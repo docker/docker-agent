@@ -1,6 +1,7 @@
 package builtins
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/docker/portcullis"
@@ -19,37 +20,42 @@ func fakeGitHubPAT() string {
 
 // TestRedactSecretsScrubsTopLevelStringValue: a recognised secret in
 // a top-level string argument is replaced and ONLY the rewritten key
-// is emitted in UpdatedInput. The latter is critical because
-// pre_tool_use hooks aggregate via shallow maps.Copy in config order
-// — returning unchanged keys would clobber concurrent hooks'
-// modifications.
+// is emitted in UpdatedInput. Both the auto-injected
+// tool_input_transform leg and an explicit legacy pre_tool_use entry
+// scrub arguments, echoing the dispatching event name back.
 func TestRedactSecretsScrubsTopLevelStringValue(t *testing.T) {
 	t.Parallel()
 
-	secret := fakeGitHubPAT()
+	for _, event := range []hooks.EventType{hooks.EventToolInputTransform, hooks.EventPreToolUse} {
+		t.Run(string(event), func(t *testing.T) {
+			t.Parallel()
 
-	in := &hooks.Input{
-		HookEventName: hooks.EventPreToolUse,
-		ToolName:      "shell",
-		ToolInput: map[string]any{
-			"command": "curl -H 'Authorization: token " + secret + "' https://api.github.com",
-			"timeout": 30,
-		},
+			secret := fakeGitHubPAT()
+
+			in := &hooks.Input{
+				HookEventName: event,
+				ToolName:      "shell",
+				ToolInput: map[string]any{
+					"command": "curl -H 'Authorization: token " + secret + "' https://api.github.com",
+					"timeout": 30,
+				},
+			}
+
+			out, err := redactSecrets(t.Context(), in, nil)
+			require.NoError(t, err)
+			require.NotNil(t, out, "must return Output when redaction happened")
+			require.NotNil(t, out.HookSpecificOutput)
+
+			updated := out.HookSpecificOutput.UpdatedInput
+			cmd, ok := updated["command"].(string)
+			require.True(t, ok, "changed key must appear in UpdatedInput")
+			assert.NotContains(t, cmd, secret, "raw secret must be gone")
+			assert.Contains(t, cmd, portcullis.Marker)
+			assert.NotContains(t, updated, "timeout",
+				"unchanged keys need no patch")
+			assert.Equal(t, event, out.HookSpecificOutput.HookEventName)
+		})
 	}
-
-	out, err := redactSecrets(t.Context(), in, nil)
-	require.NoError(t, err)
-	require.NotNil(t, out, "must return Output when redaction happened")
-	require.NotNil(t, out.HookSpecificOutput)
-
-	updated := out.HookSpecificOutput.UpdatedInput
-	cmd, ok := updated["command"].(string)
-	require.True(t, ok, "changed key must appear in UpdatedInput")
-	assert.NotContains(t, cmd, secret, "raw secret must be gone")
-	assert.Contains(t, cmd, portcullis.Marker)
-	assert.NotContains(t, updated, "timeout",
-		"unchanged keys must NOT appear in UpdatedInput (would clobber concurrent hooks)")
-	assert.Equal(t, hooks.EventPreToolUse, out.HookSpecificOutput.HookEventName)
 }
 
 // TestRedactSecretsReturnsNilWhenNothingChanged: clean tool calls
@@ -152,21 +158,23 @@ func TestRedactSecretsIsRegistered(t *testing.T) {
 
 // TestApplyAgentDefaultsInjectsRedactSecrets: setting the agent flag
 // must materialise hook entries for ALL THREE legs of the
-// redact_secrets feature — pre_tool_use (tool args), before_llm_call
-// (outgoing chat), and tool_response_transform (tool output) — each
-// pointing at the same redact_secrets builtin.
+// redact_secrets feature — tool_input_transform (tool args, before
+// approval), before_llm_call (outgoing chat), and
+// tool_response_transform (tool output) — each pointing at the same
+// redact_secrets builtin. Nothing is injected on pre_tool_use.
 func TestApplyAgentDefaultsInjectsRedactSecrets(t *testing.T) {
 	t.Parallel()
 
 	cfg := ApplyAgentDefaults(nil, AgentDefaults{RedactSecrets: true})
 	require.NotNil(t, cfg)
 
-	// Leg 1: pre_tool_use, wildcard matcher.
-	require.Len(t, cfg.PreToolUse, 1)
-	assert.Equal(t, "*", cfg.PreToolUse[0].Matcher)
-	require.Len(t, cfg.PreToolUse[0].Hooks, 1)
-	assert.Equal(t, hooks.HookTypeBuiltin, cfg.PreToolUse[0].Hooks[0].Type)
-	assert.Equal(t, RedactSecrets, cfg.PreToolUse[0].Hooks[0].Command)
+	// Leg 1: tool_input_transform, wildcard matcher.
+	require.Len(t, cfg.ToolInputTransform, 1)
+	assert.Equal(t, "*", cfg.ToolInputTransform[0].Matcher)
+	require.Len(t, cfg.ToolInputTransform[0].Hooks, 1)
+	assert.Equal(t, hooks.HookTypeBuiltin, cfg.ToolInputTransform[0].Hooks[0].Type)
+	assert.Equal(t, RedactSecrets, cfg.ToolInputTransform[0].Hooks[0].Command)
+	assert.Empty(t, cfg.PreToolUse, "argument scrubbing moved off pre_tool_use")
 
 	// Leg 2: before_llm_call, flat (event is not tool-scoped).
 	require.Len(t, cfg.BeforeLLMCall, 1)
@@ -353,6 +361,214 @@ func TestRedactSecretsLenientOnUnsupportedEvent(t *testing.T) {
 	out, err := redactSecrets(t.Context(), &hooks.Input{
 		HookEventName: hooks.EventSessionStart,
 	}, nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+}
+
+// TestRedactSecretsToolInputTransformEndToEnd wires the auto-injected
+// config through a real executor: dispatching tool_input_transform
+// yields the scrubbed arguments in Result.ModifiedInput, and nothing
+// runs on pre_tool_use anymore.
+func TestRedactSecretsToolInputTransformEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	reg := hooks.NewRegistry()
+	require.NoError(t, Register(reg))
+	cfg := ApplyAgentDefaults(nil, AgentDefaults{RedactSecrets: true})
+	exec := hooks.NewExecutorWithRegistry(cfg, t.TempDir(), nil, reg)
+	assert.False(t, exec.Has(hooks.EventPreToolUse))
+	require.True(t, exec.Has(hooks.EventToolInputTransform))
+
+	secret := fakeGitHubPAT()
+	result, err := exec.Dispatch(t.Context(), hooks.EventToolInputTransform, &hooks.Input{
+		ToolName:  "shell",
+		ToolInput: map[string]any{"cmd": "echo " + secret, "cwd": "/tmp"},
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+	require.NotNil(t, result.ModifiedInput)
+	cmd, _ := result.ModifiedInput["cmd"].(string)
+	assert.NotContains(t, cmd, secret)
+	assert.Contains(t, cmd, portcullis.Marker)
+	assert.Equal(t, "/tmp", result.ModifiedInput["cwd"], "untouched keys are preserved")
+}
+
+// requestContextWith mirrors the layout of Anthropic's persisted
+// conversation context: a baseline system block plus an update whose
+// turn-scoped text is replayed verbatim on every later request.
+func requestContextWith(transient string) json.RawMessage {
+	return json.RawMessage(`{"v":1,"baseline":{"system":[{"type":"text","text":"You are helpful"}],"tools":[{"name":"shell","input_schema":{"type":"object","maximum":9007199254740993}}]},"update":{"add_tools":["shell"],"transient":["` + transient + `"]}}`)
+}
+
+// TestRedactSecretsBeforeLLMCallScrubsProviderRequestContext: a secret
+// that only survives in ProviderState.RequestContext (the visible fields
+// are clean) is still a rewrite. The signed raw Content is left alone
+// and the caller's message keeps its plaintext state.
+func TestRedactSecretsBeforeLLMCallScrubsProviderRequestContext(t *testing.T) {
+	t.Parallel()
+
+	secret := fakeGitHubPAT()
+	rawContent := json.RawMessage(`[{"type":"text","text":"ok","signature":"` + secret + `"}]`)
+	original := chat.Message{
+		Role:    chat.MessageRoleAssistant,
+		Content: "ok",
+		ProviderState: &chat.ProviderState{
+			Provider:       "anthropic",
+			Content:        rawContent,
+			ContentHash:    "h",
+			RequestContext: requestContextWith("the token is " + secret),
+		},
+	}
+	in := &hooks.Input{HookEventName: hooks.EventBeforeLLMCall, Messages: []chat.Message{original}}
+
+	out, err := redactSecrets(t.Context(), in, nil)
+	require.NoError(t, err)
+	require.NotNil(t, out, "a request-context hit must produce a rewrite")
+	rewritten := out.HookSpecificOutput.UpdatedMessages
+	require.Len(t, rewritten, 1)
+
+	state := rewritten[0].ProviderState
+	require.NotNil(t, state)
+	assert.NotContains(t, string(state.RequestContext), secret)
+	assert.Contains(t, string(state.RequestContext), portcullis.Marker)
+	assert.Equal(t, "anthropic", state.Provider)
+	assert.Equal(t, "h", state.ContentHash)
+	assert.Equal(t, rawContent, state.Content, "signed raw content must be left untouched")
+
+	var cc struct {
+		Version  int `json:"v"`
+		Baseline struct {
+			System []struct{ Text string } `json:"system"`
+			Tools  []json.RawMessage       `json:"tools"`
+		} `json:"baseline"`
+		Update struct {
+			AddTools  []string `json:"add_tools"`
+			Transient []string `json:"transient"`
+		} `json:"update"`
+	}
+	require.NoError(t, json.Unmarshal(state.RequestContext, &cc))
+	assert.Equal(t, 1, cc.Version)
+	assert.Equal(t, "You are helpful", cc.Baseline.System[0].Text)
+	assert.Equal(t, []string{"shell"}, cc.Update.AddTools)
+	require.Len(t, cc.Update.Transient, 1)
+	assert.Equal(t, "the token is "+portcullis.Marker, cc.Update.Transient[0])
+	assert.Contains(t, string(cc.Baseline.Tools[0]), "9007199254740993", "numbers must survive the rewrite exactly")
+
+	assert.Contains(t, string(in.Messages[0].ProviderState.RequestContext), secret,
+		"the stored session message must not be mutated")
+	assert.NotSame(t, in.Messages[0].ProviderState, rewritten[0].ProviderState)
+}
+
+// TestRedactSecretsBeforeLLMCallScrubsCompactionRequestContext: the
+// compaction summary carries its own request baseline; it is scrubbed
+// while the opaque block and the summary text stay as they were.
+func TestRedactSecretsBeforeLLMCallScrubsCompactionRequestContext(t *testing.T) {
+	t.Parallel()
+
+	secret := fakeGitHubPAT()
+	block := json.RawMessage(`{"type":"compaction","content":"opaque"}`)
+	original := chat.Message{
+		Role:    chat.MessageRoleUser,
+		Content: chat.SummaryMessageContent("summary"),
+		Compaction: &chat.CompactionResult{
+			Summary:        "summary",
+			Block:          block,
+			Provider:       "anthropic",
+			RequestContext: requestContextWith(secret),
+		},
+	}
+	in := &hooks.Input{HookEventName: hooks.EventBeforeLLMCall, Messages: []chat.Message{original}}
+
+	out, err := redactSecrets(t.Context(), in, nil)
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	rewritten := out.HookSpecificOutput.UpdatedMessages
+	require.Len(t, rewritten, 1)
+
+	c := rewritten[0].Compaction
+	require.NotNil(t, c)
+	assert.NotContains(t, string(c.RequestContext), secret)
+	assert.Contains(t, string(c.RequestContext), portcullis.Marker)
+	assert.Equal(t, block, c.Block)
+	assert.Equal(t, "summary", c.Summary)
+	assert.Equal(t, original.Content, rewritten[0].Content)
+	assert.Contains(t, string(in.Messages[0].Compaction.RequestContext), secret,
+		"the stored session message must not be mutated")
+}
+
+// TestRedactSecretsBeforeLLMCallKeepsCleanRequestContextBytes: a clean
+// request log is neither rewritten nor re-encoded, and malformed bytes
+// pass through so the provider keeps ignoring them.
+func TestRedactSecretsBeforeLLMCallKeepsCleanRequestContextBytes(t *testing.T) {
+	t.Parallel()
+
+	for name, raw := range map[string]json.RawMessage{
+		"clean":     requestContextWith("remember to be brief"),
+		"malformed": json.RawMessage(`{"v":1,`),
+		"empty":     nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := &hooks.Input{
+				HookEventName: hooks.EventBeforeLLMCall,
+				Messages: []chat.Message{{
+					Role:          chat.MessageRoleAssistant,
+					Content:       "ok",
+					ProviderState: &chat.ProviderState{Provider: "anthropic", RequestContext: raw},
+				}},
+			}
+
+			out, err := redactSecrets(t.Context(), in, nil)
+			require.NoError(t, err)
+			assert.Nil(t, out, "clean request context ⇒ nil Output")
+		})
+	}
+}
+
+func TestRedactSecretsBeforeLLMCallScrubsDocumentsWithoutMutatingHistory(t *testing.T) {
+	t.Parallel()
+	secret := fakeGitHubPAT()
+	for _, field := range []string{"text", "name", "mime"} {
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+			doc := &chat.Document{Name: "notes.json", MimeType: "application/json", Source: chat.DocumentSource{InlineText: "clean"}, Size: 5}
+			switch field {
+			case "text":
+				doc.Source.InlineText = `{"token":"` + secret + `"}`
+				doc.Size = int64(len(doc.Source.InlineText))
+			case "name":
+				doc.Name = secret
+			case "mime":
+				doc.MimeType = "text/plain; token=" + secret
+			}
+			original := *doc
+			in := &hooks.Input{HookEventName: hooks.EventBeforeLLMCall, Messages: []chat.Message{{
+				Role:         chat.MessageRoleUser,
+				MultiContent: []chat.MessagePart{{Type: chat.MessagePartTypeDocument, Document: doc}},
+			}}}
+			out, err := redactSecrets(t.Context(), in, nil)
+			require.NoError(t, err)
+			require.NotNil(t, out, "document-only changes must trigger UpdatedMessages")
+			updated := out.HookSpecificOutput.UpdatedMessages[0].MultiContent[0].Document
+			require.NotSame(t, doc, updated)
+			assert.NotContains(t, updated.Source.InlineText, secret)
+			assert.NotContains(t, updated.Name, secret)
+			assert.NotContains(t, updated.MimeType, secret)
+			assert.Equal(t, int64(len(updated.Source.InlineText)), updated.Size)
+			assert.Equal(t, original, *doc)
+		})
+	}
+}
+
+func TestRedactSecretsCleanAndBinaryDocuments(t *testing.T) {
+	t.Parallel()
+	in := &hooks.Input{HookEventName: hooks.EventBeforeLLMCall, Messages: []chat.Message{{MultiContent: []chat.MessagePart{
+		{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "notes", MimeType: "text/plain", Source: chat.DocumentSource{InlineText: "clean"}, Size: 5}},
+		{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "image", MimeType: "image/png", Source: chat.DocumentSource{InlineData: []byte("opaque bytes")}}},
+		{Type: chat.MessagePartTypeDocument},
+	}}}}
+	out, err := redactSecrets(t.Context(), in, nil)
 	require.NoError(t, err)
 	assert.Nil(t, out)
 }

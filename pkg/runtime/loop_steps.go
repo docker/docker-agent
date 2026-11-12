@@ -26,8 +26,8 @@ const (
 	// returned newMax is what the loop should use going forward.
 	iterationContinue iterationDecision = iota
 	// iterationStop means the loop should exit (limit reached and the
-	// user/non-interactive policy declined to continue, or context was
-	// cancelled while waiting for a resume decision).
+	// user/non-interactive policy declined to continue, or the context
+	// was cancelled before or while waiting for a resume decision).
 	iterationStop
 )
 
@@ -63,11 +63,13 @@ func (r *LocalRuntime) enforceMaxIterations(
 		"max", runtimeMaxIterations,
 	)
 
+	if !sess.NonInteractive && ctx.Err() == nil {
+		r.armResume()
+	}
 	events.Emit(MaxIterationsReached(runtimeMaxIterations))
 
 	maxIterMsg := fmt.Sprintf("Maximum iterations reached (%d)", runtimeMaxIterations)
 	r.notifyMaxIterations(ctx, a, sess.ID, maxIterMsg)
-	r.executeOnUserInputHooks(ctx, sess.ID, "max iterations reached")
 
 	stopMsg := fmt.Sprintf(
 		"Execution stopped after reaching the configured max_iterations limit (%d).",
@@ -88,6 +90,22 @@ func (r *LocalRuntime) enforceMaxIterations(
 		appendStopMsg()
 		return runtimeMaxIterations, iterationStop
 	}
+
+	// A cancelled run can never deliver a resume decision. Bail out
+	// before signalling a bogus "waiting for user input" (#4004);
+	// mirrors the ctx.Done() branch below, which also skips the stop
+	// message.
+	if ctx.Err() != nil {
+		slog.DebugContext(ctx, "Context already cancelled at max iterations; stopping",
+			"agent", a.Name(),
+			"session_id", sess.ID,
+		)
+		return runtimeMaxIterations, iterationStop
+	}
+
+	// Only now is the runtime actually waiting for the user; the
+	// non-interactive auto-stop above never is (#4004).
+	r.executeOnUserInputHooks(ctx, a, sess.ID, "max iterations reached")
 
 	// Wait for user decision (resume / reject)
 	select {
@@ -128,7 +146,7 @@ const (
 	streamErrorFatal
 )
 
-// handleStreamError classifies the error returned by tryModelWithFallback
+// handleStreamError classifies the error returned by fallbackExecutor.execute
 // and either drives auto-compaction recovery (allowed at most
 // r.maxOverflowCompactions consecutive times) or surfaces a fatal error.
 // Context cancellation is treated as a graceful stop.
@@ -176,7 +194,10 @@ func (r *LocalRuntime) handleStreamError(
 			"The conversation has exceeded the model's context window. Automatically compacting the conversation history...",
 			a.Name(),
 		))
-		r.compactWithReason(ctx, sess, "", compactionReasonOverflow, events)
+		if err := r.compactWithReason(ctx, sess, "", compactionReasonOverflow, events); err != nil {
+			events.Emit(ErrorForSession(sess.ID, err.Error()))
+			return streamErrorFatal
+		}
 		return streamErrorRetry
 	}
 

@@ -30,7 +30,7 @@ func TestAgentBadgeStyleFor_UnknownAgentReturnsFallback(t *testing.T) {
 
 	// Unknown agent should get the fallback style, same as calling with no registration.
 	s := AgentBadgeStyleFor("unknown-agent").Render("x")
-	require.NotEmpty(t, s)
+	assert.Equal(t, fallbackBadgeStyle.Render("x"), s)
 }
 
 func TestAgentBadgeStyleFor_WrapsAroundPaletteSize(t *testing.T) {
@@ -57,7 +57,7 @@ func TestAgentBadgeStyleFor_EmptyRegistryReturnsFallback(t *testing.T) {
 	defer SetAgentOrder(nil)
 
 	s := AgentBadgeStyleFor("anything").Render("x")
-	require.NotEmpty(t, s)
+	assert.Equal(t, fallbackBadgeStyle.Render("x"), s)
 }
 
 func TestSetAgentOrder_UpdatesRegistry(t *testing.T) {

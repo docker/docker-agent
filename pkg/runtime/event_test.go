@@ -170,3 +170,30 @@ func TestMessageAddedEventJSONHasNoPayload(t *testing.T) {
 	assert.NotContains(t, decoded, "message")
 	assert.NotContains(t, string(data), "in-process only")
 }
+
+func TestMessageAddedCompletionMetadataJSON(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		msg   chat.Message
+		empty bool
+		tools bool
+	}{
+		{"answer", chat.Message{Role: chat.MessageRoleAssistant, Content: "answer"}, false, false},
+		{"empty", chat.Message{Role: chat.MessageRoleAssistant}, true, false},
+		{"tools", chat.Message{Role: chat.MessageRoleAssistant, Content: "preamble", ToolCalls: []tools.ToolCall{{ID: "call"}}}, false, true},
+		{"user", chat.Message{Role: chat.MessageRoleUser}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			msg := session.NewAgentMessage("root", &tc.msg)
+			data, err := json.Marshal(MessageAdded("sess", msg, "root"))
+			require.NoError(t, err)
+			var decoded MessageAddedEvent
+			require.NoError(t, json.Unmarshal(data, &decoded))
+			assert.Equal(t, tc.empty, decoded.AssistantMessageEmpty)
+			assert.Equal(t, tc.tools, decoded.HasToolCalls)
+			assert.Nil(t, decoded.Message, "message content remains off the wire")
+		})
+	}
+}

@@ -18,6 +18,7 @@ permissions: {}
 
 jobs:
   publish:
+    timeout-minutes: 30
     runs-on: windows-latest
     steps:
       - name: publish

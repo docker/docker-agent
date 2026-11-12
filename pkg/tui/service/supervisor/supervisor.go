@@ -12,9 +12,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/app"
-	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/service/tabstate"
 )
 
 // SessionRunner represents a running session.
@@ -22,18 +22,10 @@ type SessionRunner struct {
 	ID         string
 	App        *app.App
 	WorkingDir string
-	Title      string
-	IsRunning  bool // True when stream is active
-	NeedsAttn  bool // True when user attention is needed
-	// PendingEvents queues attention events (tool confirmation, max
-	// iterations, elicitation) that arrived while this tab was inactive, in
-	// arrival order, for replay when the user switches to it. A single slot
-	// used to overwrite an earlier event with a later one, silently dropping
-	// it (#3584) — e.g. two concurrent background-job elicitations on the
-	// same unfocused tab would leave only the second visible.
-	PendingEvents []tea.Msg
-	cancel        context.CancelFunc
-	cleanup       func()
+	State      *tabstate.State
+	Scope      *messages.RouteScope
+	cancel     context.CancelFunc
+	cleanup    func()
 }
 
 // SessionSpawner is a function that creates new sessions.
@@ -50,8 +42,7 @@ type Supervisor struct {
 	program  *tea.Program
 
 	// programReady is closed when SetProgram is called. Subscription goroutines
-	// wait on this before consuming events so that startup events (welcome message,
-	// agent info, tool info) are not silently dropped.
+	// wait on this before terminal delivery; registration happens before startup.
 	programReady     chan struct{}
 	programReadyOnce sync.Once
 }
@@ -84,17 +75,14 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 		ID:         sess.ID,
 		App:        a,
 		WorkingDir: workingDir,
-		Title:      sess.Title,
+		State:      tabstate.New(sess.ID, sess.Title),
+		Scope:      &messages.RouteScope{},
 		cleanup:    cleanup,
 	}
 
 	// Create a cancellable context for this session
 	sessionCtx, cancel := context.WithCancel(ctx)
 	runner.cancel = cancel
-	if a != nil {
-		a.Start(sessionCtx)
-	}
-
 	s.runners[sess.ID] = runner
 	s.order = append(s.order, sess.ID)
 
@@ -104,7 +92,10 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 
 	// Start the subscription goroutine with routing
 	if a != nil {
-		go s.subscribeWithRouting(sessionCtx, a, sess.ID)
+		ready := make(chan struct{})
+		go s.subscribeWithRouting(sessionCtx, a, sess.ID, ready)
+		<-ready
+		a.Start(sessionCtx)
 	}
 
 	return sess.ID
@@ -126,121 +117,44 @@ func (s *Supervisor) SpawnSession(ctx context.Context, workingDir string) (strin
 }
 
 // subscribeWithRouting subscribes to app events and wraps them with session ID.
-// It waits for the program to be set before consuming events so that startup
-// events (welcome message, agent/team/tool info) are not dropped.
-func (s *Supervisor) subscribeWithRouting(ctx context.Context, a *app.App, sessionID string) {
-	// Wait for the program to be available before consuming any events.
-	// Events are buffered in app.events, so nothing is lost during this wait.
-	select {
-	case <-s.programReady:
-	case <-ctx.Done():
-		return
+// Registration precedes startup; terminal delivery waits for the program.
+func (s *Supervisor) subscribeWithRouting(ctx context.Context, a *app.App, sessionID string, ready chan<- struct{}) {
+	prepare := func(msg tea.Msg, generation uint64) tea.Msg {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		runner := s.runners[sessionID]
+		if runner == nil || runner.App != a || ctx.Err() != nil {
+			return nil
+		}
+		return messages.RoutedMsg{SessionID: sessionID, Scope: runner.Scope, Inner: msg, Valid: func() bool { return a.IsEventGeneration(generation) }}
 	}
-
 	send := func(msg tea.Msg) {
+		select {
+		case <-s.programReady:
+		case <-ctx.Done():
+			return
+		}
 		s.mu.RLock()
 		p := s.program
 		s.mu.RUnlock()
-
-		if p == nil {
-			return
+		if p != nil && ctx.Err() == nil {
+			p.Send(msg)
 		}
-
-		// Check if this is a runtime event that should update state
-		s.handleRuntimeEvent(sessionID, msg)
-
-		// Wrap the message with session ID
-		p.Send(messages.RoutedMsg{
-			SessionID: sessionID,
-			Inner:     msg,
-		})
 	}
 
-	a.SubscribeWith(ctx, send)
+	a.SubscribeReliable(ctx, send, app.WithGenerationEventMapper(prepare), app.WithSubscriptionReady(func() { close(ready) }))
 }
 
-// isTopLevelStream reports whether a stream lifecycle event belongs to the
-// runner's own top-level session rather than a forwarded nested sub-session
-// (e.g. transfer_task or a fork-mode run_skill). Sub-session streams share
-// the parent's event channel but carry a different SessionID; they must not
-// toggle IsRunning or clear a pending attention event on the parent runner.
-//
-// An empty SessionID is treated as top-level for backward compatibility with
-// emitters that omit it (matching the convention in handleTokenUsage). (#3217)
-func isTopLevelStream(runnerID, evSessionID string) bool {
-	return evSessionID == "" || evSessionID == runnerID
-}
-
-// handleRuntimeEvent updates runner state based on runtime events.
-func (s *Supervisor) handleRuntimeEvent(sessionID string, msg tea.Msg) {
+// RetirePage invalidates runtime deliveries already queued for the previous page.
+func (s *Supervisor) RetirePage(tabID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	runner, ok := s.runners[sessionID]
-	if !ok {
-		return
+	if runner := s.runners[tabID]; runner != nil {
+		if runner.App != nil {
+			runner.App.RetireEvents()
+		}
+		runner.Scope = &messages.RouteScope{}
 	}
-
-	switch ev := msg.(type) {
-	case *runtime.StreamStartedEvent:
-		if isTopLevelStream(runner.ID, ev.SessionID) {
-			runner.IsRunning = true
-			// A new top-level turn supersedes any stale attention events raised
-			// by ITS OWN previous turn, but must not discard a still-live,
-			// unanswered elicitation from a detached background job
-			// (run_background_agent outlives the turn boundary via
-			// context.WithoutCancel) — that job's waiter goroutine is still
-			// blocked and would be orphaned if its prompt vanished from the
-			// queue (#3584 review item 4).
-			runner.PendingEvents = retainDetachedElicitations(runner.ID, runner.PendingEvents)
-			runner.NeedsAttn = len(runner.PendingEvents) > 0
-			s.notifyTabsUpdated()
-		}
-
-	case *runtime.StreamStoppedEvent:
-		if isTopLevelStream(runner.ID, ev.SessionID) {
-			runner.IsRunning = false
-			// Same rule as StreamStarted above: only this runner's own
-			// top-level attention events are moot now that its stream ended.
-			// A detached background job's live elicitation must survive the
-			// foreground stream's stop so its waiter isn't orphaned (#3584
-			// review item 4).
-			runner.PendingEvents = retainDetachedElicitations(runner.ID, runner.PendingEvents)
-			runner.NeedsAttn = len(runner.PendingEvents) > 0
-			s.notifyTabsUpdated()
-		}
-
-	case *runtime.SessionTitleEvent:
-		runner.Title = ev.Title
-		s.notifyTabsUpdated()
-
-	case *runtime.ToolCallConfirmationEvent, *runtime.MaxIterationsReachedEvent, *runtime.ElicitationRequestEvent:
-		// These require user attention
-		if sessionID != s.activeID {
-			runner.NeedsAttn = true
-			runner.PendingEvents = append(runner.PendingEvents, msg)
-			s.notifyTabsUpdated()
-			// Ring the terminal bell to alert the user
-			if p := s.program; p != nil {
-				go p.Send(messages.BellMsg{})
-			}
-		}
-	}
-}
-
-// retainDetachedElicitations filters pending to keep only
-// ElicitationRequestEvents raised by a session other than runnerID — i.e. a
-// detached background job's sub-session, whose elicitation waiter is still
-// blocked awaiting a response regardless of what the runner's own top-level
-// stream is doing. Everything else (ToolCallConfirmation, MaxIterationsReached,
-// and elicitations belonging to runnerID's own top-level stream) is dropped:
-// those are inherently scoped to the stream that just started or stopped, so
-// they are genuinely moot once it does.
-func retainDetachedElicitations(runnerID string, pending []tea.Msg) []tea.Msg {
-	return slices.DeleteFunc(pending, func(msg tea.Msg) bool {
-		elic, ok := msg.(*runtime.ElicitationRequestEvent)
-		return !ok || isTopLevelStream(runnerID, elic.SessionID)
-	})
 }
 
 // notifyTabsUpdated sends a tabs updated message (must be called with lock held).
@@ -270,7 +184,7 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 			continue
 		}
 
-		title := runner.Title
+		title, running, attention := runner.State.Snapshot()
 		if title == "" {
 			title = filepath.Base(runner.WorkingDir)
 		}
@@ -279,8 +193,8 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 			SessionID:      id,
 			Title:          title,
 			IsActive:       id == s.activeID,
-			IsRunning:      runner.IsRunning,
-			NeedsAttention: runner.NeedsAttn,
+			IsRunning:      running,
+			NeedsAttention: attention,
 		})
 	}
 	return tabs
@@ -302,44 +216,10 @@ func (s *Supervisor) SwitchTo(sessionID string) *SessionRunner {
 	}
 
 	s.activeID = sessionID
-	runner.NeedsAttn = false // Clear attention flag when switching to this tab
+	runner.State.Acknowledge()
 	s.notifyTabsUpdated()
 
 	return runner
-}
-
-// ConsumePendingEvent pops and returns the oldest pending event for the given
-// session (FIFO). Returns nil if none is pending.
-func (s *Supervisor) ConsumePendingEvent(sessionID string) tea.Msg {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	runner, ok := s.runners[sessionID]
-	if !ok || len(runner.PendingEvents) == 0 {
-		return nil
-	}
-
-	event := runner.PendingEvents[0]
-	runner.PendingEvents = runner.PendingEvents[1:]
-	return event
-}
-
-// SetPendingEvent re-queues an attention event at the FRONT of the given
-// session's pending queue, ahead of anything queued behind it, so it can be
-// replayed when the user later switches to that tab. Used to re-stash a
-// background dialog's originating event when the user navigates away from
-// the tab that opened it.
-//
-// NeedsAttention is intentionally NOT set here: the user is already aware of
-// the prompt (they just chose to step away from it) and we don't want to
-// flag the tab as if a brand-new event had arrived.
-func (s *Supervisor) SetPendingEvent(sessionID string, event tea.Msg) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if runner, ok := s.runners[sessionID]; ok {
-		runner.PendingEvents = append([]tea.Msg{event}, runner.PendingEvents...)
-	}
 }
 
 // ActiveRunner returns the currently active session runner.
@@ -363,7 +243,7 @@ func (s *Supervisor) SetRunnerTitle(sessionID, title string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if runner, ok := s.runners[sessionID]; ok {
-		runner.Title = title
+		runner.State.SetTitle(title)
 		s.notifyTabsUpdated()
 	}
 }
@@ -387,6 +267,8 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, new
 	}
 	oldCleanup := runner.cleanup
 
+	// Retire the old subscription before the new app can emit startup events.
+	runner.Scope = &messages.RouteScope{}
 	// Replace app, working dir, and cleanup.
 	runner.App = newApp
 	runner.WorkingDir = workingDir
@@ -395,8 +277,6 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, new
 	// Create a new cancellable context for the replacement.
 	sessionCtx, cancel := context.WithCancel(ctx)
 	runner.cancel = cancel
-	newApp.Start(sessionCtx)
-
 	s.notifyTabsUpdated()
 	s.mu.Unlock()
 
@@ -406,7 +286,10 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, new
 	}
 
 	// Start routing events from the new app.
-	go s.subscribeWithRouting(sessionCtx, newApp, sessionID)
+	ready := make(chan struct{})
+	go s.subscribeWithRouting(sessionCtx, newApp, sessionID, ready)
+	<-ready
+	newApp.Start(sessionCtx)
 }
 
 // ActiveID returns the ID of the currently active session.

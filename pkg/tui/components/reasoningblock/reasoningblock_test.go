@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/defaults"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
@@ -174,7 +175,7 @@ func TestReasoningBlockExpandedShowsFullToolRenderer(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("old line\n"), 0o644))
 
 	sessionState := &service.SessionState{}
-	block := New(animation.NewRuntime(), "test-expanded-tool-renderer", "root", sessionState)
+	block := New(animation.NewRuntime(), "test-expanded-tool-renderer", "root", sessionState, WithToolRenderers(defaults.NewRegistry()))
 	block.SetSize(100, 24)
 	block.SetExpanded(true)
 	block.SetReasoning("Need to edit the file.")
@@ -203,7 +204,7 @@ func TestReasoningBlockCollapsedUsesCollapsedToolRenderer(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("old line\n"), 0o644))
 
 	sessionState := &service.SessionState{}
-	block := New(animation.NewRuntime(), "test-collapsed-tool-renderer", "root", sessionState)
+	block := New(animation.NewRuntime(), "test-collapsed-tool-renderer", "root", sessionState, WithToolRenderers(defaults.NewRegistry()))
 	block.SetSize(100, 24)
 	block.SetExpanded(false)
 	block.SetReasoning("Need to edit the file.")
@@ -513,7 +514,7 @@ func TestReasoningBlockCompletedToolGracePeriod(t *testing.T) {
 	fakeNow = fakeNow.Add(totalDuration + time.Second)
 
 	// Send a tick to update fade progress (this is what happens in production)
-	block.Update(animation.TickMsg{Frame: 1})
+	block.Update(animation.TickMsg{})
 
 	// Now the tool should be hidden
 	view = block.View()
@@ -559,7 +560,7 @@ func TestReasoningBlockFadingState(t *testing.T) {
 	fakeNow = fadeStartTime.Add(time.Millisecond)
 
 	// Send animation tick to compute fade progress based on elapsed time
-	block.Update(animation.TickMsg{Frame: 1})
+	block.Update(animation.TickMsg{})
 	assert.Greater(t, block.GetToolFadeProgress("call-1"), 0.0, "Tool should have non-zero fade progress just after fade starts")
 
 	// Capture view after fading started
@@ -588,7 +589,7 @@ func TestReasoningBlockFadingState(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeNow = fadeStartTime.Add(tc.elapsed)
-			block.Update(animation.TickMsg{Frame: 99}) // Frame number doesn't matter for time-based fade
+			block.Update(animation.TickMsg{}) // Frame number doesn't matter for time-based fade
 			assert.InDelta(t, tc.expectedProgress, block.GetToolFadeProgress("call-1"), 0.001,
 				"Fade progress should be %v at %v elapsed", tc.expectedProgress, tc.elapsed)
 		})
@@ -668,16 +669,16 @@ func TestReasoningBlockNeedsTick(t *testing.T) {
 
 	// During visible period - still needs tick
 	fakeNow = completionTime.Add(completedToolVisibleDuration / 2)
-	block.Update(animation.TickMsg{Frame: 1})
+	block.Update(animation.TickMsg{})
 	assert.True(t, block.NeedsTick(), "Block should need tick during visible period")
 
 	// During fade period - still needs tick
 	fakeNow = completionTime.Add(completedToolVisibleDuration + completedToolFadeDuration/2)
-	block.Update(animation.TickMsg{Frame: 2})
+	block.Update(animation.TickMsg{})
 	assert.True(t, block.NeedsTick(), "Block should need tick during fade period")
 
 	// After grace period ends - no longer needs tick
 	fakeNow = completionTime.Add(completedToolVisibleDuration + completedToolFadeDuration + time.Second)
-	block.Update(animation.TickMsg{Frame: 3})
+	block.Update(animation.TickMsg{})
 	assert.False(t, block.NeedsTick(), "Block should not need tick after grace period ends")
 }

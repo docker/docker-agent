@@ -403,3 +403,19 @@ func buildZip(t *testing.T, entryName string, content []byte) []byte {
 
 	return buf.Bytes()
 }
+
+func TestInstall_CleanedBinaryName(t *testing.T) {
+	t.Setenv("DOCKER_AGENT_TOOLS_DIR", t.TempDir())
+	// Publication still accepts the configured name through a path-based API.
+	require.NoError(t, os.MkdirAll(filepath.Join(BinDir(), "sub"), 0o755))
+	pkg := &Package{
+		RepoOwner: "test",
+		RepoName:  "raw-tool",
+		Format:    "raw",
+		Asset:     "tool",
+		Files:     []PackageFile{{Name: "sub/../tool"}},
+	}
+	binary, err := mockRegistry([]byte("binary")).Install(t.Context(), pkg, "v1")
+	require.NoError(t, err)
+	assertInstalledBinary(t, binary, "binary", "tool")
+}

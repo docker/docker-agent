@@ -1,6 +1,7 @@
 package scrollview
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -74,15 +75,15 @@ func TestComposeMatchesJoinHorizontal(t *testing.T) {
 			m.syncScrollbar()
 
 			nLines := min(m.height, len(content)-m.scrollOffset)
-			lines := append([]string(nil), content[m.scrollOffset:m.scrollOffset+nLines]...)
+			lines := slices.Clone(content[m.scrollOffset : m.scrollOffset+nLines])
 			if m.NeedsScrollbar() {
 				for len(lines) < m.height {
 					lines = append(lines, "")
 				}
 			}
 
-			want := composeReference(m, append([]string(nil), lines...))
-			got := m.compose(append([]string(nil), lines...), m.scrollOffset)
+			want := composeReference(m, slices.Clone(lines))
+			got := m.compose(slices.Clone(lines), m.scrollOffset)
 			assert.Equal(t, want, got)
 		})
 	}
@@ -152,4 +153,17 @@ func TestComposeRemeasuresRestyledLines(t *testing.T) {
 		// Full row = content + gap + scrollbar column.
 		assert.Equal(t, m.width, ansi.StringWidth(line))
 	}
+}
+
+func TestViewWithPaddedLinesReservesScrollbarSpaceForShortContent(t *testing.T) {
+	m := New(WithReserveScrollbarSpace(true))
+	m.SetSize(20, 5)
+	m.SetContent([]string{"short"}, 1)
+	line := "short" + strings.Repeat(" ", m.ContentWidth()-len("short"))
+
+	got := m.ViewWithPaddedLines([]string{line})
+	lines := strings.Split(got, "\n")
+	require.NotEmpty(t, lines)
+	require.Equal(t, 20, ansi.StringWidth(lines[0]))
+	require.True(t, strings.HasSuffix(lines[0], strings.Repeat(" ", m.ReservedCols())))
 }

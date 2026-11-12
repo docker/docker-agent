@@ -2,8 +2,8 @@
 
 models:
   moonshot_model:
-    provider: moonshot
-    model: kimi-k2-0905-preview
+    provider: moonshotai
+    model: kimi-k3
 
 agents:
   root:

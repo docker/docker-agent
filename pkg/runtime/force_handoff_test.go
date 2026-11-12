@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +31,10 @@ type handoffRecordingProvider struct {
 func (p *handoffRecordingProvider) CreateChatCompletionStream(ctx context.Context, msgs []chat.Message, t []tools.Tool) (chat.MessageStream, error) {
 	p.mu.Lock()
 	p.calls++
-	p.lastMsgs = append([]chat.Message(nil), msgs...)
+	p.lastMsgs = slices.Clone(msgs)
+	if len(p.lastMsgs) == 0 {
+		p.lastMsgs = nil
+	}
 	p.mu.Unlock()
 	return p.mockProvider.CreateChatCompletionStream(ctx, msgs, t)
 }
@@ -44,7 +48,7 @@ func (p *handoffRecordingProvider) handoffCallCount() int {
 func (p *handoffRecordingProvider) lastMessages() []chat.Message {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]chat.Message(nil), p.lastMsgs...)
+	return slices.Clone(p.lastMsgs)
 }
 
 // forceHandoffTeam builds a two-agent team where root force-hands off to

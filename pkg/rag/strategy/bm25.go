@@ -32,14 +32,6 @@ func NewBM25FromConfig(ctx context.Context, cfg latest.RAGStrategyConfig, buildC
 	bParam := GetParam(cfg.Params, "b", 0.75)
 	threshold := GetParam(cfg.Params, "threshold", 0.0)
 
-	// Handle threshold as pointer (might be float or *float)
-	var thresholdVal float64
-	if thresholdPtr := GetParamPtr[float64](cfg.Params, "threshold"); thresholdPtr != nil {
-		thresholdVal = *thresholdPtr
-	} else {
-		thresholdVal = threshold
-	}
-
 	// Merge document paths
 	docs := MergeDocPaths(buildCtx.SharedDocs, cfg.Docs, buildCtx.ParentDir)
 
@@ -79,29 +71,39 @@ func NewBM25FromConfig(ctx context.Context, cfg latest.RAGStrategyConfig, buildC
 		Strategy:  strategy,
 		Docs:      docs,
 		Limit:     limit,
-		Threshold: thresholdVal,
+		Threshold: threshold,
 		Chunking:  chunkingCfg,
 	}, nil
+}
+
+// bm25Database is the storage backend used by BM25Strategy.
+type bm25Database interface {
+	AddDocument(ctx context.Context, doc database.Document) error
+	DeleteDocumentsByPath(ctx context.Context, sourcePath string) error
+	GetAllDocuments(ctx context.Context) ([]database.Document, error)
+	GetFileMetadata(ctx context.Context, sourcePath string) (*database.FileMetadata, error)
+	SetFileMetadata(ctx context.Context, metadata database.FileMetadata) error
+	GetAllFileMetadata(ctx context.Context) ([]database.FileMetadata, error)
+	DeleteFileMetadata(ctx context.Context, sourcePath string) error
+	Close() error
 }
 
 // BM25Strategy implements BM25 keyword-based retrieval
 // BM25 is a ranking function that uses term frequency and inverse document frequency
 type BM25Strategy struct {
 	name         string
-	db           *bm25DB
+	db           bm25Database
 	docProcessor chunk.DocumentProcessor
 	fileHashes   map[string]string
 	fileHashesMu sync.Mutex
-	watcher      *fsnotify.Watcher
-	watcherMu    sync.Mutex
 	events       chan<- types.Event
 	shouldIgnore func(path string) bool // Optional filter for gitignore support
 
 	// BM25 parameters
 	k1           float64 // term frequency saturation parameter (typically 1.2 to 2.0)
 	b            float64 // length normalization parameter (typically 0.75)
+	statsMu      sync.RWMutex
 	avgDocLength float64 // average document length
-	docCount     int     // total number of documents
 
 	// Tokenization helpers (built once per strategy instance)
 	replacer  *strings.Replacer
@@ -109,7 +111,7 @@ type BM25Strategy struct {
 }
 
 // newBM25Strategy creates a new BM25-based retrieval strategy
-func newBM25Strategy(name string, db *bm25DB, events chan<- types.Event, k1, b float64, chunking ChunkingConfig, shouldIgnore func(string) bool) *BM25Strategy {
+func newBM25Strategy(name string, db bm25Database, events chan<- types.Event, k1, b float64, chunking ChunkingConfig, shouldIgnore func(string) bool) *BM25Strategy {
 	// Create the appropriate document processor based on config
 	var dp chunk.DocumentProcessor
 	if chunking.CodeAware {
@@ -151,6 +153,15 @@ func (s *BM25Strategy) Initialize(ctx context.Context, docPaths []string, chunki
 		"chunk_overlap", chunking.Overlap,
 		"respect_word_boundaries", chunking.RespectWordBoundaries)
 
+	return s.initialize(ctx, s.files(docPaths), docPaths)
+}
+
+func (s *BM25Strategy) files(docPaths []string) fileSource {
+	return fileSource{paths: docPaths, shouldIgnore: s.shouldIgnore}
+}
+
+// docPaths is only used for logging; src decides what gets indexed.
+func (s *BM25Strategy) initialize(ctx context.Context, src documentSource, docPaths []string) error {
 	// Load existing file hashes
 	slog.DebugContext(ctx, "Loading existing file hashes", "strategy", s.name)
 	if err := s.loadExistingHashes(ctx); err != nil {
@@ -159,13 +170,13 @@ func (s *BM25Strategy) Initialize(ctx context.Context, docPaths []string, chunki
 
 	// Collect all files
 	slog.DebugContext(ctx, "Collecting files", "strategy", s.name, "paths", docPaths)
-	files, err := fsx.CollectFiles(ctx, docPaths, s.shouldIgnore)
+	files, err := src.list(ctx)
 	if err != nil {
 		s.emitEvent(types.Event{Type: types.EventTypeError, Error: err})
 		return fmt.Errorf("failed to collect files: %w", err)
 	}
 
-	seenFilesForCleanup := make(map[string]bool)
+	seenFiles := make(map[string]bool)
 	for _, f := range files {
 		// Check for context cancellation
 		select {
@@ -173,10 +184,10 @@ func (s *BM25Strategy) Initialize(ctx context.Context, docPaths []string, chunki
 			return ctx.Err()
 		default:
 		}
-		seenFilesForCleanup[f] = true
+		seenFiles[f] = true
 	}
 
-	if err := s.cleanupOrphanedDocuments(ctx, seenFilesForCleanup); err != nil {
+	if err := s.cleanupOrphanedDocuments(ctx, seenFiles); err != nil {
 		slog.ErrorContext(ctx, "Failed to cleanup orphaned documents", "error", err)
 	}
 
@@ -192,7 +203,6 @@ func (s *BM25Strategy) Initialize(ctx context.Context, docPaths []string, chunki
 	}
 
 	var fileStatuses []fileStatus
-	seenFiles := make(map[string]bool)
 	filesToIndex := 0
 
 	for _, filePath := range files {
@@ -203,9 +213,7 @@ func (s *BM25Strategy) Initialize(ctx context.Context, docPaths []string, chunki
 		default:
 		}
 
-		seenFiles[filePath] = true
-
-		needsIndexing, err := s.needsIndexing(ctx, filePath)
+		needsIndexing, err := s.needsIndexing(src, filePath)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to check if file needs indexing", "path", filePath, "error", err)
 			fileStatuses = append(fileStatuses, fileStatus{path: filePath, needsIndexing: false})
@@ -247,7 +255,7 @@ func (s *BM25Strategy) Initialize(ctx context.Context, docPaths []string, chunki
 			},
 		})
 
-		if err := s.indexFile(ctx, status.path); err != nil {
+		if err := s.indexFile(ctx, src, status.path); err != nil {
 			slog.ErrorContext(ctx, "Failed to index file", "path", status.path, "error", err)
 			continue
 		}
@@ -280,7 +288,7 @@ func (s *BM25Strategy) Query(ctx context.Context, query string, numResults int, 
 	}
 
 	// Get all documents
-	allDocs, err := s.getAllDocuments(ctx)
+	allDocs, err := s.db.GetAllDocuments(ctx)
 	if err != nil {
 		return nil, types.Usage{}, fmt.Errorf("failed to retrieve documents: %w", err)
 	}
@@ -312,10 +320,14 @@ func (s *BM25Strategy) Query(ctx context.Context, query string, numResults int, 
 		}
 	}
 
-	// Score each document.
+	s.statsMu.RLock()
+	avgDocLength := s.avgDocLength
+	s.statsMu.RUnlock()
+
+	// Score each document with the same statistics snapshot.
 	scores := make([]database.SearchResult, 0, len(allDocs))
 	for i, doc := range allDocs {
-		score := s.calculateBM25Score(queryTerms, docTermFreqs[i], docLengths[i], df)
+		score := s.calculateBM25Score(queryTerms, docTermFreqs[i], docLengths[i], df, len(allDocs), avgDocLength)
 		if score >= threshold {
 			scores = append(scores, database.SearchResult{
 				Document:   doc,
@@ -339,7 +351,8 @@ func (s *BM25Strategy) Query(ctx context.Context, query string, numResults int, 
 
 // CheckAndReindexChangedFiles checks for file changes and re-indexes if needed
 func (s *BM25Strategy) CheckAndReindexChangedFiles(ctx context.Context, docPaths []string, chunking ChunkingConfig) error {
-	files, err := fsx.CollectFiles(ctx, docPaths, s.shouldIgnore)
+	src := s.files(docPaths)
+	files, err := src.list(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to collect files: %w", err)
 	}
@@ -356,7 +369,7 @@ func (s *BM25Strategy) CheckAndReindexChangedFiles(ctx context.Context, docPaths
 
 		seenFiles[filePath] = true
 
-		needsIndexing, err := s.needsIndexing(ctx, filePath)
+		needsIndexing, err := s.needsIndexing(src, filePath)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to check if file needs indexing", "path", filePath, "error", err)
 			continue
@@ -364,7 +377,7 @@ func (s *BM25Strategy) CheckAndReindexChangedFiles(ctx context.Context, docPaths
 
 		if needsIndexing {
 			slog.InfoContext(ctx, "File changed, re-indexing", "path", filePath)
-			if err := s.indexFile(ctx, filePath); err != nil {
+			if err := s.indexFile(ctx, src, filePath); err != nil {
 				slog.ErrorContext(ctx, "Failed to re-index file", "path", filePath, "error", err)
 			}
 		}
@@ -382,57 +395,26 @@ func (s *BM25Strategy) CheckAndReindexChangedFiles(ctx context.Context, docPaths
 	return nil
 }
 
-// StartFileWatcher starts monitoring files for changes
-func (s *BM25Strategy) StartFileWatcher(ctx context.Context, docPaths []string, chunking ChunkingConfig) error {
-	s.watcherMu.Lock()
-	defer s.watcherMu.Unlock()
-
-	watcher, err := fsnotify.NewWatcher()
+// WatchFiles monitors files until ctx is canceled. Use one active call per strategy.
+// Callers must join it before Close, along with any queries or other indexing.
+func (s *BM25Strategy) WatchFiles(ctx context.Context, docPaths []string, _ ChunkingConfig) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	watcher, err := fsnotify.NewBufferedWatcher(1024)
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
 	}
-	s.watcher = watcher
-
-	for _, docPath := range docPaths {
-		if err := s.addPathToWatcher(ctx, docPath); err != nil {
-			slog.WarnContext(ctx, "Failed to watch path", "strategy", s.name, "path", docPath, "error", err)
-			continue
-		}
-	}
-
-	go s.watchLoop(ctx, docPaths)
-
-	slog.InfoContext(ctx, "File watcher started", "strategy", s.name)
-	return nil
+	slog.InfoContext(ctx, "File watcher started", "strategy", s.name, "paths", docPaths)
+	return s.watchLoop(ctx, watcher, docPaths)
 }
 
 // Close releases resources
 func (s *BM25Strategy) Close() error {
-	s.watcherMu.Lock()
-	defer s.watcherMu.Unlock()
-
-	var firstErr error
-
-	// Close file watcher
-	if s.watcher != nil {
-		if err := s.watcher.Close(); err != nil {
-			slog.Warn("Failed to close file watcher", "strategy", s.name, "error", err)
-			firstErr = err
-		}
-		s.watcher = nil
-	}
-
-	// Close database connection
 	if s.db != nil {
-		if err := s.db.Close(); err != nil {
-			slog.Error("Failed to close database", "strategy", s.name, "error", err)
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
+		return s.db.Close()
 	}
-
-	return firstErr
+	return nil
 }
 
 // Helper methods
@@ -453,7 +435,7 @@ func (s *BM25Strategy) tokenize(text string) []string {
 	return filtered
 }
 
-func (s *BM25Strategy) calculateBM25Score(queryTerms []string, docTermFreq map[string]int, docLength float64, df map[string]int) float64 {
+func (s *BM25Strategy) calculateBM25Score(queryTerms []string, docTermFreq map[string]int, docLength float64, df map[string]int, docCount int, avgDocLength float64) float64 {
 	score := 0.0
 
 	for _, queryTerm := range queryTerms {
@@ -470,13 +452,13 @@ func (s *BM25Strategy) calculateBM25Score(queryTerms []string, docTermFreq map[s
 		}
 
 		// IDF calculation
-		idf := math.Log((float64(s.docCount)-float64(termDF)+0.5)/(float64(termDF)+0.5) + 1.0)
+		idf := math.Log((float64(docCount)-float64(termDF)+0.5)/(float64(termDF)+0.5) + 1.0)
 
 		// BM25 formula
 		numerator := tf * (s.k1 + 1.0)
 		lengthRatio := 1.0
-		if s.avgDocLength > 0 {
-			lengthRatio = docLength / s.avgDocLength
+		if avgDocLength > 0 {
+			lengthRatio = docLength / avgDocLength
 		}
 		denominator := tf + s.k1*(1.0-s.b+s.b*lengthRatio)
 		score += idf * (numerator / denominator)
@@ -486,24 +468,10 @@ func (s *BM25Strategy) calculateBM25Score(queryTerms []string, docTermFreq map[s
 	return math.Min(score/float64(len(queryTerms)), 1.0)
 }
 
-func (s *BM25Strategy) getAllDocuments(ctx context.Context) ([]database.Document, error) {
+func (s *BM25Strategy) calculateAvgDocLength(ctx context.Context) error {
 	docs, err := s.db.GetAllDocuments(ctx)
 	if err != nil {
-		return nil, err
-	}
-	s.docCount = len(docs)
-	return docs, nil
-}
-
-func (s *BM25Strategy) calculateAvgDocLength(ctx context.Context) error {
-	docs, err := s.getAllDocuments(ctx)
-	if err != nil {
 		return err
-	}
-
-	if len(docs) == 0 {
-		s.avgDocLength = 0
-		return nil
 	}
 
 	totalLength := 0
@@ -511,10 +479,16 @@ func (s *BM25Strategy) calculateAvgDocLength(ctx context.Context) error {
 		totalLength += len(s.tokenize(doc.Content))
 	}
 
-	s.avgDocLength = float64(totalLength) / float64(len(docs))
+	var avgDocLength float64
+	if len(docs) > 0 {
+		avgDocLength = float64(totalLength) / float64(len(docs))
+	}
+	s.statsMu.Lock()
+	s.avgDocLength = avgDocLength
+	s.statsMu.Unlock()
 	slog.DebugContext(ctx, "Calculated average document length",
 		"strategy", s.name,
-		"avgLength", s.avgDocLength,
+		"avgLength", avgDocLength,
 		"docCount", len(docs))
 
 	return nil
@@ -536,8 +510,8 @@ func (s *BM25Strategy) loadExistingHashes(ctx context.Context) error {
 	return nil
 }
 
-func (s *BM25Strategy) needsIndexing(_ context.Context, filePath string) (bool, error) {
-	currentHash, err := chunk.FileHash(filePath)
+func (s *BM25Strategy) needsIndexing(src documentSource, filePath string) (bool, error) {
+	currentHash, err := src.hash(filePath)
 	if err != nil {
 		return false, fmt.Errorf("failed to hash file: %w", err)
 	}
@@ -553,8 +527,8 @@ func (s *BM25Strategy) needsIndexing(_ context.Context, filePath string) (bool, 
 	return storedHash != currentHash, nil
 }
 
-func (s *BM25Strategy) indexFile(ctx context.Context, filePath string) error {
-	fileHash, err := chunk.FileHash(filePath)
+func (s *BM25Strategy) indexFile(ctx context.Context, src documentSource, filePath string) error {
+	fileHash, err := src.hash(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to hash file: %w", err)
 	}
@@ -563,7 +537,11 @@ func (s *BM25Strategy) indexFile(ctx context.Context, filePath string) error {
 		return fmt.Errorf("failed to delete old documents: %w", err)
 	}
 
-	chunks, err := chunk.ProcessFile(ctx, s.docProcessor, filePath)
+	content, err := src.read(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to process file: %w", err)
+	}
+	chunks, err := s.docProcessor.Process(ctx, filePath, content)
 	if err != nil {
 		return fmt.Errorf("failed to process file: %w", err)
 	}
@@ -647,7 +625,7 @@ func (s *BM25Strategy) cleanupOrphanedDocuments(ctx context.Context, seenFiles m
 	return nil
 }
 
-func (s *BM25Strategy) addPathToWatcher(ctx context.Context, path string) error {
+func (s *BM25Strategy) addPathToWatcher(ctx context.Context, watcher *fsnotify.Watcher, path string) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path: %w", err)
@@ -661,7 +639,7 @@ func (s *BM25Strategy) addPathToWatcher(ctx context.Context, path string) error 
 		return fmt.Errorf("failed to stat path: %w", err)
 	}
 
-	if err := s.watcher.Add(absPath); err != nil {
+	if err := watcher.Add(absPath); err != nil {
 		return fmt.Errorf("failed to add path to watcher: %w", err)
 	}
 
@@ -676,7 +654,7 @@ func (s *BM25Strategy) addPathToWatcher(ctx context.Context, path string) error 
 			dir := filepath.Dir(file)
 			if !visited[dir] {
 				visited[dir] = true
-				_ = s.watcher.Add(dir)
+				_ = watcher.Add(dir)
 			}
 		}
 	}
@@ -684,30 +662,10 @@ func (s *BM25Strategy) addPathToWatcher(ctx context.Context, path string) error 
 	return nil
 }
 
-func (s *BM25Strategy) watchLoop(ctx context.Context, docPaths []string) {
-	// Capture watcher reference at goroutine start to avoid racing with Close()
-	// which sets s.watcher = nil under watcherMu.
-	s.watcherMu.Lock()
-	watcher := s.watcher
-	s.watcherMu.Unlock()
-	if watcher == nil {
-		return
-	}
+func (s *BM25Strategy) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, docPaths []string) error {
+	src := s.files(docPaths)
 
-	var debounceTimer *time.Timer
-	debounceDuration := 2 * time.Second
-	pendingChanges := make(map[string]bool)
-	var pendingMu sync.Mutex
-
-	processChanges := func() {
-		pendingMu.Lock()
-		changedFiles := make([]string, 0, len(pendingChanges))
-		for file := range pendingChanges {
-			changedFiles = append(changedFiles, file)
-		}
-		pendingChanges = make(map[string]bool)
-		pendingMu.Unlock()
-
+	processChanges := func(ctx context.Context, changedFiles []string) {
 		if len(changedFiles) == 0 {
 			return
 		}
@@ -735,13 +693,13 @@ func (s *BM25Strategy) watchLoop(ctx context.Context, docPaths []string) {
 				continue
 			}
 
-			needsIndexing, err := s.needsIndexing(ctx, file)
+			needsIndexing, err := s.needsIndexing(src, file)
 			if err != nil || !needsIndexing {
 				continue
 			}
 
 			slog.DebugContext(ctx, "Indexing file", "path", file, "strategy", s.name)
-			if err := s.indexFile(ctx, file); err != nil {
+			if err := s.indexFile(ctx, src, file); err != nil {
 				slog.ErrorContext(ctx, "Failed to re-index file", "path", file, "error", err)
 			}
 		}
@@ -749,57 +707,9 @@ func (s *BM25Strategy) watchLoop(ctx context.Context, docPaths []string) {
 		_ = s.calculateAvgDocLength(ctx)
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			return
-
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
-				continue
-			}
-
-			if event.Op&fsnotify.Create != 0 {
-				s.watcherMu.Lock()
-				if s.watcher != nil {
-					_ = s.addPathToWatcher(ctx, event.Name)
-				}
-				s.watcherMu.Unlock()
-			}
-
-			// Early filter: only track changes for files that match configured doc patterns
-			matches, err := fsx.Matches(event.Name, docPaths)
-			if err != nil || !matches {
-				continue
-			}
-			// Skip files that should be ignored (e.g., gitignore)
-			if s.shouldIgnore != nil && s.shouldIgnore(event.Name) {
-				continue
-			}
-
-			pendingMu.Lock()
-			pendingChanges[event.Name] = true
-			pendingMu.Unlock()
-
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			debounceTimer = time.AfterFunc(debounceDuration, processChanges)
-
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			slog.ErrorContext(ctx, "File watcher error", "strategy", s.name, "error", err)
-		}
-	}
+	return watchFileChanges(ctx, watcher, s.name, docPaths, s.shouldIgnore,
+		func(ctx context.Context, path string) error { return s.addPathToWatcher(ctx, watcher, path) }, processChanges,
+		func(ctx context.Context) error { return s.CheckAndReindexChangedFiles(ctx, docPaths, ChunkingConfig{}) }, watcher.Close)
 }
 
 func (s *BM25Strategy) emitEvent(event types.Event) {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"time"
 
@@ -13,11 +12,19 @@ import (
 
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/httpsec"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/profiling"
+	"github.com/docker/docker-agent/pkg/runtime/eventmerge"
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/telemetry"
+)
+
+const (
+	envPprofAddr       = "DOCKER_AGENT_PPROF_ADDR"
+	cagentEnvPprofAddr = "CAGENT_PPROF_ADDR"
 )
 
 type apiFlags struct {
@@ -30,6 +37,7 @@ type apiFlags struct {
 	pprofAddr             string
 	maxRequestSize        int64
 	sessionWorkingDirRoot string
+	streamCoalesceWindow  time.Duration
 	runConfig             config.RuntimeConfig
 }
 
@@ -48,10 +56,11 @@ func newAPICmd() *cobra.Command {
 	cmd.PersistentFlags().IntVar(&flags.pullIntervalMins, "pull-interval", 0, "Auto-pull OCI reference every N minutes (0 = disabled)")
 	cmd.PersistentFlags().StringVar(&flags.fakeResponses, "fake", "", "Replay AI responses from cassette file (for testing)")
 	cmd.PersistentFlags().StringVar(&flags.recordPath, "record", "", "Record AI API interactions to cassette file")
-	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for API requests (empty = no authentication)")
+	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for API requests (required for non-loopback TCP listeners)")
 	cmd.PersistentFlags().Int64Var(&flags.maxRequestSize, "max-request-size", 1<<20, "Maximum request body size in bytes (default 1 MiB). Requests exceeding this limit are rejected with HTTP 413.")
 	cmd.PersistentFlags().StringVar(&flags.sessionWorkingDirRoot, "session-workingdir-root", "", "Restrict the working_dir of sessions created via POST /api/sessions to this directory and its descendants (empty = no restriction; recommended for multi-user deployments)")
-	cmd.PersistentFlags().StringVar(&flags.pprofAddr, "pprof-addr", "", "TCP host:port to expose Go pprof endpoints at /debug/pprof/ (e.g. 127.0.0.1:6060); also set via CAGENT_PPROF_ADDR")
+	cmd.PersistentFlags().DurationVar(&flags.streamCoalesceWindow, "stream-coalesce-window", eventmerge.DefaultWindow, "Merge consecutive streaming deltas (text, reasoning, tool-call arguments, tool output) arriving within this window into one SSE event (0 = one event per delta)")
+	cmd.PersistentFlags().StringVar(&flags.pprofAddr, "pprof-addr", "", "TCP host:port to expose Go pprof endpoints at /debug/pprof/ (e.g. 127.0.0.1:6060); also set via DOCKER_AGENT_PPROF_ADDR")
 	_ = cmd.PersistentFlags().MarkHidden("pprof-addr")
 	cmd.MarkFlagsMutuallyExclusive("fake", "record")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
@@ -102,7 +111,7 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		return errors.New("--pull-interval flag can only be used with OCI or URL references, not local files")
 	}
 
-	if pprofAddr := cmp.Or(f.pprofAddr, os.Getenv("CAGENT_PPROF_ADDR")); pprofAddr != "" {
+	if pprofAddr := cmp.Or(f.pprofAddr, os.Getenv(envPprofAddr), os.Getenv(cagentEnvPprofAddr)); pprofAddr != "" {
 		if err := profiling.StartPprofServer(ctx, pprofAddr); err != nil {
 			return err
 		}
@@ -114,8 +123,10 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 	}
 	defer lnCleanup()
 
+	if err := httpsec.ValidateListenerAuth(ln.Addr(), f.authToken); err != nil {
+		return err
+	}
 	out.Println("Listening on", ln.Addr().String())
-	warnIfNotLoopback(out, ln.Addr())
 
 	slog.DebugContext(ctx, "Starting server", "agents", agentsPath, "addr", ln.Addr().String())
 
@@ -135,35 +146,17 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		}
 	}()
 
-	sources, err := config.ResolveSources(agentsPath, f.runConfig.EnvProvider())
+	agentSources, err := sources.ResolveSources(agentsPath, f.runConfig.EnvProvider())
 	if err != nil {
 		return fmt.Errorf("resolving agent sources: %w", err)
 	}
 
-	s, err := server.New(ctx, sessionStore, &f.runConfig, time.Duration(f.pullIntervalMins)*time.Minute, sources, f.authToken, f.maxRequestSize,
-		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
+	s, err := server.New(ctx, sessionStore, &f.runConfig, time.Duration(f.pullIntervalMins)*time.Minute, agentSources, f.authToken, f.maxRequestSize,
+		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot),
+		server.WithStreamCoalesceWindow(f.streamCoalesceWindow))
 	if err != nil {
 		return fmt.Errorf("creating server: %w", err)
 	}
 
 	return s.Serve(ctx, ln)
-}
-
-// warnIfNotLoopback prints a security warning when the API server is bound to
-// an address other than loopback. The default --listen value is 127.0.0.1, so
-// reaching this code path means the operator was explicit about exposing the
-// API; we just remind them that the API has no authentication.
-func warnIfNotLoopback(out *cli.Printer, addr net.Addr) {
-	tcpAddr, ok := addr.(*net.TCPAddr)
-	if !ok {
-		// Unix sockets and named pipes rely on filesystem permissions.
-		return
-	}
-	if tcpAddr.IP.IsLoopback() {
-		return
-	}
-	out.Println("WARNING: API server is listening on a non-loopback address.")
-	out.Println("         The API has no authentication; anyone able to reach")
-	out.Println("         this address can run agents and access all sessions.")
-	slog.Warn("API server bound to non-loopback address", "addr", tcpAddr.String())
 }

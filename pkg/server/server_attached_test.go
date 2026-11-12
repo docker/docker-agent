@@ -47,6 +47,7 @@ func TestAttachedServer_SteerReachesAttachedRuntime(t *testing.T) {
 
 func TestAttachedServer_EventStreamEmitsRegisteredEvents(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -78,7 +79,7 @@ func TestAttachedServer_EventStreamEmitsRegisteredEvents(t *testing.T) {
 	addr := "http://" + ln.Addr().String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/events", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -106,6 +107,7 @@ func TestAttachedServer_EventStreamEmitsRegisteredEvents(t *testing.T) {
 
 func httpDoTCP(t *testing.T, ctx context.Context, method, url string, payload any) []byte {
 	t.Helper()
+	client := newTestHTTPClient(t)
 
 	buf, err := json.Marshal(payload)
 	require.NoError(t, err)
@@ -114,7 +116,7 @@ func httpDoTCP(t *testing.T, ctx context.Context, method, url string, payload an
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -129,6 +131,7 @@ func httpDoTCP(t *testing.T, ctx context.Context, method, url string, payload an
 // and removes the registered event source so a subsequent GET /events 404s.
 func TestAttachedServer_DeleteSessionStopsEventStream(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -156,7 +159,7 @@ func TestAttachedServer_DeleteSessionStopsEventStream(t *testing.T) {
 	addr := "http://" + ln.Addr().String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/events", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
@@ -183,7 +186,7 @@ func TestAttachedServer_DeleteSessionStopsEventStream(t *testing.T) {
 
 	req2, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/events", http.NoBody)
 	require.NoError(t, err)
-	resp2, err := http.DefaultClient.Do(req2)
+	resp2, err := client.Do(req2)
 	require.NoError(t, err)
 	defer resp2.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
@@ -279,6 +282,7 @@ func TestAttachedServer_ReadyEndpointReturnsImmediately(t *testing.T) {
 // that GET /api/ready returns 503 when no session is registered within the timeout.
 func TestAttachedServer_ReadyEndpointTimesOut(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx := t.Context()
 	store := session.NewInMemorySessionStore()
@@ -293,7 +297,7 @@ func TestAttachedServer_ReadyEndpointTimesOut(t *testing.T) {
 	addr := "http://" + ln.Addr().String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/ready?timeout=100ms", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
@@ -303,6 +307,7 @@ func TestAttachedServer_ReadyEndpointTimesOut(t *testing.T) {
 // DELETE /api/sessions/:id?wait=true blocks until the stream goroutine exits.
 func TestAttachedServer_DeleteWithWaitBlocksUntilStreamStops(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -339,7 +344,7 @@ func TestAttachedServer_DeleteWithWaitBlocksUntilStreamStops(t *testing.T) {
 			errCh <- err
 			return
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			errCh <- err
 			return
@@ -384,6 +389,7 @@ func TestAttachedServer_DeleteWithWaitBlocksUntilStreamStops(t *testing.T) {
 // only the events newer than that sequence number, each tagged with an SSE id.
 func TestAttachedServer_EventStreamReplaysFromLastEventID(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -425,7 +431,7 @@ func TestAttachedServer_EventStreamReplaysFromLastEventID(t *testing.T) {
 	// Reconnect requesting everything after seq 1: expect only two & three.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/events?since=1", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -439,6 +445,7 @@ func TestAttachedServer_EventStreamReplaysFromLastEventID(t *testing.T) {
 // {"type":"gap"} marker (with no id) before the replay.
 func TestAttachedServer_EventStreamSignalsGapWhenResumePointEvicted(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -468,7 +475,7 @@ func TestAttachedServer_EventStreamSignalsGapWhenResumePointEvicted(t *testing.T
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/events?since=1", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -508,6 +515,7 @@ func readSSE(t *testing.T, r io.Reader, n int) (ids, types []string) {
 // sequence number, so a client can resync then tail /events?since= gaplessly.
 func TestAttachedServer_SnapshotReturnsStateAndLastEventSeq(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -563,7 +571,7 @@ func TestAttachedServer_SnapshotReturnsStateAndLastEventSeq(t *testing.T) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		addr+"/api/sessions/"+sess.ID+"/events?since="+strconv.FormatUint(snap.LastEventSeq, 10), http.NoBody)
 	require.NoError(t, err)
-	streamResp, err := http.DefaultClient.Do(req)
+	streamResp, err := client.Do(req)
 	require.NoError(t, err)
 	defer streamResp.Body.Close()
 
@@ -577,6 +585,7 @@ func TestAttachedServer_SnapshotReturnsStateAndLastEventSeq(t *testing.T) {
 // before the stream closes.
 func TestAttachedServer_DeleteEmitsSessionExited(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -600,7 +609,7 @@ func TestAttachedServer_DeleteEmitsSessionExited(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/events", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -621,6 +630,7 @@ func TestAttachedServer_DeleteEmitsSessionExited(t *testing.T) {
 // retry is acknowledged as a duplicate.
 func TestAttachedServer_FollowUpIdempotencyKeyDedupes(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx := t.Context()
 	store := session.NewInMemorySessionStore()
@@ -651,7 +661,7 @@ func TestAttachedServer_FollowUpIdempotencyKeyDedupes(t *testing.T) {
 		require.NoError(t, rErr)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Idempotency-Key", "retry-1")
-		resp, dErr := http.DefaultClient.Do(req)
+		resp, dErr := client.Do(req)
 		require.NoError(t, dErr)
 		defer resp.Body.Close()
 		var out api.FollowUpResponse
@@ -707,6 +717,7 @@ func TestAttachedServer_StatusWaitBlocksUntilAttached(t *testing.T) {
 // attaches within the wait window.
 func TestAttachedServer_StatusWaitTimesOut(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx := t.Context()
 	sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
@@ -719,7 +730,7 @@ func TestAttachedServer_StatusWaitTimesOut(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/never/status?wait=100ms", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)

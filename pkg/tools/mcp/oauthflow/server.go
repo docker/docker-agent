@@ -2,7 +2,6 @@ package oauthflow
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"html"
@@ -12,117 +11,162 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-// CallbackServer handles OAuth callback requests
-type CallbackServer struct {
-	server   *http.Server
-	listener net.Listener
-	mu       sync.Mutex
-
-	// resultCh delivers the outcome of the first received callback.
-	// It is buffered (size 1) and all sends are non-blocking so that a
-	// stray duplicate or attacker-triggered callback cannot wedge the
-	// HTTP handler goroutine on a full channel.
-	resultCh chan callbackResult
-
-	// Expected state parameter for CSRF protection
-	expectedState string
+// CallbackAddress describes the bound loopback endpoint for one authorization.
+// It contains no server resources and may be retained after the flow returns.
+type CallbackAddress struct {
+	port int
 }
 
-// callbackResult is the outcome of a single OAuth callback. Exactly one
-// of err / (code, state) is set.
+func (a CallbackAddress) Port() int { return a.port }
+
+func (a CallbackAddress) RedirectURI() string {
+	return fmt.Sprintf("http://127.0.0.1:%d/callback", a.port)
+}
+
+// ResolveRedirectURI substitutes the bound port without rewriting the override.
+func (a CallbackAddress) ResolveRedirectURI(override string) string {
+	return buildRedirectURI(override, a.RedirectURI(), a.port)
+}
+
+// AuthorizationRequest is prepared after the callback endpoint is bound.
+type AuthorizationRequest struct {
+	URL   string
+	State string
+}
+
+// PrepareAuthorization resolves credentials and builds the authorization URL.
+// It runs synchronously and must honor ctx, including when serving fails.
+type PrepareAuthorization func(ctx context.Context, address CallbackAddress) (AuthorizationRequest, error)
+
 type callbackResult struct {
-	code  string
-	state string
-	err   error
+	code, state string
+	err         error
 }
 
-// NewCallbackServer creates a new OAuth callback server on a random available port
-func NewCallbackServer(ctx context.Context) (*CallbackServer, error) {
-	return NewCallbackServerOnPort(ctx, 0)
+// callbackHandler belongs to one invocation, never to a reusable server object.
+type callbackHandler struct {
+	expectedState atomic.Pointer[string]
+	claimed       atomic.Bool
+	result        chan callbackResult
 }
 
-// NewCallbackServerOnPort creates a new OAuth callback server on a specific port.
-// Use port 0 to let the OS pick a random available port.
-func NewCallbackServerOnPort(ctx context.Context, port int) (*CallbackServer, error) {
+// RequestAuthorizationCode binds the requested loopback port (0 selects a free
+// port), prepares authorization, opens the browser and waits for the callback.
+// All listener, serving and request-handler resources are joined before return.
+func RequestAuthorizationCode(ctx context.Context, port int, prepare PrepareAuthorization) (string, string, error) {
 	var lc net.ListenConfig
-	listener, err := lc.Listen(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	return requestAuthorizationCode(ctx, port, prepare, lc.Listen, *browserOpener.Load(), 5*time.Second)
+}
+
+// RequestAuthorizationCodeOnListenerForTesting transfers a reserved loopback
+// listener into the flow without a close/rebind race. Never use in production.
+func RequestAuthorizationCodeOnListenerForTesting(ctx context.Context, listener net.Listener, prepare PrepareAuthorization) (string, string, error) {
+	defer listener.Close()
+	return requestAuthorizationCode(ctx, 0, prepare, func(context.Context, string, string) (net.Listener, error) {
+		return listener, nil
+	}, *browserOpener.Load(), 5*time.Second)
+}
+
+type callbackListen func(context.Context, string, string) (net.Listener, error)
+
+func requestAuthorizationCode(ctx context.Context, port int, prepare PrepareAuthorization, listen callbackListen, open BrowserOpener, shutdownTimeout time.Duration) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	listener, err := listen(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		return nil, fmt.Errorf("failed to find available port: %w", err)
+		return "", "", fmt.Errorf("failed to start callback server: %w", err)
 	}
-
-	cs := &CallbackServer{
-		listener: listener,
-		resultCh: make(chan callbackResult, 1),
+	defer listener.Close()
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		return "", "", errors.New("callback listener must have a TCP address")
 	}
-
+	address := CallbackAddress{port: addr.Port}
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	handler := &callbackHandler{result: make(chan callbackResult, 1)}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", cs.handleCallback)
-
-	// Wrap with otelhttp so the OAuth callback span chains onto the
-	// caller's trace when the OAuth provider preserves trace context
-	// in the redirect (most don't, but the wrap is harmless when
-	// they don't, and useful when they do).
-	cs.server = &http.Server{
-		Handler:      otelhttp.NewHandler(mux, "oauth.callback"),
+	mux.HandleFunc("/callback", handler.handleCallback)
+	traced := otelhttp.NewHandler(mux, "oauth.callback")
+	var requests sync.WaitGroup
+	var gate sync.Mutex
+	closing := false
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gate.Lock()
+			if closing {
+				gate.Unlock()
+				return
+			}
+			requests.Add(1)
+			gate.Unlock()
+			defer requests.Done()
+			traced.ServeHTTP(w, r)
+		}),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
-
-	return cs, nil
-}
-
-func (cs *CallbackServer) Start() error {
+	served := make(chan struct{})
 	go func() {
-		if err := cs.server.Serve(cs.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("Callback server error", "error", err)
+		defer close(served)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			cancel(fmt.Errorf("callback server failed: %w", err))
 		}
 	}()
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cleanupCancel()
+		if err := server.Shutdown(cleanupCtx); err != nil {
+			slog.WarnContext(ctx, "Forcing callback server shutdown", "error", err)
+			_ = server.Close()
+		}
+		_ = listener.Close() // Serve may not have registered before Shutdown.
+		<-served
+		gate.Lock()
+		closing = true
+		gate.Unlock()
+		requests.Wait()
+	}()
 
-	slog.Info("OAuth callback server started", "address", cs.GetRedirectURI())
-	return nil
-}
-
-func (cs *CallbackServer) GetRedirectURI() string {
-	addr := cs.listener.Addr().String()
-	return fmt.Sprintf("http://%s/callback", addr)
-}
-
-// Port returns the local TCP port the callback server is listening on.
-// This is useful when a fixed port was not requested (i.e. port 0 was
-// passed) and the caller needs to know which port the OS assigned.
-func (cs *CallbackServer) Port() int {
-	if tcpAddr, ok := cs.listener.Addr().(*net.TCPAddr); ok {
-		return tcpAddr.Port
+	if err := context.Cause(runCtx); err != nil {
+		return "", "", err
 	}
-	// The listener is always created via net.Listen("tcp", ...), so the
-	// address is always a *net.TCPAddr. Log defensively in case that ever
-	// changes; returning 0 here would silently produce a broken redirect URI.
-	slog.Warn("Unexpected callback server listener address type", "addr", fmt.Sprintf("%T", cs.listener.Addr()))
-	return 0
+	request, err := prepare(runCtx, address)
+	if cause := context.Cause(runCtx); cause != nil {
+		return "", "", cause
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if request.State == "" {
+		return "", "", errors.New("OAuth expected state must not be empty")
+	}
+	handler.expectedState.Store(&request.State)
+	if err := open(runCtx, request.URL); err != nil {
+		if cause := context.Cause(runCtx); cause != nil {
+			return "", "", cause
+		}
+		return "", "", err
+	}
+	select {
+	case <-runCtx.Done():
+		return "", "", context.Cause(runCtx)
+	case result := <-handler.result:
+		if err := context.Cause(runCtx); err != nil {
+			return "", "", err
+		}
+		return result.code, result.state, result.err
+	}
 }
 
-// ResolveRedirectURI returns the OAuth redirect URI to advertise to the
-// authorization server.
-//
-// When callbackRedirectURL is empty, the local callback server's URI is
-// returned unchanged (http://127.0.0.1:{port}/callback).
-//
-// When callbackRedirectURL is set, it is returned verbatim except that any
-// occurrence of the literal placeholder ${callbackPort} is replaced with
-// the actual port the local callback server is listening on. The external
-// URL is expected to eventually redirect the browser back to the local
-// callback server, preserving the OAuth query parameters.
-func (cs *CallbackServer) ResolveRedirectURI(callbackRedirectURL string) string {
-	return buildRedirectURI(callbackRedirectURL, cs.GetRedirectURI(), cs.Port())
-}
-
-// buildRedirectURI is the pure string-handling core of ResolveRedirectURI,
-// factored out so it can be unit-tested without starting a listener.
+// buildRedirectURI leaves configured redirect overrides otherwise untouched.
 func buildRedirectURI(override, fallback string, port int) string {
 	if override == "" {
 		return fallback
@@ -130,13 +174,7 @@ func buildRedirectURI(override, fallback string, port int) string {
 	return strings.ReplaceAll(override, "${callbackPort}", strconv.Itoa(port))
 }
 
-func (cs *CallbackServer) SetExpectedState(state string) {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	cs.expectedState = state
-}
-
-func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
+func (cs *callbackHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	if errMsg := query.Get("error"); errMsg != "" {
@@ -184,12 +222,9 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 
 	// Verify state parameter for CSRF protection.
 	// Reject the callback if the expected state has not been set yet
-	// (i.e. the callback arrived before SetExpectedState was called).
-	cs.mu.Lock()
-	expectedState := cs.expectedState
-	cs.mu.Unlock()
-
-	if expectedState == "" || subtle.ConstantTimeCompare([]byte(state), []byte(expectedState)) != 1 {
+	// (i.e. the callback arrived before preparation completed).
+	expectedState := cs.expectedState.Load()
+	if expectedState == nil || !constantTimeStateEqual(state, *expectedState) {
 		// Don't leak whether a flow is in progress: respond identically
 		// regardless of whether deliver succeeded.
 		cs.deliver(callbackResult{err: errors.New("OAuth state mismatch (possible CSRF attempt or stale callback)")})
@@ -229,13 +264,12 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 // duplicate clicks, any local process probing the loopback port) are
 // dropped on the floor (returns false) instead of pinning the HTTP
 // handler goroutine on a full channel.
-func (cs *CallbackServer) deliver(r callbackResult) bool {
-	select {
-	case cs.resultCh <- r:
-		return true
-	default:
+func (cs *callbackHandler) deliver(r callbackResult) bool {
+	if !cs.claimed.CompareAndSwap(false, true) {
 		return false
 	}
+	cs.result <- r // One winner and a size-one buffer; no receiver is required.
+	return true
 }
 
 // writeAlreadyProcessed responds to a stray duplicate callback with HTTP
@@ -259,20 +293,4 @@ func writeAlreadyProcessed(w http.ResponseWriter) {
     <p>You can close this window.</p>
 </body>
 </html>`)
-}
-
-func (cs *CallbackServer) WaitForCallback(ctx context.Context) (code, state string, err error) {
-	select {
-	case r := <-cs.resultCh:
-		return r.code, r.state, r.err
-	case <-ctx.Done():
-		return "", "", ctx.Err()
-	}
-}
-
-func (cs *CallbackServer) Shutdown(ctx context.Context) error {
-	if cs.server != nil {
-		return cs.server.Shutdown(ctx)
-	}
-	return nil
 }

@@ -18,8 +18,11 @@ import (
 	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
+	agentsources "github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -65,6 +68,8 @@ type doctorProviderStatus struct {
 	Found    bool     `json:"found"`
 	EnvVar   string   `json:"env_var,omitempty"`
 	Source   string   `json:"source,omitempty"`
+	// FoundAs is set when the value came from DOCKER_AGENT_ENV_<EnvVar>.
+	FoundAs string `json:"found_as,omitempty"`
 }
 
 type doctorDMRStatus struct {
@@ -95,6 +100,8 @@ type doctorEnvRequirement struct {
 	RequiredBy string `json:"required_by"`
 	Found      bool   `json:"found"`
 	Source     string `json:"source,omitempty"`
+	// FoundAs is set when the value came from DOCKER_AGENT_ENV_<EnvVar>.
+	FoundAs string `json:"found_as,omitempty"`
 }
 
 type doctorFlags struct {
@@ -103,12 +110,14 @@ type doctorFlags struct {
 
 	// Test seams: sourcesForTests replaces the env-file + default secret-source
 	// chain, dmrLister replaces dmr.ListModels, loadUserConfig replaces
-	// userconfig.Load, and claudeProbe replaces the Claude Code CLI probe, so
+	// userconfig.Load, loadHookDropIns replaces hook drop-in discovery, and
+	// claudeProbe replaces the Claude Code CLI probe, so
 	// tests never exec `docker model`, `claude`, or credential helpers, and
 	// never read the developer's real configuration.
 	sourcesForTests []environment.Source
 	dmrLister       config.DMRModelLister
 	loadUserConfig  userConfigLoader
+	loadHookDropIns func() *latest.HooksConfig
 	claudeProbe     func(ctx context.Context) codingharness.ClaudeCLIStatus
 }
 
@@ -156,6 +165,9 @@ Exits with a non-zero status when an issue would prevent an agent from running.`
 	if loadUserConfig == nil {
 		loadUserConfig = userconfig.Load
 		flags.loadUserConfig = loadUserConfig
+	}
+	if flags.loadHookDropIns == nil {
+		flags.loadHookDropIns = config.LoadHookDropIns
 	}
 	addGatewayFlags(cmd, &flags.runConfig, loadUserConfig)
 
@@ -206,22 +218,21 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 
 	// Every lookup in the report goes through the same labeled source chain so
 	// the provider table, the auto-selection result, and the agent-file checks
-	// can never disagree with each other.
-	providers := make([]environment.Provider, 0, len(sources))
-	for _, source := range sources {
-		providers = append(providers, source.Provider)
-	}
-	env := environment.NewMultiProvider(providers...)
+	// can never disagree with each other. No 1Password wrapper: doctor reports
+	// presence and must not trigger `op` prompts.
+	env := environment.NewPrefixedProvider(environment.SourceProviders(sources)...)
 
 	report := &doctorReport{ModelsGateway: f.runConfig.ModelsGateway}
 
 	report.UserConfig = doctorUserConfigStatus{Path: userconfig.Path(), Status: userConfigStatusOK}
-	if _, err := f.loadUserConfig(); err != nil {
+	userCfg, userErr := f.loadUserConfig()
+	if err := userErr; err != nil {
 		report.UserConfig.Status = userConfigStatusInvalid
 		report.UserConfig.Error = err.Error()
 		report.Issues = append(report.Issues, fmt.Sprintf(
 			"the user config file %s cannot be parsed and is ignored (settings and aliases are unavailable): %v",
-			report.UserConfig.Path, err))
+			report.UserConfig.Path, err,
+		))
 	}
 
 	credFound := map[string]bool{}
@@ -229,8 +240,11 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 	for _, p := range config.CloudProviderEnvVars() {
 		status := doctorProviderStatus{Provider: p.Provider, EnvVars: p.EnvVars}
 		for _, name := range p.EnvVars {
-			if source, ok := findSource(ctx, sources, name); ok {
+			if source, foundAs, ok := findSource(ctx, sources, name); ok {
 				status.Found, status.EnvVar, status.Source = true, name, source
+				if foundAs != name {
+					status.FoundAs = foundAs
+				}
 				break
 			}
 		}
@@ -256,12 +270,29 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 	// Agent's auto model, so global model issues must not block it.
 	var agentCfg *latest.Config
 	if agentRef != "" {
-		agentSource, err := config.Resolve(agentRef, env)
+		agentSource, err := agentsources.Resolve(agentRef, env)
 		if err != nil {
 			return nil, err
 		}
-		if agentCfg, err = config.Load(ctx, agentSource); err != nil {
+		if agentCfg, err = config.Load(ctx, agentSource, config.WithVersions(legacy.Register)); err != nil {
 			return nil, err
+		}
+	}
+	if agentCfg != nil {
+		if userErr == nil && userCfg != nil {
+			config.MergeGlobalProviders(agentCfg, userCfg.GetProviders())
+			config.MergeAgentHooks(agentCfg, userCfg.Settings.GlobalHooks())
+		}
+		config.MergeGlobalProviders(agentCfg, f.runConfig.Providers)
+		config.MergeAgentHooks(agentCfg, f.loadHookDropIns())
+		if err := agentCfg.ValidateEvaluators(); err != nil {
+			return nil, err
+		}
+		for _, name := range slices.Sorted(maps.Keys(agentCfg.Evaluators)) {
+			def := agentCfg.Evaluators[name]
+			if _, err := def.Resolve(agentCfg.Providers); err != nil {
+				report.Issues = append(report.Issues, fmt.Sprintf("evaluators.%s: %v", name, err))
+			}
 		}
 	}
 	harnessOnly := agentCfg != nil && allAgentsHarnessBacked(agentCfg)
@@ -287,8 +318,8 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		autoStatus.Note = "credentials are supplied by the models gateway"
 		// Mirrors the run-time preflight: the Docker AI Gateway authenticates
 		// with the Docker Desktop JWT, not per-provider API keys.
-		if environment.IsTrustedDockerURL(f.runConfig.ModelsGateway) {
-			if _, ok := findSource(ctx, sources, environment.DockerDesktopTokenEnv); !ok {
+		if environment.IsDockerDomainURL(f.runConfig.ModelsGateway) {
+			if _, _, ok := findSource(ctx, sources, environment.DockerDesktopTokenEnv); !ok {
 				autoStatus.Usable = false
 				autoIssues = append(autoIssues,
 					"the models gateway requires a Docker sign-in and no DOCKER_TOKEN was found; sign in to Docker Desktop or run `docker login` (check with `docker agent debug auth`)")
@@ -302,12 +333,14 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 			autoStatus.Usable = false
 			autoIssues = append(autoIssues, fmt.Sprintf(
 				"the configured default model %s/%s needs Docker Model Runner, which is %s; install or start it (%s)",
-				auto.Provider, auto.Model, describeDMRStatus(report.DMR.Status), dmrDocsURL))
+				auto.Provider, auto.Model, describeDMRStatus(report.DMR.Status), dmrDocsURL,
+			))
 		case dmrDown:
 			autoStatus.Usable = false
 			autoIssues = append(autoIssues, fmt.Sprintf(
 				"no usable model: no provider credential was found and Docker Model Runner is %s; run `docker agent setup`, or set an API key for one of the providers above (%s) or install Docker Model Runner (%s)",
-				describeDMRStatus(report.DMR.Status), environment.SecretsDocsURL, dmrDocsURL))
+				describeDMRStatus(report.DMR.Status), environment.SecretsDocsURL, dmrDocsURL,
+			))
 		case !slices.Contains(dmrModels, auto.Model):
 			autoStatus.Note = fmt.Sprintf("not pulled yet; run `docker model pull %s` or let the first run pull it", auto.Model)
 		}
@@ -319,7 +352,8 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 			autoStatus.Usable = false
 			autoIssues = append(autoIssues, fmt.Sprintf(
 				"the configured default model %s/%s has no credential for provider %s; %s (%s)",
-				auto.Provider, auto.Model, auto.Provider, providerCredentialHint(auto.Provider, primaryEnvVar[auto.Provider]), environment.SecretsDocsURL))
+				auto.Provider, auto.Model, auto.Provider, providerCredentialHint(auto.Provider, primaryEnvVar[auto.Provider]), environment.SecretsDocsURL,
+			))
 		}
 	}
 
@@ -360,6 +394,10 @@ func (f *doctorFlags) checkAgentFile(ctx context.Context, ref string, cfg *lates
 	for _, name := range config.RequiredModelEnvVars(ctx, cfg, f.runConfig.ModelsGateway, env) {
 		requiredBy[name] = append(requiredBy[name], "models")
 	}
+	evaluatorOpts := append([]options.Opt{options.WithGateway(f.runConfig.ModelsGateway)}, f.runConfig.EvaluatorOptions...)
+	for _, name := range config.RequiredEvaluatorEnvVars(cfg, evaluatorOpts...) {
+		requiredBy[name] = append(requiredBy[name], "evaluators")
+	}
 	toolVars, toolErr := config.GatherEnvVarsForTools(ctx, cfg)
 	if toolErr != nil {
 		status.ToolCheckError = toolErr.Error()
@@ -371,9 +409,12 @@ func (f *doctorFlags) checkAgentFile(ctx context.Context, ref string, cfg *lates
 	var missing []string
 	for _, name := range slices.Sorted(maps.Keys(requiredBy)) {
 		requirement := doctorEnvRequirement{EnvVar: name, RequiredBy: strings.Join(requiredBy[name], ", ")}
-		if source, ok := findSource(ctx, sources, name); ok {
+		if source, foundAs, ok := findSource(ctx, sources, name); ok {
 			requirement.Found = true
 			requirement.Source = source
+			if foundAs != name {
+				requirement.FoundAs = foundAs
+			}
 		} else {
 			missing = append(missing, name)
 		}
@@ -382,7 +423,8 @@ func (f *doctorFlags) checkAgentFile(ctx context.Context, ref string, cfg *lates
 	if len(missing) > 0 {
 		report.Issues = append(report.Issues, fmt.Sprintf(
 			"%s requires environment variables that are not set: %s (see %s)",
-			ref, strings.Join(missing, ", "), environment.SecretsDocsURL))
+			ref, strings.Join(missing, ", "), environment.SecretsDocsURL,
+		))
 	}
 
 	// The Claude Code harness runs the local `claude` CLI with its own login,
@@ -439,13 +481,13 @@ func allAgentsHarnessBacked(cfg *latest.Config) bool {
 func claudeHarnessIssue(ref string, status codingharness.ClaudeCLIStatus) string {
 	switch status.State {
 	case codingharness.ClaudeStateNotInstalled:
-		return fmt.Sprintf("%s uses a claude-code harness but the `claude` CLI was not found in PATH; install Claude Code (%s) and log in with `%s`",
+		return fmt.Sprintf("%s uses a claude-code harness but the `claude` CLI was not found in PATH; install Claude Code (%s) and log in with %#q",
 			ref, codingharness.ClaudeInstallDocsURL, codingharness.ClaudeLoginCommand)
 	case codingharness.ClaudeStateAuthCheckFailed:
 		return fmt.Sprintf("%s uses a claude-code harness but the Claude Code login could not be verified (%s); run `claude auth status` as the same OS user and environment that run docker-agent",
 			ref, status.Detail)
 	case codingharness.ClaudeStateUnauthenticated:
-		return fmt.Sprintf("%s uses a claude-code harness but the `claude` CLI is not logged in; run `%s` as the same OS user and environment that run docker-agent",
+		return fmt.Sprintf("%s uses a claude-code harness but the `claude` CLI is not logged in; run %#q as the same OS user and environment that run docker-agent",
 			ref, codingharness.ClaudeLoginCommand)
 	default:
 		return ""
@@ -490,17 +532,27 @@ func providerCredentialHint(provider, envVar string) string {
 	return "set " + envVar
 }
 
-// findSource returns the name of the first secret source that supplies a
-// non-empty value for the variable. Empty values are skipped so a source that
-// merely defines the variable (e.g. an env file with `KEY=`) is not reported
-// as supplying a credential.
-func findSource(ctx context.Context, sources []environment.Source, name string) (string, bool) {
-	for _, source := range sources {
-		if value, ok := source.Provider.Get(ctx, name); ok && value != "" {
-			return source.Name, true
+// findSource returns the first secret source that supplies a non-empty value
+// for the variable, and the name it was found under (DOCKER_AGENT_ENV_<NAME>
+// shadows <NAME> across all sources, as in the run-time chain). Empty values
+// are skipped so a source that merely defines the variable (e.g. an env file
+// with `KEY=`) is not reported as supplying a credential.
+func findSource(ctx context.Context, sources []environment.Source, name string) (source, foundAs string, found bool) {
+	for _, candidate := range environment.LookupNames(name) {
+		for _, s := range sources {
+			if value, ok := s.Provider.Get(ctx, candidate); ok && value != "" {
+				return s.Name, candidate, true
+			}
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+func sourceLabel(source, foundAs string) string {
+	if foundAs == "" {
+		return source
+	}
+	return source + " (" + foundAs + ")"
 }
 
 func describeDMRStatus(status string) string {
@@ -523,7 +575,7 @@ func printDoctorReport(w io.Writer, report *doctorReport) {
 	fmt.Fprintln(tw, "  PROVIDER\tSTATUS\tCREDENTIAL\tSOURCE")
 	for _, p := range report.Providers {
 		if p.Found {
-			fmt.Fprintf(tw, "  %s\tfound\t%s\t%s\n", p.Provider, p.EnvVar, p.Source)
+			fmt.Fprintf(tw, "  %s\tfound\t%s\t%s\n", p.Provider, p.EnvVar, sourceLabel(p.Source, p.FoundAs))
 		} else {
 			fmt.Fprintf(tw, "  %s\tnot set\t%s\t-\n", p.Provider, credentialCandidates(p.EnvVars))
 		}
@@ -571,7 +623,7 @@ func printDoctorReport(w io.Writer, report *doctorReport) {
 			fmt.Fprintln(tw, "  ENV VAR\tREQUIRED BY\tSTATUS\tSOURCE")
 			for _, r := range af.Requirements {
 				if r.Found {
-					fmt.Fprintf(tw, "  %s\t%s\tfound\t%s\n", r.EnvVar, r.RequiredBy, r.Source)
+					fmt.Fprintf(tw, "  %s\t%s\tfound\t%s\n", r.EnvVar, r.RequiredBy, sourceLabel(r.Source, r.FoundAs))
 				} else {
 					fmt.Fprintf(tw, "  %s\t%s\tnot set\t-\n", r.EnvVar, r.RequiredBy)
 				}

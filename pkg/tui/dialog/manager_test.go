@@ -3,10 +3,12 @@ package dialog
 import (
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/plans"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
 // TestManagerBackgroundDialog verifies that opening a dialog with a non-nil
@@ -139,4 +141,67 @@ func TestManagerClosePlanDetail(t *testing.T) {
 			return ok && viewer.PlanRef() == ref
 		}), "the buried detail stays open")
 	})
+}
+
+func TestTakeBackgroundDialogsPreservesOrderAndOtherLayers(t *testing.T) {
+	t.Parallel()
+	mgr := New().(*manager)
+	first, second := new(int), new(int)
+	modal := NewExitConfirmationDialog()
+	one := NewElicitationDialog("one", nil, nil)
+	two := NewElicitationDialog("two", nil, nil)
+	mgr.handleOpen(OpenDialogMsg{Model: one, OriginatingEvent: first})
+	mgr.handleOpen(OpenDialogMsg{Model: modal})
+	mgr.handleOpen(OpenDialogMsg{Model: two, OriginatingEvent: second})
+	mgr.drag.active = true
+
+	removed := mgr.TakeBackgroundDialogs(func(tea.Msg) bool { return true })
+	require.Len(t, removed, 2)
+	assert.Same(t, one, removed[0].Model)
+	assert.Same(t, first, removed[0].OriginatingEvent)
+	assert.Same(t, two, removed[1].Model)
+	assert.Same(t, second, removed[1].OriginatingEvent)
+	assert.Same(t, modal, mgr.TopDialog())
+	assert.False(t, mgr.drag.active)
+	assert.Empty(t, mgr.TakeBackgroundDialogs(func(tea.Msg) bool { return true }))
+}
+
+func TestTakeBackgroundDialogsRetainsUnmatchedAttention(t *testing.T) {
+	t.Parallel()
+	mgr := New().(*manager)
+	first, second := new(int), new(int)
+	mgr.handleOpen(OpenDialogMsg{Model: NewElicitationDialog("one", nil, nil), OriginatingEvent: first})
+	mgr.handleOpen(OpenDialogMsg{Model: NewElicitationDialog("two", nil, nil), OriginatingEvent: second})
+	removed := mgr.TakeBackgroundDialogs(func(event tea.Msg) bool { return event == first })
+	require.Len(t, removed, 1)
+	assert.Same(t, first, removed[0].OriginatingEvent)
+	assert.Same(t, second, mgr.TopBackgroundEvent())
+}
+
+func TestManagerSettingsTabsRemainClickableAfterDragging(t *testing.T) {
+	t.Parallel()
+
+	mgr := New().(*manager)
+	mgr.Update(tea.WindowSizeMsg{Width: 140, Height: 60})
+	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
+	mgr.Update(OpenDialogMsg{Model: d})
+
+	mgr.Update(settingsTabClick(t, d, "Behavior"))
+	assert.Equal(t, tabBehavior, d.tab)
+	assert.False(t, mgr.drag.active, "clicking a tab must not drag the dialog")
+
+	row, col := d.Position()
+	mgr.Update(tea.MouseClickMsg{X: col + 4, Y: row + 1, Button: tea.MouseLeft})
+	require.True(t, mgr.drag.active, "the title must still be draggable")
+	mgr.Update(tea.MouseMotionMsg{X: col + 7, Y: row + 3})
+	mgr.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft})
+
+	click := settingsTabClick(t, d, "Notifications")
+	click.X += 3
+	click.Y += 2
+	mgr.Update(click)
+	assert.Equal(t, tabNotifications, d.tab)
+	assert.False(t, mgr.drag.active)
+	assert.Equal(t, 3, mgr.stack[0].offsetX)
+	assert.Equal(t, 2, mgr.stack[0].offsetY)
 }

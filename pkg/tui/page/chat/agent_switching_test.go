@@ -2,6 +2,7 @@ package chat
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -205,24 +206,25 @@ func TestChildActivityIgnoredAfterCancel(t *testing.T) {
 func TestScheduleTransferTimersWrapsInRoutedMsg(t *testing.T) {
 	t.Parallel()
 
-	type payload struct{ n int }
+	synctest.Test(t, func(t *testing.T) {
+		type payload struct{ n int }
 
-	p, _ := newSwitchingTestPage(t)
-	p.SetRoutingID("tab-1")
-	cmd := p.scheduleTransferTimers([]sidebar.TransferTimer{{Duration: time.Millisecond, Msg: payload{n: 42}}})
-	require.NotNil(t, cmd)
+		p, _ := newSwitchingTestPage(t)
+		p.SetRoutingID("tab-1")
+		cmd := p.scheduleTransferTimers([]sidebar.TransferTimer{{Duration: time.Millisecond, Msg: payload{n: 42}}})
+		require.NotNil(t, cmd)
 
-	msgs := runTimerCmd(t, cmd)
-	require.Len(t, msgs, 1)
-	assert.Equal(t, msgtypes.RoutedMsg{SessionID: "tab-1", Inner: payload{n: 42}}, msgs[0],
-		"the expiry is addressed to the owning tab")
+		msgs := runTimerCmd(t, cmd)
+		require.Len(t, msgs, 1)
+		assert.Equal(t, msgtypes.RoutedMsg{SessionID: "tab-1", Inner: payload{n: 42}}, msgs[0],
+			"the expiry is addressed to the owning tab")
 
-	p.pendingTimers = nil
-	p.SetRoutingID("")
-	cmd = p.scheduleTransferTimers([]sidebar.TransferTimer{{Duration: time.Millisecond, Msg: payload{n: 7}}})
-	msgs = runTimerCmd(t, cmd)
-	require.Len(t, msgs, 1)
-	assert.Equal(t, payload{n: 7}, msgs[0], "standalone pages deliver the raw payload")
+		p.SetRoutingID("")
+		cmd = p.scheduleTransferTimers([]sidebar.TransferTimer{{Duration: time.Millisecond, Msg: payload{n: 7}}})
+		msgs = runTimerCmd(t, cmd)
+		require.Len(t, msgs, 1)
+		assert.Equal(t, payload{n: 7}, msgs[0], "standalone pages deliver the raw payload")
+	})
 }
 
 // runTimerCmd executes a (possibly batched) command, following nested batches,
@@ -243,32 +245,22 @@ func runTimerCmd(t *testing.T, cmd tea.Cmd) []tea.Msg {
 	return []tea.Msg{msg}
 }
 
-// TestAgentSwitchingArmsRoutedTimersForBackgroundDispatch verifies a hop
-// boundary records its routed timer commands so TakeRoutedTimers can hand
-// them to the appModel when the page is hidden (its regular command is
-// discarded there), and that the collection drains exactly once.
-func TestAgentSwitchingArmsRoutedTimersForBackgroundDispatch(t *testing.T) {
+func TestAgentSwitchingReturnsLocalWorkPerUpdate(t *testing.T) {
 	t.Parallel()
 
 	p, _ := newSwitchingTestPage(t)
 	p.SetRoutingID("tab-1")
 
-	model, _ := p.Update(runtime.AgentSwitching(true, "root", "researcher"))
-	page := model.(*chatPage)
+	_, start := p.UpdateEffects(runtime.AgentSwitching(true, "root", "researcher"))
+	require.NotNil(t, start.Local, "a start arms min/max timers")
+	assert.Nil(t, p.effects, "collection ends when UpdateEffects returns")
 
-	timers := page.TakeRoutedTimers()
-	require.NotNil(t, timers, "a start's min/max timers are collectable for background dispatch")
-	assert.Nil(t, page.TakeRoutedTimers(), "the collection drains once")
+	_, stop := p.UpdateEffects(runtime.AgentSwitching(false, "researcher", "root"))
+	require.NotNil(t, stop.Local, "an accepted stop arms the Return timer")
 
-	// The next Update clears leftovers so a later drain cannot re-arm
-	// timers that the active path already dispatched.
-	model, _ = page.Update(runtime.AgentSwitching(false, "researcher", "root"))
-	page = model.(*chatPage)
-	require.NotNil(t, page.TakeRoutedTimers(), "an accepted stop arms the Return timer")
-
-	model, _ = page.Update(msgtypes.StreamCancelledMsg{})
-	page = model.(*chatPage)
-	assert.Nil(t, page.TakeRoutedTimers(), "updates without boundaries arm nothing")
+	_, cancelled := p.UpdateEffects(msgtypes.StreamCancelledMsg{})
+	assert.Nil(t, cancelled.Local, "updates without boundaries must not redispatch prior work")
+	require.NotNil(t, start.Local, "later updates must not mutate earlier results")
 }
 
 // TestRoutedTimerExpiryDrivesSidebarOnOwnerPage chains the real pieces: the
@@ -278,31 +270,33 @@ func TestAgentSwitchingArmsRoutedTimersForBackgroundDispatch(t *testing.T) {
 func TestRoutedTimerExpiryDrivesSidebarOnOwnerPage(t *testing.T) {
 	t.Parallel()
 
-	p, rec := newSwitchingTestPage(t)
-	p.SetRoutingID("tab-1")
-	p.sessionState.SetCurrentAgentName("root")
+	synctest.Test(t, func(t *testing.T) {
+		p, rec := newSwitchingTestPage(t)
+		p.SetRoutingID("tab-1")
+		p.sessionState.SetCurrentAgentName("root")
 
-	handled, _ := p.handleRuntimeEvent(runtime.AgentSwitching(true, "root", "researcher"))
-	require.True(t, handled)
-	require.Contains(t, ansi.Strip(p.sidebar.View()), transferBoxMarker, "the outbound box shows on the hop start")
-	require.Len(t, rec.results, 1)
-	timers := rec.results[0].Timers
-	require.Len(t, timers, 2)
+		handled, _ := p.handleRuntimeEvent(runtime.AgentSwitching(true, "root", "researcher"))
+		require.True(t, handled)
+		require.Contains(t, ansi.Strip(p.sidebar.View()), transferBoxMarker, "the outbound box shows on the hop start")
+		require.Len(t, rec.results, 1)
+		timers := rec.results[0].Timers
+		require.Len(t, timers, 2)
 
-	// Rewrap each real payload through the page's routed tick (short
-	// duration), check the envelope targets this tab, and deliver the
-	// unwrapped payload to the page as handleRoutedMsg does.
-	for _, timer := range timers {
-		msg := p.routedTimerCmd(sidebar.TransferTimer{Duration: time.Millisecond, Msg: timer.Msg})()
-		routed, ok := msg.(msgtypes.RoutedMsg)
-		require.True(t, ok)
-		assert.Equal(t, "tab-1", routed.SessionID)
+		// Rewrap each real payload through the page's routed tick (short
+		// duration), check the envelope targets this tab, and deliver the
+		// unwrapped payload to the page as handleRoutedMsg does.
+		for _, timer := range timers {
+			msg := p.routedTimerCmd(sidebar.TransferTimer{Duration: time.Millisecond, Msg: timer.Msg})()
+			routed, ok := msg.(msgtypes.RoutedMsg)
+			require.True(t, ok)
+			assert.Equal(t, "tab-1", routed.SessionID)
 
-		_, _ = p.Update(routed.Inner)
-	}
+			_, _ = p.Update(routed.Inner)
+		}
 
-	// Min then max elapsed without activity: the outbound box is gone.
-	assert.NotContains(t, ansi.Strip(p.sidebar.View()), transferBoxMarker)
+		// Min then max elapsed without activity: the outbound box is gone.
+		assert.NotContains(t, ansi.Strip(p.sidebar.View()), transferBoxMarker)
+	})
 }
 
 // transferBoxMarker is the visible marker of the sidebar transfer box (the

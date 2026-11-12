@@ -7,7 +7,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
+
+// ShellBaseName returns the lowercase shell name without extension. Splits on
+// both separators so results are stable when the path came from another host OS.
+func ShellBaseName(shellPath string) string {
+	base := shellPath
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	return strings.ToLower(strings.TrimSuffix(base, filepath.Ext(base)))
+}
 
 // WindowsCmdExe returns the absolute path to cmd.exe on Windows using the
 // SystemRoot environment variable (e.g. C:\Windows\System32\cmd.exe).
@@ -42,7 +53,7 @@ func DetectShell() (shell string, argsPrefix []string) {
 		return DetectWindowsShell()
 	}
 
-	return defaultUnixShell(), []string{"-c"}
+	return DetectUnixShell(), []string{"-c"}
 }
 
 // DetectWindowsShell returns the shell binary and argument prefix for Windows.
@@ -69,11 +80,6 @@ func lookPowerShell() (string, bool) {
 // DetectUnixShell returns the user's shell from the SHELL environment variable,
 // falling back to /bin/sh.
 func DetectUnixShell() string {
-	return defaultUnixShell()
-}
-
-// defaultUnixShell returns the user's shell from SHELL or /bin/sh.
-func defaultUnixShell() string {
 	if shell := os.Getenv("SHELL"); shell != "" {
 		return shell
 	}

@@ -172,19 +172,16 @@ func TestOnePasswordProvider_ConcurrentLookups(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			value, found := provider.Get(t.Context(), "A")
 			assert.True(t, found)
 			assert.Equal(t, "value-for-op://vault/a/field", value)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			value, found := provider.Get(t.Context(), "B")
 			assert.True(t, found)
 			assert.Equal(t, "value-for-op://vault/b/field", value)
-		}()
+		})
 	}
 	wg.Wait()
 

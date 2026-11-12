@@ -1,9 +1,14 @@
 package runtime
 
 import (
+	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,8 +16,10 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	providerbase "github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
 )
 
@@ -140,7 +147,7 @@ func TestDoCompactBeforeHookDeniesSkipsCompaction(t *testing.T) {
 	originalLen := len(sess.Messages)
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events)))
 	close(events)
 
 	var sawCompactionEvent, sawSummaryEvent bool
@@ -183,7 +190,7 @@ func TestDoCompactBeforeHookSuppliesSummary(t *testing.T) {
 
 	// The provider must NOT be called — if it is, we'll consume from
 	// the (empty) mockStream and the test will catch it.
-	prov := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+	prov := &cloneFailureProvider{Config: providerbase.Config{ModelConfig: latest.ModelConfig{Provider: "test", Model: "unclonable"}}}
 	root := agent.New("root", "test",
 		agent.WithModel(prov),
 		agent.WithHooks(hookCfg),
@@ -202,7 +209,7 @@ func TestDoCompactBeforeHookSuppliesSummary(t *testing.T) {
 	}))
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events)))
 	close(events)
 
 	var summaryEvent *SessionSummaryEvent
@@ -290,7 +297,7 @@ func TestDoCompactAfterHookFires(t *testing.T) {
 	sess.OutputTokens = 567
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonThreshold, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonThreshold, NewChannelSink(events)))
 	close(events)
 	for range events {
 	}
@@ -299,6 +306,179 @@ func TestDoCompactAfterHookFires(t *testing.T) {
 	require.NoError(t, readErr, "after_compaction hook must have run and produced the log file")
 	assert.Equal(t, customSummary+"|1234|567\n", string(logged),
 		"after_compaction must receive the produced summary and the *pre-compaction* token counts")
+}
+
+type failingCompactionStore struct {
+	session.Store
+
+	err error
+}
+
+func (s failingCompactionStore) PersistCompaction(context.Context, *session.Session, int64, int64, session.Item) error {
+	return s.err
+}
+
+func TestDoCompactInMemoryStoreAppendsSummaryOnce(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	summaryStream := newStreamBuilder().AddContent("one summary").AddStopWithUsage(1, 1).Build()
+	prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{summaryStream}}
+	root := agent.New("root", "test", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+		WithSessionCompaction(false), WithSessionStore(store),
+		WithModelStore(mockModelStoreWithLimit{limit: 100_000}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithID("compact-memory"), session.WithMessages([]session.Item{
+		session.NewMessageItem(session.UserMessage("hi")),
+		session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "hello"}}),
+	}))
+	require.NoError(t, store.AddSession(t.Context(), sess))
+
+	events := make(chan Event, 32)
+	rt.Summarize(t.Context(), sess, "", NewChannelSink(events))
+	close(events)
+	for range events {
+	}
+
+	reloaded, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	var summaries int
+	for _, item := range reloaded.Messages {
+		if item.Summary != "" {
+			summaries++
+		}
+	}
+	assert.Equal(t, 1, summaries)
+	assert.Same(t, sess, reloaded, "aliasing store must mutate the live session exactly once")
+}
+
+func TestDoCompactPersistenceFailureReportsFailedWithoutApplying(t *testing.T) {
+	base := session.NewInMemorySessionStore()
+	persistErr := errors.New("disk full")
+	store := failingCompactionStore{Store: base, err: persistErr}
+	summaryStream := newStreamBuilder().AddContent("lost summary").AddStopWithUsage(1, 1).Build()
+	prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{summaryStream}}
+	root := agent.New("root", "test", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+		WithSessionCompaction(false), WithSessionStore(store),
+		WithModelStore(mockModelStoreWithLimit{limit: 100_000}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithID("compact-fails"), session.WithMessages([]session.Item{
+		session.NewMessageItem(session.UserMessage("hi")),
+		session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "hello"}}),
+	}))
+	require.NoError(t, base.AddSession(t.Context(), sess))
+	before := len(sess.Messages)
+
+	events := make(chan Event, 32)
+	rt.Summarize(t.Context(), sess, "", NewChannelSink(events))
+	close(events)
+	var outcome string
+	var sawError, sawSummary bool
+	for ev := range events {
+		switch e := ev.(type) {
+		case *SessionCompactionEvent:
+			if e.Status == "completed" {
+				outcome = e.Outcome
+			}
+		case *ErrorEvent:
+			sawError = true
+		case *SessionSummaryEvent:
+			sawSummary = true
+		}
+	}
+	assert.Equal(t, CompactionOutcomeFailed, outcome)
+	assert.True(t, sawError)
+	assert.False(t, sawSummary, "an unpersisted summary must not be announced as successful")
+	assert.Len(t, sess.Messages, before, "failed persistence must leave live continuation unchanged")
+}
+
+func TestDoCompactPersistsSummaryForSQLiteReload(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "sessions.db")
+	store, err := sqlitestore.New(t.Context(), dbPath)
+	require.NoError(t, err)
+
+	summaryStream := newStreamBuilder().AddContent("persisted summary").AddStopWithUsage(12, 3).Build()
+	prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{summaryStream}}
+	root := agent.New("root", "test", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+		WithSessionCompaction(false),
+		WithSessionStore(store),
+		WithModelStore(mockModelStoreWithLimit{limit: 100_000}),
+	)
+	require.NoError(t, err)
+
+	sess := session.New(
+		session.WithID("compact-reload"),
+		session.WithMessages([]session.Item{
+			session.NewMessageItem(session.UserMessage("old question")),
+			session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "old answer"}}),
+		}),
+	)
+	require.NoError(t, store.AddSession(t.Context(), sess))
+
+	events := make(chan Event, 32)
+	rt.Summarize(t.Context(), sess, "", NewChannelSink(events))
+	close(events)
+	for range events {
+	}
+	require.NoError(t, store.Close())
+
+	reopened, err := sqlitestore.New(t.Context(), dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	reloaded, err := reopened.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	require.Len(t, reloaded.Messages, 3)
+	assert.Equal(t, "persisted summary", reloaded.Messages[2].Summary)
+
+	messages := reloaded.GetMessages(root)
+	var continuation strings.Builder
+	for _, msg := range messages {
+		continuation.WriteString(msg.Content)
+	}
+	assert.Contains(t, continuation.String(), "persisted summary")
+	assert.NotContains(t, continuation.String(), "old question", "reload must continue from the compacted view")
+}
+
+func TestDoCompactObservedRunDoesNotDuplicateSummary(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "sessions.db")
+	store, err := sqlitestore.New(t.Context(), dbPath)
+	require.NoError(t, err)
+	summaryStream := newStreamBuilder().AddContent("one summary").AddStopWithUsage(1, 1).Build()
+	prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{summaryStream}}
+	root := agent.New("root", "test", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+		WithSessionCompaction(false),
+		WithSessionStore(store),
+		WithModelStore(mockModelStoreWithLimit{limit: 100_000}),
+	)
+	require.NoError(t, err)
+
+	sess := session.New(session.WithID("compact-dedup"), session.WithMessages([]session.Item{
+		session.NewMessageItem(session.UserMessage("hi")),
+		session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "hello"}}),
+	}))
+	require.NoError(t, store.AddSession(t.Context(), sess))
+
+	inner := make(chan Event, 32)
+	observed := rt.observe(t.Context(), sess, inner)
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(inner)))
+	close(inner)
+	for range observed {
+	}
+
+	reloaded, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	var summaries int
+	for _, item := range reloaded.Messages {
+		if item.Summary != "" {
+			summaries++
+		}
+	}
+	assert.Equal(t, 1, summaries, "intrinsic persistence and the observer must not both append the summary")
 }
 
 // TestDoCompactNoHooksMatchesPriorBehavior is a regression guard: with
@@ -329,7 +509,7 @@ func TestDoCompactNoHooksMatchesPriorBehavior(t *testing.T) {
 	}))
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events)))
 	close(events)
 
 	var startCount, doneCount int
@@ -379,7 +559,7 @@ func TestDoCompactSummaryEventCarriesCost(t *testing.T) {
 	}))
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events)))
 	close(events)
 
 	var summaryEvent *SessionSummaryEvent
@@ -397,4 +577,58 @@ func TestDoCompactSummaryEventCarriesCost(t *testing.T) {
 		"the summary item records the summarization stream's cost")
 	assert.InDelta(t, last.Cost, summaryEvent.Cost, 1e-9,
 		"the emitted event must carry the same cost that was applied to the session")
+}
+
+func TestCompactionWaitsForPendingObserverWrites(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		store := &pendingMessageStore{Store: session.NewInMemorySessionStore(), release: make(chan struct{})}
+		prov := &mockCompactor{id: "anthropic/claude-test", opts: nativeOpts, result: nativeResult()}
+		root := agent.New("root", "test", agent.WithModel(prov))
+		rt := newNativeRuntime(t, root, WithSessionStore(store), WithSessionCompaction(true))
+		t.Cleanup(func() { require.NoError(t, rt.Close()) })
+		sess := session.New(session.WithUserMessage("already compacted"))
+		sess.SetUsage(95_000, 0)
+		observed := rt.RunStream(t.Context(), sess)
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			for event := range observed {
+				if e, ok := event.(*ErrorEvent); ok {
+					t.Errorf("unexpected error event: %s", e.Error)
+				}
+			}
+		}()
+		synctest.Wait()
+		assert.False(t, store.compacted, "summary persistence must wait for the preceding user message")
+		close(store.release)
+		<-finished
+		assert.True(t, store.compacted)
+		synctest.Wait()
+
+		saved, err := store.GetSession(t.Context(), sess.ID)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(saved.Messages), 2)
+		require.True(t, saved.Messages[0].IsMessage(), "the user message must precede the summary")
+		assert.Equal(t, "already compacted", saved.Messages[0].Message.Message.Content)
+		assert.Equal(t, "native summary", saved.Messages[1].Summary)
+	})
+}
+
+type pendingMessageStore struct {
+	session.Store
+
+	release   chan struct{}
+	compacted bool
+}
+
+func (s *pendingMessageStore) AddMessage(ctx context.Context, id string, msg *session.Message) (int64, error) {
+	<-s.release
+	return s.Store.AddMessage(ctx, id, msg)
+}
+
+func (s *pendingMessageStore) PersistCompaction(ctx context.Context, sess *session.Session, input, output int64, item session.Item) error {
+	s.compacted = true
+	return s.Store.PersistCompaction(ctx, sess, input, output, item)
 }

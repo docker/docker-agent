@@ -78,9 +78,11 @@ func TestCreateBackgroundJobsTool(t *testing.T) {
 
 func TestCreateMCPTool_CommandNotFound_CreatesToolsetAnyway(t *testing.T) {
 	t.Setenv("DOCKER_AGENT_TOOLS_DIR", t.TempDir())
+	t.Setenv("DOCKER_AGENT_AUTO_INSTALL", "")
 
 	toolset := latest.Toolset{
 		Type:    "mcp",
+		Version: "invalid-ref", // Fail auto-install without a registry request.
 		Command: "./bin/nonexistent-mcp-server",
 	}
 
@@ -99,9 +101,11 @@ func TestCreateMCPTool_CommandNotFound_CreatesToolsetAnyway(t *testing.T) {
 
 func TestCreateMCPTool_BareCommandNotFound_CreatesToolsetAnyway(t *testing.T) {
 	t.Setenv("DOCKER_AGENT_TOOLS_DIR", t.TempDir())
+	t.Setenv("DOCKER_AGENT_AUTO_INSTALL", "")
 
 	toolset := latest.Toolset{
 		Type:    "mcp",
+		Version: "invalid-ref", // Fail auto-install without a registry request.
 		Command: "some-nonexistent-mcp-binary",
 	}
 
@@ -117,6 +121,7 @@ func TestCreateMCPTool_BareCommandNotFound_CreatesToolsetAnyway(t *testing.T) {
 	require.NotNil(t, tool)
 	assert.Equal(t, "mcp(stdio cmd=some-nonexistent-mcp-binary)", tools.DescribeToolSet(tool))
 } // TestCreateMCPTool_WorkingDir_ReachesSubprocess verifies that working_dir is
+
 // wired all the way through createMCPTool to the underlying stdio command (N5).
 func TestCreateMCPTool_WorkingDir_ReachesSubprocess(t *testing.T) {
 	t.Setenv("DOCKER_AGENT_TOOLS_DIR", t.TempDir())
@@ -127,6 +132,7 @@ func TestCreateMCPTool_WorkingDir_ReachesSubprocess(t *testing.T) {
 
 	toolset := latest.Toolset{
 		Type:       "mcp",
+		Version:    "false", // This test only inspects the working directory.
 		Command:    "some-nonexistent-mcp-binary",
 		WorkingDir: customDir,
 	}
@@ -159,6 +165,7 @@ func TestCreateMCPTool_RelativeWorkingDir_ResolvedAgainstAgentDir(t *testing.T) 
 
 	toolset := latest.Toolset{
 		Type:       "mcp",
+		Version:    "false", // This test only inspects the working directory.
 		Command:    "some-nonexistent-mcp-binary",
 		WorkingDir: "tools/mcp",
 	}
@@ -217,6 +224,7 @@ func TestCreateLSPTool_WorkingDir_ReachesHandler(t *testing.T) {
 	toolset := latest.Toolset{
 		Type:       "lsp",
 		Command:    "gopls",
+		Version:    "false", // no auto-install: the test never starts gopls
 		WorkingDir: customDir,
 	}
 

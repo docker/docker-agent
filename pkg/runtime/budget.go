@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -53,6 +54,10 @@ func newBudgetTracker(cfg *latest.BudgetConfig) *budgetTracker {
 }
 
 func (b *budgetTracker) record(agentName string, usage *chat.Usage, cost *float64, active time.Duration) {
+	b.recordSpend(agentName, usage, cost, active, false)
+}
+
+func (b *budgetTracker) recordSpend(agentName string, usage *chat.Usage, cost *float64, active time.Duration, unknown bool) {
 	if b == nil {
 		return
 	}
@@ -61,15 +66,20 @@ func (b *budgetTracker) record(agentName string, usage *chat.Usage, cost *float6
 
 	var addTokens int64
 	if usage != nil {
-		addTokens = usage.InputTokens + usage.OutputTokens
-		b.tokens += addTokens
+		for _, tokens := range []int64{usage.InputTokens, usage.CachedInputTokens, usage.CacheWriteTokens, usage.OutputTokens} {
+			addTokens = addBudgetTokens(addTokens, tokens)
+		}
+		b.tokens = addBudgetTokens(b.tokens, addTokens)
 	}
 	var addCost float64
 	switch {
 	case cost != nil:
 		addCost = *cost
-		b.cost += addCost
-	case usage != nil:
+		if math.IsInf(b.cost+addCost, 1) {
+			b.unpriced = true
+		}
+		b.cost = min(math.MaxFloat64, b.cost+addCost)
+	case usage != nil || unknown:
 		b.unpriced = true
 	}
 
@@ -82,11 +92,22 @@ func (b *budgetTracker) record(agentName string, usage *chat.Usage, cost *float6
 		spend = &agentSpend{}
 		b.perAgent[agentName] = spend
 	}
-	spend.cost += addCost
-	spend.tokens += addTokens
+	spend.cost = min(math.MaxFloat64, spend.cost+addCost)
+	spend.tokens = addBudgetTokens(spend.tokens, addTokens)
 	if active > 0 {
 		spend.active += active
 	}
+}
+
+// Saturate consumption counters so overflow cannot turn spend into credit.
+func addBudgetTokens(total, tokens int64) int64 {
+	if tokens <= 0 {
+		return total
+	}
+	if total > math.MaxInt64-tokens {
+		return math.MaxInt64
+	}
+	return total + tokens
 }
 
 type budgetSnapshot struct {
@@ -319,6 +340,13 @@ func newBudgetSet(runBudget *latest.BudgetConfig, named map[string]latest.Budget
 	return s
 }
 
+func withSharedBudget(budget *budgetSet) Opt {
+	return func(r *LocalRuntime) {
+		r.budget = budget
+		r.budgetStarted = true
+	}
+}
+
 func (r *LocalRuntime) ensureBudget() {
 	r.budgetMu.Lock()
 	defer r.budgetMu.Unlock()
@@ -382,7 +410,28 @@ func (s *budgetSet) exceededFor(agentName string) *budgetBreach {
 	return nil
 }
 
+const unpricedSpendWarning = "This run has a max_cost limit, but some model or evaluator spend is unknown and the runtime cannot price it, " +
+	"so that spend does not count against the limit. Set a model- or evaluator-level `cost:` block when rates are missing; requests without usage cannot be priced."
+
 func (r *LocalRuntime) recordBudget(sess *session.Session, a *agent.Agent, usage *chat.Usage, cost *float64, active time.Duration, events EventSink) {
+	r.recordBudgetSpend(sess, a, usage, cost, active, events, false)
+}
+
+func budgetUsage(usage *chat.Usage, attempts []chat.UsageAttempt) *chat.Usage {
+	if len(attempts) == 0 {
+		return usage
+	}
+	total := &chat.Usage{}
+	for _, attempt := range attempts {
+		total.InputTokens = addBudgetTokens(total.InputTokens, attempt.InputTokens)
+		total.OutputTokens = addBudgetTokens(total.OutputTokens, attempt.OutputTokens)
+		total.CachedInputTokens = addBudgetTokens(total.CachedInputTokens, attempt.CachedInputTokens)
+		total.CacheWriteTokens = addBudgetTokens(total.CacheWriteTokens, attempt.CacheWriteTokens)
+	}
+	return total
+}
+
+func (r *LocalRuntime) recordBudgetSpend(sess *session.Session, a *agent.Agent, usage *chat.Usage, cost *float64, active time.Duration, events EventSink, unknown bool) {
 	s := r.currentBudget()
 	if s == nil {
 		return
@@ -394,14 +443,10 @@ func (r *LocalRuntime) recordBudget(sess *session.Session, a *agent.Agent, usage
 
 	warnUnpriced := !s.unpricedSpend()
 	for _, nt := range targets {
-		nt.Tracker.record(a.Name(), usage, cost, active)
+		nt.Tracker.recordSpend(a.Name(), usage, cost, active, unknown)
 	}
 	if warnUnpriced && s.unpricedSpend() {
-		events.Emit(Warning(
-			"This run has a max_cost limit, but the model reported usage the runtime cannot price, "+
-				"so that spend does not count against the limit. Set a model-level `cost:` block to price it.",
-			a.Name(),
-		))
+		events.Emit(Warning(unpricedSpendWarning, a.Name()))
 	}
 	events.Emit(BudgetUsage(sess.ID, a.Name(), s.snapshot()))
 }

@@ -75,6 +75,7 @@ type Config struct {
 	AutoApprove    bool
 	HideToolCalls  bool
 	OutputJSON     bool
+	Last           bool
 }
 
 // Run executes an agent in non-TUI mode, handling user input and runtime events.
@@ -98,6 +99,7 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 	// If the last received event was an error, return it. That way the exit code
 	// will be non-zero if the agent failed.
 	var lastErr error
+	var last lastResponse
 
 	oneLoop := func(text string, rd io.Reader) error {
 		autoExtensions := 0
@@ -115,30 +117,52 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 			// Agent-only command with no content - agent switched but no message to send
 			return nil
 		}
+		if cfg.Last {
+			last = lastResponse{sessionID: sess.ID}
+		}
 		sess.AddMessage(userMsg)
 		sess.AddAttachedFile(attachedPath)
 
-		if cfg.OutputJSON {
-			for event := range rt.RunStream(ctx, sess) {
+		// Stop only this turn; subsequent user messages still need the parent context.
+		runCtx, stopRun := context.WithCancel(ctx)
+		events := rt.RunStream(runCtx, sess)
+		defer func() {
+			stopRun()
+			for range events {
+			}
+		}()
+
+		if cfg.OutputJSON || cfg.Last {
+			for event := range events {
+				if cfg.Last {
+					last.observe(event)
+				}
 				switch e := event.(type) {
 				case *runtime.ToolCallConfirmationEvent:
 					// JSON mode has no user at stdin — reject unconditionally.
 					// A confirmation event under AutoApprove means a
 					// preempt-yolo hook overrode --yolo; the safe answer is
 					// still Reject (the hook said Ask, not Approve).
-					rt.Resume(ctx, runtime.ResumeReject(""))
+					rt.Resume(runCtx, runtime.ResumeReject(""))
 				case *runtime.ElicitationRequestEvent:
-					_ = rt.ResumeElicitation(ctx, "decline", nil, e.ElicitationID)
+					_ = rt.ResumeElicitation(runCtx, "decline", nil, e.ElicitationID)
 				case *runtime.MaxIterationsReachedEvent:
 					switch handleMaxIterationsAutoApprove(cfg.AutoApprove, &autoExtensions, e.MaxIterations) {
 					case maxIterContinue:
-						rt.Resume(ctx, runtime.ResumeApprove())
+						rt.Resume(runCtx, runtime.ResumeApprove())
 					default: // maxIterStop or maxIterPrompt (no interactive prompt in JSON mode)
-						rt.Resume(ctx, runtime.ResumeReject(""))
+						rt.Resume(runCtx, runtime.ResumeReject(""))
+						if cfg.Last {
+							return errors.New("agent produced no final answer: max iterations reached")
+						}
 						return nil
 					}
 				case *runtime.ErrorEvent:
 					return fmt.Errorf("%s", e.Error)
+				}
+
+				if cfg.Last {
+					continue
 				}
 
 				buf, err := json.Marshal(event)
@@ -148,17 +172,22 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				out.Println(string(buf))
 			}
 
+			if cfg.Last {
+				return last.validate()
+			}
 			return nil
 		}
 
 		firstLoop := true
 		lastAgent := rt.CurrentAgentName(ctx)
 		var lastConfirmedToolCallID string
-		for event := range rt.RunStream(ctx, sess) {
+		var printingReasoning bool
+		for event := range events {
 			agentName := event.GetAgentName()
 			if agentName != "" && (firstLoop || lastAgent != agentName) {
 				if !firstLoop {
 					out.Println()
+					printingReasoning = false
 				}
 				out.PrintAgentName(agentName)
 				firstLoop = false
@@ -166,10 +195,20 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 			}
 			switch e := event.(type) {
 			case *runtime.AgentChoiceEvent:
-				out.Print(e.Content)
+				if e.Content != "" {
+					if printingReasoning {
+						out.Print("\n\n")
+					}
+					out.Print(e.Content)
+					printingReasoning = false
+				}
 			case *runtime.AgentChoiceReasoningEvent:
-				out.Print(e.Content)
+				if e.Content != "" {
+					out.Print(e.Content)
+					printingReasoning = true
+				}
 			case *runtime.ToolCallConfirmationEvent:
+				printingReasoning = false
 				result := out.PrintToolCallWithConfirmation(ctx, e.ToolCall, rd)
 				// If interrupted, skip resuming; the runtime will notice context cancellation and stop
 				if ctx.Err() != nil {
@@ -178,15 +217,15 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				lastConfirmedToolCallID = e.ToolCall.ID // Store the ID to avoid duplicate printing
 				switch result {
 				case ConfirmationApprove:
-					rt.Resume(ctx, runtime.ResumeApprove())
+					rt.Resume(runCtx, runtime.ResumeApprove())
 				case ConfirmationApproveBalanced:
 					sess.SetSafetyPolicy(session.SafetyPolicyBalanced)
-					rt.Resume(ctx, runtime.ResumeApproveBalanced())
+					rt.Resume(runCtx, runtime.ResumeApproveBalanced())
 				case ConfirmationApproveSession:
 					sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
-					rt.Resume(ctx, runtime.ResumeApproveAutonomous())
+					rt.Resume(runCtx, runtime.ResumeApproveAutonomous())
 				case ConfirmationReject:
-					rt.Resume(ctx, runtime.ResumeReject(""))
+					rt.Resume(runCtx, runtime.ResumeReject(""))
 					lastConfirmedToolCallID = "" // Clear on reject since tool won't execute
 				case ConfirmationAbort:
 					// Stop the agent loop immediately
@@ -200,12 +239,14 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				// Only print if this wasn't already shown during confirmation
 				if e.ToolCall.ID != lastConfirmedToolCallID {
 					out.PrintToolCall(e.ToolCall)
+					printingReasoning = false
 				}
 			case *runtime.ToolCallResponseEvent:
 				if cfg.HideToolCalls {
 					continue
 				}
 				out.PrintToolCallResponse(e.ToolDefinition.Name, e.Response)
+				printingReasoning = false
 				// Clear the confirmed ID after the tool completes
 				if e.ToolCallID == lastConfirmedToolCallID {
 					lastConfirmedToolCallID = ""
@@ -215,6 +256,7 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				// reasoning / an empty response) in non-TUI runs, where they would
 				// otherwise be dropped. The TUI renders these as notifications.
 				out.PrintWarning(e.Message)
+				printingReasoning = false
 			case *runtime.ErrorEvent:
 				lowerErr := strings.ToLower(e.Error)
 				if strings.Contains(lowerErr, "context cancel") && ctx.Err() != nil { // treat Ctrl+C cancellations as non-errors
@@ -228,31 +270,34 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 			case *runtime.MaxIterationsReachedEvent:
 				switch handleMaxIterationsAutoApprove(cfg.AutoApprove, &autoExtensions, e.MaxIterations) {
 				case maxIterContinue:
-					rt.Resume(ctx, runtime.ResumeApprove())
+					rt.Resume(runCtx, runtime.ResumeApprove())
 				case maxIterStop:
-					rt.Resume(ctx, runtime.ResumeReject(""))
+					rt.Resume(runCtx, runtime.ResumeReject(""))
 					return nil
 				case maxIterPrompt:
+					printingReasoning = false
 					result := out.PromptMaxIterationsContinue(ctx, e.MaxIterations)
 					switch result {
 					case ConfirmationApprove:
-						rt.Resume(ctx, runtime.ResumeApprove())
+						rt.Resume(runCtx, runtime.ResumeApprove())
 					case ConfirmationReject:
-						rt.Resume(ctx, runtime.ResumeReject(""))
+						rt.Resume(runCtx, runtime.ResumeReject(""))
 						return nil
 					case ConfirmationAbort:
-						rt.Resume(ctx, runtime.ResumeReject(""))
+						rt.Resume(runCtx, runtime.ResumeReject(""))
 						return nil
 					}
 				}
 			case *runtime.ElicitationRequestEvent:
 				serverURL, ok := e.Meta["docker-agent/server_url"].(string)
 				if !ok || serverURL == "" {
-					slog.WarnContext(ctx, "Skipping elicitation: missing or invalid server_url (non-interactive session?)")
-					_ = rt.ResumeElicitation(ctx, "decline", nil, e.ElicitationID)
-					return nil
+					// Keep draining after declining forms so follow-up events cannot stall the turn.
+					slog.WarnContext(ctx, "Declining elicitation without form support in CLI mode", "message", e.Message)
+					_ = rt.ResumeElicitation(runCtx, "decline", nil, e.ElicitationID)
+					continue
 				}
 
+				printingReasoning = false
 				result := out.PromptOAuthAuthorization(ctx, serverURL)
 
 				if ctx.Err() != nil {
@@ -261,9 +306,9 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 
 				switch result {
 				case ConfirmationApprove:
-					_ = rt.ResumeElicitation(ctx, "accept", nil, e.ElicitationID)
+					_ = rt.ResumeElicitation(runCtx, "accept", nil, e.ElicitationID)
 				case ConfirmationReject:
-					_ = rt.ResumeElicitation(ctx, "decline", nil, e.ElicitationID)
+					_ = rt.ResumeElicitation(runCtx, "decline", nil, e.ElicitationID)
 					return errors.New("OAuth authorization rejected by user")
 				}
 			}
@@ -314,6 +359,9 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 		}
 	default:
 		// No messages: interactive prompt loop
+		if cfg.Last {
+			return errors.New("--last requires a message argument or piped input")
+		}
 		out.PrintWelcomeMessage(cfg.AppName)
 		firstQuestion := true
 		for {
@@ -338,6 +386,12 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 	// Wrap runtime errors to prevent duplicate error messages and usage display
 	if lastErr != nil {
 		return RuntimeError{Err: lastErr}
+	}
+	if cfg.Last {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return last.print(out.out, cfg.OutputJSON)
 	}
 	return nil
 }
@@ -444,7 +498,7 @@ func ParseAttachCommand(userInput string) (messageText, attachPath string) {
 
 // CreateUserMessageWithAttachment creates a user message with optional file attachment.
 // All attachment processing (MIME detection, image resize, text inlining) is delegated
-// to [chat.ProcessAttachment], which runs once at message-assembly time.
+// to [chat.ProcessAttachmentWithMetadata], which runs once at message-assembly time.
 //
 // Returns the prepared session.Message and the absolute path of the file that
 // was actually attached. The returned path is empty when no attachment was
@@ -498,7 +552,7 @@ func CreateUserMessageWithAttachment(ctx context.Context, userContent, attachmen
 		})
 
 	default:
-		// Binary files (images, PDFs, etc.) — delegate to ProcessAttachment.
+		// Binary files (images, PDFs, etc.) — delegate to ProcessAttachmentWithMetadata.
 		if !chat.IsSupportedMimeType(chat.DetectMimeType(absPath)) {
 			slog.WarnContext(ctx, "Unsupported attachment file type", "path", absPath)
 			return noAttachment()

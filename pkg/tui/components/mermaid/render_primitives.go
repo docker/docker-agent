@@ -48,11 +48,7 @@ func mermaidCanvasText(canvas []string) string {
 }
 
 func mermaidLifeline(order []string, centers map[string]int, width int) string {
-	canvas := mermaidCanvas(width)
-	for _, id := range order {
-		canvas[centers[id]] = "│"
-	}
-	return mermaidCanvasText(canvas)
+	return mermaidCanvasText(sequenceCanvas(order, centers, width))
 }
 
 func drawMermaidEdges(edges []mermaidparser.Edge, standalone []string, nodes map[string]string, width int) string {

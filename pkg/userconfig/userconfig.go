@@ -74,6 +74,9 @@ type Settings struct {
 	// RenderImages displays images returned by tools in supported terminals.
 	// Defaults to true when not set.
 	RenderImages *bool `yaml:"render_images,omitempty"`
+	// ShowBanner displays the ASCII-art startup banner in the TUI.
+	// Defaults to true when not set.
+	ShowBanner *bool `yaml:"show_banner,omitempty"`
 	// Theme is the default theme reference (e.g., "dark", "light")
 	// Theme files are loaded from ~/.cagent/themes/<theme>.yaml
 	// The special value "auto" follows the terminal's light/dark background,
@@ -94,6 +97,8 @@ type Settings struct {
 	Safety latest.SafetyMode `yaml:"safety,omitempty"`
 	// Lean makes the simplified TUI with minimal chrome the default UI.
 	Lean bool `yaml:"lean,omitempty"`
+	// LeanFullFilePreview shows entire written files instead of the last ten lines.
+	LeanFullFilePreview bool `yaml:"lean_full_file_preview,omitempty"`
 	// TabTitleMaxLength is the maximum display length for tab titles in the TUI.
 	// Titles longer than this are truncated with an ellipsis. Defaults to 20.
 	TabTitleMaxLength int `yaml:"tab_title_max_length,omitempty"`
@@ -103,6 +108,8 @@ type Settings struct {
 	// Sound enables playing notification sounds on task success or failure.
 	// Defaults to false (user must explicitly opt-in).
 	Sound bool `yaml:"sound,omitempty"`
+	// KeepAwake prevents idle system sleep during agent runs. Disabled by default.
+	KeepAwake bool `yaml:"keep_awake,omitempty"`
 	// SoundThreshold is the minimum duration in seconds a task must run
 	// before a success sound is played. Defaults to 5 seconds.
 	SoundThreshold int `yaml:"sound_threshold,omitempty"`
@@ -111,6 +118,10 @@ type Settings struct {
 	// CacheStablePrompts keeps changing trusted context out of the frozen system
 	// prefix and appends chronological updates instead. Defaults to false.
 	CacheStablePrompts *bool `yaml:"cache_stable_prompts,omitempty"`
+	// BackgroundCompaction overlaps automatic summarization with agent work.
+	BackgroundCompaction bool `yaml:"background_compaction,omitempty"`
+	// BackgroundCompactionThreshold is a context-window percentage (1–99).
+	BackgroundCompactionThreshold int `yaml:"background_compaction_threshold,omitempty"`
 	// WarnOnCacheMiss shows a warning when a model call after the first one in
 	// a session reports no cached input tokens. Defaults to false.
 	WarnOnCacheMiss *bool `yaml:"warn_on_cache_miss,omitempty"`
@@ -143,8 +154,8 @@ type Settings struct {
 }
 
 // LayoutSettings customizes the TUI chat layout. The zero value is the
-// default layout: sidebar on the right with every section visible and
-// normal spacing between sections.
+// default layout: sidebar on the right with all sections except Plans visible
+// and normal spacing between sections.
 type LayoutSettings struct {
 	// SidebarPosition places the session info sidebar: "right" (default),
 	// "left", "top", or "bottom".
@@ -167,6 +178,8 @@ type LayoutSettings struct {
 	HideAgents bool `yaml:"hide_agents,omitempty"`
 	// HideTools hides the tools section in the sidebar.
 	HideTools bool `yaml:"hide_tools,omitempty"`
+	// ShowPlans shows shared plans in the sidebar. Defaults to false.
+	ShowPlans bool `yaml:"show_plans,omitempty"`
 	// HideTodos hides the todo list section in the sidebar.
 	HideTodos bool `yaml:"hide_todos,omitempty"`
 }
@@ -212,6 +225,11 @@ func (s *Settings) GetTabTitleMaxLength() int {
 	return s.TabTitleMaxLength
 }
 
+// GetKeepAwake reports whether agent runs should inhibit idle system sleep.
+func (s *Settings) GetKeepAwake() bool {
+	return s != nil && s.KeepAwake
+}
+
 // GetSound returns whether sound notifications are enabled, defaulting to false.
 func (s *Settings) GetSound() bool {
 	if s == nil {
@@ -250,6 +268,14 @@ func (s *Settings) GetRenderImages() bool {
 		return true
 	}
 	return *s.RenderImages
+}
+
+// GetShowBanner returns whether the startup banner is displayed, defaulting to true.
+func (s *Settings) GetShowBanner() bool {
+	if s == nil || s.ShowBanner == nil {
+		return true
+	}
+	return *s.ShowBanner
 }
 
 // GetRestoreTabs returns whether previously open tabs are restored on
@@ -293,6 +319,15 @@ func (s *Settings) GetSafety() latest.SafetyMode {
 // CacheStablePromptsEnabled reports whether chronological instruction updates are enabled.
 func (s *Settings) CacheStablePromptsEnabled() bool {
 	return s != nil && s.CacheStablePrompts != nil && *s.CacheStablePrompts
+}
+
+const DefaultBackgroundCompactionThreshold = 70
+
+func (s *Settings) GetBackgroundCompactionThreshold() int {
+	if s == nil || s.BackgroundCompactionThreshold < 1 || s.BackgroundCompactionThreshold > 99 {
+		return DefaultBackgroundCompactionThreshold
+	}
+	return s.BackgroundCompactionThreshold
 }
 
 // CacheMissWarningsEnabled reports whether cache-miss notifications are enabled.
@@ -576,19 +611,29 @@ func (c *Config) marshal() ([]byte, error) {
 	return yaml.Marshal(c)
 }
 
+// updateMu keeps in-process writers from consuming the file-lock timeout while queued.
+var updateMu sync.Mutex
+
 // Update atomically applies mutate to the freshest on-disk configuration and
 // saves the result. An advisory file lock serializes the whole
 // load-mutate-save cycle against other docker-agent processes, so concurrent
 // writers cannot overwrite each other's changes. Returning an error from
-// mutate aborts the update and leaves the file untouched. When the lock
-// cannot be acquired the update proceeds unlocked (best effort) rather than
-// failing the save.
+// mutate aborts the update and leaves the file untouched. If the lock cannot
+// be acquired, Update returns an error without calling mutate or saving.
+// The mutate callback must not call Update.
 func Update(mutate func(*Config) error) error {
-	if release, err := acquireFileLock(Path() + ".lock"); err == nil {
-		defer release()
-	} else {
-		slog.Warn("Proceeding without config file lock", "error", err)
+	return update(mutate, acquireFileLock)
+}
+
+func update(mutate func(*Config) error, acquireLock func(string) (func(), error)) error {
+	updateMu.Lock()
+	defer updateMu.Unlock()
+
+	release, err := acquireLock(Path() + ".lock")
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	cfg, err := Load()
 	if err != nil {

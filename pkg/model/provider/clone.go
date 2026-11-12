@@ -2,58 +2,134 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"slices"
 
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/internal/deepcopy"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// CloneWithOptions returns a new Provider instance using the same provider/model
-// as the base provider, applying the provided options. If cloning fails, the
-// original base provider is returned.
-func CloneWithOptions(ctx context.Context, baseProvider Provider, opts ...options.Opt) Provider {
-	cfg := baseProvider.BaseConfig()
-	modelConfig, mergedOpts := mergeCloneOptions(cfg, opts)
+// ErrNoRebuilder means a provider has no construction function for cloning.
+var ErrNoRebuilder = errors.New("provider cannot be cloned without its rebuild function")
 
-	// Use NewWithModels to support cloning routers that reference other models.
-	// cfg.Models is populated by routers; for other providers it's nil (which is fine).
-	registry, _ := cfg.ProviderRegistry.(*Registry)
-	if registry == nil {
-		registry = DefaultRegistry()
-	}
-	clone, err := registry.NewWithModels(ctx, &modelConfig, cfg.Models, cfg.Env, mergedOpts...)
-	if err != nil {
-		slog.DebugContext(ctx, "Failed to clone provider; using base provider", "error", err, "id", baseProvider.ID())
-		return baseProvider
-	}
+// ErrUncopyableConfig means mutable configuration cannot be safely copied.
+var ErrUncopyableConfig = errors.New("provider clone requires copyable configuration")
 
-	return clone
+// CloneError identifies the provider whose reconstruction failed.
+type CloneError struct {
+	ID  modelsdev.ID
+	Err error
 }
 
-// mergeCloneOptions is the pure half of CloneWithOptions. Given the base
-// provider's configuration and the user-supplied overrides, it returns:
-//
-//   - a copy of the base ModelConfig with explicit overrides applied (currently
-//     MaxTokens and the no-thinking flag), and
-//   - the full ordered slice of options that should be passed to NewWithModels
-//     (existing options first, then user overrides; later opts win).
-//
-// Splitting this out from the impure NewWithModels call lets us table-test the
-// option-merging logic without spinning up an HTTP server.
-func mergeCloneOptions(cfg base.Config, opts []options.Opt) (latest.ModelConfig, []options.Opt) {
-	// Preserve existing options, then apply overrides. Later opts take precedence.
-	baseOpts := options.FromModelOptions(cfg.ModelOptions)
-	mergedOpts := append(baseOpts, opts...)
+func (e *CloneError) Error() string { return fmt.Sprintf("cloning provider %q: %v", e.ID, e.Err) }
+func (e *CloneError) Unwrap() error { return e.Err }
 
-	// Apply every option to a single accumulator so we can read the final
-	// effective values directly. "Later opt wins" semantics fall out naturally.
-	var merged options.ModelOptions
-	for _, opt := range mergedOpts {
-		opt(&merged)
+// Clone reconstructs a provider with ordered option overrides, or returns an error.
+// Non-zero token caps also constrain routed children, subject to provider floors.
+// The last non-zero cap wins; zero retains the latest explicit cap.
+func Clone(ctx context.Context, p Provider, opts ...options.Opt) (Provider, error) {
+	clone, _, err := cloneProvider(ctx, p, opts)
+	return clone, err
+}
+
+// CloneWithOptions reconstructs a provider, returning an error-only provider on failure.
+//
+// Deprecated: use Clone to handle reconstruction errors before making a request.
+func CloneWithOptions(ctx context.Context, p Provider, opts ...options.Opt) Provider {
+	clone, requested, err := cloneProvider(ctx, p, opts)
+	if err == nil {
+		return clone
+	}
+	slog.WarnContext(ctx, "Failed to clone provider", "error", err)
+	var id modelsdev.ID
+	if p != nil {
+		id = p.ID()
+	}
+	return &failedCloneProvider{config: requested, id: id, err: err}
+}
+
+func cloneProvider(ctx context.Context, p Provider, opts []options.Opt) (Provider, base.Config, error) {
+	if p == nil {
+		return nil, base.Config{}, errors.New("cannot clone a nil provider")
+	}
+	cfg := p.BaseConfig()
+	modelConfig, mergedOpts, err := mergeCloneOptions(cfg, opts)
+	if err != nil {
+		return nil, base.Config{}, &CloneError{ID: p.ID(), Err: err}
+	}
+	requested := base.Config{ModelConfig: modelConfig, ModelOptions: options.Apply(mergedOpts...), Env: cfg.Env, BaseURL: cfg.BaseURL}
+	if cfg.RebuildProvider == nil {
+		return nil, requested, &CloneError{ID: p.ID(), Err: ErrNoRebuilder}
+	}
+	clone, err := cfg.RebuildProvider(ctx, &modelConfig, mergedOpts...)
+	if err == nil && clone == nil {
+		err = errors.New("rebuild returned a nil provider")
+	}
+	if err != nil {
+		return nil, requested, &CloneError{ID: p.ID(), Err: err}
+	}
+	return clone, requested, nil
+}
+
+type failedCloneProvider struct {
+	config base.Config
+	id     modelsdev.ID
+	err    error
+}
+
+func (p *failedCloneProvider) ID() modelsdev.ID        { return p.id }
+func (p *failedCloneProvider) BaseConfig() base.Config { return p.config }
+func (p *failedCloneProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	return nil, p.err
+}
+
+// mergeCloneOptions snapshots mutable state before reconstructing a provider.
+func mergeCloneOptions(cfg base.Config, opts []options.Opt) (latest.ModelConfig, []options.Opt, error) {
+	// Preserve existing options, then apply overrides. Later opts take precedence.
+	baseOptions, err := cfg.ModelOptions.Clone()
+	if err != nil {
+		return latest.ModelConfig{}, nil, fmt.Errorf("%w: %w", ErrUncopyableConfig, err)
+	}
+	baseOpts := options.FromModelOptions(baseOptions)
+	mergedOpts := slices.Concat(baseOpts, opts)
+	var requested options.ModelOptions
+	var explicitCap int64
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		opt(&requested)
+		if mt := requested.MaxTokens(); mt != 0 {
+			explicitCap = mt
+		}
+	}
+	if explicitCap != 0 {
+		mergedOpts = append(mergedOpts, options.WithAuxiliaryMaxTokens(explicitCap))
+	} else if baseOptions.MaxTokensInheritable() && baseOptions.MaxTokens() != 0 {
+		mergedOpts = append(mergedOpts, options.WithAuxiliaryMaxTokens(baseOptions.MaxTokens()))
 	}
 
-	modelConfig := cfg.ModelConfig
+	// Snapshot overrides too: option setters can carry caller-owned maps.
+	merged := options.Apply(mergedOpts...)
+	merged, err = merged.Clone()
+	if err != nil {
+		return latest.ModelConfig{}, nil, fmt.Errorf("%w: %w", ErrUncopyableConfig, err)
+	}
+	mergedOpts = options.FromModelOptions(merged)
+
+	source := cfg.CloneSource()
+	modelConfig, err := copyModelConfig(source)
+	if err != nil {
+		return latest.ModelConfig{}, nil, err
+	}
+
 	if mt := merged.MaxTokens(); mt != 0 {
 		modelConfig.MaxTokens = &mt
 	}
@@ -63,5 +139,13 @@ func mergeCloneOptions(cfg base.Config, opts []options.Opt) (latest.ModelConfig,
 		// thinking_budget via its setIfNil merge.
 		modelConfig.ThinkingBudget = &latest.ThinkingBudget{Effort: "none"}
 	}
-	return modelConfig, mergedOpts
+	return modelConfig, mergedOpts, nil
+}
+
+func copyModelConfig(source latest.ModelConfig) (latest.ModelConfig, error) {
+	copied, err := deepcopy.Value(source)
+	if err != nil {
+		return latest.ModelConfig{}, fmt.Errorf("%w: copying model configuration: %w", ErrUncopyableConfig, err)
+	}
+	return copied, nil
 }

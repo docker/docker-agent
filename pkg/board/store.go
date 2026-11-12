@@ -108,8 +108,7 @@ func (s *Store) GetCard(id string) (*Card, error) {
 	if i < 0 {
 		return nil, fmt.Errorf("%w: %s", ErrCardNotFound, id)
 	}
-	clone := *s.cards[i]
-	return &clone, nil
+	return new(*s.cards[i]), nil
 }
 
 // InsertCard appends a card to the board.
@@ -211,6 +210,5 @@ func (s *Store) MoveCard(id, column string, requireIdle bool) (*Card, error) {
 	if err := s.save(); err != nil {
 		return nil, err
 	}
-	clone := *card
-	return &clone, nil
+	return new(*card), nil
 }

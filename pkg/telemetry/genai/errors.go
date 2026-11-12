@@ -62,8 +62,7 @@ func ClassifyError(err error) string {
 		return "content_policy"
 	}
 
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if netErr, ok := errors.AsType[net.Error](err); ok {
 		if netErr.Timeout() {
 			return "network_timeout"
 		}

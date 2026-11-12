@@ -2,16 +2,18 @@ package gemini
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
+	"uuid"
 
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -19,6 +21,10 @@ import (
 var textExtractRegex = regexp.MustCompile(`"text"\s*:\s*"([^"\\]*(\\.[^"\\]*)*)"`)
 
 const http2BodyClosedError = "http2: response body closed"
+
+// ErrInvalidFunctionCall is returned when Gemini ends a response with
+// MALFORMED_FUNCTION_CALL or UNEXPECTED_TOOL_CALL.
+var ErrInvalidFunctionCall = modelerrors.ErrInvalidFunctionCall
 
 // StreamAdapter adapts the Gemini streaming iterator to chat.MessageStream
 type StreamAdapter struct {
@@ -32,9 +38,13 @@ type StreamAdapter struct {
 }
 
 type result struct {
-	resp *genai.GenerateContentResponse
-	err  error
-	done bool
+	resp      *genai.GenerateContentResponse
+	err       error
+	done      bool
+	toolCalls bool
+	// finish overrides the stop/tool_calls inference for a terminal
+	// MAX_TOKENS or safety stop, or an unfinished continuation.
+	finish chat.FinishReason
 }
 
 // NewStreamAdapter constructs a StreamAdapter from Gemini's iterator
@@ -59,6 +69,8 @@ func (g *StreamAdapter) run() {
 
 	hasContent := false
 	hasToolCalls := false
+	continuing := false
+	var terminal chat.FinishReason
 	var lastResponse *genai.GenerateContentResponse
 
 	// Consume the iterator
@@ -112,18 +124,29 @@ func (g *StreamAdapter) run() {
 		}
 
 		if resp != nil {
-			// Check for text content without using Text() to avoid warnings
+			// Finish-only and prompt-feedback-only chunks are not forwarded,
+			// so read their terminal reason here.
+			terminal = mergeTerminalReason(terminal, responseTerminalReason(resp))
+			continuing = continuationPending(continuing, resp)
+
+			// Check for text content and generated inline media without using
+			// Text() to avoid warnings
 			hasText := false
+			hasMedia := false
+			hasSignature := false
 			for _, candidate := range resp.Candidates {
 				if candidate.Content != nil {
 					for _, part := range candidate.Content.Parts {
+						hasSignature = hasSignature || len(part.ThoughtSignature) > 0
 						if part.Text != "" {
 							hasText = true
-							break
+						}
+						if part.InlineData != nil && len(part.InlineData.Data) > 0 {
+							hasMedia = true
 						}
 					}
 				}
-				if hasText {
+				if hasText && hasMedia {
 					break
 				}
 			}
@@ -134,29 +157,100 @@ func (g *StreamAdapter) run() {
 			// calls. Forward such chunks so downstream can capture token usage.
 			hasUsage := resp.UsageMetadata != nil
 
-			// Send response if it has content, function calls, or usage metadata
-			if hasText || hasFuncs || hasUsage {
-				hasContent = hasContent || hasText
+			// Empty text chunks can still carry signatures needed for the next request.
+			if hasText || hasMedia || hasFuncs || hasUsage || hasSignature {
+				hasContent = hasContent || hasText || hasMedia
 				hasToolCalls = hasToolCalls || hasFuncs
 				lastResponse = resp // Store for final message
 				if !g.send(result{resp: resp}) {
 					return false
 				}
 			}
+
+			if err := invalidFunctionCall(resp); err != nil {
+				g.send(result{err: err})
+				return false
+			}
 		}
 
 		return true
 	})
 
+	// The SDK resumes a CONTINUATION stop itself; one still pending here
+	// means generation is incomplete, so it must not end as stop.
+	if continuing {
+		terminal = mergeTerminalReason(terminal, chat.FinishReasonLength)
+	}
+
 	// Send final message with appropriate stop reason
-	if hasContent || hasToolCalls {
+	if hasContent || hasToolCalls || terminal != "" {
 		if lastResponse == nil {
 			lastResponse = &genai.GenerateContentResponse{}
 		}
-		if !g.send(result{done: true, resp: lastResponse}) {
+		if !g.send(result{done: true, resp: lastResponse, toolCalls: hasToolCalls, finish: terminal}) {
 			return
 		}
 	}
+}
+
+// responseTerminalReason maps a truncation or safety stop to its chat finish
+// reason, or "" when the response doesn't carry one.
+func responseTerminalReason(resp *genai.GenerateContentResponse) chat.FinishReason {
+	if resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" && resp.PromptFeedback.BlockReason != genai.BlockedReasonUnspecified {
+		return chat.FinishReasonRefusal
+	}
+	var reason chat.FinishReason
+	for _, candidate := range resp.Candidates {
+		switch candidate.FinishReason {
+		case genai.FinishReasonMaxTokens:
+			reason = mergeTerminalReason(reason, chat.FinishReasonLength)
+		case genai.FinishReasonSafety, genai.FinishReasonRecitation, genai.FinishReasonBlocklist,
+			genai.FinishReasonProhibitedContent, genai.FinishReasonSPII, genai.FinishReasonImageSafety,
+			genai.FinishReasonImageProhibitedContent, genai.FinishReasonImageRecitation:
+			reason = mergeTerminalReason(reason, chat.FinishReasonRefusal)
+		}
+	}
+	return reason
+}
+
+// continuationPending reports whether generation is still waiting on a
+// continuation after resp: a CONTINUATION stop or a continuation token sets
+// it, and any other finish reason clears it.
+func continuationPending(pending bool, resp *genai.GenerateContentResponse) bool {
+	for _, candidate := range resp.Candidates {
+		switch candidate.FinishReason {
+		case genai.FinishReasonContinuation:
+			pending = true
+		case "", genai.FinishReasonUnspecified:
+			pending = pending || len(candidate.ContinuationToken) > 0
+		default:
+			pending = false
+		}
+	}
+	return pending
+}
+
+// invalidFunctionCall returns an error when Gemini ended the response on a
+// function call it could not produce.
+func invalidFunctionCall(resp *genai.GenerateContentResponse) error {
+	for _, candidate := range resp.Candidates {
+		switch candidate.FinishReason {
+		case genai.FinishReasonMalformedFunctionCall, genai.FinishReasonUnexpectedToolCall:
+			if candidate.FinishMessage == "" {
+				return fmt.Errorf("gemini: %w (%s)", ErrInvalidFunctionCall, candidate.FinishReason)
+			}
+			return fmt.Errorf("gemini: %w (%s): %s", ErrInvalidFunctionCall, candidate.FinishReason, candidate.FinishMessage)
+		}
+	}
+	return nil
+}
+
+// mergeTerminalReason keeps the stronger reason: refusal beats length.
+func mergeTerminalReason(current, next chat.FinishReason) chat.FinishReason {
+	if current == chat.FinishReasonRefusal || next == "" {
+		return current
+	}
+	return next
 }
 
 func (g *StreamAdapter) send(res result) bool {
@@ -205,12 +299,13 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	if res.resp != nil {
 		resp.ID = res.resp.ResponseID
 
-		if res.resp.UsageMetadata != nil && g.trackUsage {
+		if usage := res.resp.UsageMetadata; usage != nil && g.trackUsage {
+			// Server-side tool results are additional, uncached input tokens.
 			resp.Usage = &chat.Usage{
-				InputTokens:       int64(res.resp.UsageMetadata.PromptTokenCount - res.resp.UsageMetadata.CachedContentTokenCount),
-				OutputTokens:      int64(res.resp.UsageMetadata.CandidatesTokenCount + res.resp.UsageMetadata.ThoughtsTokenCount),
-				CachedInputTokens: int64(res.resp.UsageMetadata.CachedContentTokenCount),
-				ReasoningTokens:   int64(res.resp.UsageMetadata.ThoughtsTokenCount),
+				InputTokens:       int64(usage.PromptTokenCount-usage.CachedContentTokenCount) + int64(usage.ToolUsePromptTokenCount),
+				OutputTokens:      int64(usage.CandidatesTokenCount + usage.ThoughtsTokenCount),
+				CachedInputTokens: int64(usage.CachedContentTokenCount),
+				ReasoningTokens:   int64(usage.ThoughtsTokenCount),
 			}
 		}
 	}
@@ -219,12 +314,16 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// Set finish reason and role
 		resp.Choices[0].Delta.Role = string(chat.MessageRoleAssistant)
 
-		// Check if we have function calls in the final response
-		if res.resp != nil && len(res.resp.FunctionCalls()) > 0 {
+		// A signature-only or usage-only chunk may follow the function calls.
+		// Truncation and safety stops win over both inferred reasons.
+		switch {
+		case res.finish != "":
+			resp.Choices[0].FinishReason = res.finish
+		case res.toolCalls:
 			resp.Choices[0].FinishReason = chat.FinishReasonToolCalls
 			// Don't include function calls in the final message - they were already sent
 			slog.Debug("Gemini: Final message with tool calls finish reason")
-		} else {
+		default:
 			resp.Choices[0].FinishReason = chat.FinishReasonStop
 		}
 	} else if res.resp != nil {
@@ -232,6 +331,7 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		var reasoningTextSb strings.Builder
 		var textContentSb strings.Builder
 		var thoughtSignature []byte
+		var media []chat.MediaDelta
 		for _, candidate := range res.resp.Candidates {
 			if candidate.Content != nil {
 				for _, part := range candidate.Content.Parts {
@@ -245,6 +345,21 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 						} else {
 							textContentSb.WriteString(part.Text)
 						}
+					}
+
+					// Inline generated media (e.g. an image from an
+					// image-output model). Gemini can return more than one
+					// inline blob per chunk — multiple parts in one candidate,
+					// or multiple candidates — so every blob is appended
+					// rather than overwriting a single field, which used to
+					// silently drop all but the last one.
+					if part.InlineData != nil && len(part.InlineData.Data) > 0 {
+						media = append(media, chat.MediaDelta{
+							Data:     part.InlineData.Data,
+							MimeType: part.InlineData.MIMEType,
+							Name:     part.InlineData.DisplayName,
+							Size:     int64(len(part.InlineData.Data)),
+						})
 					}
 				}
 			}
@@ -260,17 +375,21 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if len(thoughtSignature) > 0 {
 			resp.Choices[0].Delta.ThoughtSignature = thoughtSignature
 		}
+		if len(media) > 0 {
+			resp.Choices[0].Delta.Media = media
+		}
 
 		// Handle function calls
 		if funcs := res.resp.FunctionCalls(); len(funcs) > 0 {
 			toolCalls := make([]tools.ToolCall, 0, len(funcs))
 			for _, fc := range funcs {
 				argsJSON, _ := json.Marshal(fc.Args)
-				id := "call_" + uuid.New().String()
+				id := "call_" + uuid.NewV4().String()
 				slog.Debug("Gemini: Function call", "name", fc.Name, "args", string(argsJSON), "id", id)
 				toolCalls = append(toolCalls, tools.ToolCall{
-					ID:   id,
-					Type: "function",
+					ID:         id,
+					ProviderID: fc.ID,
+					Type:       "function",
 					Function: tools.FunctionCall{
 						Name:      fc.Name,
 						Arguments: string(argsJSON),

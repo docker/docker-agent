@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/todo/types"
 )
 
 // annotateTodoSpan stamps the operation kind, batch size, and the
@@ -47,10 +48,10 @@ func countCompleted(all []Todo) int {
 }
 
 const (
-	ToolNameCreateTodo  = "create_todo"
-	ToolNameCreateTodos = "create_todos"
-	ToolNameUpdateTodos = "update_todos"
-	ToolNameListTodos   = "list_todos"
+	ToolNameCreateTodo  = types.ToolNameCreateTodo
+	ToolNameCreateTodos = types.ToolNameCreateTodos
+	ToolNameUpdateTodos = types.ToolNameUpdateTodos
+	ToolNameListTodos   = types.ToolNameListTodos
 )
 
 // CreateToolSet is used by the tools registry.
@@ -66,11 +67,7 @@ type ToolSet struct {
 	handler *todoHandler
 }
 
-type Todo struct {
-	ID          string `json:"id" jsonschema:"ID of the todo item"`
-	Description string `json:"description" jsonschema:"Description of the todo item"`
-	Status      string `json:"status" jsonschema:"Status of the todo item (pending, in-progress, completed)"`
-}
+type Todo = types.Todo
 
 type CreateTodoArgs struct {
 	Description string `json:"description" jsonschema:"Description of the todo item"`

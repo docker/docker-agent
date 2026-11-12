@@ -14,11 +14,10 @@ import (
 
 // parseHexRGB parses a hex color string (#RGB or #RRGGBB) into normalized [0,1] sRGB components.
 func parseHexRGB(hex string) (r, g, b float64, ok bool) {
-	if !strings.HasPrefix(hex, "#") {
+	h, found := strings.CutPrefix(hex, "#")
+	if !found {
 		return 0, 0, 0, false
 	}
-
-	h := strings.TrimPrefix(hex, "#")
 	if len(h) == 3 {
 		h = string([]byte{h[0], h[0], h[1], h[1], h[2], h[2]})
 	}

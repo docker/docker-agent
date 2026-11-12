@@ -4,9 +4,9 @@ package a2a
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"log/slog"
 	"net/http"
 	neturl "net/url"
@@ -14,9 +14,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -26,6 +28,14 @@ import (
 	"github.com/docker/docker-agent/pkg/upstream"
 )
 
+type streamingSender interface {
+	SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error]
+}
+
+type headerExpander interface {
+	ExpandMap(ctx context.Context, values map[string]string) map[string]string
+}
+
 // Toolset implements tools.ToolSet for A2A remote agents.
 type Toolset struct {
 	name            string
@@ -33,8 +43,8 @@ type Toolset struct {
 	headers         map[string]string
 	timeout         time.Duration
 	allowPrivateIPs bool
-	expander        *js.Expander
-	client          *a2aclient.Client
+	expander        headerExpander
+	client          streamingSender
 	card            *a2a.AgentCard
 	mu              sync.RWMutex
 }
@@ -56,7 +66,10 @@ func WithAllowPrivateIPs(allow bool) Option {
 	return func(t *Toolset) { t.allowPrivateIPs = allow }
 }
 
-func WithExpander(expander *js.Expander) Option {
+func WithExpander(expander headerExpander) Option {
+	if expander == nil {
+		expander = (*js.Expander)(nil)
+	}
 	return func(t *Toolset) { t.expander = expander }
 }
 
@@ -86,10 +99,11 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 // NewToolset creates a new A2A toolset for the given URL.
 func NewToolset(name, url string, headers map[string]string, opts ...Option) *Toolset {
 	t := &Toolset{
-		name:    name,
-		url:     url,
-		headers: headers,
-		timeout: httpclient.DefaultToolHTTPTimeout,
+		name:     name,
+		url:      url,
+		headers:  headers,
+		timeout:  httpclient.DefaultToolHTTPTimeout,
+		expander: (*js.Expander)(nil),
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -185,36 +199,49 @@ func (t *Toolset) Start(ctx context.Context) error {
 	// addresses (cloud metadata at 169.254.169.254 in particular). The
 	// `allow_private_ips: true` opt-in disables this for legitimate
 	// internal-service use.
-	resolver := agentcard.NewResolver(httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs))
-	card, err := resolver.Resolve(ctx, t.url)
-	if err != nil {
-		return fmt.Errorf("failed to fetch A2A agent card: %w", err)
-	}
-
-	httpClient := httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs)
-	base := httpClient.Transport
+	client := httpclient.ClientForAllowPrivateIPs(t.timeout, t.allowPrivateIPs)
+	base := client.Transport
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	// Recorder sits only in front of the card-resolution GET(s); it never
+	// reaches the JSON-RPC transport chain built from base below.
+	rec := &retryAfterRecorder{base: base}
+	client.Transport = rec
 
-	endpointOrigin := t.url
-	if card.URL != "" {
-		endpointOrigin = card.URL
+	resolver := &agentcard.Resolver{Client: client, CardParser: parseAgentCard}
+	// url is a base URL; without WithPath the resolver would fetch a non-root path as the card itself.
+	card, err := resolver.Resolve(ctx, t.url, agentcard.WithPath(a2asrv.WellKnownAgentCardPath))
+	if err != nil {
+		return enrichCardError(err, rec)
 	}
-	headers := t.expander.ExpandMap(ctx, t.headers)
-	httpClient.Transport = upstream.NewHeaderTransportForOrigin(base, endpointOrigin, headers)
 
-	client, err := a2aclient.NewFromCard(
+	headers := t.expander.ExpandMap(ctx, t.headers)
+	// Scope headers to the interface the factory selects, which need not be the first one listed.
+	clientFor := func(iface *a2a.AgentInterface) *http.Client {
+		c := *client
+		c.Transport = upstream.NewHeaderTransportForOrigin(base, iface.URL, headers)
+		return &c
+	}
+
+	a2aClient, err := a2aclient.NewFromCard(
 		ctx, card,
 		a2aclient.WithDefaultsDisabled(),
-		a2aclient.WithJSONRPCTransport(httpClient),
+		a2aclient.WithTransport(a2a.TransportProtocolJSONRPC, a2aclient.TransportFactoryFn(
+			func(_ context.Context, _ *a2a.AgentCard, iface *a2a.AgentInterface) (a2aclient.Transport, error) {
+				return a2aclient.NewJSONRPCTransport(iface.URL, clientFor(iface)), nil
+			})),
+		a2aclient.WithCompatTransport(a2av0.Version, a2a.TransportProtocolJSONRPC, a2aclient.TransportFactoryFn(
+			func(_ context.Context, _ *a2a.AgentCard, iface *a2a.AgentInterface) (a2aclient.Transport, error) {
+				return a2av0.NewJSONRPCTransport(a2av0.JSONRPCTransportConfig{URL: iface.URL, Client: clientFor(iface)}), nil
+			})),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create A2A client: %w", err)
 	}
 
 	t.mu.Lock()
-	t.client = client
+	t.client = a2aClient
 	t.card = card
 	t.mu.Unlock()
 
@@ -236,7 +263,7 @@ func (t *Toolset) createHandler() tools.ToolHandler {
 		var args struct {
 			Message string `json:"message"`
 		}
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+		if err := tools.UnmarshalToolArguments(ctx, toolCall, &args); err != nil {
 			return nil, fmt.Errorf("failed to parse arguments: %w", err)
 		}
 
@@ -248,12 +275,12 @@ func (t *Toolset) createHandler() tools.ToolHandler {
 			return nil, errors.New("A2A client not initialized")
 		}
 
-		params := &a2a.MessageSendParams{
-			Message: a2a.NewMessage(a2a.MessageRoleUser, &a2a.TextPart{Text: args.Message}),
+		req := &a2a.SendMessageRequest{
+			Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(args.Message)),
 		}
 
 		var response strings.Builder
-		for event, err := range client.SendStreamingMessage(ctx, params) {
+		for event, err := range client.SendStreamingMessage(ctx, req) {
 			if err != nil {
 				return nil, fmt.Errorf("A2A call failed: %w", err)
 			}
@@ -290,11 +317,8 @@ func extractText(event a2a.Event) string {
 
 	var sb strings.Builder
 	for _, part := range parts {
-		switch p := part.(type) {
-		case *a2a.TextPart:
-			sb.WriteString(p.Text)
-		case a2a.TextPart:
-			sb.WriteString(p.Text)
+		if part != nil {
+			sb.WriteString(part.Text())
 		}
 	}
 	return sb.String()

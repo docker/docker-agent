@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -13,11 +14,14 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
+	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 )
 
 // providerStep is one scripted CreateChatCompletionStream call of a
@@ -65,8 +69,12 @@ func (p *stepProvider) CreateChatCompletionStream(ctx context.Context, _ []chat.
 	return step.stream, nil
 }
 
-func (p *stepProvider) BaseConfig() base.Config { return base.Config{} }
-func (p *stepProvider) MaxTokens() int          { return 0 }
+func (p *stepProvider) BaseConfig() base.Config {
+	cfg := base.Config{}
+	cfg.RebuildProvider = func(context.Context, *latest.ModelConfig, ...options.Opt) (provider.Provider, error) { return p, nil }
+	return cfg
+}
+func (p *stepProvider) MaxTokens() int { return 0 }
 
 // newLiveSessionsRuntime builds a runtime with a "root" agent and a "worker"
 // agent whose model is the supplied provider.
@@ -125,60 +133,62 @@ func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
 func TestLiveSessions_ListsRootAndActiveChildren(t *testing.T) {
 	t.Parallel()
 
-	startedA := make(chan struct{})
-	startedB := make(chan struct{})
-	release := make(chan struct{})
-	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
-		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build(), started: startedA, release: release},
-		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build(), started: startedB, release: release},
-	}}
-	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 1000})
+	synctest.Test(t, func(t *testing.T) {
+		startedA := make(chan struct{})
+		startedB := make(chan struct{})
+		release := make(chan struct{})
+		prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
+			{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build(), started: startedA, release: release},
+			{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build(), started: startedB, release: release},
+		}}
+		rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 1000})
 
-	rootSess := session.New(session.WithID("root-session"), session.WithUserMessage("hi"))
-	rootSess.SetUsage(100, 50)
+		rootSess := session.New(session.WithID("root-session"), session.WithUserMessage("hi"))
+		rootSess.SetUsage(100, 50)
 
-	// Two concurrent runs of the SAME agent: they must both be listed,
-	// never collapsed by agent name.
-	childA := newWorkerSession("child-a")
-	childA.SetUsage(600, 100)
-	childB := newWorkerSession("child-b")
-	childB.SetUsage(10, 5)
+		// Two concurrent runs of the SAME agent: they must both be listed,
+		// never collapsed by agent name.
+		childA := newWorkerSession("child-a")
+		childA.SetUsage(600, 100)
+		childB := newWorkerSession("child-b")
+		childB.SetUsage(10, 5)
 
-	streamA := rt.RunStream(t.Context(), childA)
-	streamB := rt.RunStream(t.Context(), childB)
-	waitClosed(t, startedA, "first child turn")
-	waitClosed(t, startedB, "second child turn")
+		streamA := rt.RunStream(t.Context(), childA)
+		streamB := rt.RunStream(t.Context(), childB)
+		waitClosed(t, startedA, "first child turn")
+		waitClosed(t, startedB, "second child turn")
 
-	rows := rt.LiveSessions(t.Context(), rootSess)
-	require.Len(t, rows, 3, "current root plus both live children")
+		rows := rt.LiveSessions(t.Context(), rootSess)
+		require.Len(t, rows, 3, "current root plus both live children")
 
-	assert.True(t, rows[0].Current)
-	assert.Equal(t, "root-session", rows[0].SessionID)
-	assert.Equal(t, "root", rows[0].AgentName)
-	assert.Equal(t, int64(150), rows[0].UsedTokens())
-	assert.Equal(t, int64(1000), rows[0].ContextLimit)
+		assert.True(t, rows[0].Current)
+		assert.Equal(t, "root-session", rows[0].SessionID)
+		assert.Equal(t, "root", rows[0].AgentName)
+		assert.Equal(t, int64(150), rows[0].UsedTokens())
+		assert.Equal(t, int64(1000), rows[0].ContextLimit)
 
-	// Child rows are stable-sorted by agent name then session ID.
-	assert.Equal(t, "child-a", rows[1].SessionID)
-	assert.Equal(t, "worker", rows[1].AgentName)
-	assert.Equal(t, int64(700), rows[1].UsedTokens())
-	assert.Equal(t, int64(1000), rows[1].ContextLimit)
-	assert.False(t, rows[1].Current)
+		// Child rows are stable-sorted by agent name then session ID.
+		assert.Equal(t, "child-a", rows[1].SessionID)
+		assert.Equal(t, "worker", rows[1].AgentName)
+		assert.Equal(t, int64(700), rows[1].UsedTokens())
+		assert.Equal(t, int64(1000), rows[1].ContextLimit)
+		assert.False(t, rows[1].Current)
 
-	assert.Equal(t, "child-b", rows[2].SessionID)
-	assert.Equal(t, "worker", rows[2].AgentName)
-	assert.Equal(t, int64(15), rows[2].UsedTokens())
+		assert.Equal(t, "child-b", rows[2].SessionID)
+		assert.Equal(t, "worker", rows[2].AgentName)
+		assert.Equal(t, int64(15), rows[2].UsedTokens())
 
-	// Ordering is deterministic across calls.
-	assert.Equal(t, rows, rt.LiveSessions(t.Context(), rootSess))
+		// Ordering is deterministic across calls.
+		assert.Equal(t, rows, rt.LiveSessions(t.Context(), rootSess))
 
-	close(release)
-	drainStream(t, streamA)
-	drainStream(t, streamB)
+		close(release)
+		drainStream(t, streamA)
+		drainStream(t, streamB)
 
-	rows = rt.LiveSessions(t.Context(), rootSess)
-	require.Len(t, rows, 1, "finished children drop out of the view")
-	assert.True(t, rows[0].Current)
+		rows = rt.LiveSessions(t.Context(), rootSess)
+		require.Len(t, rows, 1, "finished children drop out of the view")
+		assert.True(t, rows[0].Current)
+	})
 }
 
 func TestLiveSessions_UnknownContextLimit(t *testing.T) {
@@ -394,61 +404,63 @@ func TestCompactLiveSession_UnknownSessionErrors(t *testing.T) {
 func TestCompactLiveSession_ExecutesAtIterationBoundary(t *testing.T) {
 	t.Parallel()
 
-	started := make(chan struct{})
-	release := make(chan struct{})
-	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
-		// Turn 1: a tool call keeps the loop running (Stopped=false), so the
-		// queued request executes at the next iteration boundary.
-		{stream: newStreamBuilder().
-			AddToolCallName("call_1", "unknown_tool").
-			AddToolCallArguments("call_1", "{}").
-			AddToolCallStopWithUsage(1, 1).
-			Build(), started: started, release: release},
-		// The compaction summary call.
-		{stream: newStreamBuilder().AddContent("a compact summary").AddStopWithUsage(10, 5).Build()},
-		// Turn 2: natural stop ends the stream.
-		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
-	}}
-	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
+			// Turn 1: a tool call keeps the loop running (Stopped=false), so the
+			// queued request executes at the next iteration boundary.
+			{stream: newStreamBuilder().
+				AddToolCallName("call_1", "unknown_tool").
+				AddToolCallArguments("call_1", "{}").
+				AddToolCallStopWithUsage(1, 1).
+				Build(), started: started, release: release},
+			// The compaction summary call.
+			{stream: newStreamBuilder().AddContent("a compact summary").AddStopWithUsage(10, 5).Build()},
+			// Turn 2: natural stop ends the stream.
+			{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
+		}}
+		rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
-	child := newWorkerSession("child-1")
-	stream := rt.RunStream(t.Context(), child)
-	waitClosed(t, started, "first child turn")
+		child := newWorkerSession("child-1")
+		stream := rt.RunStream(t.Context(), child)
+		waitClosed(t, started, "first child turn")
 
-	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
+		requestEvents := make(chan Event, 64)
+		require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
 
-	// A second request while one is pending is rejected clearly.
-	err := rt.CompactLiveSession(t.Context(), "child-1", "", nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already pending")
+		// A second request while one is pending is rejected clearly.
+		err := rt.CompactLiveSession(t.Context(), "child-1", "", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already pending")
 
-	close(release)
-	drainStream(t, stream)
-	close(requestEvents)
+		close(release)
+		drainStream(t, stream)
+		close(requestEvents)
 
-	var kinds []string
-	for ev := range requestEvents {
-		switch e := ev.(type) {
-		case *SessionCompactionEvent:
-			assert.Equal(t, "child-1", e.SessionID)
-			assert.Equal(t, "worker", e.AgentName)
-			if e.Status == "completed" {
-				kinds = append(kinds, "completed:"+e.Outcome)
-			} else {
-				kinds = append(kinds, e.Status)
+		var kinds []string
+		for ev := range requestEvents {
+			switch e := ev.(type) {
+			case *SessionCompactionEvent:
+				assert.Equal(t, "child-1", e.SessionID)
+				assert.Equal(t, "worker", e.AgentName)
+				if e.Status == "completed" {
+					kinds = append(kinds, "completed:"+e.Outcome)
+				} else {
+					kinds = append(kinds, e.Status)
+				}
+			case *SessionSummaryEvent:
+				assert.Equal(t, "child-1", e.SessionID)
+				kinds = append(kinds, "summary")
+			case *TokenUsageEvent:
+				assert.Equal(t, "child-1", e.SessionID)
+				assert.Equal(t, "worker", e.AgentName)
+				kinds = append(kinds, "usage")
 			}
-		case *SessionSummaryEvent:
-			assert.Equal(t, "child-1", e.SessionID)
-			kinds = append(kinds, "summary")
-		case *TokenUsageEvent:
-			assert.Equal(t, "child-1", e.SessionID)
-			assert.Equal(t, "worker", e.AgentName)
-			kinds = append(kinds, "usage")
 		}
-	}
-	assert.Equal(t, []string{"started", "summary", "completed:applied", "usage"}, kinds)
-	assert.Equal(t, "a compact summary", child.LastSummary())
+		assert.Equal(t, []string{"started", "summary", "completed:applied", "usage"}, kinds)
+		assert.Equal(t, "a compact summary", child.LastSummary())
+	})
 }
 
 // TestCompactLiveSession_AcceptedRequestDrainedAtTeardown pins the shutdown
@@ -458,50 +470,52 @@ func TestCompactLiveSession_ExecutesAtIterationBoundary(t *testing.T) {
 func TestCompactLiveSession_AcceptedRequestDrainedAtTeardown(t *testing.T) {
 	t.Parallel()
 
-	started := make(chan struct{})
-	release := make(chan struct{})
-	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
-		// The one and only turn: a natural stop, gated so the request can
-		// be enqueued mid-turn.
-		{stream: newStreamBuilder().AddContent("done").AddStopWithUsage(1, 1).Build(), started: started, release: release},
-		// The compaction summary call, issued from the teardown drain.
-		{stream: newStreamBuilder().AddContent("teardown summary").AddStopWithUsage(10, 5).Build()},
-	}}
-	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
+			// The one and only turn: a natural stop, gated so the request can
+			// be enqueued mid-turn.
+			{stream: newStreamBuilder().AddContent("done").AddStopWithUsage(1, 1).Build(), started: started, release: release},
+			// The compaction summary call, issued from the teardown drain.
+			{stream: newStreamBuilder().AddContent("teardown summary").AddStopWithUsage(10, 5).Build()},
+		}}
+		rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
-	child := newWorkerSession("child-1")
-	stream := rt.RunStream(t.Context(), child)
-	waitClosed(t, started, "final child turn")
+		child := newWorkerSession("child-1")
+		stream := rt.RunStream(t.Context(), child)
+		waitClosed(t, started, "final child turn")
 
-	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
+		requestEvents := make(chan Event, 64)
+		require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
 
-	close(release)
-	drainStream(t, stream)
+		close(release)
+		drainStream(t, stream)
 
-	// The teardown drain executes before the stream channel closes, so the
-	// terminal compaction event is already buffered on the request sink.
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case ev := <-requestEvents:
-			if e, ok := ev.(*SessionCompactionEvent); ok && e.Status == "completed" {
-				assert.Equal(t, "child-1", e.SessionID)
-				assert.Equal(t, "worker", e.AgentName)
-				assert.Equal(t, CompactionOutcomeApplied, e.Outcome)
-				assert.Equal(t, "teardown summary", child.LastSummary())
+		// The teardown drain executes before the stream channel closes, so the
+		// terminal compaction event is already buffered on the request sink.
+		deadline := time.After(10 * time.Second)
+		for {
+			select {
+			case ev := <-requestEvents:
+				if e, ok := ev.(*SessionCompactionEvent); ok && e.Status == "completed" {
+					assert.Equal(t, "child-1", e.SessionID)
+					assert.Equal(t, "worker", e.AgentName)
+					assert.Equal(t, CompactionOutcomeApplied, e.Outcome)
+					assert.Equal(t, "teardown summary", child.LastSummary())
 
-				// The session is gone from the registry: further requests
-				// are rejected instead of stranded.
-				err := rt.CompactLiveSession(t.Context(), "child-1", "", nil)
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "not live")
-				return
+					// The session is gone from the registry: further requests
+					// are rejected instead of stranded.
+					err := rt.CompactLiveSession(t.Context(), "child-1", "", nil)
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), "not live")
+					return
+				}
+			case <-deadline:
+				t.Fatal("timed out waiting for the terminal compaction event")
 			}
-		case <-deadline:
-			t.Fatal("timed out waiting for the terminal compaction event")
 		}
-	}
+	})
 }
 
 // TestCompactLiveSession_DuplicateSessionIDsCompactOnlyTargetEntry is the
@@ -514,78 +528,80 @@ func TestCompactLiveSession_AcceptedRequestDrainedAtTeardown(t *testing.T) {
 func TestCompactLiveSession_DuplicateSessionIDsCompactOnlyTargetEntry(t *testing.T) {
 	t.Parallel()
 
-	startedA := make(chan struct{})
-	releaseA := make(chan struct{})
-	startedB := make(chan struct{})
-	releaseB := make(chan struct{})
-	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
-		// Older stream turn 1: a tool call keeps the stream live (the loop
-		// continues to execute the call) while the newer stream registers
-		// under the same session ID. A tool-call turn is used rather than a
-		// bare content turn so the older stream deterministically reaches a
-		// second model call regardless of the bare-EOF stop rule.
-		{stream: newStreamBuilder().
-			AddToolCallName("call_older", "unknown_tool").
-			AddToolCallArguments("call_older", "{}").
-			AddToolCallStopWithUsage(1, 1).
-			Build(), started: startedA, release: releaseA},
-		// Newer stream turn 1, gated so it stays live throughout. A tool-call
-		// turn is used (matching the older stream) so the newer stream reaches
-		// an iteration boundary where the pending compaction can run.
-		{stream: newStreamBuilder().
-			AddToolCallName("call_newer", "unknown_tool").
-			AddToolCallArguments("call_newer", "{}").
-			AddToolCallStopWithUsage(1, 1).
-			Build(), started: startedB, release: releaseB},
-		// Older stream turn 2: natural stop. With the request left alone this
-		// is the older stream's next model call (after the tool result feeds
-		// back in); stealing the request would consume this step as the
-		// compaction summary instead.
-		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
-		// The compaction summary call, drained by the newer stream's own
-		// iteration boundary.
-		{stream: newStreamBuilder().AddContent("latest summary").AddStopWithUsage(10, 5).Build()},
-		// Newer stream turn 2: natural stop.
-		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
-	}}
-	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
+	synctest.Test(t, func(t *testing.T) {
+		startedA := make(chan struct{})
+		releaseA := make(chan struct{})
+		startedB := make(chan struct{})
+		releaseB := make(chan struct{})
+		prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
+			// Older stream turn 1: a tool call keeps the stream live (the loop
+			// continues to execute the call) while the newer stream registers
+			// under the same session ID. A tool-call turn is used rather than a
+			// bare content turn so the older stream deterministically reaches a
+			// second model call regardless of the bare-EOF stop rule.
+			{stream: newStreamBuilder().
+				AddToolCallName("call_older", "unknown_tool").
+				AddToolCallArguments("call_older", "{}").
+				AddToolCallStopWithUsage(1, 1).
+				Build(), started: startedA, release: releaseA},
+			// Newer stream turn 1, gated so it stays live throughout. A tool-call
+			// turn is used (matching the older stream) so the newer stream reaches
+			// an iteration boundary where the pending compaction can run.
+			{stream: newStreamBuilder().
+				AddToolCallName("call_newer", "unknown_tool").
+				AddToolCallArguments("call_newer", "{}").
+				AddToolCallStopWithUsage(1, 1).
+				Build(), started: startedB, release: releaseB},
+			// Older stream turn 2: natural stop. With the request left alone this
+			// is the older stream's next model call (after the tool result feeds
+			// back in); stealing the request would consume this step as the
+			// compaction summary instead.
+			{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
+			// The compaction summary call, drained by the newer stream's own
+			// iteration boundary.
+			{stream: newStreamBuilder().AddContent("latest summary").AddStopWithUsage(10, 5).Build()},
+			// Newer stream turn 2: natural stop.
+			{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
+		}}
+		rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
-	older := newWorkerSession("dup-id")
-	newer := newWorkerSession("dup-id")
+		older := newWorkerSession("dup-id")
+		newer := newWorkerSession("dup-id")
 
-	streamA := rt.RunStream(t.Context(), older)
-	waitClosed(t, startedA, "older stream turn")
-	streamB := rt.RunStream(t.Context(), newer)
-	waitClosed(t, startedB, "newer stream turn")
+		streamA := rt.RunStream(t.Context(), older)
+		waitClosed(t, startedA, "older stream turn")
+		streamB := rt.RunStream(t.Context(), newer)
+		waitClosed(t, startedB, "newer stream turn")
 
-	// The registry now maps dup-id to the newer entry, so the request is
-	// queued there.
-	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "dup-id", "", NewChannelSink(requestEvents)))
+		// The registry now maps dup-id to the newer entry, so the request is
+		// queued there.
+		requestEvents := make(chan Event, 64)
+		require.NoError(t, rt.CompactLiveSession(t.Context(), "dup-id", "", NewChannelSink(requestEvents)))
 
-	// Run the older stream to completion (iteration boundary plus teardown
-	// drain) while the request is still pending for the newer entry.
-	close(releaseA)
-	drainStream(t, streamA)
+		// Run the older stream to completion (iteration boundary plus teardown
+		// drain) while the request is still pending for the newer entry.
+		close(releaseA)
+		drainStream(t, streamA)
 
-	assert.Empty(t, older.LastSummary(), "the older stream must not execute the newer entry's request")
-	err := rt.CompactLiveSession(t.Context(), "dup-id", "", nil)
-	require.Error(t, err, "the queued request must survive the older stream's boundary and teardown")
-	assert.Contains(t, err.Error(), "already pending")
+		assert.Empty(t, older.LastSummary(), "the older stream must not execute the newer entry's request")
+		err := rt.CompactLiveSession(t.Context(), "dup-id", "", nil)
+		require.Error(t, err, "the queued request must survive the older stream's boundary and teardown")
+		assert.Contains(t, err.Error(), "already pending")
 
-	close(releaseB)
-	drainStream(t, streamB)
-	close(requestEvents)
+		close(releaseB)
+		drainStream(t, streamB)
+		close(requestEvents)
 
-	var outcomes []string
-	for ev := range requestEvents {
-		if e, ok := ev.(*SessionCompactionEvent); ok && e.Status == "completed" {
-			outcomes = append(outcomes, e.Outcome)
+		var outcomes []string
+		for ev := range requestEvents {
+			if e, ok := ev.(*SessionCompactionEvent); ok && e.Status == "completed" {
+				outcomes = append(outcomes, e.Outcome)
+			}
 		}
-	}
-	assert.Equal(t, []string{CompactionOutcomeApplied}, outcomes)
-	assert.Equal(t, "latest summary", newer.LastSummary(), "the request must compact the newer in-memory session")
-	assert.Empty(t, older.LastSummary())
+		assert.Equal(t, []string{CompactionOutcomeApplied}, outcomes)
+		assert.Equal(t, "latest summary", newer.LastSummary(), "the request must compact the newer in-memory session")
+		assert.Empty(t, older.LastSummary())
+	})
 }
 
 // TestCompactLiveSession_CancelledStreamEmitsSingleSkippedEvent pins the
@@ -596,36 +612,38 @@ func TestCompactLiveSession_DuplicateSessionIDsCompactOnlyTargetEntry(t *testing
 func TestCompactLiveSession_CancelledStreamEmitsSingleSkippedEvent(t *testing.T) {
 	t.Parallel()
 
-	started := make(chan struct{})
-	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
-		// The one and only turn, blocked until the context is cancelled.
-		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build(), started: started, release: make(chan struct{})},
-	}}
-	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
+			// The one and only turn, blocked until the context is cancelled.
+			{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build(), started: started, release: make(chan struct{})},
+		}}
+		rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
-	ctx, cancel := context.WithCancel(t.Context())
-	child := newWorkerSession("child-1")
-	stream := rt.RunStream(ctx, child)
-	waitClosed(t, started, "child turn")
+		ctx, cancel := context.WithCancel(t.Context())
+		child := newWorkerSession("child-1")
+		stream := rt.RunStream(ctx, child)
+		waitClosed(t, started, "child turn")
 
-	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
+		requestEvents := make(chan Event, 64)
+		require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
 
-	cancel()
-	drainStream(t, stream)
-	close(requestEvents)
+		cancel()
+		drainStream(t, stream)
+		close(requestEvents)
 
-	var kinds []string
-	for ev := range requestEvents {
-		if e, ok := ev.(*SessionCompactionEvent); ok {
-			assert.Equal(t, "child-1", e.SessionID)
-			assert.Equal(t, "worker", e.AgentName)
-			kinds = append(kinds, e.Status+":"+e.Outcome)
+		var kinds []string
+		for ev := range requestEvents {
+			if e, ok := ev.(*SessionCompactionEvent); ok {
+				assert.Equal(t, "child-1", e.SessionID)
+				assert.Equal(t, "worker", e.AgentName)
+				kinds = append(kinds, e.Status+":"+e.Outcome)
+			}
 		}
-	}
-	assert.Equal(t, []string{"completed:" + CompactionOutcomeSkipped}, kinds,
-		"a cancelled target must consume the request and emit exactly one terminal skipped event")
-	assert.Empty(t, child.LastSummary(), "no compaction must run against a cancelled stream")
+		assert.Equal(t, []string{"completed:" + CompactionOutcomeSkipped}, kinds,
+			"a cancelled target must consume the request and emit exactly one terminal skipped event")
+		assert.Empty(t, child.LastSummary(), "no compaction must run against a cancelled stream")
+	})
 }
 
 // TestCompactLiveSession_HookVetoSynthesizesSkipped verifies that when a
@@ -635,51 +653,53 @@ func TestCompactLiveSession_CancelledStreamEmitsSingleSkippedEvent(t *testing.T)
 func TestCompactLiveSession_HookVetoSynthesizesSkipped(t *testing.T) {
 	t.Parallel()
 
-	started := make(chan struct{})
-	release := make(chan struct{})
-	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
-		// Turn 1: tool call keeps the loop running (Stopped=false) so the
-		// hook veto fires at the iteration boundary, not at teardown.
-		{stream: newStreamBuilder().
-			AddToolCallName("call_1", "unknown_tool").
-			AddToolCallArguments("call_1", "{}").
-			AddToolCallStopWithUsage(1, 1).
-			Build(), started: started, release: release},
-		// Turn 2: natural stop (model call after the tool result, compaction vetoed).
-		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
-	}}
-	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000},
-		agent.WithHooks(&latest.HooksConfig{
-			PreCompact: []latest.HookDefinition{{Type: "builtin", Command: "test-veto-compact"}},
-		}),
-	)
-	require.NoError(t, rt.hooksRegistry.RegisterBuiltin(
-		"test-veto-compact",
-		func(context.Context, *hooks.Input, []string) (*hooks.Output, error) {
-			return &hooks.Output{Decision: hooks.DecisionBlockValue, Reason: "vetoed"}, nil
-		},
-	))
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
+			// Turn 1: tool call keeps the loop running (Stopped=false) so the
+			// hook veto fires at the iteration boundary, not at teardown.
+			{stream: newStreamBuilder().
+				AddToolCallName("call_1", "unknown_tool").
+				AddToolCallArguments("call_1", "{}").
+				AddToolCallStopWithUsage(1, 1).
+				Build(), started: started, release: release},
+			// Turn 2: natural stop (model call after the tool result, compaction vetoed).
+			{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
+		}}
+		rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000},
+			agent.WithHooks(&latest.HooksConfig{
+				PreCompact: []latest.HookDefinition{{Type: "builtin", Command: "test-veto-compact"}},
+			}),
+		)
+		require.NoError(t, rt.hooksRegistry.RegisterBuiltin(
+			"test-veto-compact",
+			func(context.Context, *hooks.Input, []string) (*hooks.Output, error) {
+				return &hooks.Output{Decision: hooks.DecisionBlockValue, Reason: "vetoed"}, nil
+			},
+		))
 
-	child := newWorkerSession("child-1")
-	stream := rt.RunStream(t.Context(), child)
-	waitClosed(t, started, "first child turn")
+		child := newWorkerSession("child-1")
+		stream := rt.RunStream(t.Context(), child)
+		waitClosed(t, started, "first child turn")
 
-	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
+		requestEvents := make(chan Event, 64)
+		require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
 
-	close(release)
-	drainStream(t, stream)
-	close(requestEvents)
+		close(release)
+		drainStream(t, stream)
+		close(requestEvents)
 
-	var statuses []string
-	for ev := range requestEvents {
-		if e, ok := ev.(*SessionCompactionEvent); ok {
-			statuses = append(statuses, e.Status+":"+e.Outcome)
+		var statuses []string
+		for ev := range requestEvents {
+			if e, ok := ev.(*SessionCompactionEvent); ok {
+				statuses = append(statuses, e.Status+":"+e.Outcome)
+			}
 		}
-	}
-	assert.Equal(t, []string{"completed:" + CompactionOutcomeSkipped}, statuses,
-		"a vetoed request must synthesize the terminal skipped event, with no started pair")
-	assert.Empty(t, child.LastSummary(), "a vetoed compaction must not modify the session")
+		assert.Equal(t, []string{"completed:" + CompactionOutcomeSkipped}, statuses,
+			"a vetoed request must synthesize the terminal skipped event, with no started pair")
+		assert.Empty(t, child.LastSummary(), "a vetoed compaction must not modify the session")
+	})
 }
 
 // TestLiveSessions_ConcurrentAccess exercises the registry under -race:
@@ -718,4 +738,36 @@ func TestLiveSessions_ConcurrentAccess(t *testing.T) {
 
 	close(done)
 	wg.Wait()
+}
+
+type quiescenceRunner struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (*quiescenceRunner) CurrentAgentSubAgentNames() []string { return []string{"worker"} }
+func (r *quiescenceRunner) RunAgent(context.Context, agenttool.RunParams) *agenttool.RunResult {
+	close(r.entered)
+	<-r.release
+	return &agenttool.RunResult{}
+}
+
+func TestHasActiveWorkIncludesBackgroundOutsideLiveStreams(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		runner := &quiescenceRunner{entered: make(chan struct{}), release: make(chan struct{})}
+		handler := agenttool.NewHandler(runner)
+		rt := &LocalRuntime{bgAgents: handler}
+		result, err := handler.HandleRun(t.Context(), session.New(), tools.ToolCall{Function: tools.FunctionCall{Arguments: `{"agent":"worker","task":"work"}`}})
+		require.NoError(t, err)
+		require.False(t, result.IsError, result.Output)
+		// No stream exists at all in this runner; only admission tracks the task lifetime.
+		assert.Empty(t, rt.liveSessions)
+		assert.True(t, rt.HasActiveWork())
+		<-runner.entered
+		assert.True(t, rt.HasActiveWork())
+		close(runner.release)
+		handler.StopAll()
+		assert.False(t, rt.HasActiveWork())
+	})
 }

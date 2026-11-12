@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/team"
 )
 
@@ -22,7 +23,7 @@ func TestWithAgentModel(t *testing.T) {
 		tm := team.New(team.WithAgents(agent.New("root", "test")))
 		r := &LocalRuntime{
 			team:             tm,
-			modelSwitcherCfg: &ModelSwitcherConfig{},
+			modelSwitcherCfg: &modelcatalog.Config{},
 		}
 
 		restore, err := r.WithAgentModel(t.Context(), "missing", "openai/gpt-4o")
@@ -51,7 +52,7 @@ func TestWithAgentModel(t *testing.T) {
 		tm := team.New(team.WithAgents(root))
 		r := &LocalRuntime{
 			team:             tm,
-			modelSwitcherCfg: &ModelSwitcherConfig{},
+			modelSwitcherCfg: &modelcatalog.Config{},
 		}
 
 		// "invalid" has no slash → not an inline spec, and no named config
@@ -75,7 +76,7 @@ func TestWithAgentModel(t *testing.T) {
 		tm := team.New(team.WithAgents(root))
 		r := &LocalRuntime{
 			team:             tm,
-			modelSwitcherCfg: &ModelSwitcherConfig{},
+			modelSwitcherCfg: &modelcatalog.Config{},
 		}
 
 		// Empty modelRef clears the override (handled inside SetAgentModel
@@ -103,7 +104,7 @@ func TestWithAgentModel(t *testing.T) {
 		tm := team.New(team.WithAgents(root))
 		r := &LocalRuntime{
 			team:             tm,
-			modelSwitcherCfg: &ModelSwitcherConfig{},
+			modelSwitcherCfg: &modelcatalog.Config{},
 		}
 
 		restore, err := r.WithAgentModel(t.Context(), "root", "")
@@ -126,7 +127,7 @@ func TestWithAgentModel(t *testing.T) {
 		tm := team.New(team.WithAgents(root))
 		r := &LocalRuntime{
 			team:             tm,
-			modelSwitcherCfg: &ModelSwitcherConfig{},
+			modelSwitcherCfg: &modelcatalog.Config{},
 		}
 
 		// Apply: clears any override (none was set).

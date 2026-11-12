@@ -62,7 +62,8 @@ func parseWhen(when string, now time.Time) (next time.Time, interval time.Durati
 
 	default:
 		return time.Time{}, 0, fmt.Errorf(
-			"unrecognized schedule %q: use in:<dur>, at:<RFC3339>, every:<dur>, or minutely/hourly/daily/weekly", when)
+			"unrecognized schedule %q: use in:<dur>, at:<RFC3339>, every:<dur>, or minutely/hourly/daily/weekly", when,
+		)
 	}
 }
 

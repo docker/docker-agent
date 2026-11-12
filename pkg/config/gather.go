@@ -5,21 +5,22 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/gateway"
-	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
 // gatherMissingEnvVars finds out which environment variables are required by the models and tools.
 // It returns the missing variables, whether any of them is a model-provider
 // credential (as opposed to a tool secret), and any non-fatal error
 // encountered during tool discovery.
-func gatherMissingEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway string, env environment.Provider) (missing []string, missingModelCreds bool, toolErr error) {
+func gatherMissingEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway string, env environment.Provider, evaluatorOpts ...options.Opt) (missing []string, missingModelCreds bool, toolErr error) {
 	requiredEnv := map[string]bool{}
 	modelEnv := map[string]bool{}
 
@@ -36,6 +37,12 @@ func gatherMissingEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway
 	for _, e := range modelNames {
 		requiredEnv[e] = true
 		modelEnv[e] = true
+	}
+
+	// The gateway supplies evaluator credentials unless explicitly bypassed.
+	opts := append([]options.Opt{options.WithGateway(modelsGateway)}, evaluatorOpts...)
+	for _, name := range RequiredEvaluatorEnvVars(cfg, opts...) {
+		requiredEnv[name] = true
 	}
 
 	// Tools
@@ -118,7 +125,7 @@ func gatherEnvVarsForCompactionModel(ctx context.Context, cfg *latest.Config, ag
 	if err != nil {
 		return
 	}
-	if !bypassOnly || hasCustomBaseURL(&inline, cfg.Providers) {
+	if !bypassOnly || latest.HasCustomBaseURL(inline, cfg.Providers) {
 		addEnvVarsForModelConfig(ctx, &inline, cfg.Providers, requiredEnv, env)
 	}
 }
@@ -145,7 +152,7 @@ func gatherEnvVarsForModel(ctx context.Context, cfg *latest.Config, modelName st
 	if len(model.Routing) > 0 {
 		leaf = routerFallbackLeaf(cfg, model)
 	}
-	if !bypassOnly || rootBypassed || leaf.BypassModelsGateway || hasCustomBaseURL(&leaf, cfg.Providers) {
+	if !bypassOnly || rootBypassed || leaf.BypassModelsGateway || latest.HasCustomBaseURL(leaf, cfg.Providers) {
 		addEnvVarsForModelConfig(ctx, &leaf, cfg.Providers, requiredEnv, env)
 	}
 
@@ -156,7 +163,7 @@ func gatherEnvVarsForModel(ctx context.Context, cfg *latest.Config, modelName st
 			// Named model reference. A routed target bypasses when the router
 			// does (propagation), when it sets its own flag, or when it dials a
 			// custom base_url (implied bypass).
-			if !bypassOnly || rootBypassed || ruleModel.BypassModelsGateway || hasCustomBaseURL(&ruleModel, cfg.Providers) {
+			if !bypassOnly || rootBypassed || ruleModel.BypassModelsGateway || latest.HasCustomBaseURL(ruleModel, cfg.Providers) {
 				addEnvVarsForModelConfig(ctx, &ruleModel, cfg.Providers, requiredEnv, env)
 			}
 		} else if providerName, _, ok := strings.Cut(ruleModelName, "/"); ok {
@@ -164,7 +171,7 @@ func gatherEnvVarsForModel(ctx context.Context, cfg *latest.Config, modelName st
 			// Inline specs carry no flag of their own; they bypass via the
 			// router's propagated bypass or a custom provider's base_url.
 			inlineModel := latest.ModelConfig{Provider: providerName}
-			if !bypassOnly || rootBypassed || hasCustomBaseURL(&inlineModel, cfg.Providers) {
+			if !bypassOnly || rootBypassed || latest.HasCustomBaseURL(inlineModel, cfg.Providers) {
 				addEnvVarsForModelConfig(ctx, &inlineModel, cfg.Providers, requiredEnv, env)
 			}
 		}
@@ -236,19 +243,25 @@ func addEnvVarsForModelConfig(ctx context.Context, model *latest.ModelConfig, cu
 				if effective == "" {
 					effective = "openai"
 				}
-				addEnvVarsForCoreProvider(ctx, effective, model, requiredEnv, env)
+				addEnvVarsForAPI(ctx, effective, model, requiredEnv, env)
 			}
 			return
 		}
 	}
-	if alias, exists := provider.LookupAlias(model.Provider); exists {
+	if alias, exists := catalog.Find(model.Provider); exists {
 		// Check built-in aliases
-		if alias.TokenEnvVar != "" {
-			if model.Provider == "github-copilot" {
-				requiredEnv[githubCopilotTokenEnvVar(ctx, env)] = true
-			} else {
-				requiredEnv[alias.TokenEnvVar] = true
+		switch {
+		case alias.APIType == "google" || alias.APIType == "amazon-bedrock":
+			addEnvVarsForAPI(ctx, alias.APIType, model, requiredEnv, env)
+		case len(alias.TokenEnvVars) > 0:
+			key := alias.TokenEnvVars[0]
+			for _, candidate := range catalog.TokenKeys(model.Provider, key) {
+				if value, _ := env.Get(ctx, candidate); value != "" {
+					key = candidate
+					break
+				}
 			}
+			requiredEnv[key] = true
 		}
 		// A templated alias base URL (e.g. Cloudflare's account/gateway-scoped
 		// endpoint) references env vars that must resolve when the provider is
@@ -257,22 +270,12 @@ func addEnvVarsForModelConfig(ctx context.Context, model *latest.ModelConfig, cu
 			requiredEnv[name] = true
 		}
 	} else {
-		addEnvVarsForCoreProvider(ctx, model.Provider, model, requiredEnv, env)
+		addEnvVarsForAPI(ctx, model.Provider, model, requiredEnv, env)
 	}
 }
 
-func githubCopilotTokenEnvVar(ctx context.Context, env environment.Provider) string {
-	if value, _ := env.Get(ctx, "GITHUB_TOKEN"); value != "" {
-		return "GITHUB_TOKEN"
-	}
-	if value, _ := env.Get(ctx, "GH_TOKEN"); value != "" {
-		return "GH_TOKEN"
-	}
-	return "GITHUB_TOKEN"
-}
-
-// addEnvVarsForCoreProvider adds the required env vars for a core provider type.
-func addEnvVarsForCoreProvider(ctx context.Context, providerType string, model *latest.ModelConfig, requiredEnv map[string]bool, env environment.Provider) {
+// addEnvVarsForAPI adds credentials required by the implemented API's auth scheme.
+func addEnvVarsForAPI(ctx context.Context, providerType string, model *latest.ModelConfig, requiredEnv map[string]bool, env environment.Provider) {
 	switch providerType {
 	case "openai":
 		requiredEnv["OPENAI_API_KEY"] = true
@@ -280,7 +283,10 @@ func addEnvVarsForCoreProvider(ctx context.Context, providerType string, model *
 		requiredEnv["ANTHROPIC_API_KEY"] = true
 	case "google":
 		if model.ProviderOpts["project"] == nil && model.ProviderOpts["location"] == nil {
-			if value, _ := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI"); value != "" {
+			value, _ := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI")
+			useVertexAI, _ := strconv.ParseBool(value)
+			publisher, _ := model.ProviderOpts["publisher"].(string)
+			if useVertexAI || (publisher != "" && !strings.EqualFold(publisher, "google")) {
 				requiredEnv["GOOGLE_CLOUD_PROJECT"] = true
 				requiredEnv["GOOGLE_CLOUD_LOCATION"] = true
 			} else if value, _ := env.Get(ctx, "GEMINI_API_KEY"); value == "" {
@@ -316,10 +322,11 @@ func GatherEnvVarsForTools(ctx context.Context, cfg *latest.Config) ([]string, e
 				if !ok {
 					requiredEnv[secret.Env] = true
 				} else {
-					os.Expand(value, func(name string) string {
+					// Use the same normalization the runtime applies, so `${env.X}`
+					// discovers X rather than the literal name "env.X".
+					for _, name := range environment.Refs(value) {
 						requiredEnv[name] = true
-						return ""
-					})
+					}
 				}
 			}
 		}
@@ -333,4 +340,33 @@ func GatherEnvVarsForTools(ctx context.Context, cfg *latest.Config) ([]string, e
 
 func sortedKeys(requiredEnv map[string]bool) []string {
 	return slices.Sorted(maps.Keys(requiredEnv))
+}
+
+// RequiredEvaluatorEnvVars mirrors the effective evaluator connection options.
+func RequiredEvaluatorEnvVars(cfg *latest.Config, opts ...options.Opt) []string {
+	required := map[string]bool{}
+	for _, a := range cfg.Agents {
+		for _, matchers := range a.Hooks.Events() {
+			for _, matcher := range matchers {
+				for _, hook := range matcher.Hooks {
+					if hook.Type != "evaluator" {
+						continue
+					}
+					def, ok := cfg.Evaluators[hook.Evaluator]
+					if !ok {
+						continue
+					}
+					resolved, err := def.Resolve(cfg.Providers)
+					if err != nil {
+						continue
+					}
+					connection := options.ForEvaluator(resolved, opts...)
+					if connection.Gateway() == "" && connection.TokenSource() == nil {
+						required[resolved.TokenKey] = true
+					}
+				}
+			}
+		}
+	}
+	return sortedKeys(required)
 }

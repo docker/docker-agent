@@ -1,19 +1,17 @@
 package bedrock
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go/auth/bearer"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -21,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/modelinfo"
@@ -36,17 +35,6 @@ type Client struct {
 	cachingSupported bool // Cached at init time for efficiency
 }
 
-// bearerTokenTransport adds Authorization header with bearer token to requests
-type bearerTokenTransport struct {
-	token string
-	base  http.RoundTripper
-}
-
-func (t *bearerTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Header.Set("Authorization", "Bearer "+t.token)
-	return t.base.RoundTrip(req)
-}
-
 func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (*Client, error) {
 	if cfg == nil {
 		slog.ErrorContext(ctx, "Bedrock client creation failed", "error", "model configuration is required")
@@ -58,13 +46,33 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		return nil, errors.New("model type must be 'amazon-bedrock'")
 	}
 
+	if c5, ok := modelinfo.LookupClaude5(cfg.Model); ok && c5.BedrockMantleOnly {
+		err := fmt.Errorf("amazon-bedrock: model %q is only available on Bedrock Mantle, which docker-agent does not support", cfg.Model)
+		slog.ErrorContext(ctx, "Bedrock client creation failed", "error", err)
+		return nil, err
+	}
+
+	if providerutil.HasProviderOpt(cfg.ProviderOpts, "fallbacks") {
+		err := errors.New("amazon-bedrock: fallbacks requires the Claude API and is not available on Bedrock")
+		slog.ErrorContext(ctx, "Bedrock client creation failed", "error", err)
+		return nil, err
+	}
+
+	if raw, ok := cfg.ProviderOpts["thinking_prefix_mismatch"]; ok {
+		value, valid := raw.(string)
+		if !valid || (value != "error" && value != "drop_block") {
+			return nil, errors.New("amazon-bedrock: thinking_prefix_mismatch must be error or drop_block")
+		}
+	}
+
 	globalOptions := options.Apply(opts...)
 
 	// Check for bearer token
 	// Bearer token is optional: if not provided, falls back to standard AWS credential chain (SigV4).
 	//
-	// NOTE: Manual token handling is required because aws-sdk-go-v2's default credential chain
-	// does not recognize bearer tokens for Bedrock API keys.
+	// NOTE: The default credential chain does not recognize Bedrock API keys; the
+	// token is wired explicitly, the way the SDK handles AWS_BEARER_TOKEN_BEDROCK
+	// in the process environment.
 	// See: https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html
 	var bearerToken string
 	if cfg.TokenKey != "" {
@@ -76,19 +84,13 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	} else {
 		bearerToken, _ = env.Get(ctx, "AWS_BEARER_TOKEN_BEDROCK")
 	}
+	if bearerToken == "" && bearerTokenRequired {
+		return nil, errors.New("amazon-bedrock requires a bearer token (token_key or AWS_BEARER_TOKEN_BEDROCK): the AWS credential chain is not available in this build")
+	}
 
 	// Build the docker-agent HTTP client (OTel instrumentation, SSE decompression,
 	// Desktop proxy support) so transport-level concerns apply to Bedrock too.
 	httpClient := httpclient.NewHTTPClient(ctx)
-
-	// If a bearer token is set, chain it on top of the base transport so auth
-	// headers are injected without replacing the rest of the transport stack.
-	if bearerToken != "" {
-		httpClient.Transport = &bearerTokenTransport{
-			token: bearerToken,
-			base:  httpClient.Transport,
-		}
-	}
 
 	// Apply the transport wrapper, if registered, over the full chain.
 	globalOptions.WrapTransport(ctx, httpClient)
@@ -103,25 +105,32 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	// Create Bedrock Runtime client with appropriate auth
 	var clientOpts []func(*bedrockruntime.Options)
 
-	// Support custom endpoint for VPC endpoints or testing
-	if endpoint := getProviderOpt[string](cfg.ProviderOpts, "endpoint_url"); endpoint != "" {
+	// The catalog template leaves regional and partition-specific routing to AWS.
+	endpoint := getProviderOpt[string](cfg.ProviderOpts, "endpoint_url")
+	if !catalog.IsDefaultEndpoint("amazon-bedrock", cfg.BaseURL) {
+		endpoint = cmp.Or(endpoint, cfg.BaseURL)
+	}
+	if endpoint != "" {
 		clientOpts = append(clientOpts, func(o *bedrockruntime.Options) {
-			o.BaseEndpoint = aws.String(endpoint)
+			o.BaseEndpoint = new(endpoint)
 		})
 	}
 
-	// Inject our HTTP client (which carries OTel, SSE, bearer token if set, and
-	// any caller-registered transport wrapper) into the Bedrock runtime options.
+	// Inject our HTTP client (which carries OTel, SSE, and any caller-registered
+	// transport wrapper) into the Bedrock runtime options.
+	clientOpts = append(clientOpts, func(o *bedrockruntime.Options) {
+		o.HTTPClient = httpClient
+	})
 	if bearerToken != "" {
 		slog.DebugContext(ctx, "Bedrock using bearer token authentication")
 		clientOpts = append(clientOpts, func(o *bedrockruntime.Options) {
-			// Use anonymous credentials to skip SigV4 signing
+			// Anonymous credentials disable SigV4; the bearer scheme must then be
+			// preferred with a real provider, or the SDK selects it with a nil one.
 			o.Credentials = aws.AnonymousCredentials{}
-			o.HTTPClient = httpClient
-		})
-	} else {
-		clientOpts = append(clientOpts, func(o *bedrockruntime.Options) {
-			o.HTTPClient = httpClient
+			o.BearerAuthTokenProvider = bearer.TokenProviderFunc(func(context.Context) (bearer.Token, error) {
+				return bearer.Token{Value: bearerToken}, nil
+			})
+			o.AuthSchemePreference = []string{"httpBearerAuth"}
 		})
 	}
 
@@ -166,10 +175,9 @@ func detectCachingSupport(ctx context.Context, model string, store *modelsdev.St
 	return m.Cost != nil && (m.Cost.CacheRead > 0 || m.Cost.CacheWrite > 0)
 }
 
-func buildAWSConfig(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider) (aws.Config, error) {
-	var configOpts []func(*config.LoadOptions) error
-
-	// Region from provider_opts or environment
+// resolveRegion picks the region from provider_opts, then AWS_REGION /
+// AWS_DEFAULT_REGION, defaulting to us-east-1.
+func resolveRegion(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider) string {
 	region := getProviderOpt[string](cfg.ProviderOpts, "region")
 	if region == "" {
 		region, _ = env.Get(ctx, "AWS_REGION")
@@ -178,39 +186,9 @@ func buildAWSConfig(ctx context.Context, cfg *latest.ModelConfig, env environmen
 		region, _ = env.Get(ctx, "AWS_DEFAULT_REGION")
 	}
 	if region == "" {
-		region = "us-east-1" // Default region
+		region = "us-east-1"
 	}
-	configOpts = append(configOpts, config.WithRegion(region))
-
-	// Profile from provider_opts
-	if profile := getProviderOpt[string](cfg.ProviderOpts, "profile"); profile != "" {
-		configOpts = append(configOpts, config.WithSharedConfigProfile(profile))
-	}
-
-	// Load base config with default credential chain
-	awsCfg, err := config.LoadDefaultConfig(ctx, configOpts...)
-	if err != nil {
-		return aws.Config{}, fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	// Handle assume role if specified
-	if roleARN := getProviderOpt[string](cfg.ProviderOpts, "role_arn"); roleARN != "" {
-		stsClient := sts.NewFromConfig(awsCfg)
-		creds := stscreds.NewAssumeRoleProvider(stsClient, roleARN, func(o *stscreds.AssumeRoleOptions) {
-			if sessionName := getProviderOpt[string](cfg.ProviderOpts, "role_session_name"); sessionName != "" {
-				o.RoleSessionName = sessionName
-			} else {
-				o.RoleSessionName = "docker-agent-bedrock-session"
-			}
-			if externalID := getProviderOpt[string](cfg.ProviderOpts, "external_id"); externalID != "" {
-				o.ExternalID = aws.String(externalID)
-			}
-		})
-		awsCfg.Credentials = aws.NewCredentialsCache(creds)
-		slog.DebugContext(ctx, "Bedrock using assumed role", "role_arn", roleARN)
-	}
-
-	return awsCfg, nil
+	return region
 }
 
 func (c *Client) CreateChatCompletionStream(
@@ -225,6 +203,14 @@ func (c *Client) CreateChatCompletionStream(
 
 	if len(messages) == 0 {
 		return nil, errors.New("at least one message is required")
+	}
+
+	if err := checkReplayableThinking(c.ModelConfig.Model, c.requestThinks(), messages); err != nil {
+		return nil, err
+	}
+
+	if _, ok := modelinfo.LookupClaude5(c.ModelConfig.Model); ok && providerutil.FinalAssistantPrefill(messages) {
+		return nil, fmt.Errorf("%s does not accept a final assistant message (prefill)", c.ModelConfig.Model)
 	}
 
 	// Build Converse input
@@ -243,7 +229,7 @@ func (c *Client) CreateChatCompletionStream(
 
 func (c *Client) buildConverseStreamInput(ctx context.Context, messages []chat.Message, requestTools []tools.Tool) *bedrockruntime.ConverseStreamInput {
 	input := &bedrockruntime.ConverseStreamInput{
-		ModelId: aws.String(c.ModelConfig.Model),
+		ModelId: new(c.ModelConfig.Model),
 	}
 
 	enableCaching := c.promptCachingEnabled()
@@ -272,17 +258,22 @@ func (c *Client) buildInferenceConfig(thinkingEnabled bool) *types.InferenceConf
 	cfg := &types.InferenceConfiguration{}
 
 	if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens > 0 {
-		cfg.MaxTokens = aws.Int32(int32(*c.ModelConfig.MaxTokens)) //nolint:gosec // user-configured token count; realistic values fit in int32
+		cfg.MaxTokens = new(int32(*c.ModelConfig.MaxTokens)) //nolint:gosec // user-configured token count; realistic values fit in int32
 	}
 
 	// Temperature and TopP cannot be set when extended thinking is enabled
-	// (Claude requires temperature=1.0 which is the default when thinking is on)
-	if !thinkingEnabled {
+	// (Claude requires temperature=1.0 which is the default when thinking is on).
+	// Claude 5.x rejects them in every mode.
+	if _, isClaude5 := modelinfo.LookupClaude5(c.ModelConfig.Model); isClaude5 {
+		if c.ModelConfig.Temperature != nil || c.ModelConfig.TopP != nil {
+			slog.Debug("Bedrock: Claude 5.x rejects sampling parameters, ignoring temperature/top_p", "model", c.ModelConfig.Model)
+		}
+	} else if !thinkingEnabled {
 		if c.ModelConfig.Temperature != nil {
-			cfg.Temperature = aws.Float32(float32(*c.ModelConfig.Temperature))
+			cfg.Temperature = new(float32(*c.ModelConfig.Temperature))
 		}
 		if c.ModelConfig.TopP != nil {
-			cfg.TopP = aws.Float32(float32(*c.ModelConfig.TopP))
+			cfg.TopP = new(float32(*c.ModelConfig.TopP))
 		}
 	} else if c.ModelConfig.Temperature != nil || c.ModelConfig.TopP != nil {
 		slog.Debug("Bedrock extended thinking enabled, ignoring temperature/top_p settings")
@@ -309,18 +300,40 @@ func (c *Client) interleavedThinkingEnabled() bool {
 	return b
 }
 
+// thinkingBudget returns the configured thinking budget. The provider
+// defaults turn a configured none into nil plus WithNoThinking; Claude 5.x
+// thinks by default, so it gets the explicit none back.
+func (c *Client) thinkingBudget() *latest.ThinkingBudget {
+	if budget := c.ModelConfig.ThinkingBudget; budget != nil {
+		return budget
+	}
+	if _, ok := modelinfo.LookupClaude5(c.ModelConfig.Model); ok && c.ModelOptions.NoThinking() {
+		return &latest.ThinkingBudget{Effort: "none"}
+	}
+	return nil
+}
+
+// requestThinks reports whether the request sends, or defaults to, thinking.
+func (c *Client) requestThinks() bool {
+	if c.thinkingBudget() == nil {
+		_, isClaude5 := modelinfo.LookupClaude5(c.ModelConfig.Model)
+		return isClaude5
+	}
+	return c.isThinkingEnabled()
+}
+
 // isThinkingEnabled returns true if a valid thinking budget is configured.
 // It mirrors the validation in buildAdditionalModelRequestFields but without
 // side effects (no logging), so it can safely be used to gate inference config.
 func (c *Client) isThinkingEnabled() bool {
-	if c.ModelConfig.ThinkingBudget == nil {
+	if c.thinkingBudget() == nil {
 		return false
 	}
 	if _, ok := c.adaptiveThinkingEffort(); ok {
 		return true
 	}
-	tokens := c.ModelConfig.ThinkingBudget.Tokens
-	if t, ok := c.ModelConfig.ThinkingBudget.EffortTokens(); ok {
+	tokens := c.thinkingBudget().Tokens
+	if t, ok := c.thinkingBudget().EffortTokens(); ok {
 		tokens = t
 	}
 	if tokens < 1024 {
@@ -341,9 +354,19 @@ func (c *Client) isThinkingEnabled() bool {
 //
 // It has no side effects so it can be shared by isThinkingEnabled and
 // buildAdditionalModelRequestFields.
+//
+// An empty effort with ok=true means adaptive thinking at the model's default
+// effort (a token budget on a Claude 5.x model).
 func (c *Client) adaptiveThinkingEffort() (string, bool) {
-	budget := c.ModelConfig.ThinkingBudget
-	if budget == nil || budget.IsDisabled() {
+	budget := c.thinkingBudget()
+	if budget == nil {
+		return "", false
+	}
+	c5, isClaude5 := modelinfo.LookupClaude5(c.ModelConfig.Model)
+	if budget.IsDisabled() {
+		if isClaude5 && !c5.CanDisableThinking {
+			return "low", true
+		}
 		return "", false
 	}
 	if e, ok := budget.AdaptiveEffort(); ok {
@@ -356,6 +379,9 @@ func (c *Client) adaptiveThinkingEffort() (string, bool) {
 		return effort.ForAnthropic(l)
 	}
 	if budget.Tokens > 0 {
+		if isClaude5 {
+			return "", true
+		}
 		// Coerced token budget: adaptive's default effort.
 		return "high", true
 	}
@@ -374,18 +400,20 @@ func (c *Client) promptCachingEnabled() bool {
 func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 	fields := map[string]any{}
 
+	claude5, isClaude5 := modelinfo.LookupClaude5(c.ModelConfig.Model)
+
 	// Forward top_k from provider_opts (Anthropic on Bedrock supports it)
-	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok {
+	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok && !isClaude5 {
 		fields["top_k"] = topK
 		slog.Debug("Bedrock provider_opts: set top_k", "value", topK)
 	}
 
 	// Configure thinking budget if present and valid
-	if budget := c.ModelConfig.ThinkingBudget; budget != nil {
+	if budget := c.thinkingBudget(); budget != nil {
 		if effortStr, ok := c.adaptiveThinkingEffort(); ok {
 			switch {
 			case budget.Tokens > 0:
-				slog.Warn("Bedrock: model rejects token-based thinking budgets; switching to adaptive thinking",
+				slog.Warn("Bedrock: model rejects token-based thinking budgets; switching to adaptive thinking, the token ceiling is not enforced",
 					"model", c.ModelConfig.Model,
 					"thinking_budget_tokens", budget.Tokens,
 					"effort", effortStr)
@@ -400,7 +428,11 @@ func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 			}
 			slog.Debug("Bedrock request using adaptive thinking", "effort", effortStr)
 			fields["thinking"] = map[string]any{"type": "adaptive"}
-			fields["output_config"] = map[string]any{"effort": effortStr}
+			if effortStr != "" {
+				fields["output_config"] = map[string]any{"effort": effortStr}
+			}
+		} else if budget.IsDisabled() && isClaude5 {
+			fields["thinking"] = map[string]any{"type": "disabled"}
 		} else {
 			tokens := budget.Tokens
 			if t, ok := budget.EffortTokens(); ok {
@@ -434,6 +466,20 @@ func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 						"the anthropic_beta header will not be sent, which may cause the thinking budget to be ignored")
 				}
 			}
+		}
+	}
+
+	if isClaude5 && claude5.ChecksThinkingPrefix {
+		thinking, ok := fields["thinking"].(map[string]any)
+		if !ok && c.thinkingBudget() == nil && !c.ModelOptions.NoThinking() {
+			thinking = map[string]any{"type": "adaptive"}
+			fields["thinking"] = thinking
+		}
+		if thinking["type"] == "adaptive" {
+			behavior, _ := c.ModelConfig.ProviderOpts["thinking_prefix_mismatch"].(string)
+			thinking["block_binding"] = map[string]any{"prefix_mismatch_behavior": cmp.Or(behavior, "drop_block")}
+			betas, _ := fields["anthropic_beta"].([]string)
+			fields["anthropic_beta"] = append(betas, "thinking-binding-controls-2026-08-01")
 		}
 	}
 

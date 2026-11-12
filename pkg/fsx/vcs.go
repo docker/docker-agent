@@ -174,10 +174,11 @@ func readGitfile(path string) (string, bool) {
 	content := string(buf[:n])
 
 	const prefix = "gitdir:"
-	if !strings.HasPrefix(content, prefix) {
+	rest, ok := strings.CutPrefix(content, prefix)
+	if !ok {
 		return "", false
 	}
-	gitDir, _, _ := strings.Cut(content[len(prefix):], "\n")
+	gitDir, _, _ := strings.Cut(rest, "\n")
 	gitDir = strings.TrimSpace(gitDir)
 	return gitDir, gitDir != ""
 }

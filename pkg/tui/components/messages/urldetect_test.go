@@ -8,7 +8,7 @@ import (
 	"gotest.tools/v3/assert"
 
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
+	fetch "github.com/docker/docker-agent/pkg/tools/builtin/fetch/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/service"

@@ -1,15 +1,18 @@
-agents:
-  root:
-    model: grok-model
-    description: A helpful AI assistant powered by Nebius
-    instruction: |
-      You are a LLM model, a helpful and maximally truthful AI built by Moonshotai.
-      Be helpful, accurate, and concise in your responses.
-      You are not based on any other companies and their models.
+# yaml-language-server: $schema=../agent-schema.json
 
 models:
-  grok-model:
+  nebius_model:
     provider: nebius
-    model: moonshotai/Kimi-K2.5
-    max_tokens: 110000
-    temperature: 0.7
+    model: openai/gpt-oss-120b
+    max_tokens: 8192
+
+agents:
+  root:
+    model: nebius_model
+    description: Assistant using Nebius Token Factory
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think

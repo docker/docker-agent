@@ -8,7 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
+	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -20,9 +20,9 @@ type MCPPromptInputDialog struct {
 	BaseDialog
 
 	promptName   string
-	promptInfo   mcptools.PromptInfo
+	promptInfo   tools.PromptInfo
 	inputs       []textinput.Model
-	arguments    []mcptools.PromptArgument
+	arguments    []tools.PromptArgument
 	currentInput int
 	keyMap       mcpPromptInputKeyMap
 }
@@ -63,10 +63,10 @@ func defaultMCPPromptInputKeyMap() mcpPromptInputKeyMap {
 }
 
 // NewMCPPromptInputDialog creates a new MCP prompt input dialog
-func NewMCPPromptInputDialog(promptName string, promptInfo mcptools.PromptInfo) Dialog {
+func NewMCPPromptInputDialog(promptName string, promptInfo tools.PromptInfo) Dialog {
 	// Create text inputs for all arguments (both required and optional)
 	var inputs []textinput.Model
-	var arguments []mcptools.PromptArgument
+	var arguments []tools.PromptArgument
 
 	for _, arg := range promptInfo.Arguments {
 		ti := textinput.New()

@@ -3,11 +3,11 @@ package codingharness
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	baseharness "github.com/rumpl/harness"
 	"github.com/rumpl/harness/claudecode"
 	"github.com/rumpl/harness/codex"
+	"github.com/rumpl/harness/commandcode"
 	"github.com/rumpl/harness/opencode"
 	"github.com/rumpl/harness/pi"
 
@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	TypeClaudeCode = "claude-code"
-	TypeCodex      = "codex"
-	TypePi         = "pi"
-	TypeOpenCode   = "opencode"
+	TypeClaudeCode  = "claude-code"
+	TypeCodex       = "codex"
+	TypePi          = "pi"
+	TypeOpenCode    = "opencode"
+	TypeCommandCode = "command-code"
 )
 
 func NewProvider(cfg *latest.HarnessConfig) (baseharness.Provider, error) {
@@ -35,20 +36,11 @@ func NewProvider(cfg *latest.HarnessConfig) (baseharness.Provider, error) {
 		return pi.New(cfg.Model), nil
 	case TypeOpenCode:
 		return newOpenCodeProvider(cfg), nil
+	case TypeCommandCode:
+		return newCommandCodeProvider(cfg), nil
 	default:
 		return nil, fmt.Errorf("unsupported harness type %q", cfg.Type)
 	}
-}
-
-func Label(cfg *latest.HarnessConfig) string {
-	if cfg == nil {
-		return ""
-	}
-	model := strings.TrimSpace(cfg.Model)
-	if model == "" {
-		return cfg.Type
-	}
-	return cfg.Type + "/" + model
 }
 
 func newClaudeCodeProvider(cfg *latest.HarnessConfig) baseharness.Provider {
@@ -57,6 +49,14 @@ func newClaudeCodeProvider(cfg *latest.HarnessConfig) baseharness.Provider {
 		opts = append(opts, claudecode.WithEffort(claudecode.Effort(cfg.Effort)))
 	}
 	return claudecode.New(cfg.Model, opts...)
+}
+
+func newCommandCodeProvider(cfg *latest.HarnessConfig) baseharness.Provider {
+	var opts []commandcode.Option
+	if cfg.Effort != "" {
+		opts = append(opts, commandcode.WithEffort(cfg.Effort))
+	}
+	return commandcode.New(cfg.Model, opts...)
 }
 
 func newOpenCodeProvider(cfg *latest.HarnessConfig) baseharness.Provider {

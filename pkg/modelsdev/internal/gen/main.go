@@ -3,7 +3,7 @@
 //
 // It fetches https://models.dev/api.json, re-marshals it through the trimmed
 // [modelsdev.Database] type (dropping fields docker-agent never reads) and
-// writes the result to pkg/modelsdev/snapshot.json together with a generated
+// writes the result to pkg/modelsdev/embedded/snapshot.json together with a generated
 // snapshot_date.txt recording when the snapshot was taken.
 //
 // Run it via `go generate ./pkg/modelsdev/...` or the `task update-models`
@@ -103,23 +103,23 @@ func fetch(ctx context.Context) (map[string]modelsdev.Provider, error) {
 	return providers, nil
 }
 
-// snapshotDir locates pkg/modelsdev relative to this source file so the
+// snapshotDir locates pkg/modelsdev/embedded relative to this source file so the
 // generator works regardless of the caller's working directory.
 func snapshotDir() (string, error) {
 	// This file lives at pkg/modelsdev/internal/gen/main.go; the snapshot
-	// lives two directories up.
+	// lives under the sibling embedded directory.
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
 	// `go run ./pkg/modelsdev/internal/gen` runs with the module root as wd.
-	candidate := filepath.Join(wd, "pkg", "modelsdev")
+	candidate := filepath.Join(wd, "pkg", "modelsdev", "embedded")
 	if _, err := os.Stat(candidate); err == nil {
 		return candidate, nil
 	}
-	// `go generate` runs with the package dir (pkg/modelsdev) as wd.
+	// `go generate` runs with pkg/modelsdev/embedded as wd.
 	if _, err := os.Stat(filepath.Join(wd, "snapshot.json")); err == nil {
 		return wd, nil
 	}
-	return "", fmt.Errorf("could not locate pkg/modelsdev from %s", wd)
+	return "", fmt.Errorf("could not locate pkg/modelsdev/embedded from %s", wd)
 }

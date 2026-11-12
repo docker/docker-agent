@@ -62,6 +62,8 @@ func MergeHooks(base, cli *latest.HooksConfig) *latest.HooksConfig {
 	}
 
 	merged := &latest.HooksConfig{
+		PromptFileGuard:            slices.Concat(base.PromptFileGuard, cli.PromptFileGuard),
+		SkillContentGuard:          slices.Concat(base.SkillContentGuard, cli.SkillContentGuard),
 		PreToolUse:                 slices.Concat(base.PreToolUse, cli.PreToolUse),
 		PostToolUse:                slices.Concat(base.PostToolUse, cli.PostToolUse),
 		PermissionRequest:          slices.Concat(base.PermissionRequest, cli.PermissionRequest),
@@ -87,6 +89,10 @@ func MergeHooks(base, cli *latest.HooksConfig) *latest.HooksConfig {
 		BeforeCompaction:           slices.Concat(base.BeforeCompaction, cli.BeforeCompaction),
 		AfterCompaction:            slices.Concat(base.AfterCompaction, cli.AfterCompaction),
 		ToolResponseTransform:      slices.Concat(base.ToolResponseTransform, cli.ToolResponseTransform),
+		ToolInputTransform:         slices.Concat(base.ToolInputTransform, cli.ToolInputTransform),
+		ToolGuard:                  slices.Concat(base.ToolGuard, cli.ToolGuard),
+		BeforeAgentRun:             slices.Concat(base.BeforeAgentRun, cli.BeforeAgentRun),
+		AfterAgentComplete:         slices.Concat(base.AfterAgentComplete, cli.AfterAgentComplete),
 		WorktreeCreate:             slices.Concat(base.WorktreeCreate, cli.WorktreeCreate),
 	}
 	return merged
@@ -103,4 +109,11 @@ func (runConfig *RuntimeConfig) CLIHooks() *latest.HooksConfig {
 		runConfig.HookOnUserInput,
 		runConfig.HookStop,
 	)
+}
+
+// MergeAgentHooks appends inherited hooks to each agent before validation and preflight.
+func MergeAgentHooks(cfg *latest.Config, inherited *latest.HooksConfig) {
+	for i := range cfg.Agents {
+		cfg.Agents[i].Hooks = MergeHooks(cfg.Agents[i].Hooks, inherited)
+	}
 }

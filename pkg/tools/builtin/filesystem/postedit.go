@@ -34,10 +34,15 @@ func runPostEditCommands(ctx context.Context, workingDir string, postEditCommand
 			continue
 		}
 
+		absolutePath, err := filepath.Abs(filePath)
+		if err != nil {
+			return fmt.Errorf("resolving post-edit file path: %w", err)
+		}
 		shell, argsPrefix := shellpath.DetectShell()
 		cmd := exec.CommandContext(ctx, shell, append(argsPrefix, postEdit.Cmd)...)
+		cmd.Dir = workingDir
 		cmd.Env = cmd.Environ()
-		cmd.Env = append(cmd.Env, "file="+filePath)
+		cmd.Env = append(cmd.Env, "file="+absolutePath)
 
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("post-edit command failed for %s: %w", filePath, err)

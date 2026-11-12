@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"sync"
 
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
@@ -13,13 +14,22 @@ type Startable interface {
 	Stop(ctx context.Context) error
 }
 
-// PeerDependent is implemented by toolsets whose Start reads from the
-// agent's other toolsets (e.g. the deferred aggregator lists its source
-// toolsets' tools). Callers that start an agent's toolsets concurrently
-// must start these only after every other toolset has settled, or their
-// Start would race the very toolsets it depends on.
-type PeerDependent interface {
-	StartsAfterPeers()
+// Runnable is implemented by toolsets with background work but no startup handshake.
+// Run blocks until cancellation and joins all work before returning. It must not
+// run concurrently on the same toolset. NewStartable owns a detached run until
+// Stop; Startable takes precedence when both capabilities are present.
+type Runnable interface {
+	Run(ctx context.Context)
+}
+
+// StartReporter is implemented by toolsets whose live lifecycle state can
+// be queried independently of the StartableToolSet wrapper's latched state
+// (e.g. an MCP toolset whose supervisor lost the session in the background).
+// The wrapper consults it on Start to decide whether a recovery is needed,
+// and composite toolsets consult their inner toolsets' reporters to detect
+// an inner that started successfully and later died.
+type StartReporter interface {
+	IsStarted() bool
 }
 
 // Statable is implemented by toolsets that expose a lifecycle state
@@ -55,21 +65,6 @@ type Elicitable interface {
 	SetElicitationHandler(handler ElicitationHandler)
 }
 
-// Sampleable is implemented by toolsets that support MCP sampling
-// (sampling/createMessage). MCP servers use sampling to delegate LLM calls
-// back to the host; the handler is expected to drive the host's model.
-type Sampleable interface {
-	SetSamplingHandler(handler SamplingHandler)
-}
-
-// SampleableWithTools is implemented by toolsets that support MCP sampling
-// requests carrying a tools array (sampling-with-tools). The handler is
-// invoked instead of the basic SamplingHandler when both are registered and
-// the SDK negotiates the with-tools variant on the wire.
-type SampleableWithTools interface {
-	SetSamplingWithToolsHandler(handler SamplingWithToolsHandler)
-}
-
 // OAuthCapable is implemented by toolsets that support OAuth flows.
 type OAuthCapable interface {
 	SetOAuthSuccessHandler(handler func())
@@ -91,27 +86,82 @@ func GetInstructions(ts ToolSet) string {
 	return ""
 }
 
-// ChangeNotifier is implemented by toolsets that can notify when their
-// tool list changes (e.g. after an MCP ToolListChanged notification).
-type ChangeNotifier interface {
-	SetToolsChangedHandler(handler func())
+// ChangeSubscriber is implemented by toolsets whose tool-list changes can
+// be observed by any number of hosts at once (one per runtime sharing the
+// toolset). Every subscriber receives every change; unsubscribing removes
+// only that subscription. Handlers must not block.
+type ChangeSubscriber interface {
+	SubscribeToolsChanged(handler func()) (unsubscribe func())
 }
 
-// ConfigureHandlers sets all applicable handlers on a toolset.
-// It checks for Elicitable, Sampleable, SampleableWithTools, and OAuthCapable
-// interfaces and configures them. This is a convenience function that handles
-// the capability checking internally.
-func ConfigureHandlers(ts ToolSet, elicitHandler ElicitationHandler, samplingHandler SamplingHandler, samplingWithToolsHandler SamplingWithToolsHandler, oauthHandler func(), managedOAuth bool, unmanagedOAuthRedirectURI string) {
-	if e, ok := As[Elicitable](ts); ok {
+// Subscribers is a concurrency-safe fan-out registry for host callbacks on
+// toolsets shared by several runtimes or streams. Notify snapshots the set
+// under the lock and invokes callbacks outside it, so a callback may
+// subscribe or unsubscribe re-entrantly. The zero value is ready to use.
+type Subscribers[T any] struct {
+	mu     sync.Mutex
+	subs   map[uint64]func(T)
+	nextID uint64
+}
+
+// Subscribe registers cb and returns an idempotent unsubscribe function.
+// A nil cb registers nothing.
+func (s *Subscribers[T]) Subscribe(cb func(T)) (unsubscribe func()) {
+	if cb == nil {
+		return func() {}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.subs == nil {
+		s.subs = make(map[uint64]func(T))
+	}
+	id := s.nextID
+	s.nextID++
+	s.subs[id] = cb
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.subs, id)
+	}
+}
+
+// Notify invokes every current subscriber with v.
+func (s *Subscribers[T]) Notify(v T) {
+	s.mu.Lock()
+	subs := make([]func(T), 0, len(s.subs))
+	for _, cb := range s.subs {
+		subs = append(subs, cb)
+	}
+	s.mu.Unlock()
+
+	for _, cb := range subs {
+		cb(v)
+	}
+}
+
+// ChangeSubscribers backs ChangeSubscriber implementations: a Subscribers
+// registry for argument-less tools-changed handlers.
+type ChangeSubscribers struct {
+	subs Subscribers[struct{}]
+}
+
+func (c *ChangeSubscribers) Subscribe(handler func()) (unsubscribe func()) {
+	if handler == nil {
+		return func() {}
+	}
+	return c.subs.Subscribe(func(struct{}) { handler() })
+}
+
+func (c *ChangeSubscribers) Notify() {
+	c.subs.Notify(struct{}{})
+}
+
+// ConfigureHandlers sets all applicable handlers throughout a toolset graph.
+func ConfigureHandlers(ts ToolSet, elicitHandler ElicitationHandler, oauthHandler func(), managedOAuth bool, unmanagedOAuthRedirectURI string) {
+	for _, e := range FindAll[Elicitable](ts) {
 		e.SetElicitationHandler(elicitHandler)
 	}
-	if s, ok := As[Sampleable](ts); ok {
-		s.SetSamplingHandler(samplingHandler)
-	}
-	if s, ok := As[SampleableWithTools](ts); ok {
-		s.SetSamplingWithToolsHandler(samplingWithToolsHandler)
-	}
-	if o, ok := As[OAuthCapable](ts); ok {
+	for _, o := range FindAll[OAuthCapable](ts) {
 		o.SetOAuthSuccessHandler(oauthHandler)
 		o.SetManagedOAuth(managedOAuth)
 		o.SetUnmanagedOAuthRedirectURI(unmanagedOAuthRedirectURI)

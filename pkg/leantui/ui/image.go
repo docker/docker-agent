@@ -9,8 +9,3 @@ type InlineImage = tuiimage.Inline
 func RenderInlineImage(img InlineImage, width int) []string {
 	return tuiimage.Render(img, width)
 }
-
-// KittyImageSequence encodes PNG data as a kitty graphics escape sequence.
-func KittyImageSequence(pngData []byte, cols, rows int) string {
-	return tuiimage.KittySequence(pngData, cols, rows)
-}

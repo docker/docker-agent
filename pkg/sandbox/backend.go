@@ -22,18 +22,24 @@ type Backend struct {
 	prefix []string
 	// extraEnv holds extra environment variables to set on every command.
 	extraEnv []string
+	cloud    bool
 }
 
 // NewBackend returns the appropriate backend.  When preferSbx is true
 // and the "sbx" binary is on PATH, the sbx backend is used; otherwise
 // it falls back to "docker sandbox".
-func NewBackend(preferSbx bool) *Backend {
+func NewBackend(preferSbx, cloud bool) *Backend {
+	var backend *Backend
 	if preferSbx {
 		if _, err := exec.LookPath("sbx"); err == nil {
-			return sbxBackend()
+			backend = sbxBackend()
 		}
 	}
-	return dockerSandboxBackend()
+	if backend == nil {
+		backend = dockerSandboxBackend()
+	}
+	backend.cloud = cloud
+	return backend
 }
 
 func dockerSandboxBackend() *Backend {
@@ -98,22 +104,15 @@ func (b *Backend) AllowHosts(ctx context.Context, name string, hosts []string) e
 	return nil
 }
 
-// rm wraps a single "rm" invocation. --force skips the confirmation
-// prompt — our rm calls are non-interactive (the user is just running
-// another command). Stale or already-removed names produce a non-nil
-// error — callers usually log and continue.
-func (b *Backend) rm(ctx context.Context, name string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, b.program, b.args("rm", "--force", name)...)
-	b.applyEnv(cmd)
-	return cmd.CombinedOutput()
-}
-
 // command builds an exec.Cmd for the given sandbox sub-command and arguments.
 // For example, command(ctx, "ls", "--json") produces either
 // "docker sandbox ls --json" or "sbx ls --json".
 func (b *Backend) args(subCmd string, extra ...string) []string {
 	args := make([]string, 0, len(b.prefix)+1+len(extra))
 	args = append(args, b.prefix...)
+	if b.cloud {
+		args = append(args, "--cloud")
+	}
 	args = append(args, subCmd)
 	args = append(args, extra...)
 	return args

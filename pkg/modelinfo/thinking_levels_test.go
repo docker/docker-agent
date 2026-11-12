@@ -174,6 +174,12 @@ func TestSupportedThinkingLevels(t *testing.T) {
 			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max},
 		},
 		{
+			name:     "gpt-6-astra gets the full gpt-5.6+ ladder (xhigh, max, dropped minimal) even though it rejects wire 'none'",
+			provider: "openai",
+			modelID:  "gpt-6-astra",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max},
+		},
+		{
 			name:     "chatgpt provider maps to the openai scale",
 			provider: "chatgpt",
 			modelID:  "gpt-5.6",
@@ -255,6 +261,9 @@ func TestOpenAITopEfforts(t *testing.T) {
 		{"gpt-5.6-luna", []effort.Level{effort.XHigh, effort.Max}},
 		{"gpt-5.7", []effort.Level{effort.XHigh, effort.Max}},
 		{"GPT-5.6-SOL", []effort.Level{effort.XHigh, effort.Max}},
+		// gpt-6 inherits the full gpt-5.6+ ladder via atLeastGPT.
+		{"gpt-6-astra", []effort.Level{effort.XHigh, effort.Max}},
+		{"gpt-6", []effort.Level{effort.XHigh, effort.Max}},
 		// Valid hyphen-delimited snapshot form: still a real gpt-5.6 minor.
 		{"gpt-5.6-2026-07-09", []effort.Level{effort.XHigh, effort.Max}},
 		// Vercel-style "openai/" qualified id: normalize strips the qualifier.
@@ -374,6 +383,71 @@ func TestOpenAISupportsNoneEffort(t *testing.T) {
 	}
 }
 
+func TestOpenAISupportsNoneEffort_GPT6Variants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		modelID string
+		want    bool
+	}{
+		{"gpt-6-sol", true},
+		{"gpt-6-luna", true},
+		{"gpt-6-sol-2026-09-22", true},
+		{"gpt-6-luna-2026-09-22", true},
+		{"openai/gpt-6-sol", true},
+		{"vercel/openai/gpt-6-luna-2026-09-22", true},
+		{" GPT-6-LUNA ", true},
+		{"gpt-6-astra", false},
+		{"openai/gpt-6-astra-2026-09-04", false},
+		{"gpt-6", false},
+		{"gpt-6-terra", false},
+		{"gpt-6.1-sol", false},
+		{"gpt-7-luna", false},
+		{"gpt-6-solar", false},
+		{"gpt-6-lunatic", false},
+		{"gpt-6-sol-pro", false},
+		{"gpt-6-luna-", false},
+		{"gpt-6-sol-2026-99-22", false},
+		{"gpt-6-sol-2026-02-30", false},
+		{"gpt-6-luna-2026-9-22", false},
+		{"gpt-6-luna-2026-09-22-extra", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.modelID, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, OpenAISupportsNoneEffort(tt.modelID))
+			assert.Equal(t, tt.want, OpenAISupportsChatToolsWithNoneEffort(tt.modelID))
+		})
+	}
+}
+
+func TestOpenAIDropsMinimalEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		modelID string
+		want    bool
+	}{
+		{"gpt-5", false},
+		{"gpt-5.2", false},
+		{"gpt-5.5", false},
+		{"gpt-5.6", true},
+		{"gpt-5.6-sol", true},
+		{"gpt-6-astra", true},
+		{"gpt-6", true},
+		{"gpt-7", true},
+		{"o3", false},
+		{"claude-opus-4-7", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.modelID, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, openAIDropsMinimalEffort(tt.modelID))
+		})
+	}
+}
+
 func TestOpenAISupportsExplicitPromptCache(t *testing.T) {
 	t.Parallel()
 
@@ -398,12 +472,52 @@ func TestOpenAISupportsExplicitPromptCache(t *testing.T) {
 		// Malformed/date-shaped minors must not be treated as gpt-5.6+.
 		{"gpt-5.6foo", false},
 		{"gpt-5.20260709", false},
+		// gpt-6 inherits explicit prompt-cache support via atLeastGPT.
+		{"gpt-6-astra", true},
+		{"gpt-6", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.modelID, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, OpenAISupportsExplicitPromptCache(tt.modelID))
+		})
+	}
+}
+
+// TestOpenAIRejectsToolsWithReasoningEffort exercises the minor-version
+// boundary (verified live against api.openai.com) where OpenAI's Chat
+// Completions endpoint starts rejecting an explicit reasoning_effort
+// alongside function tools: below gpt-5.4 the combination works; gpt-5.4
+// and gpt-5.5 reject only an explicit effort; gpt-5.6 and every later
+// generation (including gpt-6+) reject the combination outright.
+func TestOpenAIRejectsToolsWithReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		modelID string
+		want    bool
+	}{
+		{"gpt-5", false},
+		{"gpt-5.1-codex", false},
+		{"gpt-5.2", false},
+		{"o3-mini", false},
+		{"claude-opus-4-7", false},
+		{"gpt-5.4", true},
+		{"gpt-5.4-mini", true},
+		{"gpt-5.5", true},
+		{"gpt-5.6", true},
+		{"gpt-5.6-terra", true},
+		{"gpt-6-astra", true},
+		{"gpt-6", true},
+		{"gpt-7", true},
+		{"openai/gpt-5.4", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.modelID, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, OpenAIRejectsToolsWithReasoningEffort(tt.modelID))
 		})
 	}
 }

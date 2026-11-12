@@ -1,0 +1,24 @@
+╭──────────────────────────────────────────────────────────────────────────╮
+│                                 Settings                                 │
+│                                                                          │
+│              Appearance   ·   Behavior   ·   Notifications               │
+│                                                                          │
+│  ── Completion sound ──────────────────────────────────────────────      │
+│  › [ ] Sound on task completion                                          │
+│    Sound threshold                                     ‹ 10 seconds ›    │
+│                                                                          │
+│                                                                          │
+│  ── Cache warnings ────────────────────────────────────────────────      │
+│    [ ] Warn when a turn misses the cache                                 │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│     ↑↓ move  ←→/space change  tab category  enter apply  esc cancel      │
+╰──────────────────────────────────────────────────────────────────────────╯

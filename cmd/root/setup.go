@@ -27,7 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/input"
-	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -166,9 +166,11 @@ func newTerminalSetupWizard(in io.Reader, out io.Writer) *setupWizard {
 			}
 			return string(value), nil
 		},
-		stores:       environment.SecretStores(),
-		dmrLister:    dmr.ListModels,
-		pullModel:    dmr.Pull,
+		stores:    environment.SecretStores(),
+		dmrLister: dmr.ListModels,
+		pullModel: func(ctx context.Context, model string) error {
+			return dmr.PullTo(ctx, model, out, out)
+		},
 		chatgptLogin: chatgpt.Login,
 		saveProvider: func(name string, provider latest.ProviderConfig) error {
 			return userconfig.Update(func(cfg *userconfig.Config) error {
@@ -436,7 +438,7 @@ func (w *setupWizard) promptProviderName(ctx context.Context) (string, error) {
 			fmt.Fprintln(w.out, "The name is empty; enter one or press Ctrl+C to cancel.")
 		case strings.ContainsAny(name, "/ \t"):
 			fmt.Fprintln(w.out, "The name cannot contain '/' or whitespace.")
-		case name == "auto" || provider.IsKnownProvider(name):
+		case name == "auto" || catalog.IsKnownProvider(name):
 			fmt.Fprintf(w.out, "%q is a built-in provider name; pick another one.\n", name)
 		default:
 			return name, nil

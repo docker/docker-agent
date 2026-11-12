@@ -22,6 +22,7 @@ tasks:
     aliases: [b]
     sources:
       - "**/*.go"
+      - pkg/model/provider/catalog/providers.json
       - "**/*.template"
       - "**/*.txt"
       - "**/*.yml"
@@ -43,10 +44,26 @@ tasks:
     cmds:
       - go generate ./pkg/modelsdev/...
 
+  models-delta:
+    desc: Show the models.dev catalog delta (HEAD vs the working-tree snapshot by default)
+    silent: true
+    cmds:
+      - bash ./scripts/models-delta.sh {{.CLI_ARGS}}
+
+  test-models-delta:
+    desc: Run the golden-fixture regression test for the models-delta jq scripts
+    cmds:
+      - bash ./scripts/models-delta-test.sh
+
   check-models-fresh:
     desc: Fail if the embedded models.dev snapshot is stale (run update-models to refresh)
     cmds:
-      - CHECK_MODELS_SNAPSHOT_FRESHNESS=1 go test -run TestSnapshotDateIsFresh ./pkg/modelsdev/
+      - CHECK_MODELS_SNAPSHOT_FRESHNESS=1 go test -run TestSnapshotDateIsFresh ./pkg/modelsdev/embedded/
+
+  check-models-live:
+    desc: Validate example model references against the live models.dev API (hits the network; not part of `task test` since drift here is external and must not block PRs — see issue #4134)
+    cmds:
+      - CHECK_MODELS_DEV_LIVE=1 go test -count=1 -run TestExamplesAgainstLiveModelsDev ./pkg/config/
 
   check-plan-cross:
     desc: Cross-compile the plan storage and host plans packages for every file-lock build-tag variant (plus the plan-consuming CLI and TUI packages on windows)
@@ -56,6 +73,39 @@ tasks:
       - GOOS=js GOARCH=wasm go build ./pkg/tools/builtin/plan/ ./pkg/plans/
       - GOOS=wasip1 GOARCH=wasm go build ./pkg/tools/builtin/plan/ ./pkg/plans/
       - GOOS=plan9 GOARCH=amd64 go build ./pkg/tools/builtin/plan/ ./pkg/plans/
+
+  generate-ts:
+    desc: Generate the TypeScript SDK types and JSON Schemas from the Go API types
+    cmds:
+      - go run ./sdk/typescript/gen
+
+  check-ts:
+    desc: Fail if the generated TypeScript SDK is stale or does not type-check (requires Node)
+    deps: [install-ts]
+    vars:
+      GENERATED: sdk/typescript/src/generated sdk/typescript/schemas
+    cmds:
+      - task: generate-ts
+      - |
+        untracked="$(git ls-files --others --exclude-standard -- {{.GENERATED}})"
+        if ! git --no-pager diff --exit-code -- {{.GENERATED}} || [ -n "$untracked" ]; then
+          [ -z "$untracked" ] || printf 'untracked: %s\n' $untracked
+          echo 'The generated TypeScript SDK is stale: run `task generate-ts` and commit the result.'
+          exit 1
+        fi
+      - npm --prefix sdk/typescript run typecheck
+      - npm --prefix sdk/typescript test
+
+  install-ts:
+    internal: true
+    dir: sdk/typescript
+    sources:
+      - package.json
+      - package-lock.json
+    generates:
+      - node_modules/.package-lock.json
+    cmds:
+      - npm ci --ignore-scripts --no-audit --no-fund
 
   deploy-local:
     desc: Deploy the cli-plugin
@@ -73,7 +123,7 @@ tasks:
       - go.mod
       - go.sum
     cmds:
-      - GOLANGCI_LINT_CACHE={{.TASKFILE_DIR}}/.cache/lint golangci-lint run
+      - GOLANGCI_LINT_CACHE={{.TASKFILE_DIR}}/.cache/lint golangci-lint run --allow-parallel-runners
       - go run ./lint .
       - go mod tidy --diff >/dev/null || (echo 'go.mod/go.sum files are not tidy' && exit 1)
 
@@ -90,6 +140,54 @@ tasks:
     dotenv: [.env.test]
     cmds:
       - go test ./...
+
+  test-ci:
+    desc: Run tests with CI timing reports
+    dotenv: [.env.test]
+    cmds:
+      - set -o pipefail; go test -json ./... | go run ./scripts/gotestreport -out "${RUNNER_TEMP:-/tmp}/go-test.json"
+
+  test-race:
+    desc: Run tests with the race detector and shuffled order (slow; CI runs it on main only)
+    dotenv: [.env.test]
+    cmds:
+      - go test -race -shuffle=on ./...
+
+  test-wasm-providers:
+    desc: Test explicit provider registration in the WASM demo (requires Node)
+    cmds:
+      - task: test-wasm-js
+      - go test ./e2e -run '^TestWasmProviderDependencies$'
+
+  # The GOOS=js half of test-wasm-providers; the e2e check above already runs
+  # under `task test`, so CI calls this to avoid recompiling the e2e package.
+  test-wasm-js:
+    desc: Run portable runtime, tool and provider tests under GOOS=js (requires Node)
+    cmds:
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
+      - GOOS=js GOARCH=wasm go test -tags docker_agent_wasm_rag -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" pkg/model/provider/factory_js_openai_vendor_test.go
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run '^TestLimitLargeToolResults|^TestEnvironmentInfo' ./pkg/hooks/builtins
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./pkg/embeddedchat ./pkg/fuzzy/... ./pkg/tools/builtin/calculator ./pkg/tools/builtin/datetime ./pkg/tools/builtin/deferred ./pkg/tools/builtin/think ./pkg/tools/builtin/random ./pkg/tools/builtin/todo ./pkg/tools/builtin/memory ./pkg/memory/database/inmemory ./pkg/tools/codemode ./pkg/tools/toon ./pkg/rag ./pkg/rag/strategy
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run 'MemoryStorage|Conformance' ./pkg/tools/builtin/plan
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run 'Egress|TestWithOAuthTokenStore' ./pkg/httpclient ./pkg/tools/mcp
+      - GOOS=js GOARCH=wasm go test -tags docker_agent_wasm_cloud -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm ./pkg/model/provider/bedrock ./pkg/model/provider/gemini ./pkg/model/provider/anthropic/vertex ./pkg/model/provider/vertexai
+
+  test-wasm-bridge:
+    desc: Build WASM variants and test their JavaScript API under Node
+    cmds:
+      - GOOS=js GOARCH=wasm go build -tags docker_agent_wasm_rag -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
+      - node cmd/wasm/smoke_test.js
+      - node --test cmd/wasm/node/rag_test.js
+      - GOOS=js GOARCH=wasm go build -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
+      - node --test cmd/wasm/web/events_test.js
+      - node cmd/wasm/smoke_test.js
+      - node --test cmd/wasm/node/bridge_test.js cmd/wasm/node/rag_off_test.js
+
+  test-wasm-browser:
+    desc: Test real browser fetch, tools and RAG (requires Chrome and openssl)
+    cmds:
+      - node cmd/wasm/browser/smoke_test.js --build {{.CLI_ARGS}}
 
   test-binary:
     desc: Run tests on build binary

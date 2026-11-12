@@ -638,3 +638,40 @@ func TestResponsesAPI_ReasoningEffortNone_SpoofedProviderOptsCannotSuppress(t *t
 	require.NoError(t, json.Unmarshal(body(), &req))
 	assert.Equal(t, "none", req.Reasoning.Effort)
 }
+
+func TestGPT6ReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, api := range []struct {
+		name    string
+		request func(*testing.T, string, string, *latest.ThinkingBudget, ...options.Opt) string
+	}{
+		{"chat_completions", chatCompletionsReasoningEffortForProvider},
+		{"responses", responsesReasoningEffortForProvider},
+	} {
+		for _, tc := range []struct {
+			provider string
+			model    string
+			want     string
+		}{
+			{"openai", "gpt-6-sol", "none"},
+			{"openai", "gpt-6-luna", "none"},
+			{"openai", "gpt-6-sol-2026-09-22", "none"},
+			{"openai", "gpt-6-luna-2026-09-22", "none"},
+			{"vercel", "openai/gpt-6-sol", "none"},
+			{"vercel", "openai/gpt-6-luna", "none"},
+			{"openai", "gpt-6-astra", "low"},
+			{"vercel", "openai/gpt-6-astra", "low"},
+			{"xai", "gpt-6-sol", "low"},
+			{"mistral", "gpt-6-luna", "low"},
+		} {
+			t.Run(api.name+"/"+tc.provider+"/"+tc.model, func(t *testing.T) {
+				t.Parallel()
+				assert.Equal(t, tc.want, api.request(t, tc.provider, tc.model, nil, options.WithNoThinking()))
+				if tc.want == "none" {
+					assert.Equal(t, "none", api.request(t, tc.provider, tc.model, &latest.ThinkingBudget{Effort: "none"}))
+				}
+			})
+		}
+	}
+}

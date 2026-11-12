@@ -78,6 +78,31 @@ func parseField(name string, prop map[string]any, required bool) ElicitationFiel
 				field.EnumValues = append(field.EnumValues, s)
 			}
 		}
+	} else if field.Type == "string" && parseChoices(&field, prop["oneOf"]) {
+		field.Type = "enum"
+	}
+
+	// Multi-select enums, as the MCP elicitation spec defines them: an array
+	// of strings from items.enum, or titled choices in items.anyOf.
+	if items, ok := prop["items"].(map[string]any); ok && field.Type == "array" {
+		if enum, ok := items["enum"].([]any); ok {
+			for _, e := range enum {
+				if s, ok := e.(string); ok {
+					field.EnumValues = append(field.EnumValues, s)
+				}
+			}
+		} else {
+			parseChoices(&field, items["anyOf"])
+		}
+		if len(field.EnumValues) > 0 {
+			field.Type = "multiselect"
+		}
+	}
+	if v, ok := prop["minItems"].(float64); ok {
+		field.MinItems = int(v)
+	}
+	if v, ok := prop["maxItems"].(float64); ok {
+		field.MaxItems = int(v)
 	}
 
 	if v, ok := prop["minLength"].(float64); ok {
@@ -96,6 +121,27 @@ func parseField(name string, prop map[string]any, required bool) ElicitationFiel
 	}
 
 	return field
+}
+
+// parseChoices reads titled choices ({const, title, description}) into the
+// field's values, labels and descriptions, and reports whether any were found.
+func parseChoices(field *ElicitationField, v any) bool {
+	choices, _ := v.([]any)
+	for _, c := range choices {
+		choice, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		value, ok := choice["const"].(string)
+		if !ok {
+			continue
+		}
+		field.EnumValues = append(field.EnumValues, value)
+		field.EnumTitles = append(field.EnumTitles, getString(choice, "title", value))
+		description, _ := choice["description"].(string)
+		field.EnumDescriptions = append(field.EnumDescriptions, description)
+	}
+	return len(field.EnumValues) > 0
 }
 
 // toMap converts various schema representations to map[string]any.

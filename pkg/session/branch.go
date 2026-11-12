@@ -79,6 +79,7 @@ func (s *Session) Clone() *Session {
 
 	clone := &Session{
 		ID:                      s.ID,
+		Origin:                  s.Origin,
 		InputID:                 s.InputID,
 		Title:                   s.Title,
 		Evals:                   cloneEvalCriteria(s.Evals),
@@ -102,17 +103,21 @@ func (s *Session) Clone() *Session {
 		Permissions:             s.Permissions.Clone(),
 		Attributes:              maps.Clone(s.Attributes),
 		AgentModelOverrides:     cloneStringMap(s.AgentModelOverrides),
-		CustomModelsUsed:        cloneStringSlice(s.CustomModelsUsed),
-		AttachedFiles:           cloneStringSlice(s.AttachedFiles),
-		ExcludedTools:           cloneStringSlice(s.ExcludedTools),
-		AllowedTools:            cloneStringSlice(s.AllowedTools),
+		CustomModelsUsed:        slices.Clone(s.CustomModelsUsed),
+		AttachedFiles:           slices.Clone(s.AttachedFiles),
+		ExcludedTools:           slices.Clone(s.ExcludedTools),
+		AllowedTools:            slices.Clone(s.AllowedTools),
 		ExtraToolSets:           slices.Clone(s.ExtraToolSets),
 		DisableStructuredOutput: s.DisableStructuredOutput,
 		AgentName:               s.AgentName,
+		allowAgentHandoffs:      s.allowAgentHandoffs,
+		handoffAgent:            s.handoffAgent,
+		routed:                  s.routed,
 		ParentID:                s.ParentID,
-		DelegationLineage:       cloneStringSlice(s.DelegationLineage),
+		DelegationLineage:       slices.Clone(s.DelegationLineage),
 		InstructionContext:      cloneInstructionContext(s.InstructionContext),
 		MessageUsageHistory:     slices.Clone(s.MessageUsageHistory),
+		EvaluationUsageHistory:  cloneEvaluations(s.EvaluationUsageHistory),
 	}
 
 	// Start from a shallow copy of each item so value fields (Summary,
@@ -141,6 +146,9 @@ func (s *Session) Clone() *Session {
 			usageCopy := *item.Usage
 			clone.Messages[i].Usage = &usageCopy
 		}
+		clone.Messages[i].Compaction = item.Compaction.Clone()
+		clone.Messages[i].Evaluation = cloneEvaluation(item.Evaluation)
+		clone.Messages[i].RoutingDecision = cloneRoutingDecision(item.RoutingDecision)
 	}
 	return clone
 }
@@ -160,12 +168,16 @@ func cloneSessionItem(item Item) (Item, error) {
 		}
 		return Item{SubSession: clonedSub}, nil
 	case item.Summary != "":
-		cloned := Item{Summary: item.Summary, FirstKeptEntry: item.FirstKeptEntry, Cost: item.Cost, Model: item.Model}
+		cloned := Item{Summary: item.Summary, FirstKeptEntry: item.FirstKeptEntry, Cost: item.Cost, Model: item.Model, Compaction: item.Compaction.Clone()}
 		if item.Usage != nil {
 			usageCopy := *item.Usage
 			cloned.Usage = &usageCopy
 		}
 		return cloned, nil
+	case item.Evaluation != nil:
+		return Item{Evaluation: cloneEvaluation(item.Evaluation)}, nil
+	case item.RoutingDecision != nil:
+		return Item{RoutingDecision: cloneRoutingDecision(item.RoutingDecision)}, nil
 	case item.Error != nil:
 		errCopy := *item.Error
 		return Item{Error: &errCopy}, nil
@@ -233,7 +245,7 @@ func copySessionMetadata(dst, src *Session, title string) {
 	dst.Permissions = src.Permissions.Clone()
 	dst.Attributes = src.AttributesSnapshot()
 	dst.AgentModelOverrides = cloneStringMap(src.AgentModelOverrides)
-	dst.CustomModelsUsed = cloneStringSlice(src.CustomModelsUsed)
+	dst.CustomModelsUsed = slices.Clone(src.CustomModelsUsed)
 	dst.AttachedFiles = src.AttachedFilesSnapshot()
 }
 
@@ -261,8 +273,8 @@ func generateBranchTitle(parentTitle string) string {
 
 	// Check for "(branched)" pattern
 	const branchedSuffix = "(branched)"
-	if strings.HasSuffix(parentTitle, branchedSuffix) {
-		baseTitle := strings.TrimRight(parentTitle[:len(parentTitle)-len(branchedSuffix)], " \t")
+	if baseTitle, ok := strings.CutSuffix(parentTitle, branchedSuffix); ok {
+		baseTitle = strings.TrimRight(baseTitle, " \t")
 		return baseTitle + " (branch 2)"
 	}
 
@@ -327,7 +339,8 @@ func cloneEvalCriteria(src *EvalCriteria) *EvalCriteria {
 		return nil
 	}
 	cp := *src
-	cp.Relevance = cloneStringSlice(src.Relevance)
+	cp.Relevance = slices.Clone(src.Relevance)
+	cp.Assertions = slices.Clone(src.Assertions)
 	return &cp
 }
 
@@ -336,8 +349,8 @@ func cloneEvalResult(src *EvalResult) *EvalResult {
 		return nil
 	}
 	cp := *src
-	cp.Successes = cloneStringSlice(src.Successes)
-	cp.Failures = cloneStringSlice(src.Failures)
+	cp.Successes = slices.Clone(src.Successes)
+	cp.Failures = slices.Clone(src.Failures)
 	cp.Checks = cloneEvalResultChecks(src.Checks)
 	if src.Termination != nil {
 		term := *src.Termination
@@ -359,7 +372,17 @@ func cloneEvalResultChecks(src EvalResultChecks) EvalResultChecks {
 	if src.Relevance != nil {
 		relevance := *src.Relevance
 		relevance.Results = slices.Clone(src.Relevance.Results)
+		for i := range relevance.Results {
+			if p := relevance.Results[i].Probability; p != nil {
+				relevance.Results[i].Probability = new(*p)
+			}
+		}
 		cp.Relevance = &relevance
+	}
+	if src.Assertions != nil {
+		assertions := *src.Assertions
+		assertions.Results = slices.Clone(src.Assertions.Results)
+		cp.Assertions = &assertions
 	}
 	return cp
 }
@@ -369,13 +392,6 @@ func cloneStringMap(src map[string]string) map[string]string {
 		return nil
 	}
 	return maps.Clone(src)
-}
-
-func cloneStringSlice(src []string) []string {
-	if src == nil {
-		return nil
-	}
-	return slices.Clone(src)
 }
 
 func setParentIDs(sess *Session) {

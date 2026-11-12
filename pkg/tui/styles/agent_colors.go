@@ -106,19 +106,12 @@ func InvalidateAgentColorCache() {
 	rebuildAgentColorCache()
 }
 
-// lookupAgentIndex returns the palette index for the given agent name
-// and whether the agent was found. Must be called with agentRegistry.RLock held.
-func lookupAgentIndex(agentName string) (int, bool) {
-	idx, ok := agentRegistry.indices[agentName]
-	return idx, ok
-}
-
 // AgentBadgeColorsFor returns the badge foreground/background colors for a given agent name.
 func AgentBadgeColorsFor(agentName string) AgentBadgeColors {
 	agentRegistry.RLock()
 	defer agentRegistry.RUnlock()
 
-	idx, ok := lookupAgentIndex(agentName)
+	idx, ok := agentRegistry.indices[agentName]
 	if !ok || len(agentRegistry.badgeStyles) == 0 {
 		return fallbackBadgeColors
 	}
@@ -131,7 +124,7 @@ func AgentBadgeStyleFor(agentName string) lipgloss.Style {
 	agentRegistry.RLock()
 	defer agentRegistry.RUnlock()
 
-	idx, ok := lookupAgentIndex(agentName)
+	idx, ok := agentRegistry.indices[agentName]
 	if !ok || len(agentRegistry.badgeStyles) == 0 {
 		return fallbackBadgeStyle
 	}
@@ -144,7 +137,7 @@ func AgentAccentStyleFor(agentName string) lipgloss.Style {
 	agentRegistry.RLock()
 	defer agentRegistry.RUnlock()
 
-	idx, ok := lookupAgentIndex(agentName)
+	idx, ok := agentRegistry.indices[agentName]
 	if !ok || len(agentRegistry.accentStyles) == 0 {
 		return fallbackAccentStyle
 	}

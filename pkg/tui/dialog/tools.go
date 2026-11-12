@@ -36,8 +36,7 @@ type toolsDialog struct {
 // degraded".
 func NewToolsDialog(toolsets []tools.ToolsetStatus, toolList []tools.Tool) Dialog {
 	// Sort tools by category then name.
-	sortedTools := make([]tools.Tool, len(toolList))
-	copy(sortedTools, toolList)
+	sortedTools := slices.Clone(toolList)
 	slices.SortFunc(sortedTools, func(a, b tools.Tool) int {
 		if c := strings.Compare(strings.ToLower(a.Category), strings.ToLower(b.Category)); c != 0 {
 			return c

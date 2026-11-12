@@ -24,6 +24,8 @@
 package kit
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -45,8 +47,11 @@ import (
 	"github.com/docker/portcullis"
 	"github.com/fatih/color"
 
+	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/paths"
@@ -77,7 +82,10 @@ type Options struct {
 	// and skills to ship.
 	AgentRef string
 
-	// EnvProvider is forwarded to [config.Resolve] so URL-sourced
+	// Source freezes an already resolved agent selection when provided.
+	Source config.Source
+
+	// EnvProvider is forwarded to [sources.Resolve] so URL-sourced
 	// agents can pick up GITHUB_TOKEN. May be nil.
 	EnvProvider environment.Provider
 
@@ -90,10 +98,9 @@ type Options struct {
 	HostHome string
 
 	// Workspace is the absolute host path that the sandbox mounts as
-	// the agent's live working directory. Files under it are not
-	// staged into the kit because the sandbox sees them through the
-	// live mount; staging them would duplicate content and ship a
-	// stale, redacted copy alongside the live one.
+	// the agent's live working directory. Paths under it are left to
+	// the live mount, even if symlinks point outside it; their host
+	// targets are never imported through those paths.
 	Workspace string
 
 	// CacheDir is the parent directory under which the kit will be
@@ -170,15 +177,14 @@ type Entry struct {
 	// manifest so the sandbox cannot learn the host layout.
 	Source string `json:"-"`
 	// Target is the path relative to the kit root. Empty when the
-	// file isn't staged into the kit because it's already reachable
-	// inside the sandbox via the live workspace mount.
+	// file isn't staged into the kit because it's left to the live
+	// workspace mount.
 	Target string `json:"target,omitempty"`
 }
 
 // IsStaged reports whether the entry has a copy under the kit root.
-// A non-staged entry is one the agent reaches via the live workspace
-// mount instead, surfaced in the manifest and the printed summary so
-// the user can see what the agent will read.
+// A non-staged entry is left to the live workspace mount instead;
+// its symlink target may be unavailable inside the sandbox.
 func (e Entry) IsStaged() bool {
 	return e.Target != ""
 }
@@ -415,11 +421,14 @@ func promote(stagingDir, finalDir string) error {
 }
 
 func loadConfig(ctx context.Context, opts Options) (*latestcfg.Config, error) {
-	source, err := config.Resolve(opts.AgentRef, opts.EnvProvider)
+	if opts.Source != nil {
+		return config.Load(ctx, opts.Source, config.WithFlavors(opts.Flavors...), config.WithVersions(legacy.Register))
+	}
+	source, err := sources.Resolve(opts.AgentRef, opts.EnvProvider)
 	if err != nil {
 		return nil, err
 	}
-	return config.Load(ctx, source, config.WithFlavors(opts.Flavors...))
+	return config.Load(ctx, source, config.WithFlavors(opts.Flavors...), config.WithVersions(legacy.Register))
 }
 
 // stageSkills copies every local skill the agent config enables into
@@ -502,24 +511,26 @@ func localSkillFilter(cfg *latestcfg.Config) (map[string]bool, bool) {
 	return include, true
 }
 
-// stagePromptFiles walks every agent in cfg, records every
-// add_prompt_files entry the agent will read, and stages the ones
-// that aren't already reachable inside the sandbox via the live
-// workspace mount.
-//
-// Files under workspace are NOT copied (the live mount surfaces them
-// directly), but they are still recorded in the returned [Entry]
-// slice with Target == "" so the printed kit summary reflects every
-// file the agent will see — not just the ones the host had to ship.
+// stagePromptFiles records discovered add_prompt_files entries and stages
+// external files. Paths under workspace are left to the live mount, even
+// when symlinks point outside it, and recorded with Target == "".
 //
 // When a single name (e.g. "AGENTS.md") resolves to both a workspace
 // match and a host-home match we record both: the workspace one
 // surfaces through the live mount and the host-home one is staged
 // into the kit, exactly mirroring the runtime [promptfiles.Paths]
 // behaviour that returns up to two paths.
+//
+// The nested files listed by add_prompt_files_depth are not staged: they
+// live under workspace by construction and are read on demand through the
+// live mount.
 func stagePromptFiles(kitDir string, cfg *latestcfg.Config, hostCwd, hostHome, workspace string) ([]Entry, []Redaction, error) {
-	target := filepath.Join(kitDir, promptfiles.KitSubdir)
-	if err := os.MkdirAll(target, 0o750); err != nil {
+	root, err := os.OpenRoot(kitDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening kit directory: %w", err)
+	}
+	defer root.Close()
+	if err := root.MkdirAll(promptfiles.KitSubdir, 0o750); err != nil {
 		return nil, nil, fmt.Errorf("creating kit prompt-files dir: %w", err)
 	}
 
@@ -531,17 +542,18 @@ func stagePromptFiles(kitDir string, cfg *latestcfg.Config, hostCwd, hostHome, w
 	)
 	for _, agent := range cfg.Agents {
 		for _, name := range agent.AddPromptFiles {
+			if !filepath.IsLocal(name) {
+				return nil, nil, fmt.Errorf("prompt file %q must be a local relative path for kit staging", name)
+			}
 			if seen[name] {
 				continue
 			}
 			seen[name] = true
 
 			for _, src := range promptfiles.Paths(hostCwd, hostHome, "", name) {
-				if isUnder(src, workspace) {
-					// The live mount will surface it inside the sandbox —
-					// no copy needed, but record the entry so the user can
-					// see in the kit summary that AGENTS.md (etc.) is
-					// covered.
+				if pathx.IsWithin(src, workspace) || isUnder(src, workspace) {
+					// Leave workspace paths to the live mount, even when a
+					// symlink points outside; never import its host target.
 					entries = append(entries, Entry{Source: src, Target: ""})
 					continue
 				}
@@ -645,62 +657,112 @@ func sanitise(name string) string {
 // [copyFile] so [Redaction.Target] entries are recorded relative to
 // it (matching [Entry.Target]).
 func copyTree(kitRoot, src, dst string) ([]Redaction, error) {
-	root := resolveAbs(src)
-	if root == "" {
-		return nil, fmt.Errorf("resolving source: %s", src)
+	abs, err := filepath.Abs(src)
+	if err != nil {
+		return nil, err
+	}
+	canonicalParent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return nil, err
+	}
+	parent, err := os.OpenRoot(canonicalParent)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.Close()
+	name := filepath.Base(abs)
+	info, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return nil, nil
+	}
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	opened, err := root.Stat(".")
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("skill directory %q changed while opening", src)
+	}
+	return copyRootedTree(kitRoot, root, src, dst)
+}
+
+func copyRootedTree(kitRoot string, root *os.Root, src, dst string) ([]Redaction, error) {
+	destination, err := os.OpenRoot(kitRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer destination.Close()
+	dstRel, err := filepath.Rel(kitRoot, dst)
+	if err != nil {
+		return nil, err
+	}
+	if !filepath.IsLocal(dstRel) {
+		return nil, fmt.Errorf("destination %q escapes kit directory", dst)
 	}
 
 	var redactions []Redaction
-	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(root.FS(), ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, relErr := filepath.Rel(src, path)
-		if relErr != nil {
-			return relErr
-		}
+		rel := filepath.FromSlash(name)
 		out := filepath.Join(dst, rel)
+		source := filepath.Join(src, rel)
 
-		switch {
-		case d.IsDir():
-			return os.MkdirAll(out, 0o750)
-		case d.Type()&fs.ModeSymlink != 0:
-			realTarget, terr := filepath.EvalSymlinks(path)
-			if terr != nil {
-				return nil
-			}
-			if !isUnder(realTarget, root) {
-				slog.Warn("kit: skipping symlink that escapes skill root",
-					"link", path, "target", realTarget, "root", root)
-				return nil
-			}
-			info, sterr := os.Stat(realTarget)
-			if sterr != nil || info.IsDir() {
-				return nil
-			}
-			red, copyErr := copyFile(kitRoot, realTarget, out)
-			if copyErr != nil {
-				return copyErr
-			}
-			if red != nil {
-				redactions = append(redactions, *red)
-			}
-			return nil
-		default:
-			red, copyErr := copyFile(kitRoot, path, out)
-			if copyErr != nil {
-				return copyErr
-			}
-			if red != nil {
-				redactions = append(redactions, *red)
-			}
-			return nil
+		if d.IsDir() {
+			return destination.MkdirAll(filepath.Join(dstRel, rel), 0o750)
 		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			info, err := root.Stat(rel)
+			if err != nil {
+				path := filepath.Join(root.Name(), rel)
+				realTarget, resolveErr := filepath.EvalSymlinks(path)
+				if resolveErr != nil {
+					return nil
+				}
+				// Map absolute in-root links to relative names; the rooted open enforces confinement.
+				rel, err = filepath.Rel(root.Name(), realTarget)
+				if err != nil || !filepath.IsLocal(rel) {
+					slog.Warn("kit: skipping symlink that escapes skill root",
+						"link", path, "target", realTarget, "root", root.Name())
+					return nil
+				}
+				source = realTarget
+				info, err = root.Stat(rel)
+			}
+			if err != nil || info.IsDir() {
+				return nil
+			}
+		}
+		red, err := copyRootedFile(kitRoot, root, rel, source, out)
+		if err != nil {
+			return err
+		}
+		if red != nil {
+			redactions = append(redactions, *red)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return redactions, nil
+}
+
+func copyRootedFile(kitRoot string, root *os.Root, name, src, dst string) (*Redaction, error) {
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return copyOpenedFile(kitRoot, file, src, dst)
 }
 
 // copyFile copies a regular file from src to dst, redacting via
@@ -716,15 +778,37 @@ func copyTree(kitRoot, src, dst string) ([]Redaction, error) {
 // sandbox anyway and there's no reason to expose it to other users
 // on the host.
 func copyFile(kitRoot, src, dst string) (*Redaction, error) {
-	srcInfo, err := os.Stat(src)
+	file, err := os.Open(src)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(src)
+	defer file.Close()
+	return copyOpenedFile(kitRoot, file, src, dst)
+}
+
+func copyOpenedFile(kitRoot string, file *os.File, src, dst string) (*Redaction, error) {
+	rel, err := filepath.Rel(kitRoot, dst)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+	if !filepath.IsLocal(rel) {
+		return nil, fmt.Errorf("destination %q escapes kit directory", dst)
+	}
+	root, err := os.OpenRoot(kitRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	srcInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	if err := root.MkdirAll(filepath.Dir(rel), 0o750); err != nil {
 		return nil, err
 	}
 
@@ -735,10 +819,6 @@ func copyFile(kitRoot, src, dst string) (*Redaction, error) {
 		scrubbed := portcullis.Redact(original)
 		if scrubbed != original {
 			out = []byte(scrubbed)
-			rel, relErr := filepath.Rel(kitRoot, dst)
-			if relErr != nil {
-				rel = dst // best effort; should never happen for staged files
-			}
 			redaction = &Redaction{Source: src, Target: rel}
 		}
 	}
@@ -747,7 +827,7 @@ func copyFile(kitRoot, src, dst string) (*Redaction, error) {
 	if mode == 0 {
 		mode = 0o600
 	}
-	if err := os.WriteFile(dst, out, mode); err != nil {
+	if err := root.WriteFile(rel, out, mode); err != nil {
 		return nil, err
 	}
 	return redaction, nil
@@ -780,7 +860,7 @@ func writeManifest(dir string, m Manifest) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, manifestFile), data, 0o600)
+	return atomicfile.Write(filepath.Join(dir, manifestFile), bytes.NewReader(data), 0o600)
 }
 
 // PrintSummary writes a human-readable description of what was staged
@@ -802,8 +882,8 @@ func (r *Result) PrintSummary(w io.Writer) {
 	}
 
 	skillFiles := r.skillFilesGrouped()
-	promptEntries := append([]Entry(nil), r.Manifest.PromptFiles...)
-	sort.Slice(promptEntries, func(i, j int) bool { return promptEntries[i].Target < promptEntries[j].Target })
+	promptEntries := slices.Clone(r.Manifest.PromptFiles)
+	slices.SortFunc(promptEntries, func(a, b Entry) int { return cmp.Compare(a.Target, b.Target) })
 
 	if len(skillFiles) == 0 && len(promptEntries) == 0 {
 		return
@@ -874,8 +954,8 @@ type skillGroup struct {
 // skill's target path. The walk happens after staging is complete, so
 // it sees exactly what the sandbox will see.
 func (r *Result) skillFilesGrouped() []skillGroup {
-	entries := append([]Entry(nil), r.Manifest.Skills...)
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Target < entries[j].Target })
+	entries := slices.Clone(r.Manifest.Skills)
+	slices.SortFunc(entries, func(a, b Entry) int { return cmp.Compare(a.Target, b.Target) })
 
 	groups := make([]skillGroup, 0, len(entries))
 	for _, e := range entries {
@@ -923,34 +1003,6 @@ func plural(n int, what string) string {
 		return styleCount("1") + " " + what
 	}
 	return fmt.Sprintf("%s %ss", styleCount(strconv.Itoa(n)), what)
-}
-
-// needsAutoInstall reports whether cfg has at least one toolset that
-// the in-sandbox runtime would push through [toolinstall.EnsureCommand].
-// Today only MCP and LSP toolsets do; shell toolsets run a user-
-// supplied binary directly without auto-install.
-//
-// A toolset is a candidate when:
-//   - its type is "mcp" or "lsp" (top-level cfg.MCPs entries are
-//     also implicitly mcp);
-//   - it has a Command (no command means the in-sandbox runtime has
-//     nothing to look up on PATH);
-//   - its Version is not "false" / "off" (the per-toolset opt-out
-//     [toolinstall.EnsureCommand] honours).
-//
-// We deliberately don't try to predict whether the command will
-// actually be missing inside the sandbox image. We only know that on
-// the host. The sandbox image may already ship the binary, in which
-// case auto-install never fires and the allowlist we open is unused —
-// but unused allow rules are harmless, while a blocked auto-install
-// is an opaque "403 Blocked by network policy" that's hard to
-// diagnose. Erring on the side of allow keeps the failure mode loud
-// instead of mysterious.
-func needsAutoInstall(cfg *latestcfg.Config) bool {
-	if cfg == nil {
-		return false
-	}
-	return len(collectAutoInstallable(cfg)) > 0
 }
 
 // isAutoInstallable returns true if ts is the kind of toolset

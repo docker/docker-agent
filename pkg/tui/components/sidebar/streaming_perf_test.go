@@ -12,7 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
+	todo "github.com/docker/docker-agent/pkg/tools/builtin/todo/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/service"

@@ -43,8 +43,9 @@ func (r *agentRouter) Name() string {
 }
 
 // Set replaces the current agent name without validating that it exists
-// in the team. Used from agent_delegation.go where the validation has
-// already been performed against the team's transfer/handoff lists.
+// in the team. Callers resolve the name through the team first
+// (setCurrentAgent for delegation swaps and switchSessionAgent), and
+// WithCurrentAgent is checked by NewLocalRuntime after options apply.
 func (r *agentRouter) Set(name string) {
 	r.current.Store(&name)
 }
@@ -69,11 +70,22 @@ func (r *agentRouter) Current() *agent.Agent {
 	return a
 }
 
-// ResolveSession returns the agent for sess: when sess pins a specific
+// ResolveSession returns the agent for sess: a hook-routed session's selected
+// agent wins; then a session-local handoff agent; otherwise, when sess pins a specific
 // agent (e.g. background agent tasks), that agent is returned directly
 // instead of reading the shared current-agent field; otherwise Current
 // is returned.
 func (r *agentRouter) ResolveSession(sess *session.Session) *agent.Agent {
+	if name := sess.RouteAgent(); name != "" {
+		if a, err := r.team.Agent(name); err == nil {
+			return a
+		}
+	}
+	if name := sess.HandoffAgent(); name != "" {
+		if a, err := r.team.Agent(name); err == nil {
+			return a
+		}
+	}
 	if sess.AgentName != "" {
 		if a, err := r.team.Agent(sess.AgentName); err == nil {
 			return a

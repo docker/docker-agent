@@ -19,6 +19,9 @@ func (t *Config) UnmarshalYAML(unmarshal func(any) error) error {
 }
 
 func (t *Config) Validate() error {
+	if err := t.ValidateEvaluators(); err != nil {
+		return err
+	}
 	if err := t.Budget.validate(); err != nil {
 		return fmt.Errorf("budget: %w", err)
 	}
@@ -65,6 +68,18 @@ func (t *Config) Validate() error {
 		}
 	}
 
+	// Top-level "rag" definitions skip Toolset.validate() during YAML
+	// unmarshaling (see RAGToolset.UnmarshalYAML), so their RAGConfig is
+	// validated here instead.
+	for name, def := range t.RAG {
+		if def.RAGConfig == nil {
+			continue
+		}
+		if err := def.RAGConfig.validate(); err != nil {
+			return fmt.Errorf("rag.%s: %w", name, err)
+		}
+	}
+
 	for i := range t.Agents {
 		agent := &t.Agents[i]
 
@@ -83,6 +98,9 @@ func (t *Config) Validate() error {
 		}
 		if err := validateCompactionThreshold(agent.CompactionThreshold); err != nil {
 			return fmt.Errorf("agents.%s: %w", agent.Name, err)
+		}
+		if agent.AddPromptFilesDepth < 0 {
+			return fmt.Errorf("agents.%s: add_prompt_files_depth must be >= 0, got %d", agent.Name, agent.AddPromptFilesDepth)
 		}
 		for _, name := range agent.Budgets {
 			if _, ok := t.Budgets[name]; !ok {
@@ -172,6 +190,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	if m.Cost != nil {
 		return errors.New("first_available cannot be combined with cost (set it on the candidate models instead)")
 	}
+	if m.OutputCapabilities != nil {
+		return errors.New("first_available cannot be combined with output_capabilities (set output_capabilities.image on the candidate models instead)")
+	}
 	for i, ref := range m.FirstAvailable {
 		if strings.TrimSpace(ref) == "" {
 			return fmt.Errorf("first_available[%d] must not be empty", i)
@@ -230,16 +251,16 @@ func (a *AgentConfig) validateHarness() error {
 
 	h := a.Harness
 	switch h.Type {
-	case "claude-code", "codex", "pi", "opencode":
+	case "claude-code", "codex", "pi", "opencode", "command-code":
 	case "":
 		return errors.New("harness.type is required")
 	default:
-		return fmt.Errorf("unsupported harness.type %q (must be one of: claude-code, codex, pi, opencode)", h.Type)
+		return fmt.Errorf("unsupported harness.type %q (must be one of: claude-code, codex, pi, opencode, command-code)", h.Type)
 	}
 
 	if h.Effort != "" {
-		if h.Type != "claude-code" {
-			return errors.New("harness.effort can only be used with harness.type 'claude-code'")
+		if h.Type != "claude-code" && h.Type != "command-code" {
+			return errors.New("harness.effort can only be used with harness.type 'claude-code' or 'command-code'")
 		}
 		switch h.Effort {
 		case "low", "medium", "high", "xhigh", "max":
@@ -265,17 +286,17 @@ func (t *Toolset) validate() error {
 	if t.Path != "" && t.Type != "memory" && t.Type != "tasks" {
 		return errors.New("path can only be used with type 'memory' or 'tasks'")
 	}
-	if len(t.PostEdit) > 0 && t.Type != "filesystem" {
-		return errors.New("post_edit can only be used with type 'filesystem'")
+	if len(t.PostEdit) > 0 && t.Type != "filesystem" && t.Type != "file" {
+		return errors.New("post_edit can only be used with type 'filesystem' or 'file'")
 	}
 	if t.IgnoreVCS != nil && t.Type != "filesystem" {
 		return errors.New("ignore_vcs can only be used with type 'filesystem'")
 	}
-	if len(t.AllowList) > 0 && t.Type != "filesystem" {
-		return errors.New("allow_list can only be used with type 'filesystem'")
+	if len(t.AllowList) > 0 && t.Type != "filesystem" && t.Type != "file" {
+		return errors.New("allow_list can only be used with type 'filesystem' or 'file'")
 	}
-	if len(t.DenyList) > 0 && t.Type != "filesystem" {
-		return errors.New("deny_list can only be used with type 'filesystem'")
+	if len(t.DenyList) > 0 && t.Type != "filesystem" && t.Type != "file" {
+		return errors.New("deny_list can only be used with type 'filesystem' or 'file'")
 	}
 	if err := validatePathRootEntries("allow_list", t.AllowList); err != nil {
 		return err
@@ -301,6 +322,12 @@ func (t *Toolset) validate() error {
 	if err := validateNonEmptyEntries("blocked_servers", t.BlockedServers); err != nil {
 		return err
 	}
+	if t.MaxOutputBytes != nil && t.Type != "openapi" {
+		return errors.New("max_output_bytes can only be used with type 'openapi'")
+	}
+	if t.EscapeHTML != nil && t.Type != "fetch" {
+		return errors.New("escape_html can only be used with type 'fetch'")
+	}
 	if len(t.AllowedDomains) > 0 && t.Type != "fetch" {
 		return errors.New("allowed_domains can only be used with type 'fetch'")
 	}
@@ -315,9 +342,6 @@ func (t *Toolset) validate() error {
 	}
 	if t.Recall != nil && t.Type != "background_jobs" {
 		return errors.New("recall can only be used with type 'background_jobs'")
-	}
-	if t.Safer != nil && t.Type != "shell" {
-		return errors.New("safer can only be used with type 'shell'")
 	}
 	if len(t.AllowedDomains) > 0 && len(t.BlockedDomains) > 0 {
 		return errors.New("allowed_domains and blocked_domains are mutually exclusive")
@@ -346,7 +370,7 @@ func (t *Toolset) validate() error {
 	if t.Ref != "" && t.Type != "mcp" && t.Type != "rag" {
 		return errors.New("ref can only be used with type 'mcp' or 'rag'")
 	}
-	if (t.Remote.URL != "" || t.Remote.TransportType != "" || t.Remote.OAuth != nil) && t.Type != "mcp" {
+	if (t.Remote.URL != "" || t.Remote.TransportType != "" || t.Remote.OAuth != nil || t.Remote.StandaloneSSE) && t.Type != "mcp" {
 		return errors.New("remote can only be used with type 'mcp'")
 	}
 	if (len(t.Remote.Headers) > 0) && (t.Type != "mcp" && t.Type != "a2a") {
@@ -410,6 +434,9 @@ func (t *Toolset) validate() error {
 		if t.AllowPrivateIPsEnabled() && t.Remote.URL == "" && t.Ref == "" {
 			return errors.New("allow_private_ips can only be used with type 'fetch', 'api', 'openapi', 'a2a' or remote MCP toolsets")
 		}
+		if t.Remote.StandaloneSSE && t.Remote.URL == "" {
+			return errors.New("standalone_sse requires remote url to be set")
+		}
 		if t.Remote.OAuth != nil {
 			if t.Remote.URL == "" {
 				return errors.New("oauth requires remote url to be set")
@@ -438,6 +465,9 @@ func (t *Toolset) validate() error {
 		if t.URL == "" {
 			return errors.New("openapi toolset requires a url to be set")
 		}
+		if t.MaxOutputBytes != nil && *t.MaxOutputBytes < 0 {
+			return errors.New("max_output_bytes must not be negative")
+		}
 	case "open_url":
 		if t.URL == "" {
 			return errors.New("open_url toolset requires a url to be set")
@@ -451,10 +481,24 @@ func (t *Toolset) validate() error {
 		if t.Ref == "" && t.RAGConfig == nil {
 			return errors.New("rag toolset requires either ref or rag_config")
 		}
+		if t.RAGConfig != nil {
+			if err := t.RAGConfig.validate(); err != nil {
+				return err
+			}
+		}
 	case "background_agents":
 		// no additional validation needed
 	}
 
+	return nil
+}
+
+// validate rejects an invalid RAGConfig. Currently only IndexingTimeout is
+// checked; a negative value would make context.WithTimeout fire immediately.
+func (c *RAGConfig) validate() error {
+	if c.IndexingTimeout != nil && c.IndexingTimeout.Duration < 0 {
+		return errors.New("indexing_timeout must not be negative")
+	}
 	return nil
 }
 
@@ -475,12 +519,7 @@ func validateNonEmptyEntries(field string, entries []string) error {
 // would resolve to the working directory and silently widen (or close) the
 // matched set in surprising ways.
 func validatePathRootEntries(field string, entries []string) error {
-	for i, e := range entries {
-		if strings.TrimSpace(e) == "" {
-			return fmt.Errorf("%s[%d] must not be empty", field, i)
-		}
-	}
-	return nil
+	return validateNonEmptyEntries(field, entries)
 }
 
 // validateDomainPatterns rejects empty / whitespace-only entries and

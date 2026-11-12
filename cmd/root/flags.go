@@ -14,6 +14,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -59,12 +60,17 @@ func sessionDBPath(flagValue string) string {
 	return filepath.Join(paths.GetDataDir(), "session.db")
 }
 
-func setupWorkingDirectory(workingDir string) error {
-	if workingDir == "" {
+// setupWorkingDirectory applies a --working-dir override: it chdirs into the
+// directory and stores the absolute path back into runConfig.WorkingDir so
+// downstream consumers (session workspace provenance, toolsets, servers) see
+// an absolute root — after the chdir a relative flag value would otherwise
+// resolve against itself.
+func setupWorkingDirectory(runConfig *config.RuntimeConfig) error {
+	if runConfig.WorkingDir == "" {
 		return nil
 	}
 
-	absWd, err := filepath.Abs(workingDir)
+	absWd, err := filepath.Abs(runConfig.WorkingDir)
 	if err != nil {
 		return fmt.Errorf("invalid working directory: %w", err)
 	}
@@ -79,6 +85,7 @@ func setupWorkingDirectory(workingDir string) error {
 	}
 
 	_ = os.Setenv("PWD", absWd)
+	runConfig.WorkingDir = absWd
 	slog.Debug("Working directory set", "path", absWd)
 
 	return nil
@@ -105,12 +112,11 @@ func canonize(endpoint string) string {
 type userConfigLoader func() (*userconfig.Config, error)
 
 func addGatewayFlags(cmd *cobra.Command, runConfig *config.RuntimeConfig, loadUserConfig userConfigLoader) {
+	runConfig.ModelsDevFallback = embedded.Snapshot
 	cmd.PersistentFlags().StringVar(&runConfig.ModelsGateway, flagModelsGateway, "", "Set the models gateway address")
 
 	persistentPreRunE := cmd.PersistentPreRunE
 	cmd.PersistentPreRunE = func(_ *cobra.Command, args []string) error {
-		ctx := cmd.Context()
-
 		// Run any inherited PersistentPreRunE first so directory
 		// overrides (--config-dir, --cache-dir, --data-dir) and other
 		// global setup land before we materialise the env provider —
@@ -120,6 +126,7 @@ func addGatewayFlags(cmd *cobra.Command, runConfig *config.RuntimeConfig, loadUs
 		if err := runParentPreRun(cmd, persistentPreRunE, args); err != nil {
 			return err
 		}
+		ctx := cmd.Context()
 
 		userCfg, err := loadUserConfig()
 		if err != nil {
@@ -164,7 +171,7 @@ func addGatewayFlags(cmd *cobra.Command, runConfig *config.RuntimeConfig, loadUs
 			runConfig.Providers = userCfg.GetProviders()
 		}
 
-		return setupWorkingDirectory(runConfig.WorkingDir)
+		return setupWorkingDirectory(runConfig)
 	}
 }
 

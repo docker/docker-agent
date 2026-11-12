@@ -2,6 +2,7 @@ package modelinfo
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -120,4 +121,105 @@ func TestLoadCaps_MissDiagnosticDedup(t *testing.T) {
 	assert.Equal(t, 1, lines, "miss diagnostic must be logged exactly once per model id, got %d", lines)
 	assert.Contains(t, buf.String(), "not found in models.dev")
 	assert.Contains(t, buf.String(), "capabilities", "diagnostic should point at the config override")
+}
+
+// TestResolveCapsFromModel pins the store-free resolution path used by the
+// runtime's strip transform: same precedence contract as ResolveCaps, but
+// operating on an already-fetched models.dev record.
+func TestResolveCapsFromModel(t *testing.T) {
+	t.Parallel()
+
+	multimodal := &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text", "image", "audio", "video"}}}
+
+	cases := []struct {
+		name                     string
+		model                    *modelsdev.Model
+		override                 *CapsOverride
+		image, pdf, audio, video bool
+	}{
+		{name: "modalities drive caps", model: multimodal, image: true, audio: true, video: true},
+		{name: "override wins over modalities", model: multimodal, override: &CapsOverride{Audio: true}, audio: true},
+		{name: "override wins over nil model", model: nil, override: &CapsOverride{Image: true, PDF: true, Audio: true, Video: true}, image: true, pdf: true, audio: true, video: true},
+		{name: "nil model is conservative text-only", model: nil},
+		{name: "empty modalities are conservative text-only", model: &modelsdev.Model{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc := ResolveCapsFromModel(tc.model, tc.override)
+			assert.Equal(t, tc.image, mc.SupportsImage())
+			assert.Equal(t, tc.pdf, mc.SupportsPDF())
+			assert.Equal(t, tc.audio, mc.SupportsAudio())
+			assert.Equal(t, tc.video, mc.SupportsVideo())
+		})
+	}
+}
+
+func TestResolveCaps_ChatGPTCatalogFallback(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		model    string
+		direct   []string
+		override *CapsOverride
+		want     ModelCapabilities
+	}{
+		{name: "image input only", model: "gpt-6.1-sol", want: CapsWith(true, false, false, false)},
+		{name: "unknown model", model: "unknown", want: CapsWith(false, false, false, false)},
+		{name: "direct entry wins", model: "gpt-6.1-sol", direct: []string{"text", "audio"}, want: CapsWith(false, false, true, false)},
+		{name: "explicit false wins", model: "gpt-6.1-sol", override: &CapsOverride{}, want: CapsWith(false, false, false, false)},
+		{name: "explicit true wins even for unknown", model: "unknown", override: &CapsOverride{Image: true, PDF: true}, want: CapsWith(true, true, false, false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			providers := map[string]modelsdev.Provider{
+				"openai": {Models: map[string]modelsdev.Model{
+					"gpt-6.1-sol": {Modalities: modelsdev.Modalities{Input: []string{"text", "image", "pdf", "audio", "video"}}},
+				}},
+			}
+			if tc.direct != nil {
+				providers["chatgpt"] = modelsdev.Provider{Models: map[string]modelsdev.Model{
+					tc.model: {Modalities: modelsdev.Modalities{Input: tc.direct}},
+				}}
+			}
+			store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: providers})
+			got := ResolveCaps(t.Context(), store, modelsdev.NewID("chatgpt", tc.model), tc.override)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestAliasedCatalogCaps_Misses(t *testing.T) {
+	t.Parallel()
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"openai": {Models: map[string]modelsdev.Model{
+			"vision":    {Modalities: modelsdev.Modalities{Input: []string{"image", "pdf"}}},
+			"text-only": {Modalities: modelsdev.Modalities{Input: []string{"text"}, Output: []string{"image"}}},
+		}},
+	}})
+	for _, id := range []modelsdev.ID{
+		modelsdev.NewID("chatgpt", "missing"),
+		modelsdev.NewID("other", "vision"),
+		modelsdev.NewID("", "vision"),
+		modelsdev.NewID("chatgpt", ""),
+	} {
+		caps, ok := AliasedCatalogCaps(t.Context(), store, id)
+		assert.False(t, ok, id.String())
+		assert.Equal(t, ModelCapabilities{}, caps)
+	}
+	caps, ok := AliasedCatalogCaps(t.Context(), store, modelsdev.NewID("chatgpt", "text-only"))
+	assert.True(t, ok)
+	assert.Equal(t, ModelCapabilities{}, caps, "output images must not imply image input")
+
+	caps, ok = AliasedCatalogCaps(t.Context(), nil, modelsdev.NewID("chatgpt", "vision"))
+	assert.False(t, ok)
+	assert.Equal(t, ModelCapabilities{}, caps)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	caps, ok = AliasedCatalogCaps(ctx, store, modelsdev.NewID("chatgpt", "vision"))
+	assert.False(t, ok)
+	assert.Equal(t, ModelCapabilities{}, caps)
 }

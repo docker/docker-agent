@@ -46,6 +46,7 @@ func maxIterations(_ context.Context, in *hooks.Input, args []string) (*hooks.Ou
 		Decision: hooks.DecisionBlockValue,
 		Reason: fmt.Sprintf(
 			"Agent terminated: max_iterations builtin reached its limit of %d model call(s).",
-			limit),
+			limit,
+		),
 	}, nil
 }

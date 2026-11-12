@@ -1,29 +1,25 @@
 package config
 
 import (
-	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/empty"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/content"
+	"github.com/docker/docker-agent/pkg/configsize"
 	"github.com/docker/docker-agent/pkg/environment"
-	"github.com/docker/docker-agent/pkg/memoize"
-	"github.com/docker/docker-agent/pkg/remote"
+	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/paths"
 )
 
 // newURLSourceForTest constructs a urlSource that bypasses the HTTPS-only and
@@ -32,225 +28,11 @@ import (
 // binds to 127.0.0.1 over plain HTTP.
 func newURLSourceForTest(rawURL string, envProvider environment.Provider) Source {
 	return &urlSource{
-		url:         rawURL,
-		envProvider: envProvider,
-		unsafe:      true,
+		url:             rawURL,
+		envProvider:     envProvider,
+		unsafe:          true,
+		encryptedConfig: &atomic.Pointer[string]{},
 	}
-}
-
-func TestOCISource_DigestReference_ServesFromCache(t *testing.T) {
-	t.Parallel()
-
-	// Create a temporary content store and store a test artifact.
-	storeDir := t.TempDir()
-	store, err := content.NewStore(content.WithBaseDir(storeDir))
-	require.NoError(t, err)
-
-	testData := []byte("version: v1\nname: test-agent")
-	layer := static.NewLayer(testData, "application/yaml")
-	img, err := mutate.AppendLayers(empty.Image, layer)
-	require.NoError(t, err)
-	img = mutate.Annotations(img, map[string]string{
-		"io.docker.agent.version": "test",
-	}).(v1.Image)
-
-	ref := "test-digest-cache/agent:latest"
-	digest, err := store.StoreArtifact(img, ref)
-	require.NoError(t, err)
-
-	// Build a digest reference using the stored digest.
-	digestRef := "test-digest-cache/agent@" + digest
-
-	// Read via ociSource. Since the reference is pinned by digest and is
-	// present in the local store, this must succeed without any network call.
-	// We override the default store directory via an env-based approach;
-	// instead, we directly exercise the cache-hit logic by verifying the
-	// store lookup works with the normalized key.
-	storeKey, err := remote.NormalizeReference(digestRef)
-	require.NoError(t, err)
-
-	// Verify the store can resolve the digest key directly.
-	data, err := store.GetArtifact(storeKey)
-	require.NoError(t, err)
-	assert.Equal(t, string(testData), data)
-
-	// Also verify that IsDigestReference correctly identifies this.
-	assert.True(t, remote.IsDigestReference(digestRef))
-	assert.False(t, remote.IsDigestReference(ref))
-}
-
-// storeTestArtifact writes an agent YAML artifact into the default content
-// store (rooted at $HOME, which the caller must point at a temp dir) under
-// the given tag reference.
-func storeTestArtifact(t *testing.T, ref string, data []byte) string {
-	t.Helper()
-
-	store, err := content.NewStore()
-	require.NoError(t, err)
-
-	layer := static.NewLayer(data, "application/yaml")
-	img, err := mutate.AppendLayers(empty.Image, layer)
-	require.NoError(t, err)
-	img = mutate.Annotations(img, map[string]string{
-		"io.docker.agent.version": "test",
-	}).(v1.Image)
-
-	digest, err := store.StoreArtifact(img, ref)
-	require.NoError(t, err)
-	return digest
-}
-
-// stubOCIPull replaces the registry pull with fn for the test's duration.
-func stubOCIPull(t *testing.T, fn func(ctx context.Context, ref string, force bool) (string, error)) {
-	t.Helper()
-	original := pullOCIArtifact
-	pullOCIArtifact = fn
-	t.Cleanup(func() { pullOCIArtifact = original })
-}
-
-// resetOCIMemoizer swaps in a fresh read memoizer so tests neither observe
-// nor leak cached reads across tests and repeated runs (-count=2).
-func resetOCIMemoizer(t *testing.T) {
-	t.Helper()
-	original := ociReadMemoizer
-	ociReadMemoizer = memoize.New[[]byte](time.Minute)
-	t.Cleanup(func() { ociReadMemoizer = original })
-}
-
-// Not parallel: stubs the package-level pullOCIArtifact and re-homes the
-// default content store via t.Setenv.
-func TestOCISource_Read_MemoizesSuccessfulReads(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	resetOCIMemoizer(t)
-
-	testData := []byte("version: v1\nname: memoized-agent")
-	ref := "test-memoize/agent:latest"
-	storeTestArtifact(t, ref, testData)
-
-	var pulls atomic.Int32
-	stubOCIPull(t, func(context.Context, string, bool) (string, error) {
-		pulls.Add(1)
-		return "", nil
-	})
-
-	source := NewOCISource(ref)
-	for range 3 {
-		data, err := source.Read(t.Context())
-		require.NoError(t, err)
-		assert.Equal(t, testData, data)
-	}
-	assert.Equal(t, int32(1), pulls.Load(), "repeated reads of the same ref must pull only once")
-
-	// An equivalent form of the same reference must hit the same cache entry.
-	data, err := NewOCISource("index.docker.io/test-memoize/agent:latest").Read(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, testData, data)
-	assert.Equal(t, int32(1), pulls.Load(), "equivalent refs must share the cache entry")
-}
-
-// Not parallel: stubs the package-level pullOCIArtifact and re-homes the
-// default content store via t.Setenv.
-func TestOCISource_Read_DoesNotCacheFailures(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	resetOCIMemoizer(t)
-
-	ref := "test-memoize-errors/agent:latest"
-
-	// No local artifact and a failing pull: Read must fail.
-	var pulls atomic.Int32
-	stubOCIPull(t, func(context.Context, string, bool) (string, error) {
-		pulls.Add(1)
-		return "", errors.New("registry unreachable")
-	})
-
-	source := NewOCISource(ref)
-	_, err := source.Read(t.Context())
-	require.Error(t, err)
-
-	// Make the artifact available and the pull succeed: the earlier failure
-	// must not have been cached, so Read retries and succeeds.
-	testData := []byte("version: v1\nname: retried-agent")
-	storeTestArtifact(t, ref, testData)
-	stubOCIPull(t, func(context.Context, string, bool) (string, error) {
-		pulls.Add(1)
-		return "", nil
-	})
-
-	data, err := source.Read(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, testData, data)
-	assert.Equal(t, int32(2), pulls.Load(), "a failed read must be retried, not served from cache")
-}
-
-// Not parallel: stubs the package-level pullOCIArtifact and re-homes the
-// default content store via t.Setenv.
-func TestOCISource_Read_CacheIsScopedToRegistry(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	resetOCIMemoizer(t)
-
-	// Same repository and tag on two different registries: distinct trust
-	// boundaries, so each must do its own pull instead of sharing an entry.
-	testData := []byte("version: v1\nname: scoped-agent")
-	storeTestArtifact(t, "test-scoped/agent:latest", testData)
-
-	var pulls atomic.Int32
-	stubOCIPull(t, func(context.Context, string, bool) (string, error) {
-		pulls.Add(1)
-		return "", nil
-	})
-
-	_, err := NewOCISource("registry-a.example.com/test-scoped/agent:latest").Read(t.Context())
-	require.NoError(t, err)
-	_, err = NewOCISource("registry-b.example.com/test-scoped/agent:latest").Read(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, int32(2), pulls.Load(), "refs differing only by registry must not share a cache entry")
-}
-
-// Not parallel: stubs the package-level pullOCIArtifact and re-homes the
-// default content store via t.Setenv.
-func TestOCISource_Read_DoesNotCacheDegradedFallback(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	resetOCIMemoizer(t)
-
-	// Artifact is available locally but the registry is unreachable: Read
-	// succeeds by falling back to the local store.
-	testData := []byte("version: v1\nname: degraded-agent")
-	ref := "test-degraded/agent:latest"
-	storeTestArtifact(t, ref, testData)
-
-	var pulls atomic.Int32
-	stubOCIPull(t, func(context.Context, string, bool) (string, error) {
-		pulls.Add(1)
-		return "", errors.New("registry unreachable")
-	})
-
-	source := NewOCISource(ref)
-	for i := 1; i <= 2; i++ {
-		data, err := source.Read(t.Context())
-		require.NoError(t, err)
-		assert.Equal(t, testData, data)
-		assert.Equal(t, int32(i), pulls.Load(), "a degraded fallback read must not be cached; the registry must be retried")
-	}
-
-	// Once the registry recovers, the validated read IS cached.
-	stubOCIPull(t, func(context.Context, string, bool) (string, error) {
-		pulls.Add(1)
-		return "", nil
-	})
-	for range 2 {
-		data, err := source.Read(t.Context())
-		require.NoError(t, err)
-		assert.Equal(t, testData, data)
-	}
-	assert.Equal(t, int32(3), pulls.Load(), "a validated read must be cached again")
 }
 
 func TestURLSource_Read(t *testing.T) {
@@ -269,6 +51,122 @@ func TestURLSource_Read(t *testing.T) {
 	data, err := source.Read(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, "test content", string(data))
+}
+
+func TestURLSource_Read_SizeLimit(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		size          int64
+		contentLength bool
+		wantError     bool
+	}{
+		{name: "exact boundary", size: configsize.MaxBytes, contentLength: true},
+		{name: "over boundary", size: configsize.MaxBytes + 1, contentLength: true, wantError: true},
+		{name: "unknown length over boundary", size: configsize.MaxBytes + 1, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			paths.SetDataDir(t.TempDir())
+			t.Cleanup(func() { paths.SetDataDir("") })
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if test.contentLength {
+					w.Header().Set("Content-Length", strconv.FormatInt(test.size, 10))
+				}
+				// Advertise an encrypted-config digest as a Docker source would;
+				// an oversized body must error out before any capture/cache happens.
+				w.Header().Set(httpclient.EncryptedConfigDigestHeader, "sha256:deadbeef")
+				_, _ = io.CopyN(w, zeroReader{}, test.size)
+			}))
+			t.Cleanup(server.Close)
+
+			source := newURLSourceForTest(server.URL, nil)
+			data, err := source.Read(t.Context())
+			if test.wantError {
+				require.ErrorIs(t, err, configsize.ErrTooLarge)
+				require.NotErrorIs(t, err, ErrSourceFetchFailed)
+				cachePath := filepath.Join(getURLCacheDir(), hashURL(server.URL))
+				_, cacheErr := os.Stat(cachePath)
+				require.ErrorIs(t, cacheErr, os.ErrNotExist)
+				_, encErr := os.Stat(cachePath + ".enc")
+				require.ErrorIs(t, encErr, os.ErrNotExist)
+				assert.Empty(t, source.(EncryptedConfigSource).EncryptedConfig())
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, data, int(test.size))
+		})
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+func TestURLSource_Read_CacheSizeLimit(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		response  string
+		size      int64
+		wantError bool
+	}{
+		{name: "304 exact boundary", response: "304", size: configsize.MaxBytes},
+		{name: "304 over boundary", response: "304", size: configsize.MaxBytes + 1, wantError: true},
+		{name: "network over boundary", response: "network", size: configsize.MaxBytes + 1, wantError: true},
+		{name: "HTTP error over boundary", response: "HTTP error", size: configsize.MaxBytes + 1, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			paths.SetDataDir(t.TempDir())
+			t.Cleanup(func() { paths.SetDataDir("") })
+
+			var server *httptest.Server
+			switch test.response {
+			case "304":
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusNotModified)
+				}))
+			case "network":
+				server = httptest.NewServer(http.NotFoundHandler())
+				server.Close()
+			case "HTTP error":
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+				}))
+			default:
+				t.Fatalf("unknown response %q", test.response)
+			}
+			if test.response != "network" {
+				t.Cleanup(server.Close)
+			}
+
+			cachePath := filepath.Join(getURLCacheDir(), hashURL(server.URL))
+			require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o700))
+			require.NoError(t, writeZeroFile(cachePath, test.size))
+
+			data, err := newURLSourceForTest(server.URL, nil).Read(t.Context())
+			if test.wantError {
+				require.ErrorIs(t, err, configsize.ErrTooLarge)
+				require.NotErrorIs(t, err, ErrSourceFetchFailed)
+				info, statErr := os.Stat(cachePath)
+				require.NoError(t, statErr)
+				assert.Equal(t, test.size, info.Size(), "rejected cache bytes must be preserved")
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, data, int(test.size))
+		})
+	}
+}
+
+func writeZeroFile(path string, size int64) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.CopyN(file, zeroReader{}, size)
+	return errors.Join(copyErr, file.Close())
 }
 
 func TestURLSource_Read_HTTPError(t *testing.T) {
@@ -301,6 +199,7 @@ func TestURLSource_Read_HTTPError(t *testing.T) {
 
 			_, err := newURLSourceForTest(server.URL, nil).Read(t.Context())
 			require.Error(t, err)
+			require.ErrorIs(t, err, ErrSourceFetchFailed)
 		})
 	}
 }
@@ -310,6 +209,7 @@ func TestURLSource_Read_ConnectionError(t *testing.T) {
 
 	_, err := newURLSourceForTest("http://invalid.invalid/config.yaml", nil).Read(t.Context())
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSourceFetchFailed)
 }
 
 func TestURLSource_Read_CachesContent(t *testing.T) {
@@ -646,30 +546,6 @@ func TestIsURLReference(t *testing.T) {
 			assert.Equal(t, tt.expected, IsURLReference(tt.input))
 		})
 	}
-}
-
-func TestResolve_URLReference(t *testing.T) {
-	t.Parallel()
-
-	source, err := Resolve("https://example.com/agent.yaml", nil)
-	require.NoError(t, err)
-	assert.Equal(t, "https://example.com/agent.yaml", source.Name())
-	assert.Empty(t, source.ParentDir())
-}
-
-func TestResolveSources_URLReference(t *testing.T) {
-	t.Parallel()
-
-	testURL := "https://example.com/agent.yaml"
-	sources, err := ResolveSources(testURL, nil)
-	require.NoError(t, err)
-	require.Len(t, sources, 1)
-
-	// The key should be the URL-encoded version
-	expectedKey := url.QueryEscape(testURL)
-	source, ok := sources[expectedKey]
-	require.True(t, ok)
-	assert.Equal(t, testURL, source.Name())
 }
 
 func TestURLSource_Read_WithGitHubAuth(t *testing.T) {
@@ -1056,42 +932,289 @@ func TestURLSource_addDockerAuth(t *testing.T) {
 	}
 }
 
-func TestResolve_URLReference_WithEnvProvider(t *testing.T) {
+func TestIsLocalhostHTTPHost(t *testing.T) {
 	t.Parallel()
 
-	envProvider := environment.NewMapEnvProvider(map[string]string{
-		"GITHUB_TOKEN": "test-token",
-	})
+	tests := []struct {
+		host     string
+		expected bool
+	}{
+		{"localhost", true},
+		{"LOCALHOST", true},
+		{"localhost.", true},      // trailing dot
+		{"LOCALHOST.", true},      // trailing dot, case insensitive
+		{"evil.localhost", false}, // *.localhost subdomains must be rejected
+		{"sub.localhost", false},
+		{"notlocalhost", false},
+		{"localhost.evil.com", false},
+		{"", false},
+	}
 
-	source, err := Resolve("https://github.com/owner/repo/raw/main/agent.yaml", envProvider)
-	require.NoError(t, err)
-	assert.Equal(t, "https://github.com/owner/repo/raw/main/agent.yaml", source.Name())
-
-	// Verify the source has the env provider set
-	urlSrc, ok := source.(*urlSource)
-	require.True(t, ok)
-	assert.NotNil(t, urlSrc.envProvider)
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, isLocalhostHTTPHost(tt.host))
+		})
+	}
 }
 
-func TestResolveSources_URLReference_WithEnvProvider(t *testing.T) {
-	t.Parallel()
+// digestOf mirrors the server's X-Cagent-Encrypted-Config-Digest format.
+func digestOf(enc string) string {
+	return encryptedConfigDigest(enc)
+}
 
-	envProvider := environment.NewMapEnvProvider(map[string]string{
-		"GITHUB_TOKEN": "test-token",
-	})
+// testConfigBody is the agent YAML every encrypted-config test serves.
+const testConfigBody = "version: \"2\"\n"
 
-	testURL := "https://github.com/owner/repo/raw/main/agent.yaml"
-	sources, err := ResolveSources(testURL, envProvider)
+// writeConfigWithEncrypted writes a 200 response carrying the agent YAML with
+// the encrypted config injected as a top-level `encrypted_agent_config` field,
+// plus the digest header, mirroring the Docker gateway (gordon proxy).
+func writeConfigWithEncrypted(w http.ResponseWriter, enc string) {
+	w.Header().Set(httpclient.EncryptedConfigDigestHeader, digestOf(enc))
+	_, _ = w.Write([]byte(testConfigBody + "encrypted_agent_config: " + enc + "\n"))
+}
+
+func TestURLSource_CapturesEncryptedConfigField(t *testing.T) {
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	var gotSendEncrypted string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSendEncrypted = r.URL.Query().Get("sendEncrypted")
+		writeConfigWithEncrypted(w, "ENCRYPTED-BLOB")
+	}))
+	t.Cleanup(server.Close)
+
+	// httptest binds to 127.0.0.1, which IsTrustedDockerURL treats as trusted,
+	// so the field is stripped and the encrypted config captured.
+	source := newURLSourceForTest(server.URL, nil)
+	data, err := source.Read(t.Context())
 	require.NoError(t, err)
-	require.Len(t, sources, 1)
+	// The stripped YAML is returned as the config body, without the field.
+	assert.NotContains(t, string(data), "encrypted_agent_config")
+	assert.Contains(t, string(data), "version:")
 
-	// The key should be the URL-encoded version
-	expectedKey := url.QueryEscape(testURL)
-	source, ok := sources[expectedKey]
-	require.True(t, ok)
+	ecs, ok := source.(EncryptedConfigSource)
+	require.True(t, ok, "urlSource must implement EncryptedConfigSource")
+	assert.Equal(t, "ENCRYPTED-BLOB", ecs.EncryptedConfig())
+	// The client opts in to the encrypted config on trusted Docker URLs
+	// (httptest binds to 127.0.0.1, treated as trusted).
+	assert.Equal(t, "true", gotSendEncrypted, "sendEncrypted=true must be sent to a trusted Docker URL")
+}
 
-	// Verify the source has the env provider set
-	urlSrc, ok := source.(*urlSource)
+func TestURLWithSendEncrypted(t *testing.T) {
+	t.Parallel()
+	t.Run("adds the flag preserving existing params", func(t *testing.T) {
+		t.Parallel()
+		out, err := urlWithSendEncrypted("https://api.docker.com/gordon-agent?gordonTag=v15&origin=desktop")
+		require.NoError(t, err)
+		u, err := url.Parse(out)
+		require.NoError(t, err)
+		q := u.Query()
+		assert.Equal(t, "true", q.Get("sendEncrypted"))
+		assert.Equal(t, "v15", q.Get("gordonTag"))
+		assert.Equal(t, "desktop", q.Get("origin"))
+	})
+	t.Run("overwrites an existing value", func(t *testing.T) {
+		t.Parallel()
+		out, err := urlWithSendEncrypted("https://api.docker.com/gordon-agent?sendEncrypted=false")
+		require.NoError(t, err)
+		u, err := url.Parse(out)
+		require.NoError(t, err)
+		assert.Equal(t, "true", u.Query().Get("sendEncrypted"))
+	})
+}
+
+func TestURLSource_NoEncryptedConfigRawYAML(t *testing.T) {
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("version: \"2\"\n"))
+	}))
+	t.Cleanup(server.Close)
+
+	source := newURLSourceForTest(server.URL, nil)
+	data, err := source.Read(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "version: \"2\"\n", string(data))
+
+	ecs, ok := source.(EncryptedConfigSource)
 	require.True(t, ok)
-	assert.NotNil(t, urlSrc.envProvider)
+	assert.Empty(t, ecs.EncryptedConfig())
+}
+
+// TestURLSource_RecoversEncryptedConfigFrom304 verifies that after a 200 that
+// cached the encrypted config, a subsequent 304 (carrying only the digest,
+// not the full blob) recovers the value from disk.
+func TestURLSource_RecoversEncryptedConfigFrom304(t *testing.T) {
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	const enc = "ENCRYPTED-BLOB"
+	const etag = "sha256:abc"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == etag {
+			w.Header().Set(httpclient.EncryptedConfigDigestHeader, digestOf(enc))
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		writeConfigWithEncrypted(w, enc)
+	}))
+	t.Cleanup(server.Close)
+
+	src1 := newURLSourceForTest(server.URL, nil)
+	_, err := src1.Read(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, enc, src1.(EncryptedConfigSource).EncryptedConfig())
+
+	// Fresh source (empty in-memory state): server 304s, value recovered from disk.
+	src2 := newURLSourceForTest(server.URL, nil)
+	data, err := src2.Read(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, testConfigBody, string(data))
+	assert.Equal(t, enc, src2.(EncryptedConfigSource).EncryptedConfig(),
+		"encrypted config must be recovered from cache on a 304")
+}
+
+// TestURLSource_SelfHealsOn304WithoutCachedConfig verifies that a 304 with no
+// cached config forces a full reload to recover it.
+func TestURLSource_SelfHealsOn304WithoutCachedConfig(t *testing.T) {
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	const enc = "ENCRYPTED-BLOB"
+	const etag = "sha256:abc"
+
+	var notModified, forced int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cache-Control") == "no-cache" {
+			forced++
+			w.Header().Set("ETag", etag)
+			writeConfigWithEncrypted(w, enc)
+			return
+		}
+		if r.Header.Get("If-None-Match") == etag {
+			notModified++
+			w.Header().Set(httpclient.EncryptedConfigDigestHeader, digestOf(enc))
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		writeConfigWithEncrypted(w, enc)
+	}))
+	t.Cleanup(server.Close)
+
+	// Prime the YAML+ETag cache, then delete the .enc sidecar.
+	src1 := newURLSourceForTest(server.URL, nil)
+	_, err := src1.Read(t.Context())
+	require.NoError(t, err)
+	encPath := filepath.Join(getURLCacheDir(), hashURL(server.URL)+".enc")
+	require.NoError(t, os.Remove(encPath))
+
+	src2 := newURLSourceForTest(server.URL, nil)
+	data, err := src2.Read(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, testConfigBody, string(data))
+	assert.Equal(t, enc, src2.(EncryptedConfigSource).EncryptedConfig(),
+		"self-heal must recover the encrypted config")
+	assert.Equal(t, 1, notModified, "exactly one 304 before self-healing")
+	assert.Equal(t, 1, forced, "exactly one forced reload")
+}
+
+// TestURLSource_SelfHealsOn304DigestMismatch verifies a stale cached config is
+// discarded and force-reloaded when the server's digest no longer matches.
+func TestURLSource_SelfHealsOn304DigestMismatch(t *testing.T) {
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	const staleEnc = "OLD-BLOB"
+	const freshEnc = "NEW-BLOB"
+	const etag = "sha256:abc"
+
+	var forced int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cache-Control") == "no-cache" {
+			forced++
+			w.Header().Set("ETag", etag)
+			writeConfigWithEncrypted(w, freshEnc)
+			return
+		}
+		if r.Header.Get("If-None-Match") == etag {
+			w.Header().Set(httpclient.EncryptedConfigDigestHeader, digestOf(freshEnc))
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		writeConfigWithEncrypted(w, staleEnc)
+	}))
+	t.Cleanup(server.Close)
+
+	src1 := newURLSourceForTest(server.URL, nil)
+	_, err := src1.Read(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, staleEnc, src1.(EncryptedConfigSource).EncryptedConfig())
+
+	src2 := newURLSourceForTest(server.URL, nil)
+	_, err = src2.Read(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, freshEnc, src2.(EncryptedConfigSource).EncryptedConfig(),
+		"stale config must be replaced by the forced reload")
+	assert.Equal(t, 1, forced, "digest mismatch must trigger exactly one forced reload")
+}
+
+// TestURLSource_ForcedReloadStill304 verifies the guard against a misbehaving
+// server that answers 304 even to a forced reload (Cache-Control: no-cache),
+// advertising a digest the cache cannot satisfy. This must NOT loop, must NOT
+// error the whole config load (the YAML is valid and cached), and must forward
+// no encrypted config (nothing stale/mismatched leaks to the gateway).
+func TestURLSource_ForcedReloadStill304(t *testing.T) {
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	const staleEnc = "OLD-BLOB"
+	const freshDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	const etag = "sha256:abc"
+
+	var total, notModified, forced int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		total++
+		if r.Header.Get("Cache-Control") == "no-cache" {
+			// Misbehaving: 304 to a forced reload, advertising a digest that
+			// never matches the cached config.
+			forced++
+			w.Header().Set(httpclient.EncryptedConfigDigestHeader, freshDigest)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		if r.Header.Get("If-None-Match") == etag {
+			notModified++
+			w.Header().Set(httpclient.EncryptedConfigDigestHeader, freshDigest)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		writeConfigWithEncrypted(w, staleEnc)
+	}))
+	t.Cleanup(server.Close)
+
+	// Prime the YAML+ETag+.enc cache with the stale config.
+	src1 := newURLSourceForTest(server.URL, nil)
+	_, err := src1.Read(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, staleEnc, src1.(EncryptedConfigSource).EncryptedConfig())
+
+	// A fresh read now 304s (digest mismatch) -> forces a reload -> the server
+	// 304s AGAIN. The read must still succeed with the valid cached YAML, forward
+	// no encrypted config, and issue exactly one forced reload (no loop).
+	src2 := newURLSourceForTest(server.URL, nil)
+	data, err := src2.Read(t.Context())
+	require.NoError(t, err, "a misbehaving server must not fail the whole config load")
+	assert.Equal(t, testConfigBody, string(data))
+	assert.Empty(t, src2.(EncryptedConfigSource).EncryptedConfig(),
+		"no encrypted config must be forwarded when a forced reload cannot recover a matching one")
+	assert.Equal(t, 1, notModified, "exactly one conditional 304 before forcing a reload")
+	assert.Equal(t, 1, forced, "the forced reload must be attempted exactly once (no retry loop)")
 }

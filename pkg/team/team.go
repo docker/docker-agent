@@ -4,17 +4,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/evaluator"
 	"github.com/docker/docker-agent/pkg/permissions"
 )
 
 type Team struct {
 	agents      []*agent.Agent
+	evaluators  map[string]evaluator.Evaluator
 	permissions *permissions.Checker
+	// linkedAgents owns workspace copies of imported agents outside the member list.
+	linkedAgents []*agent.Agent
 	// runtimeSafety is the config-wide safety-mode default declared under
 	// runtime.safety, retained so session constructors can apply it when
 	// neither the user nor the selected agent chose a mode. Empty when the
@@ -99,8 +105,7 @@ func (t *Team) AgentsInfo(ctx context.Context) []AgentInfo {
 			info.Model = id.Model
 		} else if harnessType := a.HarnessType(); harnessType != "" {
 			// Harness-backed agents have no provider.Provider; surface the
-			// harness type (e.g. "claude-code") as the display model and leave
-			// Thinking empty so no badge/card line is shown.
+			// harness type (e.g. "claude-code") as the display model.
 			info.Model = harnessType
 		}
 		infos = append(infos, info)
@@ -156,13 +161,16 @@ func (t *Team) Size() int {
 }
 
 func (t *Team) StopToolSets(ctx context.Context) error {
-	for _, agent := range t.agents {
+	var errs []error
+	for _, agent := range slices.Concat(t.agents, t.linkedAgents) {
+		// One agent failing to stop (e.g. a wedged toolset) must not leave
+		// later agents' toolsets running: keep stopping and aggregate.
 		if err := agent.StopToolSets(ctx); err != nil {
-			return fmt.Errorf("failed to stop tool sets: %w", err)
+			errs = append(errs, fmt.Errorf("failed to stop tool sets of agent %s: %w", agent.Name(), err))
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // AgentConfig returns the raw resolved config for the named agent and true
@@ -192,4 +200,15 @@ func (t *Team) RuntimeSafety() latest.SafetyMode {
 // permissions) into the team's checker after construction.
 func (t *Team) SetPermissions(checker *permissions.Checker) {
 	t.permissions = checker
+}
+
+// WithEvaluators installs reusable, provider-backed assessments for this team.
+func WithEvaluators(evaluators map[string]evaluator.Evaluator) Opt {
+	return func(t *Team) { t.evaluators = maps.Clone(evaluators) }
+}
+
+// Evaluator returns the named assessment shared by the team's agents.
+func (t *Team) Evaluator(name string) (evaluator.Evaluator, bool) {
+	e, ok := t.evaluators[name]
+	return e, ok
 }

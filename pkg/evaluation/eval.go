@@ -3,8 +3,10 @@ package evaluation
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,15 +19,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
-	"github.com/docker/docker-agent/pkg/environment"
-	"github.com/docker/docker-agent/pkg/model/provider"
-	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/config/legacy"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -34,6 +35,7 @@ type Runner struct {
 	Config
 
 	agentSource config.Source
+	agentConfig *latest.Config
 	judge       *Judge
 	runConfig   *config.RuntimeConfig
 
@@ -46,15 +48,16 @@ type Runner struct {
 }
 
 // newRunner creates a new evaluation runner.
-func newRunner(agentSource config.Source, runConfig *config.RuntimeConfig, judgeModel provider.Provider, cfg Config) *Runner {
-	var judge *Judge
-	if judgeModel != nil {
-		judge = NewJudge(judgeModel, cfg.Concurrency)
+func newRunner(agentSource config.Source, runConfig *config.RuntimeConfig, cfg Config) *Runner {
+	if runConfig != nil && runConfig.EncryptedConfig == "" {
+		if source, ok := agentSource.(config.EncryptedConfigSource); ok && source.EncryptedConfig() != "" {
+			runConfig = runConfig.Clone()
+			runConfig.EncryptedConfig = source.EncryptedConfig()
+		}
 	}
 	return &Runner{
 		Config:      cfg,
 		agentSource: agentSource,
-		judge:       judge,
 		runConfig:   runConfig,
 		imageCache:  make(map[imageKey]string),
 	}
@@ -64,26 +67,27 @@ func newRunner(agentSource config.Source, runConfig *config.RuntimeConfig, judge
 // ttyOut is used for progress bar rendering (should be the console/TTY).
 // out is used for results and status messages (can be tee'd to a log file).
 func Evaluate(ctx context.Context, ttyOut, out io.Writer, isTTY bool, runName string, runConfig *config.RuntimeConfig, cfg Config) (*EvalRun, error) {
-	agentSource, err := config.Resolve(cfg.AgentFilename, nil)
+	agentSource, err := sources.Resolve(cfg.AgentFilename, nil)
 	if err != nil {
 		return nil, fmt.Errorf("resolving agent: %w", err)
 	}
-
-	// Create judge model provider for relevance checking
-	judgeModel, err := createJudgeModel(ctx, cfg.JudgeModel, runConfig)
+	agentConfig, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...), config.WithVersions(legacy.Register))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading agent: %w", err)
 	}
 
-	runner := newRunner(agentSource, runConfig, judgeModel, cfg)
+	runner := newRunner(agentSource, runConfig, cfg)
+	runner.agentConfig = agentConfig
 
 	fmt.Fprintf(out, "Evaluation run: %s\n", runName)
 
 	startTime := time.Now()
 	results, err := runner.Run(ctx, ttyOut, out, isTTY)
 	duration := time.Since(startTime)
+	cfg.Flavors = slices.Clone(runConfig.Flavors)
 
 	summary := computeSummary(results)
+	summary.RepeatMetrics = computeRepeatMetrics(results, cfg.Repeat)
 	printSummary(out, summary, duration)
 
 	run := &EvalRun{
@@ -124,7 +128,14 @@ func (r *Runner) Run(ctx context.Context, ttyOut, out io.Writer, isTTY bool) ([]
 	// instead of silently producing zero-relevance results.
 	if needsJudge(evals) {
 		if r.judge == nil {
-			return nil, errors.New("some evaluations have relevance criteria but no judge model is configured (use --judge-model)")
+			judge, err := createJudge(ctx, r.Config, r.runConfig, r.agentConfig)
+			if err != nil {
+				return nil, err
+			}
+			if judge == nil {
+				return nil, errors.New("some evaluations have relevance criteria but no judge model is configured (use --judge-model)")
+			}
+			r.judge = judge
 		}
 		fmt.Fprintln(out, "Validating judge model...")
 		if err := r.judge.Validate(ctx); err != nil {
@@ -141,8 +152,14 @@ func (r *Runner) Run(ctx context.Context, ttyOut, out io.Writer, isTTY bool) ([]
 	fmt.Fprintf(out, "Running %d evaluations with concurrency %d\n\n", len(evals), r.Concurrency)
 
 	progress := newProgressBar(ttyOut, out, r.TTYFd, len(evals), isTTY)
-	progress.start()
-	defer progress.stop()
+	// Keep rendering until workers finish, even after evaluation cancellation.
+	progressCtx, stopProgress := context.WithCancel(context.WithoutCancel(ctx))
+	var progressWG sync.WaitGroup
+	progressWG.Go(func() { progress.run(progressCtx) })
+	defer func() {
+		stopProgress()
+		progressWG.Wait()
+	}()
 
 	results := make([]Result, len(evals))
 
@@ -329,6 +346,7 @@ func (r *Runner) runSingleEval(ctx context.Context, evalSess *InputSession) (Res
 		Question:          strings.Join(userMessages, "\n"),
 		SizeExpected:      evals.Size,
 		RelevanceExpected: float64(len(evals.Relevance)),
+		AssertionsTotal:   len(evals.Assertions),
 	}
 
 	expectedToolCalls := extractToolCalls(evalSess.Messages)
@@ -383,6 +401,17 @@ func (r *Runner) runSingleEval(ctx context.Context, evalSess *InputSession) (Res
 		result.RelevanceResults = results
 	}
 
+	// Run code-based assertions against the agent output.
+	if len(evals.Assertions) > 0 {
+		assertionResults := runAssertions(evals.Assertions, response, cost, actualToolCalls)
+		result.AssertionResults = assertionResults
+		for _, ar := range assertionResults {
+			if ar.Passed {
+				result.AssertionsPassed++
+			}
+		}
+	}
+
 	slog.DebugContext(ctx, "Evaluation complete", "title", title, "duration", time.Since(startTime))
 	return result, nil
 }
@@ -390,7 +419,8 @@ func (r *Runner) runSingleEval(ctx context.Context, evalSess *InputSession) (Res
 func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, questions []string, setup string) ([]map[string]any, error) {
 	agentDir := r.agentSource.ParentDir()
 	agentFile := filepath.Base(r.agentSource.Name())
-	containerName := fmt.Sprintf("docker-agent-eval-%d", uuid.New().ID())
+	containerID := uuid.NewV4()
+	containerName := fmt.Sprintf("docker-agent-eval-%d", binary.BigEndian.Uint32(containerID[:4]))
 
 	args := []string{
 		"run",
@@ -406,6 +436,15 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 		"-v", agentDir+":/configs:ro",
 	)
 
+	judgeConfigDir, err := r.stageJudgeProvider()
+	if err != nil {
+		return nil, err
+	}
+	if judgeConfigDir != "" {
+		defer os.RemoveAll(judgeConfigDir)
+		args = append(args, "-v", judgeConfigDir+":/judge-config:ro")
+	}
+
 	var env []string
 	// addEnv forwards a variable to the container: "-e NAME" tells the runtime
 	// CLI to pass it through, and NAME=VALUE sets it on the CLI process.
@@ -414,21 +453,7 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 		env = append(env, name+"="+value)
 	}
 
-	if r.runConfig.ModelsGateway != "" {
-		addEnv("DOCKER_AGENT_MODELS_GATEWAY", r.runConfig.ModelsGateway)
-
-		if token, ok := r.runConfig.EnvProvider().Get(ctx, environment.DockerDesktopTokenEnv); ok && token != "" {
-			addEnv(environment.DockerDesktopTokenEnv, token)
-		}
-	} else {
-		for _, name := range config.ProviderAPIKeyEnvVars() {
-			if val, ok := r.runConfig.EnvProvider().Get(ctx, name); ok && val != "" {
-				addEnv(name, val)
-			}
-		}
-	}
-
-	// Pass additional environment variables specified via -e flag
+	// Only forward environment variables explicitly requested via -e.
 	// Format: KEY or KEY=VALUE
 	for _, entry := range r.EnvVars {
 		if key, val, hasValue := strings.Cut(entry, "="); hasValue && key != "" {
@@ -443,7 +468,8 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 	// The default entrypoint is: /run.sh /docker-agent run --exec --yolo --json
 	// /run.sh starts dockerd then exec's "$@".
 	if setup != "" {
-		setupFile := filepath.Join(os.TempDir(), fmt.Sprintf("docker-agent-eval-setup-%d.sh", uuid.New().ID()))
+		setupID := uuid.NewV4()
+		setupFile := filepath.Join(os.TempDir(), fmt.Sprintf("docker-agent-eval-setup-%d.sh", binary.BigEndian.Uint32(setupID[:4])))
 		if err := os.WriteFile(setupFile, []byte(setup), 0o600); err != nil {
 			return nil, fmt.Errorf("writing setup script: %w", err)
 		}
@@ -459,15 +485,20 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 
 	if setup != "" {
 		// Run setup script, then docker agent run --exec with the original arguments.
-		args = append(args, "sh", "-c", "sh /setup.sh && exec /docker-agent run --exec --yolo --json \"$@\"", "--", "/configs/"+agentFile)
-	} else {
-		args = append(args, "/configs/"+agentFile)
+		args = append(args, "sh", "-c", "sh /setup.sh && exec /docker-agent run --exec --yolo --json \"$@\"", "--")
 	}
+	if judgeConfigDir != "" {
+		args = append(args, "--config-dir", "/judge-config")
+	}
+	for _, flavor := range r.runConfig.Flavors {
+		args = append(args, "--flavor", flavor)
+	}
+	args = append(args, "--", "/configs/"+agentFile)
 	args = append(args, questions...)
 
 	containerRuntime := r.containerRuntimeOrDefault()
 	cmd := exec.CommandContext(ctx, containerRuntime, args...)
-	cmd.Env = append(env, os.Environ()...)
+	cmd.Env = append(os.Environ(), env...)
 	// On cancellation send SIGINT instead of the default SIGKILL: the
 	// Docker-compatible CLI proxies SIGINT to the container (SIGKILL is never
 	// proxied and would leave the container running daemon-side). The
@@ -481,19 +512,16 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 	if err != nil {
 		return nil, fmt.Errorf("creating stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("creating stderr pipe: %w", err)
-	}
+	// Let exec.Cmd own the stderr copy: Wait blocks until its own copying
+	// goroutine finishes (bounded by WaitDelay), so stderrBuf is safe to read
+	// after Wait returns. A hand-rolled StderrPipe+goroutine has no such
+	// guarantee and races with the reads below.
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting %s run: %w", containerRuntime, err)
 	}
-
-	var stderrData []byte
-	go func() {
-		stderrData, _ = io.ReadAll(stderr)
-	}()
 
 	var events []map[string]any
 	scanner := bufio.NewScanner(stdout)
@@ -519,11 +547,11 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 
 	waitErr := cmd.Wait()
 	if waitErr != nil {
-		slog.DebugContext(ctx, "Container exited with error", "stderr", string(stderrData), "error", waitErr)
+		slog.DebugContext(ctx, "Container exited with error", "stderr", stderrBuf.String(), "error", waitErr)
 	}
 
 	if len(events) == 0 {
-		stderrStr := strings.TrimSpace(string(stderrData))
+		stderrStr := strings.TrimSpace(stderrBuf.String())
 		if waitErr != nil {
 			return nil, fmt.Errorf("container failed: %w (stderr: %s)", waitErr, stderrStr)
 		}
@@ -538,6 +566,7 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 
 func parseContainerEvents(events []map[string]any) (response string, cost float64, outputTokens int64, toolCalls []string) {
 	var responseBuf strings.Builder
+	outputs := acceptedStructuredOutputs(events)
 	for _, event := range events {
 		eventType, _ := event["type"].(string)
 
@@ -559,14 +588,22 @@ func parseContainerEvents(events []map[string]any) (response string, cost float6
 				if c, ok := usage["cost"].(float64); ok {
 					cost = c
 				}
-				if tokens, ok := usage["output_tokens"].(float64); ok {
-					outputTokens += int64(tokens)
+				if snapshotOnly, _ := usage["snapshot_only"].(bool); !snapshotOnly {
+					if tokens, ok := usage["output_tokens"].(float64); ok {
+						outputTokens += int64(tokens)
+					}
 				}
 			}
 		}
 	}
 
-	return responseBuf.String(), cost, outputTokens, toolCalls
+	response = responseBuf.String()
+	if len(outputs) > 0 {
+		// Structured results are terminal messages, not streamed text. Use
+		// the last answer, including a later handoff or conversational turn.
+		response = SessionFromEvents(events, "", nil).GetLastAssistantMessageContent()
+	}
+	return response, cost, outputTokens, toolCalls
 }
 
 // buildTranscript creates a chronological transcript of agent interactions.
@@ -587,7 +624,8 @@ func buildTranscript(events []map[string]any) string {
 		pendingText.Reset()
 	}
 
-	for _, event := range events {
+	outputs := acceptedStructuredOutputs(events)
+	for index, event := range events {
 		switch event["type"] {
 		case "agent_choice":
 			if agentName, _ := event["agent_name"].(string); agentName != "" {
@@ -613,10 +651,12 @@ func buildTranscript(events []map[string]any) string {
 				name, _ = td["name"].(string)
 			}
 			response, _ := event["response"].(string)
-			if len(response) > 500 {
-				response = response[:500] + "...(truncated)"
-			}
+			// Keep the evidence the agent saw; truncation can turn correct answers into grading failures.
 			fmt.Fprintf(&transcript, "[Tool %q returns: %s]\n\n", name, response)
+			if output, ok := outputs[index]; ok {
+				agentName, _ := event["agent_name"].(string)
+				fmt.Fprintf(&transcript, "[Agent %s final answer]:\n%s\n\n", cmp.Or(agentName, "unknown"), output)
+			}
 
 		case "budget_exceeded":
 			// A budget stop is a structured termination, never an error. The
@@ -663,31 +703,4 @@ func needsJudge(evals []InputSession) bool {
 	return slices.ContainsFunc(evals, func(s InputSession) bool {
 		return s.Evals != nil && len(s.Evals.Relevance) > 0
 	})
-}
-
-// createJudgeModel creates a provider.Provider from a model string (format: provider/model).
-// Returns nil if judgeModel is empty.
-func createJudgeModel(ctx context.Context, judgeModel string, runConfig *config.RuntimeConfig) (provider.Provider, error) {
-	if judgeModel == "" {
-		return nil, nil
-	}
-
-	cfg, err := latest.ParseModelRef(judgeModel)
-	if err != nil {
-		return nil, fmt.Errorf("invalid judge model format %q: expected 'provider/model'", judgeModel)
-	}
-
-	opts := []options.Opt{
-		options.WithStructuredOutput(judgeResponseSchema),
-	}
-	if runConfig.ModelsGateway != "" {
-		opts = append(opts, options.WithGateway(runConfig.ModelsGateway))
-	}
-
-	judge, err := runConfig.ProviderRegistryOrDefault().New(ctx, &cfg, runConfig.EnvProvider(), opts...)
-	if err != nil {
-		return nil, fmt.Errorf("creating judge model: %w", err)
-	}
-
-	return judge, nil
 }

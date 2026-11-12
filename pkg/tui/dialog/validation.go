@@ -27,11 +27,6 @@ func getCompiledPattern(pattern string) (*regexp.Regexp, error) {
 	return compiled, nil
 }
 
-// validateStringField validates a string value against field constraints.
-func validateStringField(val string, field ElicitationField) bool {
-	return validateStringFieldWithMessage(val, field) == ""
-}
-
 // validateStringFieldWithMessage validates a string value and returns a descriptive error message.
 func validateStringFieldWithMessage(val string, field ElicitationField) string {
 	if field.MinLength > 0 && len(val) < field.MinLength {
@@ -49,11 +44,6 @@ func validateStringFieldWithMessage(val string, field ElicitationField) string {
 	return validateFormatWithMessage(val, field.Format)
 }
 
-// validateNumberField validates a numeric value against field constraints.
-func validateNumberField(val float64, field ElicitationField) bool {
-	return validateNumberFieldWithMessage(val, field) == ""
-}
-
 // validateNumberFieldWithMessage validates a numeric value and returns a descriptive error message.
 func validateNumberFieldWithMessage(val float64, field ElicitationField) string {
 	if field.HasMinimum && val < field.Minimum {
@@ -65,9 +55,15 @@ func validateNumberFieldWithMessage(val float64, field ElicitationField) string 
 	return ""
 }
 
-// validateFormat validates a string value against a JSON Schema format.
-func validateFormat(val, format string) bool {
-	return validateFormatWithMessage(val, format) == ""
+// validateSelectionCount checks a multiselect against minItems and maxItems.
+func validateSelectionCount(count int, field ElicitationField) string {
+	if count < field.MinItems {
+		return fmt.Sprintf("Select at least %d", field.MinItems)
+	}
+	if field.MaxItems > 0 && count > field.MaxItems {
+		return fmt.Sprintf("Select at most %d", field.MaxItems)
+	}
+	return ""
 }
 
 // validateFormatWithMessage validates a string against a JSON Schema format and returns an error message.

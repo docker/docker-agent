@@ -53,8 +53,56 @@ func WithEventObserver(o EventObserver) Opt {
 		if o == nil {
 			return
 		}
-		r.observers = append(r.observers, o)
+		if factory, ok := o.(interface{ NewRunObserver() EventObserver }); ok {
+			r.observers = append(r.observers, factory.NewRunObserver)
+		} else {
+			r.observers = append(r.observers, func() EventObserver { return o })
+		}
 	}
+}
+
+// WithEventObserverFactory creates an independent observer for each RunStream.
+// Factories run synchronously before OnRunStart; nil results are ignored.
+func WithEventObserverFactory(factory func() EventObserver) Opt {
+	return func(r *LocalRuntime) {
+		if factory != nil {
+			r.observers = append(r.observers, factory)
+		}
+	}
+}
+
+type observerBarrier struct {
+	done chan struct{}
+}
+
+func (*observerBarrier) GetAgentName() string { return "" }
+
+type observerFlushKey struct{}
+
+// flushObservers orders direct store writes after previously emitted events.
+func flushObservers(ctx context.Context) error {
+	flush, _ := ctx.Value(observerFlushKey{}).(func(context.Context) error)
+	if flush == nil {
+		return nil
+	}
+	return flush(ctx)
+}
+
+func withObserverFlush(ctx context.Context, events chan<- Event) context.Context {
+	return context.WithValue(ctx, observerFlushKey{}, func(ctx context.Context) error {
+		barrier := &observerBarrier{done: make(chan struct{})}
+		select {
+		case events <- barrier:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-barrier.done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
 }
 
 // observe wraps inner with the runtime's observer chain: each
@@ -64,14 +112,24 @@ func WithEventObserver(o EventObserver) Opt {
 // channel. Observers run synchronously, so a slow observer
 // back-pressures the consumer.
 func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner <-chan Event) <-chan Event {
-	for _, obs := range r.observers {
+	observers := make([]EventObserver, 0, len(r.observers))
+	for _, factory := range r.observers {
+		if obs := factory(); obs != nil {
+			observers = append(observers, obs)
+		}
+	}
+	for _, obs := range observers {
 		obs.OnRunStart(ctx, sess)
 	}
 	out := make(chan Event, cap(inner))
 	go func() {
 		defer close(out)
 		for event := range inner {
-			for _, obs := range r.observers {
+			if barrier, ok := event.(*observerBarrier); ok {
+				close(barrier.done)
+				continue
+			}
+			for _, obs := range observers {
 				obs.OnEvent(ctx, sess, event)
 			}
 			out <- event

@@ -5,11 +5,12 @@ package history
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/docker/portcullis"
 
@@ -20,31 +21,54 @@ import (
 // (used by [History.Previous] and [History.Next]) stays in [0, len(Messages)],
 // where len(Messages) means "past the most recent entry".
 type History struct {
+	// Messages is populated by Load or the first method call. Call Load before
+	// reading it directly.
 	Messages []string
 
 	path    string
 	current int
+	// loadOnce is set by New: the history file is read on first use.
+	loadOnce *sync.Once
+	loadErr  error
 }
 
-// New loads the history stored under baseDir/.cagent/history. If baseDir is
-// empty, the user's home directory is used.
+// New opens history at paths.GetDataDir()/history when baseDir is empty.
+// An explicit baseDir uses baseDir/.cagent/history instead. The history file
+// is read on first use, or earlier by [History.Load]. A failed read leaves
+// the history empty. Legacy history is imported before New returns.
 func New(baseDir string) (*History, error) {
-	if baseDir == "" {
-		baseDir = paths.GetHomeDir()
-		if baseDir == "" {
-			return nil, errors.New("failed to get user home directory")
-		}
+	dir := baseDir
+	if dir == "" {
+		dir = paths.GetDataDir()
+	} else {
+		dir = filepath.Join(baseDir, ".cagent") //rubocop:disable Lint/StatePathViaPathsPackage // preserve the caller-supplied root layout
 	}
-
-	h := &History{path: filepath.Join(baseDir, ".cagent", "history")}
-	if err := h.migrateOldHistory(baseDir); err != nil {
+	h := &History{path: filepath.Join(dir, "history"), loadOnce: &sync.Once{}}
+	if err := h.migrateOldHistory(dir); err != nil {
 		return nil, err
 	}
-	if err := h.load(); err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	h.current = len(h.Messages)
 	return h, nil
+}
+
+// Load reads the history file once; later calls return the same error. It may
+// run concurrently with the other methods, which wait for it, so a caller can
+// run it in the background ahead of first use.
+func (h *History) Load() error {
+	if h.loadOnce == nil {
+		return nil
+	}
+	h.loadOnce.Do(func() {
+		if err := h.load(); err != nil && !os.IsNotExist(err) {
+			h.loadErr = err
+		}
+		h.current = len(h.Messages)
+	})
+	return h.loadErr
+}
+
+// ensureLoaded is Load for the methods: they carry on with an empty history.
+func (h *History) ensureLoaded() {
+	_ = h.Load()
 }
 
 // NewAtDir loads the history stored at dir/history, without the ".cagent"
@@ -66,15 +90,23 @@ func NewAtDir(dir string) (*History, error) {
 // in memory or written to disk so secrets pasted into the prompt never
 // linger in the persistent history.
 func (h *History) Add(message string) error {
+	h.ensureLoaded()
 	message = portcullis.Redact(message)
 	h.addInMemory(message)
 	h.current = len(h.Messages)
 	return h.append(message)
 }
 
+// Len returns the number of entries.
+func (h *History) Len() int {
+	h.ensureLoaded()
+	return len(h.Messages)
+}
+
 // Previous moves the cursor one step toward older entries and returns the
 // entry under it. At the oldest entry, the cursor stays put.
 func (h *History) Previous() string {
+	h.ensureLoaded()
 	if len(h.Messages) == 0 {
 		return ""
 	}
@@ -85,6 +117,7 @@ func (h *History) Previous() string {
 // Next moves the cursor one step toward newer entries and returns the entry
 // under it. Past the most recent entry, returns an empty string.
 func (h *History) Next() string {
+	h.ensureLoaded()
 	if h.current >= len(h.Messages)-1 {
 		h.current = len(h.Messages)
 		return ""
@@ -97,12 +130,14 @@ func (h *History) Next() string {
 // Keeping the cursor in this range guarantees that subsequent Previous and
 // Next calls never index out of bounds.
 func (h *History) SetCurrent(i int) {
+	h.ensureLoaded()
 	h.current = max(0, min(i, len(h.Messages)))
 }
 
 // LatestMatch returns the most recent entry that strictly extends prefix, or
 // an empty string when none does.
 func (h *History) LatestMatch(prefix string) string {
+	h.ensureLoaded()
 	for _, msg := range slices.Backward(h.Messages) {
 		if strings.HasPrefix(msg, prefix) && len(msg) > len(prefix) {
 			return msg
@@ -113,8 +148,9 @@ func (h *History) LatestMatch(prefix string) string {
 
 // FindPrevContains searches backward from index from-1 for an entry containing
 // query (case-insensitive). An empty query matches any entry. Pass
-// len(Messages) to start from the most recent entry.
+// [History.Len] to start from the most recent entry.
 func (h *History) FindPrevContains(query string, from int) (msg string, idx int, ok bool) {
+	h.ensureLoaded()
 	query = strings.ToLower(query)
 	for i := min(from-1, len(h.Messages)-1); i >= 0; i-- {
 		if query == "" || strings.Contains(strings.ToLower(h.Messages[i]), query) {
@@ -128,6 +164,7 @@ func (h *History) FindPrevContains(query string, from int) (msg string, idx int,
 // query (case-insensitive). An empty query matches any entry. Pass -1 to
 // start from the oldest entry.
 func (h *History) FindNextContains(query string, from int) (msg string, idx int, ok bool) {
+	h.ensureLoaded()
 	query = strings.ToLower(query)
 	for i := max(from+1, 0); i < len(h.Messages); i++ {
 		if query == "" || strings.Contains(strings.ToLower(h.Messages[i]), query) {
@@ -175,8 +212,10 @@ func (h *History) load() error {
 		return err
 	}
 
-	for line := range bytes.Lines(data) {
-		line = bytes.TrimSuffix(line, []byte("\n"))
+	seenRaw := make(map[string]struct{})
+	var messages []string
+	// Walk newest-first so duplicates need neither rescanning nor removal.
+	for _, line := range slices.Backward(bytes.Split(data, []byte("\n"))) {
 		if len(line) == 0 {
 			continue
 		}
@@ -184,18 +223,60 @@ func (h *History) load() error {
 		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
 		}
-		// Redact on read so a history file that predates redaction
-		// (or was tampered with externally) never exposes secrets to
-		// the in-memory navigation cursor or downstream callers.
-		h.addInMemory(portcullis.Redact(msg))
+		if _, ok := seenRaw[msg]; ok {
+			continue
+		}
+		seenRaw[msg] = struct{}{}
+		messages = append(messages, msg)
 	}
+
+	redactMessages(messages, portcullis.Redact)
+
+	// Deduplicate in file order, not worker completion order.
+	seenRedacted := make(map[string]struct{})
+	unique := messages[:0]
+	for _, msg := range messages {
+		if _, ok := seenRedacted[msg]; ok {
+			continue
+		}
+		seenRedacted[msg] = struct{}{}
+		unique = append(unique, msg)
+	}
+	clear(messages[len(unique):])
+	slices.Reverse(unique)
+	h.Messages = unique
 	return nil
+}
+
+func redactMessages(messages []string, redact func(string) string) {
+	workers := min(runtime.NumCPU(), len(messages))
+	if workers <= 1 {
+		for i, msg := range messages {
+			messages[i] = redact(msg)
+		}
+		return
+	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for i := range jobs {
+				messages[i] = redact(messages[i])
+			}
+		})
+	}
+	for i := range messages {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
 }
 
 // migrateOldHistory imports messages from the legacy history.json file (if it
 // exists) into the new line-oriented format and removes the old file.
-func (h *History) migrateOldHistory(baseDir string) error {
-	oldPath := filepath.Join(baseDir, ".cagent", "history.json")
+func (h *History) migrateOldHistory(dir string) error {
+	oldPath := filepath.Join(dir, "history.json")
 
 	data, err := os.ReadFile(oldPath)
 	if os.IsNotExist(err) {

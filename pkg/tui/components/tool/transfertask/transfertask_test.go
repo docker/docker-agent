@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/docker-agent/pkg/tools"
-	transfertasktool "github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
+	transfertasktool "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"

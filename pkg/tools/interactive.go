@@ -59,9 +59,21 @@ func (e *AuthorizationRequiredError) Error() string {
 // signals that the toolset failed to start because OAuth is needed and the
 // caller chose to defer the prompt. Callers can use this to render a softer,
 // "needs auth" notice instead of a red error.
+//
+// PartialStartError and TotalStartError batch several inner-toolset
+// failures and only count as authorization-required when all of their
+// causes are (see the AuthOnly fields): matching a mixed batch through
+// plain errors.As would hide the non-auth causes behind the silent
+// auth-deferral handling.
 func IsAuthorizationRequired(err error) bool {
-	var target *AuthorizationRequiredError
-	return errors.As(err, &target)
+	if partial, ok := errors.AsType[*PartialStartError](err); ok {
+		return partial.AuthOnly
+	}
+	if total, ok := errors.AsType[*TotalStartError](err); ok {
+		return total.AuthOnly
+	}
+	_, ok := errors.AsType[*AuthorizationRequiredError](err)
+	return ok
 }
 
 // OAuthDeclinedError is returned by the transport when the user explicitly
@@ -96,6 +108,6 @@ func (e *OAuthDeclinedError) Error() string {
 // "Tools() -> Start() -> OAuth elicitation" retry loop so the dismissed
 // dialog does not immediately re-appear on the next loop iteration.
 func IsOAuthDeclined(err error) bool {
-	var target *OAuthDeclinedError
-	return errors.As(err, &target)
+	_, ok := errors.AsType[*OAuthDeclinedError](err)
+	return ok
 }

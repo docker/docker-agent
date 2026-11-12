@@ -301,12 +301,12 @@ func (s *ChatSpan) End() {
 		return
 	}
 	s.ended = true
-	finishReasons := append([]string(nil), s.finishReasons...)
+	finishReasons := slices.Clone(s.finishReasons)
 	usage := s.usage
 	usageRecorded := s.usageRecorded
 	errType := s.errType
 	firstChunkAt := s.firstChunkAt
-	chunkDurations := append([]float64(nil), s.chunkDurations...)
+	chunkDurations := slices.Clone(s.chunkDurations)
 	s.mu.Unlock()
 
 	if len(finishReasons) > 0 {
@@ -363,7 +363,7 @@ func (s *ChatSpan) End() {
 		commonAttrs = append(commonAttrs, attribute.String(AttrRequestModel, s.model))
 	}
 
-	durationAttrs := append([]attribute.KeyValue(nil), commonAttrs...)
+	durationAttrs := slices.Clone(commonAttrs)
 	if errType != "" {
 		durationAttrs = append(durationAttrs, attribute.String("error.type", errType))
 	}
@@ -391,7 +391,7 @@ func (s *ChatSpan) End() {
 			if value <= 0 {
 				return
 			}
-			tokenAttrs := append([]attribute.KeyValue(nil), commonAttrs...)
+			tokenAttrs := slices.Clone(commonAttrs)
 			tokenAttrs = append(tokenAttrs, attribute.String(AttrTokenType, tokenType))
 			insts.clientTokenUsage.Record(s.metricCtx, value,
 				metric.WithAttributes(tokenAttrs...),

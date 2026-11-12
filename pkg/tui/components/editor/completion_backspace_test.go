@@ -154,7 +154,7 @@ func collectMsgs(cmd tea.Cmd) []tea.Msg {
 		for i := range msgValue.Len() {
 			elem := msgValue.Index(i)
 			if elem.CanInterface() {
-				if innerCmd, ok := elem.Interface().(tea.Cmd); ok && innerCmd != nil {
+				if innerCmd, ok := reflect.TypeAssert[tea.Cmd](elem); ok && innerCmd != nil {
 					msgs = append(msgs, collectMsgs(innerCmd)...)
 				}
 			}

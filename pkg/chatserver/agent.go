@@ -64,15 +64,16 @@ func (p agentPolicy) pick(model string) string {
 //
 // Returns nil when the history contains no usable user message, in which
 // case the caller should reject the request.
-func buildSession(messages []ChatCompletionMessage) *session.Session {
+func buildSession(messages []ChatCompletionMessage, workingDir string) *session.Session {
 	sess := session.New(
 		session.WithNonInteractive(true),
+		session.WithWorkingDir(workingDir),
 	)
 
 	hasUser := false
 	for _, m := range messages {
 		role := strings.ToLower(strings.TrimSpace(m.Role))
-		if len(m.Parts) > 0 && (role == "" || (role != "system" && role != "assistant" && role != "tool")) {
+		if len(m.Parts) > 0 && role != "system" && role != "assistant" && role != "tool" {
 			// Multi-part content: route through chat.MultiContent so the
 			// runtime/provider sees image parts. Only user-style messages
 			// support images today.
@@ -187,6 +188,13 @@ func appendLatestUser(sess *session.Session, msgs []ChatCompletionMessage) bool 
 	return false
 }
 
+// runtimeRunner is the execution and interaction contract the chat adapter needs.
+type runtimeRunner interface {
+	RunStream(ctx context.Context, sess *session.Session) <-chan runtime.Event
+	Resume(ctx context.Context, req runtime.ResumeRequest)
+	ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any, elicitationID ...string) error
+}
+
 // agentEmit collects the side-effect callbacks invoked by runAgentLoop as
 // it drives the runtime. All callbacks are optional; nil means "ignore
 // this kind of event".
@@ -207,11 +215,13 @@ type agentEmit struct {
 // request. Elicitation is the exception — the runtime always blocks until we
 // respond, so its case is required for correctness, not just defence.
 //
-// All ErrorEvents seen in the run are joined into the returned error so
-// callers can see the full picture; the loop keeps draining until the
-// stream closes so the runtime can shut down cleanly.
-func runAgentLoop(ctx context.Context, rt runtime.Runtime, sess *session.Session, emit agentEmit) error {
+// All ErrorEvents seen in the run are joined into the returned error, along with
+// cancellation at the root's stop event (or channel close if no stop arrives).
+// The loop keeps draining until the stream closes so cleanup finishes before reuse.
+func runAgentLoop(ctx context.Context, rt runtimeRunner, sess *session.Session, emit agentEmit) error {
 	var runErrs []error
+	var completionErr error
+	stopped := false
 	toolIndex := 0
 	for ev := range rt.RunStream(ctx, sess) {
 		switch e := ev.(type) {
@@ -242,9 +252,27 @@ func runAgentLoop(ctx context.Context, rt runtime.Runtime, sess *session.Session
 			rt.Resume(ctx, runtime.ResumeReject(""))
 		case *runtime.ErrorEvent:
 			runErrs = append(runErrs, errors.New(e.Error))
+		case *runtime.StreamStoppedEvent:
+			if e.SessionID != sess.ID {
+				continue
+			}
+			stopped = true
+			completionErr = ctx.Err()
+			switch e.Reason {
+			case runtime.TurnEndReasonNormal:
+				completionErr = nil
+			case runtime.TurnEndReasonCanceled:
+				if completionErr == nil {
+					completionErr = context.Canceled
+				}
+			}
 		}
 	}
-	return errors.Join(runErrs...)
+	// Cancellation during cleanup must not undo an already completed turn.
+	if !stopped {
+		completionErr = ctx.Err()
+	}
+	return errors.Join(append(runErrs, completionErr)...)
 }
 
 // sessionUsage extracts approximate token usage from a completed session

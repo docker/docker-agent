@@ -35,8 +35,7 @@ func Classify(err error) error {
 		return wrap(ErrServerUnavailable, err)
 	}
 
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if _, ok := errors.AsType[net.Error](err); ok {
 		return wrap(ErrTransport, err)
 	}
 

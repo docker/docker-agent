@@ -17,8 +17,8 @@ func wrapBedrockError(err error) error {
 		return nil
 	}
 
-	var respErr *smithyhttp.ResponseError
-	if !errors.As(err, &respErr) {
+	respErr, ok := errors.AsType[*smithyhttp.ResponseError](err)
+	if !ok {
 		return err
 	}
 

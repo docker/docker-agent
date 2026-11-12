@@ -1,0 +1,3 @@
+/community/telemetry/: /configuration/telemetry/
+/community/opentelemetry/: /configuration/opentelemetry/
+/community/troubleshooting/: /guides/troubleshooting/

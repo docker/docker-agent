@@ -4,11 +4,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 func TestV2Commands_AllForms(t *testing.T) {
 	t.Parallel()
-	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v2.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v2.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	// Test simple map format
@@ -40,7 +42,7 @@ func TestV2Commands_AllForms(t *testing.T) {
 
 func TestV2Commands_DisplayText(t *testing.T) {
 	t.Parallel()
-	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v2.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v2.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	// Simple format: DisplayText returns the instruction
@@ -54,7 +56,7 @@ func TestV2Commands_DisplayText(t *testing.T) {
 
 func TestMigrate_v1_Commands_AllForms(t *testing.T) {
 	t.Parallel()
-	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v1.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	require.Equal(t, "root", cfg.Agents[0].Name)
@@ -73,7 +75,7 @@ func TestMigrate_v1_Commands_AllForms(t *testing.T) {
 
 func TestMigrate_v0_Commands_AllForms(t *testing.T) {
 	t.Parallel()
-	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v0.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	require.Equal(t, "root", cfg.Agents[0].Name)

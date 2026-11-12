@@ -73,6 +73,45 @@ func TestSchemaToMap_PropertyWithoutType(t *testing.T) {
 	}, m)
 }
 
+// TestSchemaToMap_EnumPropertyWithoutType covers pydantic's schema for
+// Literal["auto", 0, 1] and Literal["x"]: the injected type must admit the
+// enum/const values, not reject them all as "object" would.
+func TestSchemaToMap_EnumPropertyWithoutType(t *testing.T) {
+	t.Parallel()
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode": map[string]any{"enum": []any{"auto", 0, 1}},
+			"only": map[string]any{"const": "x"},
+		},
+	})
+	require.NoError(t, err)
+
+	props := m["properties"].(map[string]any)
+	assert.Equal(t, []any{"string", "integer"}, props["mode"].(map[string]any)["type"])
+	assert.Equal(t, "string", props["only"].(map[string]any)["type"])
+}
+
+// TestSchemaToMap_RequiredEnumKeepsNull ensures a required property whose
+// enum lists null keeps "null" in its inferred type: required means present,
+// and null is one of the allowed values.
+func TestSchemaToMap_RequiredEnumKeepsNull(t *testing.T) {
+	t.Parallel()
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode": map[string]any{"enum": []any{"auto", 0, nil}},
+			"none": map[string]any{"const": nil},
+		},
+		"required": []any{"mode", "none"},
+	})
+	require.NoError(t, err)
+
+	props := m["properties"].(map[string]any)
+	assert.Equal(t, []any{"string", "integer", "null"}, props["mode"].(map[string]any)["type"])
+	assert.Equal(t, "null", props["none"].(map[string]any)["type"])
+}
+
 func TestSchemaToMap_NestedPropertyWithoutType(t *testing.T) {
 	t.Parallel()
 	m, err := SchemaToMap(map[string]any{
@@ -226,4 +265,47 @@ func TestSchemaToMap_StripsNullFromRequiredArrayTypes(t *testing.T) {
 		},
 		"required": []any{"paths"},
 	}, m)
+}
+
+// T14: ensurePropertyTypes must not inject a "type" key into a $ref node.
+// Doing so pollutes the node with a sibling keyword, which providers like
+// OpenAI reject on $ref nodes under strict mode (see docker/docker-agent#4106).
+func TestSchemaToMap_RefPropertyLeftAsLeaf(t *testing.T) {
+	t.Parallel()
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"p": map[string]any{"$ref": "#/$defs/thing"},
+		},
+		"$defs": map[string]any{
+			"thing": map[string]any{"type": "string"},
+		},
+	})
+	require.NoError(t, err)
+
+	p := m["properties"].(map[string]any)["p"].(map[string]any)
+	assert.Equal(t, map[string]any{"$ref": "#/$defs/thing"}, p, "$ref node must be left as a leaf, no injected type")
+}
+
+func TestSchemaToMap_RefPropertyInNestedObjectLeftAsLeaf(t *testing.T) {
+	t.Parallel()
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"config": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": "#/$defs/thing"},
+				},
+			},
+		},
+		"$defs": map[string]any{
+			"thing": map[string]any{"type": "string"},
+		},
+	})
+	require.NoError(t, err)
+
+	config := m["properties"].(map[string]any)["config"].(map[string]any)
+	p := config["properties"].(map[string]any)["p"].(map[string]any)
+	assert.Equal(t, map[string]any{"$ref": "#/$defs/thing"}, p, "$ref node must be left as a leaf, no injected type")
 }

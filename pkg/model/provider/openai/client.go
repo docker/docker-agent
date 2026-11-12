@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
+	"os"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -19,12 +21,12 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/docker/docker-agent/pkg/chat"
-	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
@@ -44,6 +46,11 @@ type Client struct {
 	// wsPool is initialized in NewClient when transport=websocket is configured.
 	// It maintains a persistent WebSocket connection across requests.
 	wsPool *wsPool
+
+	// warnThinkingBudgetIgnoredOnce dedupes the "thinking_budget has no
+	// effect on this model" diagnostic (see [Client.warnThinkingBudgetIgnored])
+	// so a long-lived client warns at most once instead of on every request.
+	warnThinkingBudgetIgnoredOnce sync.Once
 }
 
 // NewClient creates a new OpenAI client from the provided configuration
@@ -54,6 +61,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	}
 
 	globalOptions := options.Apply(opts...)
+	resolvedBaseURL := "https://api.openai.com/v1"
+	if globalOptions.Gateway() == "" {
+		resolvedBaseURL = cmp.Or(cfg.BaseURL, os.Getenv("OPENAI_BASE_URL"), resolvedBaseURL)
+	}
 
 	var clientFn func(context.Context) (*openai.Client, error)
 	if gateway := globalOptions.Gateway(); gateway == "" {
@@ -75,14 +86,20 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 				option.WithAPIKey(""),
 				option.WithMiddleware(chatgptAuthMiddleware(tokenSource)),
 			)
+		case globalOptions.TokenSource() != nil:
+			tokenSource := globalOptions.TokenSource()
+			if _, err := tokenSource(ctx); err != nil {
+				return nil, fmt.Errorf("resolving access token: %w", err)
+			}
+			clientOptions = append(clientOptions,
+				option.WithAPIKey(""),
+				option.WithMiddleware(tokenAuthMiddleware(tokenSource)),
+			)
 		case cfg.TokenKey != "":
 			// Explicit token_key configured - use that env var
 			authToken, tokenKey := authTokenForTokenKey(ctx, cfg, env)
 			if authToken == "" {
-				if cfg.Provider == "github-copilot" && cfg.TokenKey == "GITHUB_TOKEN" {
-					return nil, errors.New("GITHUB_TOKEN or GH_TOKEN environment variable is required")
-				}
-				return nil, fmt.Errorf("%s environment variable is required", tokenKey)
+				return nil, fmt.Errorf("%s environment variable is required", strings.Join(catalog.TokenKeys(cfg.Provider, tokenKey), " or "))
 			}
 			clientOptions = append(clientOptions, option.WithAPIKey(authToken))
 		case isCustomProvider(cfg):
@@ -104,23 +121,13 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			// (OPENAI_API_KEY from the OS env).
 		}
 
-		if cfg.Provider == "azure" {
-			// Azure configuration
-			if cfg.BaseURL != "" {
-				clientOptions = append(clientOptions, option.WithBaseURL(cfg.BaseURL))
-			}
-
-			// Azure API version from provider opts
-			if cfg.ProviderOpts != nil {
-				if apiVersion, exists := cfg.ProviderOpts["api_version"]; exists {
-					slog.DebugContext(ctx, "Setting API version", "api_version", apiVersion)
-					if apiVersionStr, ok := apiVersion.(string); ok {
-						clientOptions = append(clientOptions, option.WithQueryAdd("api-version", apiVersionStr))
-					}
-				}
-			}
-		} else if cfg.BaseURL != "" {
+		if cfg.BaseURL != "" {
 			clientOptions = append(clientOptions, option.WithBaseURL(cfg.BaseURL))
+		}
+		for key, name := range catalog.Lookup(cfg.Provider).QueryParams {
+			if value, ok := cfg.ProviderOpts[key].(string); ok {
+				clientOptions = append(clientOptions, option.WithQueryAdd(name, value))
+			}
 		}
 
 		// Apply custom HTTP headers from provider_opts (e.g. github-copilot's
@@ -134,6 +141,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 		httpClient := httpclient.NewHTTPClient(ctx)
 		globalOptions.WrapTransport(ctx, httpClient)
+		base.WrapOpenCodeSession(cfg, httpClient)
 		clientOptions = append(clientOptions, option.WithHTTPClient(httpClient))
 
 		client := openai.NewClient(clientOptions...)
@@ -150,35 +158,20 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 		// When using a Gateway, tokens are short-lived.
 		clientFn = func(ctx context.Context) (*openai.Client, error) {
-			// Query a fresh auth token each time the client is used.
-			authToken, err := base.GatewayAuthToken(ctx, env, gateway)
+			connection, err := base.NewGatewayClient(ctx, env, gateway, "https://api.openai.com/v1", "/v1/", cfg, &globalOptions)
 			if err != nil {
 				return nil, err
 			}
 
-			url, err := url.Parse(gateway)
-			if err != nil {
-				return nil, fmt.Errorf("invalid gateway URL: %w", err)
-			}
-			baseURL := fmt.Sprintf("%s://%s%s/v1/", url.Scheme, url.Host, url.Path)
-
-			// Configure a custom HTTP client to inject headers and query params used by the Gateway.
-			httpOptions := base.GatewayHTTPOptions(url, "https://api.openai.com/v1", cfg, &globalOptions)
-			httpOptions = append(httpOptions, base.GatewayAuthRetry(env, gateway)...)
-
-			gatewayHTTPClient := httpclient.NewHTTPClient(ctx, httpOptions...)
-			globalOptions.WrapTransport(ctx, gatewayHTTPClient)
 			clientOptions := []option.RequestOption{
-				option.WithBaseURL(baseURL),
-				option.WithHTTPClient(gatewayHTTPClient),
+				option.WithBaseURL(connection.BaseURL),
+				option.WithHTTPClient(connection.HTTPClient),
 				option.WithMiddleware(oaistream.ErrorBodyMiddleware()),
 			}
-			if authToken != "" {
-				clientOptions = append(clientOptions, option.WithAPIKey(authToken))
+			if connection.AuthToken != "" {
+				clientOptions = append(clientOptions, option.WithAPIKey(connection.AuthToken))
 			}
-			client := openai.NewClient(clientOptions...)
-
-			return &client, nil
+			return new(openai.NewClient(clientOptions...)), nil
 		}
 	}
 
@@ -189,6 +182,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			ModelConfig:  *cfg,
 			ModelOptions: globalOptions,
 			Env:          env,
+			BaseURL:      resolvedBaseURL,
 		},
 		clientFn: clientFn,
 	}
@@ -196,12 +190,8 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	// Pre-create the WebSocket pool when the transport is configured.
 	// The pool is cheap (no connections opened until the first Stream call)
 	// and eager init avoids a data race on the lazy path.
-	// WebSocket is also skipped when an HTTP transport wrapper is registered:
-	// gorilla/websocket dials raw TCP and never calls http.RoundTripper, so the
-	// wrapper cannot be applied. Fall back to SSE so the wrapper covers all calls.
-	if getTransport(cfg) == "websocket" && globalOptions.Gateway() == "" && globalOptions.TransportWrapper() == nil {
-		baseURL := cmp.Or(cfg.BaseURL, "https://api.openai.com/v1")
-		client.wsPool = newWSPool(httpToWSURL(baseURL), client.buildWSHeaderFn())
+	if webSocketEnabled(cfg, &globalOptions) {
+		client.wsPool = newWSPool(httpToWSURL(resolvedBaseURL), client.buildWSHeaderFn())
 	}
 
 	return client, nil
@@ -215,9 +205,30 @@ func (c *Client) Close() {
 	}
 }
 
+// replaysReasoning reports whether stored assistant reasoning is replayed as
+// reasoning_content on Chat Completions requests. Replay defaults on; an
+// explicit provider_opts.replay_reasoning value can opt out.
+func (c *Client) replaysReasoning() bool {
+	return oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts)
+}
+
+// endpointConfig returns ModelConfig with BaseURL set to [base.Config.Endpoint],
+// so endpoint checks also see OPENAI_BASE_URL.
+func (c *Client) endpointConfig() *latest.ModelConfig {
+	cfg := c.ModelConfig
+	cfg.BaseURL = c.Endpoint()
+	return &cfg
+}
+
 // convertMessages converts chat.Message to openai.ChatCompletionMessageParamUnion
 // using the shared oaistream implementation.
 func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
+	// Gated here rather than inside the converter so that every path below --
+	// including the prompt-cache breakpoint path, which must keep computing the
+	// same body it will send -- sees the same messages.
+	if !c.replaysReasoning() {
+		messages = oaistream.WithoutReplayedReasoning(messages)
+	}
 	// Explicit prompt-cache breakpoints take priority over the consecutive-
 	// message merge below. [sendsExplicitCacheBreakpoints] only admits genuine
 	// OpenAI vendor endpoints — including a trusted named custom OpenAI
@@ -227,7 +238,7 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	// merging rewrites the stable message boundaries the markers pin. The
 	// self-hosted case the merge exists for (openai provider + custom
 	// base_url) is already excluded by the gate and still merges below.
-	if sendsExplicitCacheBreakpoints(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
+	if sendsExplicitCacheBreakpoints(c.endpointConfig(), c.ModelOptions.OpenAIVendor()) {
 		return c.convertMessagesWithCacheBreakpoints(ctx, messages)
 	}
 	// Coalesce consecutive same-role (system/user) messages into one for generic
@@ -244,35 +255,11 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	// prompt-cache breakpoints never reach this path: such backends don't
 	// accept the OpenAI-only field, and the merge rewrites message boundaries
 	// the markers would pin.
-	if shouldMergeConsecutiveMessages(&c.ModelConfig) {
+	if shouldMergeConsecutiveMessages(c.endpointConfig()) {
 		converted := oaistream.ConvertMessages(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
 		return oaistream.MergeConsecutiveMessages(converted)
 	}
 	return oaistream.ConvertMessages(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
-}
-
-// openModelHostProviders are built-in OpenAI-compatible aliases that front
-// arbitrary open-weight models (Qwen, GLM, Llama, DeepSeek, ...) whose
-// server-side chat templates may reject a request with more than one system
-// message. First-party APIs with a fixed, vendor-controlled model lineup
-// (openai, mistral, xai, minimax, github-copilot, opencode) tolerate multiple
-// system messages and are deliberately absent so their behavior is unchanged.
-var openModelHostProviders = map[string]bool{
-	"baseten":     true,
-	"ovhcloud":    true,
-	"openrouter":  true,
-	"nebius":      true,
-	"nvidia":      true,
-	"cerebras":    true,
-	"fireworks":   true,
-	"together":    true,
-	"huggingface": true,
-	"vercel":      true,
-	// Cloudflare Workers AI serves open-weight models directly; the AI Gateway
-	// fronts them (and other providers) through one endpoint. Both plausibly
-	// reach models with strict single-system-message chat templates.
-	"cloudflare-workers-ai": true,
-	"cloudflare-ai-gateway": true,
 }
 
 // shouldMergeConsecutiveMessages reports whether the chat-completions request
@@ -288,7 +275,7 @@ var openModelHostProviders = map[string]bool{
 // It is scoped to endpoints that plausibly front such models: explicit
 // chat-completions custom providers, a self-hosted server reached by pointing
 // the openai provider at a custom base_url (vLLM/SGLang), and the open-model
-// host aliases above. The official OpenAI API and other first-party APIs are
+// host aliases declared in the catalog. The official OpenAI API and other first-party APIs are
 // left untouched.
 func shouldMergeConsecutiveMessages(cfg *latest.ModelConfig) bool {
 	if cfg == nil {
@@ -300,10 +287,10 @@ func shouldMergeConsecutiveMessages(cfg *latest.ModelConfig) bool {
 	}
 	// A custom base_url on the openai provider means a self-hosted or
 	// third-party OpenAI-compatible server (e.g. vLLM), not api.openai.com.
-	if cfg.Provider == "openai" && cfg.BaseURL != "" {
+	if cfg.Provider == "openai" && !catalog.IsDefaultEndpoint(cfg.Provider, cfg.BaseURL) {
 		return true
 	}
-	return openModelHostProviders[cfg.Provider]
+	return catalog.Lookup(cfg.Provider).MergeConsecutiveMessages
 }
 
 // contextLimit returns this model's context window in tokens, preferring an
@@ -396,12 +383,14 @@ func (c *Client) CreateChatCompletionStream(
 	}
 
 	messages = c.withClaudeSchemaInstruction(ctx, messages)
+	requestTools = tools.WithoutSearchOnly(requestTools)
 
 	trackUsage := c.TrackUsageEnabled()
 
 	params := openai.ChatCompletionNewParams{
-		Model:    c.ModelConfig.Model,
-		Messages: c.convertMessages(ctx, messages),
+		Model:       c.ModelConfig.Model,
+		ServiceTier: openai.ChatCompletionNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
+		Messages:    c.convertMessages(ctx, messages),
 		StreamOptions: openai.ChatCompletionStreamOptionsParam{
 			IncludeUsage: openai.Bool(trackUsage),
 		},
@@ -440,6 +429,7 @@ func (c *Client) CreateChatCompletionStream(
 				slog.DebugContext(ctx, "Failed to convert tool parameters to OpenAI schema", "tool_name", tool.Name, "error", err)
 				return nil, err
 			}
+			tools.OrderedSchemaProperties(parameters)
 
 			toolsParam[i] = openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
 				Name:        tool.Name,
@@ -470,7 +460,7 @@ func (c *Client) CreateChatCompletionStream(
 	// When NoThinking is set we still need to send an explicit effort so hidden
 	// reasoning tokens don't exhaust the max_completion_tokens budget: "none" on
 	// a genuine OpenAI vendor endpoint whose model has a real off switch
-	// (gpt-5.6+, see [sendsRealNoneEffort]), "low" otherwise — older models
+	// (see [sendsRealNoneEffort]), "low" otherwise — older models
 	// (o3-mini, o1) only accept low/medium/high, and "low" is the closest thing
 	// to off they have.
 	//
@@ -478,32 +468,42 @@ func (c *Client) CreateChatCompletionStream(
 	// noThinkingMinOutputTokens so residual hidden reasoning can't starve
 	// visible output. The nil-guard is intentional: when MaxTokens is unset
 	// the caller has imposed no cap, so there is nothing to floor.
-	if modelinfo.UsesReasoningEffort(c.ModelConfig.Model) {
-		if c.ModelOptions.NoThinking() {
-			reasoningEffort := "low"
-			if sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
-				reasoningEffort = "none"
-			}
-			params.ReasoningEffort = shared.ReasoningEffort(reasoningEffort)
-			// Hidden reasoning tokens count against the output budget even
-			// with low effort. Enforce a floor so visible text isn't starved.
-			if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
-				if !modelinfo.SupportsResponsesAPI(c.ModelConfig.Model) {
-					params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
-				} else {
-					params.MaxCompletionTokens = openai.Int(noThinkingMinOutputTokens)
-				}
-			}
-			slog.DebugContext(ctx, "OpenAI request using reasoning effort (NoThinking)", "reasoning_effort", reasoningEffort)
-		} else if c.ModelConfig.ThinkingBudget != nil {
-			effortStr, err := openAIReasoningEffort(c.ModelConfig.ThinkingBudget)
-			if err != nil {
-				slog.ErrorContext(ctx, "OpenAI request using thinking_budget failed", "error", err)
-				return nil, err
-			}
-			params.ReasoningEffort = shared.ReasoningEffort(effortStr)
-			slog.DebugContext(ctx, "OpenAI request using thinking_budget", "reasoning_effort", effortStr)
+	switch {
+	case !modelinfo.UsesReasoningEffort(c.ModelConfig.Model):
+		if c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled() {
+			c.warnThinkingBudgetIgnored(ctx)
 		}
+	case len(requestTools) > 0 && modelinfo.OpenAIRejectsToolsWithReasoningEffort(c.ModelConfig.Model) && !c.chatToolsWithNoneEffort():
+		// Sol/Luna accept tools with explicit "none"; other efforts need Responses.
+		// Omitting effort also lets GPT-5.4/5.5 use their implicit default.
+		// Warn only when a configured effort is actually being dropped.
+		if c.ModelOptions.NoThinking() || c.ModelConfig.ThinkingBudget != nil {
+			slog.WarnContext(ctx, "OpenAI: dropping reasoning_effort for a tools request forced onto Chat Completions; use api_type: openai_responses for tool calling on this model", "model", c.ModelConfig.Model)
+		}
+	case c.ModelOptions.NoThinking():
+		reasoningEffort := "low"
+		if sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
+			reasoningEffort = "none"
+		}
+		params.ReasoningEffort = shared.ReasoningEffort(reasoningEffort)
+		// Hidden reasoning tokens count against the output budget even
+		// with low effort. Enforce a floor so visible text isn't starved.
+		if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
+			if !modelinfo.SupportsResponsesAPI(c.ModelConfig.Model) {
+				params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
+			} else {
+				params.MaxCompletionTokens = openai.Int(noThinkingMinOutputTokens)
+			}
+		}
+		slog.DebugContext(ctx, "OpenAI request using reasoning effort (NoThinking)", "reasoning_effort", reasoningEffort)
+	case c.ModelConfig.ThinkingBudget != nil:
+		effortStr, err := openAIReasoningEffort(c.ModelConfig.ThinkingBudget)
+		if err != nil {
+			slog.ErrorContext(ctx, "OpenAI request using thinking_budget failed", "error", err)
+			return nil, err
+		}
+		params.ReasoningEffort = shared.ReasoningEffort(effortStr)
+		slog.DebugContext(ctx, "OpenAI request using thinking_budget", "reasoning_effort", effortStr)
 	}
 
 	// Apply structured output configuration
@@ -520,6 +520,10 @@ func (c *Client) CreateChatCompletionStream(
 		}
 	}
 
+	if err := applyChatProviderOpts(&params, c.ModelConfig.ProviderOpts); err != nil {
+		return nil, err
+	}
+
 	// Log the request in JSON format for debugging
 	if requestJSON, err := json.Marshal(params); err == nil {
 		slog.DebugContext(ctx, "OpenAI chat completion request", "request", string(requestJSON))
@@ -533,15 +537,21 @@ func (c *Client) CreateChatCompletionStream(
 		return nil, err
 	}
 
-	// Forward sampling-related provider_opts as extra body fields.
-	// This allows custom/OpenAI-compatible providers (vLLM, Ollama, etc.)
-	// to receive parameters like top_k, repetition_penalty, etc.
-	applySamplingProviderOpts(&params, c.ModelConfig.ProviderOpts)
-
 	stream := client.Chat.Completions.NewStreaming(ctx, params)
 
 	slog.DebugContext(ctx, "OpenAI chat completion stream created successfully", "model", c.ModelConfig.Model)
-	return newStreamAdapter(stream, trackUsage), nil
+	return oaistream.NewStreamAdapter(stream, trackUsage), nil
+}
+
+// warnThinkingBudgetIgnored logs, once per client, that a configured and
+// enabled thinking_budget has no effect because this model does not accept
+// a reasoning-effort parameter at all (docker-agent#4162: previously
+// silent — the setting was accepted by config validation but dropped
+// without a trace here).
+func (c *Client) warnThinkingBudgetIgnored(ctx context.Context) {
+	c.warnThinkingBudgetIgnoredOnce.Do(func() {
+		slog.WarnContext(ctx, "OpenAI: thinking_budget is configured but this model does not support a reasoning effort parameter; the setting has no effect", "model", c.ModelConfig.Model)
+	})
 }
 
 func (c *Client) supportsDeferredTools() bool {
@@ -568,7 +578,7 @@ func injectDeferredToolLoads(input []responses.ResponseInputItemUnionParam, requ
 		if item.OfFunctionCallOutput == nil {
 			continue
 		}
-		deferred := byCallID[item.OfFunctionCallOutput.CallID]
+		deferred := byCallID[item.OfFunctionCallOutput.CallID.Value]
 		if len(deferred) == 0 {
 			continue
 		}
@@ -580,6 +590,7 @@ func injectDeferredToolLoads(input []responses.ResponseInputItemUnionParam, requ
 			if err != nil {
 				return nil, err
 			}
+			tools.OrderedSchemaProperties(parameters)
 			loaded = append(loaded, responses.ToolUnionParam{OfFunction: &responses.FunctionToolParam{
 				Name:         tool.Name,
 				Description:  param.NewOpt(tool.Description),
@@ -590,7 +601,7 @@ func injectDeferredToolLoads(input []responses.ResponseInputItemUnionParam, requ
 			names = append(names, tool.Name)
 		}
 
-		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(item.OfFunctionCallOutput.CallID+":"+strings.Join(names, ","))))
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(item.OfFunctionCallOutput.CallID.Value+":"+strings.Join(names, ","))))
 		callID := "cagent_tool_load_" + digest[:16]
 		result = append(result,
 			responses.ResponseInputItemUnionParam{OfToolSearchCall: &responses.ResponseInputItemToolSearchCallParam{
@@ -623,8 +634,14 @@ func (c *Client) CreateResponseStream(
 	}
 
 	messages = c.withClaudeSchemaInstruction(ctx, messages)
+	allRequestTools := requestTools
+	requestTools, hostedTools, err := c.hostedToolSearchTools(ctx, requestTools)
+	if err != nil {
+		return nil, err
+	}
 
 	input := c.convertMessagesToResponseInput(ctx, messages)
+	input = c.filterToolSearchHistory(input, allRequestTools)
 	deferredToolsEnabled := c.supportsDeferredTools()
 	if deferredToolsEnabled {
 		loadedInput, err := injectDeferredToolLoads(input, requestTools)
@@ -635,9 +652,11 @@ func (c *Client) CreateResponseStream(
 	}
 
 	params := responses.ResponseNewParams{
-		Model: c.ModelConfig.Model,
+		Model:       c.ModelConfig.Model,
+		ServiceTier: responses.ResponseNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
 	}
 	params.Input.OfInputItemList = input
+	c.configureResponseState(ctx, &params, messages)
 
 	if c.ModelConfig.Temperature != nil {
 		params.Temperature = param.NewOpt(*c.ModelConfig.Temperature)
@@ -652,9 +671,9 @@ func (c *Client) CreateResponseStream(
 		slog.DebugContext(ctx, "OpenAI responses request configured with max output tokens", "max_output_tokens", maxTokens)
 	}
 
-	if len(requestTools) > 0 {
+	if len(requestTools) > 0 || len(hostedTools) > 0 {
 		slog.DebugContext(ctx, "Adding tools to OpenAI responses request", "tool_count", len(requestTools))
-		toolsParam := make([]responses.ToolUnionParam, 0, len(requestTools))
+		toolsParam := make([]responses.ToolUnionParam, 0, len(requestTools)+len(hostedTools))
 		for _, tool := range requestTools {
 			if deferredToolsEnabled && tool.Deferred {
 				continue
@@ -664,6 +683,7 @@ func (c *Client) CreateResponseStream(
 				slog.DebugContext(ctx, "Failed to convert tool parameters to OpenAI schema", "tool_name", tool.Name, "error", err)
 				return nil, err
 			}
+			tools.OrderedSchemaProperties(parameters)
 
 			functionTool := &responses.FunctionToolParam{
 				Name:        tool.Name,
@@ -679,6 +699,7 @@ func (c *Client) CreateResponseStream(
 
 			slog.DebugContext(ctx, "Added tool to OpenAI responses request", "tool_name", tool.Name)
 		}
+		toolsParam = append(toolsParam, hostedTools...)
 		if len(toolsParam) > 0 {
 			params.Tools = toolsParam
 
@@ -711,7 +732,7 @@ func (c *Client) CreateResponseStream(
 			// Send an explicit effort so the model spends as few output tokens
 			// as possible on reasoning, leaving room for visible text: "none"
 			// on a genuine OpenAI vendor endpoint whose model has a real off
-			// switch (gpt-5.6+, see [sendsRealNoneEffort]), "low" otherwise —
+			// switch (see [sendsRealNoneEffort]), "low" otherwise —
 			// older models (o3-mini, o1) only accept low/medium/high.
 			reasoningEffort := "low"
 			if sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
@@ -740,6 +761,8 @@ func (c *Client) CreateResponseStream(
 				slog.DebugContext(ctx, "OpenAI responses request using thinking_budget", "reasoning_effort", effortStr)
 			}
 		}
+	} else if c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled() {
+		c.warnThinkingBudgetIgnored(ctx)
 	}
 
 	// Apply structured output configuration
@@ -758,37 +781,35 @@ func (c *Client) CreateResponseStream(
 		applyChatGPTResponsesPolicy(ctx, &params)
 	}
 
-	// Log the request in JSON format for debugging
+	// Keep prompt and tool diagnostics without logging opaque reasoning blobs.
 	if requestJSON, err := json.Marshal(params); err == nil {
-		slog.DebugContext(ctx, "OpenAI responses request", "request", string(requestJSON))
+		slog.DebugContext(ctx, "OpenAI responses request", "request", redactEncryptedContent(requestJSON))
 	} else {
 		slog.ErrorContext(ctx, "Failed to marshal OpenAI responses request to JSON", "error", err)
 	}
 
 	// Choose transport: WebSocket or SSE (default).
-	// WebSocket is disabled when using a Gateway since most gateways don't support it.
-	// WebSocket is also disabled when an HTTP transport wrapper is registered: gorilla/websocket
-	// dials raw TCP and never calls http.RoundTripper, so the wrapper cannot intercept those
-	// connections. Fall back to SSE so the wrapper applies to all requests.
 	transport := getTransport(&c.ModelConfig)
-	trackUsage := c.TrackUsageEnabled()
 
 	switch {
-	case transport == "websocket" && c.ModelOptions.Gateway() == "" && c.ModelOptions.TransportWrapper() == nil:
+	case webSocketEnabled(&c.ModelConfig, &c.ModelOptions):
 		stream, err := c.createWebSocketStream(ctx, params)
 		if err != nil {
 			slog.WarnContext(ctx, "WebSocket stream failed, falling back to SSE", "error", err)
 			// Fall through to SSE below.
 		} else {
 			slog.DebugContext(ctx, "OpenAI responses WebSocket stream created successfully", "model", c.ModelConfig.Model)
-			return newResponseStreamAdapter(stream, trackUsage), nil
+			return c.responseAdapter(ctx, stream), nil
 		}
 	case transport == "websocket" && c.ModelOptions.Gateway() != "":
 		slog.DebugContext(ctx, "WebSocket transport requested but Gateway is configured, using SSE",
 			"model", c.ModelConfig.Model,
 			"gateway", c.ModelOptions.Gateway())
-	case transport == "websocket":
+	case transport == "websocket" && c.ModelOptions.TransportWrapper() != nil:
 		slog.DebugContext(ctx, "WebSocket transport requested but HTTP transport wrapper is set, using SSE",
+			"model", c.ModelConfig.Model)
+	case transport == "websocket":
+		slog.DebugContext(ctx, "WebSocket transport requested but the endpoint is OpenCode, using SSE",
 			"model", c.ModelConfig.Model)
 	}
 
@@ -800,7 +821,7 @@ func (c *Client) CreateResponseStream(
 	stream := client.Responses.NewStreaming(ctx, params)
 
 	slog.DebugContext(ctx, "OpenAI responses stream created successfully", "model", c.ModelConfig.Model)
-	return newResponseStreamAdapter(stream, trackUsage), nil
+	return c.responseAdapter(ctx, stream), nil
 }
 
 // createWebSocketStream sends a request over the pre-initialized WebSocket
@@ -813,6 +834,10 @@ func (c *Client) createWebSocketStream(
 		return nil, errors.New("websocket pool not initialized")
 	}
 
+	// Full-history replay must not also append to connection-local history.
+	if c.preservesResponseState() {
+		params.PreviousResponseID = param.Null[string]()
+	}
 	return c.wsPool.Stream(ctx, params)
 }
 
@@ -827,7 +852,13 @@ func (c *Client) buildWSHeaderFn() func(ctx context.Context) (http.Header, error
 
 		// Resolve the API key using the same logic as the HTTP client.
 		var apiKey string
-		if c.ModelConfig.TokenKey != "" {
+		if source := c.ModelOptions.TokenSource(); source != nil {
+			var err error
+			apiKey, err = source(ctx)
+			if err != nil {
+				return nil, err
+			}
+		} else if c.ModelConfig.TokenKey != "" {
 			apiKey, _ = authTokenForTokenKey(ctx, &c.ModelConfig, c.Env)
 		}
 		if apiKey == "" {
@@ -852,13 +883,22 @@ func (c *Client) buildWSHeaderFn() func(ctx context.Context) (http.Header, error
 }
 
 func authTokenForTokenKey(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider) (string, string) {
-	token, _ := env.Get(ctx, cfg.TokenKey)
-	if token == "" && cfg.Provider == "github-copilot" && cfg.TokenKey == "GITHUB_TOKEN" {
-		if fallback, _ := env.Get(ctx, "GH_TOKEN"); fallback != "" {
-			return fallback, "GH_TOKEN"
+	for _, key := range catalog.TokenKeys(cfg.Provider, cfg.TokenKey) {
+		if token, _ := env.Get(ctx, key); token != "" {
+			return token, key
 		}
 	}
-	return token, cfg.TokenKey
+	return "", cfg.TokenKey
+}
+
+// webSocketEnabled reports whether transport=websocket can be honoured. WebSocket
+// dials bypass http.RoundTripper, so SSE is used behind a gateway, under a
+// transport wrapper, and for OpenCode, whose session header needs the RoundTripper.
+func webSocketEnabled(cfg *latest.ModelConfig, opts *options.ModelOptions) bool {
+	return getTransport(cfg) == "websocket" &&
+		opts.Gateway() == "" &&
+		opts.TransportWrapper() == nil &&
+		!base.IsOpenCodeProvider(cfg)
 }
 
 // getTransport returns the streaming transport preference from ProviderOpts.
@@ -874,9 +914,13 @@ func getTransport(cfg *latest.ModelConfig) string {
 }
 
 func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []chat.Message) []responses.ResponseInputItemUnionParam {
-	markBreakpoints := sendsExplicitCacheBreakpoints(&c.ModelConfig, c.ModelOptions.OpenAIVendor())
+	markBreakpoints := sendsExplicitCacheBreakpoints(c.endpointConfig(), c.ModelOptions.OpenAIVendor())
 	var input []responses.ResponseInputItemUnionParam
 	for _, msg := range messages {
+		if replay := c.replayResponse(msg); len(replay) > 0 {
+			input = append(input, replay...)
+			continue
+		}
 		// Skip invalid messages
 		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" {
 			continue
@@ -1007,66 +1051,14 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 			}
 
 		case chat.MessageRoleTool:
-			// Tool response message - convert to function call output
 			item.OfFunctionCallOutput = &responses.ResponseInputItemFunctionCallOutputParam{
-				CallID: msg.ToolCallID,
-				Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-					OfString: param.NewOpt(msg.Content),
-				},
+				CallID: param.NewOpt(msg.ToolCallID),
+				Output: c.convertToolResultOutput(ctx, msg),
 			}
 		}
 
 		if item.OfMessage != nil || item.OfInputMessage != nil || item.OfFunctionCall != nil || item.OfFunctionCallOutput != nil {
 			input = append(input, item)
-		}
-
-		// For tool messages with attachments, inject a follow-up user message
-		// since OpenAI function call outputs only support text.
-		if msg.Role == chat.MessageRoleTool && len(msg.MultiContent) > 0 {
-			var attachmentParts []responses.ResponseInputContentUnionParam
-			for _, part := range msg.MultiContent {
-				switch part.Type {
-				case chat.MessagePartTypeImageURL:
-					if part.ImageURL != nil {
-						detail := responses.ResponseInputImageContentDetailAuto
-						switch part.ImageURL.Detail {
-						case chat.ImageURLDetailHigh:
-							detail = responses.ResponseInputImageContentDetailHigh
-						case chat.ImageURLDetailLow:
-							detail = responses.ResponseInputImageContentDetailLow
-						}
-						attachmentParts = append(attachmentParts, responses.ResponseInputContentUnionParam{
-							OfInputImage: &responses.ResponseInputImageParam{
-								ImageURL: param.NewOpt(part.ImageURL.URL),
-								Detail:   responses.ResponseInputImageDetail(detail),
-							},
-						})
-					}
-				case chat.MessagePartTypeDocument:
-					if part.Document != nil {
-						docParts, err := convertDocumentToResponseInput(ctx, *part.Document, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
-						if err != nil {
-							slog.WarnContext(ctx, "failed to convert tool result document attachment", "error", err, "doc", part.Document.Name)
-							continue
-						}
-						attachmentParts = append(attachmentParts, docParts...)
-					}
-				}
-			}
-			if len(attachmentParts) > 0 {
-				label := responses.ResponseInputContentUnionParam{
-					OfInputText: &responses.ResponseInputTextParam{
-						Text: "Attached content from tool result:",
-					},
-				}
-				allParts := append([]responses.ResponseInputContentUnionParam{label}, attachmentParts...)
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfInputMessage: &responses.ResponseInputItemMessageParam{
-						Role:    "user",
-						Content: allParts,
-					},
-				})
-			}
 		}
 
 		// Translate the CacheControl marker into an explicit prompt-cache
@@ -1086,14 +1078,14 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 			pendingCalls[item.OfFunctionCall.CallID] = true
 		}
 		if item.OfFunctionCallOutput != nil {
-			delete(pendingCalls, item.OfFunctionCallOutput.CallID)
+			delete(pendingCalls, item.OfFunctionCallOutput.CallID.Value)
 		}
 	}
 	for callID := range pendingCalls {
 		slog.WarnContext(ctx, "Injecting placeholder output for orphaned function call", "call_id", callID)
 		input = append(input, responses.ResponseInputItemUnionParam{
 			OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-				CallID: callID,
+				CallID: param.NewOpt(callID),
 				Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 					OfString: param.NewOpt("(no output — tool call was not executed)"),
 				},
@@ -1165,7 +1157,7 @@ func (c *Client) CreateBatchEmbedding(ctx context.Context, texts []string) (*bas
 	response, err := client.Embeddings.New(ctx, params)
 	if err != nil {
 		slog.ErrorContext(ctx, "OpenAI batch embedding request failed", "error", err)
-		return nil, fmt.Errorf("failed to create batch embeddings: %w", err)
+		return nil, fmt.Errorf("failed to create batch embeddings: %w", oaistream.WrapOpenAIError(err))
 	}
 
 	if len(response.Data) != len(texts) {
@@ -1176,8 +1168,10 @@ func (c *Client) CreateBatchEmbedding(ctx context.Context, texts []string) (*bas
 	embeddings := make([][]float64, len(response.Data))
 	for i, data := range response.Data {
 		embedding32 := data.Embedding
-		embedding := make([]float64, len(embedding32))
-		copy(embedding, embedding32)
+		embedding := slices.Clip(slices.Clone(embedding32))
+		if embedding == nil {
+			embedding = []float64{}
+		}
 		embeddings[i] = embedding
 	}
 
@@ -1232,7 +1226,8 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 	systemPrompt := prompts.BuildRerankSystemPrompt(documents, criteria, c.ModelConfig.ProviderOpts, jsonFormatInstruction)
 
 	params := openai.ChatCompletionNewParams{
-		Model: c.ModelConfig.Model,
+		Model:       c.ModelConfig.Model,
+		ServiceTier: openai.ChatCompletionNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(systemPrompt),
 			openai.UserMessage(userPrompt),
@@ -1285,7 +1280,9 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		},
 	}
 
-	applySamplingProviderOpts(&params, c.ModelConfig.ProviderOpts)
+	if err := applyChatProviderOpts(&params, c.ModelConfig.ProviderOpts); err != nil {
+		return nil, err
+	}
 
 	resp, err := client.Chat.Completions.New(ctx, params)
 	if err != nil {
@@ -1388,11 +1385,7 @@ func isCustomProvider(cfg *latest.ModelConfig) bool {
 // driven by modelinfo.SupportsResponsesAPI so new models are picked up by
 // naming convention rather than a hardcoded allow-list.
 func autoSelectsResponsesAPI(provider string) bool {
-	switch provider {
-	case "openai", "github-copilot", "opencode-zen", chatgpt.ProviderName:
-		return true
-	}
-	return false
+	return catalog.Lookup(provider).AutoResponses
 }
 
 // noThinkingMinOutputTokens is the minimum output-token budget we enforce for
@@ -1436,6 +1429,15 @@ func sendsRealNoneEffort(cfg *latest.ModelConfig, openAIVendor bool) bool {
 		return false
 	}
 	return modelinfo.IsOpenAIVendor(cfg.Provider, cfg.Model) || openAIVendor
+}
+
+func (c *Client) chatToolsWithNoneEffort() bool {
+	if !modelinfo.OpenAISupportsChatToolsWithNoneEffort(c.ModelConfig.Model) ||
+		!sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
+		return false
+	}
+	level, ok := c.ModelConfig.ThinkingBudget.EffortLevel()
+	return c.ModelOptions.NoThinking() || (ok && level == effort.None)
 }
 
 // openAIReasoningEffort validates a ThinkingBudget effort string for the

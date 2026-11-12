@@ -2,11 +2,14 @@ package runtime
 
 import (
 	"cmp"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -16,7 +19,7 @@ type Event interface {
 }
 
 // SessionScoped is implemented by events that belong to a specific session.
-// The PersistentRuntime uses this to filter out sub-session events that
+// The PersistenceObserver uses this to filter out sub-session events that
 // should not be persisted into the parent session's history.
 type SessionScoped interface {
 	GetSessionID() string
@@ -24,12 +27,16 @@ type SessionScoped interface {
 
 // AgentContext carries optional agent attribution and timestamp for an event.
 type AgentContext struct {
-	AgentName string    `json:"agent_name,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	OperationID uint64    `json:"-"`
+	AgentName   string    `json:"agent_name,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
 }
 
 // GetAgentName returns the agent name for events embedding AgentContext.
 func (a AgentContext) GetAgentName() string { return a.AgentName }
+
+// Operation identifies the local foreground run; it is not sent over the wire.
+func (a AgentContext) Operation() uint64 { return a.OperationID }
 
 // newAgentContext creates a new AgentContext with the current timestamp.
 func newAgentContext(agentName string) AgentContext {
@@ -40,6 +47,7 @@ func newAgentContext(agentName string) AgentContext {
 type UserMessageEvent struct {
 	AgentContext
 
+	MessageID       string             `json:"message_id,omitempty"`
 	Type            string             `json:"type"`
 	Message         string             `json:"message"`
 	MultiContent    []chat.MessagePart `json:"multi_content,omitempty"`
@@ -60,6 +68,12 @@ func UserMessage(message, sessionID string, multiContent []chat.MessagePart, ses
 		SessionPosition: pos,
 		AgentContext:    newAgentContext(""),
 	}
+}
+
+func userMessageEvent(msg chat.Message, sessionID string, position int) Event {
+	event := UserMessage(msg.Content, sessionID, msg.MultiContent, position).(*UserMessageEvent)
+	event.MessageID = msg.MessageID
+	return event
 }
 
 func (e *UserMessageEvent) GetSessionID() string { return e.SessionID }
@@ -84,6 +98,24 @@ func PartialToolCall(toolCall tools.ToolCall, toolDefinition tools.Tool, agentNa
 		ToolCall:       toolCall,
 		ToolDefinition: toolDef,
 		AgentContext:   newAgentContext(agentName),
+	}
+}
+
+// ToolCallsRetractedEvent is sent when tool calls announced by
+// PartialToolCallEvent will never run: a refusal or a server fallback
+// superseded them.
+type ToolCallsRetractedEvent struct {
+	AgentContext
+
+	Type        string   `json:"type"`
+	ToolCallIDs []string `json:"tool_call_ids"`
+}
+
+func ToolCallsRetracted(toolCallIDs []string, agentName string) Event {
+	return &ToolCallsRetractedEvent{
+		Type:         "tool_calls_retracted",
+		ToolCallIDs:  toolCallIDs,
+		AgentContext: newAgentContext(agentName),
 	}
 }
 
@@ -168,6 +200,26 @@ func ToolCallResponse(toolCallID string, toolDefinition tools.Tool, result *tool
 	}
 }
 
+// BackgroundAgentStatusEvent tracks a detached agent without changing the foreground stream.
+type BackgroundAgentStatusEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Running   bool   `json:"running"`
+}
+
+func BackgroundAgentStatus(sessionID, agentName string, running bool) Event {
+	return &BackgroundAgentStatusEvent{
+		Type:         "background_agent_status",
+		SessionID:    sessionID,
+		Running:      running,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+func (e *BackgroundAgentStatusEvent) GetSessionID() string { return e.SessionID }
+
 type StreamStartedEvent struct {
 	AgentContext
 
@@ -191,12 +243,18 @@ type AgentChoiceEvent struct {
 	Type      string `json:"type"`
 	Content   string `json:"content"`
 	SessionID string `json:"session_id,omitempty"`
+	MessageID string `json:"message_id,omitempty"`
 }
 
 func (e *AgentChoiceEvent) GetSessionID() string { return e.SessionID }
 
-func AgentChoice(agentName, sessionID, content string) Event {
+func AgentChoice(agentName, sessionID, content string, messageID ...string) Event {
+	var id string
+	if len(messageID) > 0 {
+		id = messageID[0]
+	}
 	return &AgentChoiceEvent{
+		MessageID:    id,
 		Type:         "agent_choice",
 		Content:      content,
 		SessionID:    sessionID,
@@ -210,16 +268,43 @@ type AgentChoiceReasoningEvent struct {
 	Type      string `json:"type"`
 	Content   string `json:"content"`
 	SessionID string `json:"session_id,omitempty"`
+	MessageID string `json:"message_id,omitempty"`
 }
 
 func (e *AgentChoiceReasoningEvent) GetSessionID() string { return e.SessionID }
 
-func AgentChoiceReasoning(agentName, sessionID, content string) Event {
+func AgentChoiceReasoning(agentName, sessionID, content string, messageID ...string) Event {
+	var id string
+	if len(messageID) > 0 {
+		id = messageID[0]
+	}
 	return &AgentChoiceReasoningEvent{
+		MessageID:    id,
 		Type:         "agent_choice_reasoning",
 		Content:      content,
 		SessionID:    sessionID,
 		AgentContext: newAgentContext(agentName),
+	}
+}
+
+// AgentChoiceReasoningResetEvent discards reasoning already streamed for one message.
+// Text and tool calls are unaffected; later reasoning starts from an empty buffer.
+type AgentChoiceReasoningResetEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	MessageID string `json:"message_id"`
+}
+
+func (e *AgentChoiceReasoningResetEvent) GetSessionID() string { return e.SessionID }
+
+func AgentChoiceReasoningReset(agentName, sessionID, messageID string) Event {
+	return &AgentChoiceReasoningResetEvent{
+		AgentContext: newAgentContext(agentName),
+		Type:         "agent_choice_reasoning_reset",
+		SessionID:    sessionID,
+		MessageID:    messageID,
 	}
 }
 
@@ -241,6 +326,7 @@ const (
 	ErrorCodeHookBlocked            = "hook_blocked"
 	ErrorCodeLoopDetected           = "loop_detected"
 	ErrorCodeStructuredOutputFailed = "structured_output_failed"
+	ErrorCodeRoutingFailed          = "routing_failed"
 )
 
 type ErrorEvent struct {
@@ -298,16 +384,54 @@ func ErrorWithCodeForSession(sessionID, code, msg string) Event {
 type ShellOutputEvent struct {
 	AgentContext
 
-	Type   string `json:"type"`
-	Output string `json:"output"`
+	Type      string `json:"type"`
+	CommandID string `json:"command_id,omitempty"`
+	Command   string `json:"command,omitempty"`
+	Output    string `json:"output,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Done      bool   `json:"done,omitempty"`
 }
 
 func ShellOutput(output string) Event {
 	return &ShellOutputEvent{
 		Type:         "shell",
 		Output:       output,
+		Done:         true,
 		AgentContext: newAgentContext(""),
 	}
+}
+
+func ShellCommandStarted(id, command string) Event {
+	return &ShellOutputEvent{
+		Type:         "shell",
+		CommandID:    id,
+		Command:      command,
+		AgentContext: newAgentContext(""),
+	}
+}
+
+func ShellCommandOutput(id, output string) Event {
+	return &ShellOutputEvent{
+		Type:         "shell",
+		CommandID:    id,
+		Output:       output,
+		AgentContext: newAgentContext(""),
+	}
+}
+
+func ShellCommandFinished(id, command, output string, err error) Event {
+	event := &ShellOutputEvent{
+		Type:         "shell",
+		CommandID:    id,
+		Command:      command,
+		Output:       output,
+		Done:         true,
+		AgentContext: newAgentContext(""),
+	}
+	if err != nil {
+		event.Error = err.Error()
+	}
+	return event
 }
 
 type WarningEvent struct {
@@ -356,9 +480,10 @@ func ModelFallback(agentName, failedModel, fallbackModel, reason string, attempt
 type TokenUsageEvent struct {
 	AgentContext
 
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Usage     *Usage `json:"usage"`
+	Type                  string `json:"type"`
+	SessionID             string `json:"session_id"`
+	Usage                 *Usage `json:"usage"`
+	AssistantMessageEmpty bool   `json:"assistant_message_empty,omitempty"`
 }
 
 type Usage struct {
@@ -368,6 +493,8 @@ type Usage struct {
 	ContextLimit  int64         `json:"context_limit"`
 	Cost          float64       `json:"cost"`
 	LastMessage   *MessageUsage `json:"last_message,omitempty"`
+	// SnapshotOnly refreshes totals without reporting another chat response.
+	SnapshotOnly bool `json:"snapshot_only,omitempty"`
 	// CompactionThreshold is the fraction of the context window at which
 	// auto-compaction triggers for the agent that produced this snapshot,
 	// so UIs can color context gauges against it. 0 means unknown;
@@ -395,9 +522,9 @@ func NewTokenUsageEvent(sessionID, agentName string, usage *Usage) Event {
 	}
 }
 
-// GetSessionID makes TokenUsageEvent satisfy [SessionScoped] so the
-// observer fan-out can drop sub-session events without each observer
-// re-implementing the check.
+// GetSessionID makes TokenUsageEvent satisfy [SessionScoped] so observers
+// that filter on it (e.g. PersistenceObserver) can drop sub-session
+// token-usage events.
 func (e *TokenUsageEvent) GetSessionID() string { return e.SessionID }
 
 // SessionUsage builds a Usage from the session's current token counts, the
@@ -419,7 +546,7 @@ func SessionUsage(sess *session.Session, contextLimit int64, compactionThreshold
 		OutputTokens:  output,
 		ContextLength: input + output,
 		ContextLimit:  contextLimit,
-		Cost:          sess.OwnCost() + sess.EmbeddedSubSessionCost(),
+		Cost:          min(math.MaxFloat64, sess.OwnCost()+sess.EmbeddedSubSessionCost()),
 	}
 	if len(compactionThreshold) > 0 {
 		u.CompactionThreshold = compactionThreshold[0]
@@ -444,29 +571,6 @@ func SessionTitle(sessionID, title string) Event {
 }
 
 func (e *SessionTitleEvent) GetSessionID() string { return e.SessionID }
-
-// SessionPlanUpdatedEvent fires when the session_plan toolset writes a plan.
-// Content and Path let a UI render the plan inline without re-reading the file.
-type SessionPlanUpdatedEvent struct {
-	AgentContext
-
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Content   string `json:"content,omitempty"`
-	Path      string `json:"path,omitempty"`
-}
-
-func SessionPlanUpdated(sessionID, content, path, agentName string) Event {
-	return &SessionPlanUpdatedEvent{
-		Type:         "session_plan_updated",
-		SessionID:    sessionID,
-		Content:      content,
-		Path:         path,
-		AgentContext: newAgentContext(agentName),
-	}
-}
-
-func (e *SessionPlanUpdatedEvent) GetSessionID() string { return e.SessionID }
 
 // PlanChangedEvent fires after an agent successfully mutates a shared plan
 // (write, status change, or delete) through the plan toolset. It carries
@@ -506,6 +610,11 @@ type SessionSummaryEvent struct {
 	Cost           float64     `json:"cost,omitempty"`
 	Model          string      `json:"model,omitempty"`
 	Usage          *chat.Usage `json:"usage,omitempty"`
+
+	// persisted is set when the compaction path wrote this summary directly.
+	// The persistence observer uses it to avoid writing the same summary again
+	// on normal observed RunStream executions. It is intentionally not serialized.
+	persisted bool
 }
 
 // SessionSummary builds the event announcing an applied compaction summary.
@@ -577,21 +686,29 @@ func SessionCompactionCompleted(sessionID, outcome, agentName string) Event {
 
 func (e *SessionCompactionEvent) GetSessionID() string { return e.SessionID }
 
-// StreamStoppedEvent reports that a RunStream loop has stopped. Reason carries
-// the turnEndReason* classification (normal, error, canceled) so consumers can
+// StreamStopReasonMaxIterations identifies a stream stopped at its iteration limit.
+const StreamStopReasonMaxIterations = "max_iterations"
+
+// StreamStoppedEvent reports that a RunStream loop has stopped. Reason is a
+// turnEndReason* value (e.g. normal, error, canceled) or
+// StreamStopReasonMaxIterations, so consumers can
 // tell successful completion apart from crashes and user-initiated stops.
 //
-// Delivery is best-effort: it is emitted non-blockingly during teardown and is
-// dropped if the events buffer is full and the consumer has gone away (see
-// finalizeEventChannel). Treat the channel close, not receipt of this event, as
-// the guaranteed terminal signal. Do not assume session-end hooks have finished
-// when this event arrives: it is emitted before they run.
+// Delivery is bounded-blocking: finalizeEventChannel waits (up to a deadline)
+// for the consumer to accept it, so any consumer still draining the channel
+// reliably receives it, and it is dropped only once the consumer has
+// abandoned the channel entirely (#4136). Still, treat the channel close, not
+// receipt of this event, as the guaranteed terminal signal — it remains the
+// only delivery that can never be dropped. Do not assume session-end hooks
+// have finished when this event arrives: it is emitted before they run.
 type StreamStoppedEvent struct {
 	AgentContext
 
 	Type      string `json:"type"`
 	SessionID string `json:"session_id,omitempty"`
 	Reason    string `json:"reason,omitempty"`
+	// FinishReason is the terminal model result, independent of content or usage.
+	FinishReason chat.FinishReason `json:"finish_reason,omitempty"`
 }
 
 func StreamStopped(sessionID, agentName, reason string) Event {
@@ -604,6 +721,25 @@ func StreamStopped(sessionID, agentName, reason string) Event {
 }
 
 func (e *StreamStoppedEvent) GetSessionID() string { return e.SessionID }
+
+// SessionRecoveredEvent is an authoritative idle boundary after snapshot recovery.
+// Reset stream depth and transient interactions without running stop-triggered actions.
+type SessionRecoveredEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+}
+
+func SessionRecovered(sessionID string) Event {
+	return &SessionRecoveredEvent{
+		Type:         "session_recovered",
+		SessionID:    sessionID,
+		AgentContext: newAgentContext(""),
+	}
+}
+
+func (e *SessionRecoveredEvent) GetSessionID() string { return e.SessionID }
 
 // PausedEvent reports that the run loop has reached an iteration
 // boundary and is now blocked because /pause was toggled on. It is emitted
@@ -639,7 +775,7 @@ type ElicitationRequestEvent struct {
 	URL     string `json:"url,omitempty"`
 	// ElicitationID is the internally-generated correlation ID used to route
 	// a ResumeElicitation response back to this specific request (see
-	// elicitationHandler). It is always set and always unique, regardless of
+	// requestElicitation). It is always set and always unique, regardless of
 	// whether the originating MCP server supplied its own wire ID: two
 	// independent servers can coincidentally reuse the same wire ID, so that
 	// value is never used for routing (#3584).
@@ -677,6 +813,17 @@ func ElicitationRequest(message, mode string, schema any, url, elicitationID, se
 
 // GetSessionID makes ElicitationRequestEvent satisfy [SessionScoped].
 func (e *ElicitationRequestEvent) GetSessionID() string { return e.SessionID }
+
+// ElicitationClosedEvent retires a request after resolution or cancellation.
+type ElicitationClosedEvent struct {
+	AgentContext
+
+	Type          string `json:"type"`
+	ElicitationID string `json:"elicitation_id"`
+	SessionID     string `json:"session_id,omitempty"`
+}
+
+func (e *ElicitationClosedEvent) GetSessionID() string { return e.SessionID }
 
 type AuthorizationEvent struct {
 	AgentContext
@@ -919,6 +1066,8 @@ type AgentInfoEvent struct {
 	// PrimaryContextLimit is the primary model's own context window, set
 	// only alongside CompactionModel.
 	PrimaryContextLimit int64 `json:"primary_context_limit,omitempty"`
+	// Nil means unknown; model-only update events may omit this field.
+	ExecutionCapabilities *inspection.ExecutionCapabilities `json:"execution_capabilities,omitempty"`
 }
 
 func AgentInfo(agentName, model, description, welcomeMessage string, contextLimit ...int64) Event {
@@ -947,8 +1096,9 @@ type AgentDetails struct {
 	// configuration: an effort level (e.g. "high"), "adaptive", a decimal token
 	// count for token-based budgets, or "off" when disabled. Empty when the
 	// model has no selectable thinking configuration.
-	Thinking string         `json:"thinking,omitempty"`
-	Commands types.Commands `json:"commands,omitempty"`
+	Thinking              string                            `json:"thinking,omitempty"`
+	Commands              types.Commands                    `json:"commands,omitempty"`
+	ExecutionCapabilities *inspection.ExecutionCapabilities `json:"execution_capabilities,omitempty"`
 }
 
 // TeamInfoEvent is sent when team information is available
@@ -1140,28 +1290,35 @@ func HookBlocked(toolCall tools.ToolCall, toolDefinition tools.Tool, message, ag
 }
 
 // MessageAddedEvent is emitted when a message is added to the session.
-// This event is used by the PersistentRuntime wrapper to persist messages.
+// This event is used by the PersistenceObserver to persist messages.
 type MessageAddedEvent struct {
 	AgentContext
 
 	Type      string           `json:"type"`
 	SessionID string           `json:"session_id"`
 	Message   *session.Message `json:"-"`
+	// Completion metadata remains available when Message is omitted on the wire.
+	AssistantMessageEmpty bool `json:"assistant_message_empty,omitempty"`
+	HasToolCalls          bool `json:"has_tool_calls,omitempty"`
 }
 
 func (e *MessageAddedEvent) GetSessionID() string { return e.SessionID }
 
 func MessageAdded(sessionID string, msg *session.Message, agentName string) Event {
+	emptyAssistant := msg != nil && !msg.Implicit && msg.Message.Role == chat.MessageRoleAssistant && strings.TrimSpace(msg.Message.Content) == ""
+	hasToolCalls := msg != nil && !msg.Implicit && msg.Message.Role == chat.MessageRoleAssistant && (len(msg.Message.ToolCalls) > 0 || msg.Message.FunctionCall != nil)
 	return &MessageAddedEvent{
-		Type:         "message_added",
-		SessionID:    sessionID,
-		Message:      msg,
-		AgentContext: newAgentContext(agentName),
+		Type:                  "message_added",
+		SessionID:             sessionID,
+		Message:               msg,
+		AssistantMessageEmpty: emptyAssistant,
+		HasToolCalls:          hasToolCalls,
+		AgentContext:          newAgentContext(agentName),
 	}
 }
 
 // SubSessionCompletedEvent is emitted when a sub-session completes and is added to parent.
-// This event is used by the PersistentRuntime wrapper to persist sub-sessions.
+// This event is used by the PersistenceObserver to persist sub-sessions.
 type SubSessionCompletedEvent struct {
 	AgentContext
 

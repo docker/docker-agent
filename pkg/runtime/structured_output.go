@@ -14,6 +14,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -142,7 +143,8 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 		rejectMsg := fmt.Sprintf(
 			"Structured output rejected: %s must be the only tool call in the response. "+
 				"Finish any other tool use first, then call %s alone with the final answer.",
-			structuredoutput.ToolName, structuredoutput.ToolName)
+			structuredoutput.ToolName, structuredoutput.ToolName,
+		)
 		for _, tc := range outputCalls {
 			r.rejectStructuredOutputCall(ctx, sess, a, tc, tool, rejectMsg, events)
 		}
@@ -303,14 +305,19 @@ func (r *LocalRuntime) recordStructuredOutputResponse(
 // reminder (at most maxStructuredOutputReminders times), then fail the run
 // with a coded error. Returns turnContinue/turnExit and the matching
 // turn-end reason.
+//
+// The retry ends on the plain-text assistant turn, which Claude 5.x rejects
+// as a prefill, so those models fail after the first inference.
 func (r *LocalRuntime) structuredOutputStop(
 	ctx context.Context,
 	sess *session.Session,
 	a *agent.Agent,
+	servingModel string,
 	ls *loopState,
 	events EventSink,
 ) (turnControl, string) {
-	if ls.structuredOutputReminders < maxStructuredOutputReminders {
+	_, rejectsPrefill := modelinfo.LookupClaude5(servingModel)
+	if !rejectsPrefill && ls.structuredOutputReminders < maxStructuredOutputReminders {
 		ls.structuredOutputReminders++
 		slog.InfoContext(ctx, "Model stopped without structured output; injecting transient reminder",
 			"agent", a.Name(), "session_id", sess.ID,
@@ -319,7 +326,14 @@ func (r *LocalRuntime) structuredOutputStop(
 	}
 	errMsg := fmt.Sprintf(
 		"Agent terminated: the model did not deliver structured output via the %s tool after %d reminders.",
-		structuredoutput.ToolName, maxStructuredOutputReminders)
+		structuredoutput.ToolName, maxStructuredOutputReminders,
+	)
+	if rejectsPrefill {
+		errMsg = fmt.Sprintf(
+			"Agent terminated: the model did not deliver structured output via the %s tool; %s cannot be reminded because it rejects a request ending on its own answer.",
+			structuredoutput.ToolName, servingModel,
+		)
+	}
 	slog.WarnContext(ctx, "Structured output failed: reminders exhausted",
 		"agent", a.Name(), "session_id", sess.ID, "max", maxStructuredOutputReminders)
 	events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeStructuredOutputFailed, errMsg))

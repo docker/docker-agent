@@ -1,14 +1,15 @@
-//go:build darwin && !no_audio
+//go:build darwin && cgo && !no_audio
 
-// Package capture provides audio capture functionality for macOS using CoreAudio.
 package capture
 
 /*
-#cgo CFLAGS: -x objective-c
 #cgo LDFLAGS: -framework CoreAudio -framework AudioToolbox -framework CoreFoundation
 
 #include <AudioToolbox/AudioToolbox.h>
-#include <CoreAudio/CoreAudio.h>
+#include <errno.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,274 +17,209 @@ package capture
 #define BITS_PER_SAMPLE 16
 #define NUM_BUFFERS 3
 
-// Capture state
-static AudioQueueRef audioQueue = NULL;
-static AudioQueueBufferRef buffers[NUM_BUFFERS];
-static AudioFileID audioFile = NULL;
-static SInt64 currentPacket = 0;
-static volatile int isCapturing = 0;
-static double sampleRate = 44100.0;
-static UInt32 bufferSize = 4096;
+typedef struct {
+    AudioQueueRef queue;
+    AudioFileID file;
+    AudioStreamBasicDescription format;
+    SInt64 packet;
+    uintptr_t handle;
+    pthread_mutex_t mutex;
+    bool started;
+    bool stopping;
+    OSStatus error;
+} Capture;
 
-// Audio format description
-static AudioStreamBasicDescription audioFormat;
+void goAudioCallback(uintptr_t handle, void *data, int32_t size, int32_t status);
 
-// Forward declaration for Go callback
-void goAudioCallback(void *data, int size);
-
-// Callback function for audio input
 static void AudioInputCallback(
-    void *inUserData,
-    AudioQueueRef inAQ,
-    AudioQueueBufferRef inBuffer,
-    const AudioTimeStamp *inStartTime,
-    UInt32 inNumberPacketDescriptions,
-    const AudioStreamPacketDescription *inPacketDescs
+    void *userData,
+    AudioQueueRef queue,
+    AudioQueueBufferRef buffer,
+    const AudioTimeStamp *startTime,
+    UInt32 packetCount,
+    const AudioStreamPacketDescription *packetDescriptions
 ) {
-    if (!isCapturing || inBuffer->mAudioDataByteSize == 0) return;
+    Capture *capture = userData;
+    pthread_mutex_lock(&capture->mutex);
+    if (capture->error != noErr) {
+        pthread_mutex_unlock(&capture->mutex);
+        return;
+    }
 
-    // Write to file if recording
-    if (audioFile != NULL) {
-        UInt32 numPackets = inBuffer->mAudioDataByteSize / audioFormat.mBytesPerPacket;
-        if (AudioFileWritePackets(audioFile, false, inBuffer->mAudioDataByteSize,
-                                   NULL, currentPacket, &numPackets, inBuffer->mAudioData) == noErr) {
-            currentPacket += numPackets;
+    if (buffer->mAudioDataByteSize > 0) {
+        if (capture->file != NULL) {
+            UInt32 packets = buffer->mAudioDataByteSize / capture->format.mBytesPerPacket;
+            capture->error = AudioFileWritePackets(capture->file, false,
+                buffer->mAudioDataByteSize, NULL, capture->packet, &packets, buffer->mAudioData);
+            capture->packet += packets;
+        }
+        if (capture->error == noErr) {
+            goAudioCallback(capture->handle, buffer->mAudioData, (int)buffer->mAudioDataByteSize, noErr);
         }
     }
 
-    // Call Go callback for streaming
-    goAudioCallback(inBuffer->mAudioData, (int)inBuffer->mAudioDataByteSize);
-
-    if (isCapturing) {
-        AudioQueueEnqueueBuffer(inAQ, inBuffer, 0, NULL);
+    if (!capture->stopping && capture->error == noErr) {
+        capture->error = AudioQueueEnqueueBuffer(queue, buffer, 0, NULL);
     }
+    if (capture->error != noErr) {
+        goAudioCallback(capture->handle, NULL, 0, capture->error);
+    }
+    pthread_mutex_unlock(&capture->mutex);
 }
 
-// Initialize audio format with given sample rate
-static void initAudioFormat(double rate) {
-    sampleRate = rate;
-    bufferSize = (UInt32)(rate * 0.1) * (BITS_PER_SAMPLE / 8) * CHANNELS; // 100ms buffer
+static OSStatus freeCapture(Capture *capture) {
+    pthread_mutex_lock(&capture->mutex);
+    capture->stopping = true;
+    pthread_mutex_unlock(&capture->mutex);
 
-    memset(&audioFormat, 0, sizeof(audioFormat));
-    audioFormat.mSampleRate = rate;
-    audioFormat.mFormatID = kAudioFormatLinearPCM;
-    audioFormat.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
-    audioFormat.mFramesPerPacket = 1;
-    audioFormat.mChannelsPerFrame = CHANNELS;
-    audioFormat.mBitsPerChannel = BITS_PER_SAMPLE;
-    audioFormat.mBytesPerPacket = (BITS_PER_SAMPLE / 8) * CHANNELS;
-    audioFormat.mBytesPerFrame = (BITS_PER_SAMPLE / 8) * CHANNELS;
+    OSStatus status = noErr;
+    if (capture->queue != NULL) {
+        // Stop delivers partially filled buffers before disposal joins callbacks.
+        if (capture->started) status = AudioQueueStop(capture->queue, true);
+        OSStatus disposeStatus = AudioQueueDispose(capture->queue, true);
+        if (status == noErr) status = disposeStatus;
+    }
+    if (capture->file != NULL) {
+        OSStatus fileStatus = AudioFileClose(capture->file);
+        if (status == noErr) status = fileStatus;
+    }
+    if (status == noErr) status = capture->error;
+    pthread_mutex_destroy(&capture->mutex);
+    free(capture);
+    return status;
 }
 
-// Start capturing audio, optionally recording to file
-// filePath can be NULL for streaming-only mode
-static int startCapture(const char *filePath, double rate) {
-    if (isCapturing) return -1;
+static Capture *startCapture(const char *filePath, double rate, uintptr_t handle, OSStatus *status) {
+    Capture *capture = calloc(1, sizeof(Capture));
+    if (capture == NULL) {
+        *status = ENOMEM;
+        return NULL;
+    }
+    int mutexStatus = pthread_mutex_init(&capture->mutex, NULL);
+    if (mutexStatus != 0) {
+        *status = mutexStatus;
+        free(capture);
+        return NULL;
+    }
+    capture->handle = handle;
+    capture->format.mSampleRate = rate;
+    capture->format.mFormatID = kAudioFormatLinearPCM;
+    capture->format.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+    capture->format.mFramesPerPacket = 1;
+    capture->format.mChannelsPerFrame = CHANNELS;
+    capture->format.mBitsPerChannel = BITS_PER_SAMPLE;
+    capture->format.mBytesPerPacket = (BITS_PER_SAMPLE / 8) * CHANNELS;
+    capture->format.mBytesPerFrame = (BITS_PER_SAMPLE / 8) * CHANNELS;
 
-    initAudioFormat(rate);
-
-    // Create audio file if path provided
     if (filePath != NULL) {
-        CFURLRef fileURL = CFURLCreateFromFileSystemRepresentation(
+        CFURLRef url = CFURLCreateFromFileSystemRepresentation(
             NULL, (const UInt8 *)filePath, strlen(filePath), false);
-        if (fileURL == NULL) return -2;
-
-        OSStatus status = AudioFileCreateWithURL(fileURL, kAudioFileWAVEType,
-            &audioFormat, kAudioFileFlags_EraseFile, &audioFile);
-        CFRelease(fileURL);
-        if (status != noErr) return -3;
-    }
-
-    // Create audio queue
-    OSStatus status = AudioQueueNewInput(&audioFormat, AudioInputCallback, NULL,
-        NULL, kCFRunLoopCommonModes, 0, &audioQueue);
-    if (status != noErr) {
-        if (audioFile) { AudioFileClose(audioFile); audioFile = NULL; }
-        return -4;
-    }
-
-    // Allocate and enqueue buffers
-    for (int i = 0; i < NUM_BUFFERS; i++) {
-        status = AudioQueueAllocateBuffer(audioQueue, bufferSize, &buffers[i]);
-        if (status != noErr) {
-            AudioQueueDispose(audioQueue, true);
-            if (audioFile) { AudioFileClose(audioFile); audioFile = NULL; }
-            return -5;
+        if (url == NULL) {
+            *status = EINVAL;
+            goto fail;
         }
-        AudioQueueEnqueueBuffer(audioQueue, buffers[i], 0, NULL);
+        *status = AudioFileCreateWithURL(url, kAudioFileWAVEType,
+            &capture->format, kAudioFileFlags_EraseFile, &capture->file);
+        CFRelease(url);
+        if (*status != noErr) goto fail;
     }
 
-    currentPacket = 0;
-    isCapturing = 1;
+    *status = AudioQueueNewInput(&capture->format, AudioInputCallback, capture,
+        NULL, kCFRunLoopCommonModes, 0, &capture->queue);
+    if (*status != noErr) goto fail;
 
-    status = AudioQueueStart(audioQueue, NULL);
-    if (status != noErr) {
-        isCapturing = 0;
-        AudioQueueDispose(audioQueue, true);
-        if (audioFile) { AudioFileClose(audioFile); audioFile = NULL; }
-        return -6;
+    UInt32 bufferSize = (UInt32)(rate * 0.1) * (BITS_PER_SAMPLE / 8) * CHANNELS;
+    for (int i = 0; i < NUM_BUFFERS; i++) {
+        AudioQueueBufferRef buffer;
+        *status = AudioQueueAllocateBuffer(capture->queue, bufferSize, &buffer);
+        if (*status != noErr) goto fail;
+        *status = AudioQueueEnqueueBuffer(capture->queue, buffer, 0, NULL);
+        if (*status != noErr) goto fail;
     }
+    *status = AudioQueueStart(capture->queue, NULL);
+    if (*status != noErr) goto fail;
+    capture->started = true;
+    return capture;
 
-    return 0;
-}
-
-// Stop capturing
-static int stopCapture() {
-    if (!isCapturing) return -1;
-
-    isCapturing = 0;
-    AudioQueueStop(audioQueue, true);
-    AudioQueueDispose(audioQueue, true);
-    audioQueue = NULL;
-
-    if (audioFile != NULL) {
-        AudioFileClose(audioFile);
-        audioFile = NULL;
-    }
-
-    return 0;
+fail:
+    freeCapture(capture);
+    return NULL;
 }
 */
 import "C"
 
 import (
+	"context"
 	"errors"
-	"sync"
-	"time"
+	"fmt"
+	"runtime/cgo"
+	"strings"
 	"unsafe"
 )
 
-// Common sample rates
-const (
-	SampleRate44100 = 44100 // CD quality, used for WAV recording
-	SampleRate24000 = 24000 // Required by OpenAI Realtime API
-)
-
-// AudioHandler is called for each chunk of captured audio data.
-// The data is mono, 16-bit signed PCM (little-endian).
-type AudioHandler func(data []byte)
-
-// Capturer records audio from the microphone using CoreAudio.
-type Capturer struct {
-	mu         sync.Mutex
-	capturing  bool
-	handler    AudioHandler
-	sampleRate int
+type callbacks struct {
+	handler AudioHandler
+	errors  chan int
 }
-
-// Global instance for C callback
-var (
-	globalCapturer   *Capturer
-	globalCapturerMu sync.Mutex
-)
 
 //export goAudioCallback
-func goAudioCallback(data unsafe.Pointer, size C.int) {
-	globalCapturerMu.Lock()
-	c := globalCapturer
-	globalCapturerMu.Unlock()
-
-	if c != nil && c.handler != nil {
-		c.handler(C.GoBytes(data, size))
+func goAudioCallback(handle uintptr, data unsafe.Pointer, size, status int32) {
+	cb := cgo.Handle(handle).Value().(*callbacks)
+	if status != 0 {
+		select {
+		case cb.errors <- int(status):
+		default:
+		}
+		return
+	}
+	if cb.handler != nil {
+		cb.handler(C.GoBytes(data, C.int(size)))
 	}
 }
 
-// NewCapturer creates a new audio capturer with the specified sample rate.
-func NewCapturer(sampleRate int) *Capturer {
-	return &Capturer{sampleRate: sampleRate}
-}
-
-// Start begins capturing audio. If filePath is non-empty, audio is also saved to a WAV file.
-// The handler is called for each chunk of audio data (can be nil if only recording to file).
-func (c *Capturer) Start(filePath string, handler AudioHandler) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.capturing {
-		return errors.New("already capturing")
+// Run captures until ctx is canceled. A non-empty filePath also records a WAV file.
+// Each invocation is independent. The optional ready callback runs after capture starts.
+// Handlers run synchronously; Run waits for them before returning, so they must not wait for Run.
+// Canceling ctx normally returns nil. Native capture and cleanup failures return an error.
+func (c *Capturer) Run(ctx context.Context, filePath string, handler AudioHandler, ready func()) (err error) {
+	if ctx.Err() != nil {
+		return nil
+	}
+	// C.GoBytes takes a signed 32-bit size for the 100 ms PCM buffer.
+	if c.sampleRate < 10 || uint64(c.sampleRate/10)*2 > 1<<31-1 {
+		return fmt.Errorf("invalid audio sample rate: %d", c.sampleRate)
+	}
+	if strings.IndexByte(filePath, 0) >= 0 {
+		return errors.New("audio file path contains a NUL byte")
 	}
 
-	c.handler = handler
+	cb := &callbacks{handler: handler, errors: make(chan int, 1)}
+	handle := cgo.NewHandle(cb)
+	defer handle.Delete()
 
-	globalCapturerMu.Lock()
-	globalCapturer = c
-	globalCapturerMu.Unlock()
-
-	var cPath *C.char
+	var path *C.char
 	if filePath != "" {
-		cPath = C.CString(filePath)
-		defer C.free(unsafe.Pointer(cPath))
+		path = C.CString(filePath)
+		defer C.free(unsafe.Pointer(path))
 	}
-
-	if result := C.startCapture(cPath, C.double(c.sampleRate)); result != 0 {
-		return errorFromCode(int(result))
+	var status C.OSStatus
+	capture := C.startCapture(path, C.double(c.sampleRate), C.uintptr_t(handle), &status)
+	if capture == nil {
+		return fmt.Errorf("start audio capture: OSStatus %d", status)
 	}
+	defer func() {
+		// Native callbacks must finish before their Go handle is deleted.
+		if status := C.freeCapture(capture); status != 0 {
+			err = fmt.Errorf("audio capture: OSStatus %d", status)
+		}
+	}()
 
-	c.capturing = true
+	if ready != nil {
+		ready()
+	}
+	select {
+	case <-ctx.Done():
+	case <-cb.errors:
+	}
 	return nil
-}
-
-// Stop ends audio capture.
-func (c *Capturer) Stop() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.capturing {
-		return errors.New("not capturing")
-	}
-
-	result := C.stopCapture()
-	if result != 0 {
-		return errorFromCode(int(result))
-	}
-
-	c.capturing = false
-
-	globalCapturerMu.Lock()
-	defer globalCapturerMu.Unlock()
-	globalCapturer = nil
-
-	return nil
-}
-
-// IsCapturing returns true if currently capturing.
-func (c *Capturer) IsCapturing() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.capturing
-}
-
-// Record captures audio for the specified duration and saves to the given WAV file.
-func (c *Capturer) Record(filePath string, duration time.Duration) error {
-	err := c.Start(filePath, nil)
-	if err != nil {
-		return err
-	}
-	time.Sleep(duration)
-	return c.Stop()
-}
-
-// Stream captures audio for the specified duration, calling handler for each chunk.
-func (c *Capturer) Stream(duration time.Duration, handler AudioHandler) error {
-	if err := c.Start("", handler); err != nil {
-		return err
-	}
-	time.Sleep(duration)
-	return c.Stop()
-}
-
-var errorMessages = map[int]string{
-	-1: "already capturing",
-	-2: "failed to create file URL",
-	-3: "failed to create audio file",
-	-4: "failed to create audio queue",
-	-5: "failed to allocate audio buffers",
-	-6: "failed to start audio queue",
-}
-
-func errorFromCode(code int) error {
-	if msg, ok := errorMessages[code]; ok {
-		return errors.New(msg)
-	}
-	return errors.New("unknown error")
 }

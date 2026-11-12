@@ -2,10 +2,13 @@ package openai
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
 // TestChatCompletions_MergesConsecutiveSystemMessages is a regression test for
@@ -35,24 +39,96 @@ func TestChatCompletions_MergesConsecutiveSystemMessages(t *testing.T) {
 	})
 }
 
-func TestBaseten_MergesConsecutiveSystemMessages(t *testing.T) {
+// TestChatCompletions_StrictTemplateRequiresMerge proves the merge is what
+// makes a strict-template endpoint accept the per-source system messages: the
+// fake rejects a request with more than one system message, so the test only
+// passes when the client coalesces them first.
+func TestChatCompletions_StrictTemplateRequiresMerge(t *testing.T) {
 	t.Parallel()
 
-	assertMergesConsecutiveMessages(t, &latest.ModelConfig{
-		Provider: "baseten",
-		Model:    "zai-org/GLM-5.2",
-		TokenKey: "MY_TOKEN",
-	})
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		var payload struct {
+			Messages []struct {
+				Role string `json:"role"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, `{"error":{"message":"invalid request body"}}`, http.StatusBadRequest)
+			return
+		}
+
+		systemCount := 0
+		for _, msg := range payload.Messages {
+			if msg.Role == "system" {
+				systemCount++
+			}
+		}
+		if systemCount > 1 {
+			http.Error(w, `{"error":{"message":"System message must be at the beginning"}}`, http.StatusBadRequest)
+			return
+		}
+		writeSSEResponse(w)
+	}))
+	defer server.Close()
+
+	cfg := &latest.ModelConfig{
+		Provider:     "custom",
+		Model:        "qwen3",
+		TokenKey:     "MY_TOKEN",
+		BaseURL:      server.URL,
+		ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"},
+	}
+	env := environment.NewMapEnvProvider(map[string]string{"MY_TOKEN": "secret"})
+
+	client, err := NewClient(t.Context(), cfg, env)
+	require.NoError(t, err)
+
+	stream, err := client.CreateChatCompletionStream(
+		t.Context(),
+		[]chat.Message{
+			{Role: chat.MessageRoleSystem, Content: "You are a helpful assistant."},
+			{Role: chat.MessageRoleSystem, Content: "## Filesystem Tools"},
+			{Role: chat.MessageRoleUser, Content: "List the files."},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	defer stream.Close()
+
+	var content strings.Builder
+	for {
+		resp, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		for _, choice := range resp.Choices {
+			content.WriteString(choice.Delta.Content)
+		}
+	}
+
+	assert.Contains(t, content.String(), "ok")
+	require.Equal(t, int32(1), requests.Load())
 }
 
-func TestOVHcloud_MergesConsecutiveSystemMessages(t *testing.T) {
+func TestAliases_MergeConsecutiveSystemMessages(t *testing.T) {
 	t.Parallel()
 
-	assertMergesConsecutiveMessages(t, &latest.ModelConfig{
-		Provider: "ovhcloud",
-		Model:    "Qwen3.5-397B-A17B",
-		TokenKey: "MY_TOKEN",
-	})
+	for name, alias := range catalog.Providers {
+		if !alias.MergeConsecutiveMessages {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assertMergesConsecutiveMessages(t, &latest.ModelConfig{
+				Provider: name,
+				Model:    "test-model",
+				TokenKey: "MY_TOKEN",
+			})
+		})
+	}
 }
 
 // TestOpenAIWithBaseURL_MergesConsecutiveSystemMessages is a regression test for
@@ -157,11 +233,19 @@ func TestShouldMergeConsecutiveMessages_Gating(t *testing.T) {
 		{"official openai, no base_url", &latest.ModelConfig{Provider: "openai", Model: "gpt-4o"}, false},
 		{"openai with custom base_url (vLLM)", &latest.ModelConfig{Provider: "openai", Model: "Qwen/Qwen3.6-35B", BaseURL: "http://box:8000/v1"}, true},
 		{"open-model host alias openrouter", &latest.ModelConfig{Provider: "openrouter", Model: "qwen/qwen3.6-35b"}, true},
+		{"open-model host alias atlascloud", &latest.ModelConfig{Provider: "atlascloud", Model: "qwen/qwen3.8-max"}, true},
 		{"open-model host alias nebius", &latest.ModelConfig{Provider: "nebius", Model: "Qwen/Qwen3"}, true},
+		{"lunaroute, no base_url", &latest.ModelConfig{Provider: "lunaroute", Model: "glm-5.3"}, true},
+		{"api-route, no base_url", &latest.ModelConfig{Provider: "api-route", Model: "gpt-6.1-sol"}, true},
 		{"baseten", &latest.ModelConfig{Provider: "baseten", Model: "zai-org/GLM-5.2"}, true},
+		{"daoxe, no base_url", &latest.ModelConfig{Provider: "daoxe", Model: "claude-sonnet-4-6"}, true},
+		{"opper, no base_url", &latest.ModelConfig{Provider: "opper", Model: "claude-sonnet-4-6"}, true},
+		{"runcrate, no base_url", &latest.ModelConfig{Provider: "runcrate", Model: "deepseek-ai/DeepSeek-V4.1-Flash"}, true},
+		{"cloudgpu, no base_url", &latest.ModelConfig{Provider: "cloudgpu", Model: "deepseek-v4.1-flash"}, true},
+		{"obscurify, no base_url", &latest.ModelConfig{Provider: "obscurify", Model: "deepseek/deepseek-v4-flash"}, true},
 		{"ovhcloud", &latest.ModelConfig{Provider: "ovhcloud", Model: "Qwen3.5-397B-A17B"}, true},
 		{"open-model host alias cerebras", &latest.ModelConfig{Provider: "cerebras", Model: "qwen-3-coder-480b"}, true},
-		{"open-model host fireworks", &latest.ModelConfig{Provider: "fireworks", Model: "accounts/fireworks/models/kimi-k2-instruct"}, true},
+		{"open-model host fireworks", &latest.ModelConfig{Provider: "fireworks", Model: "accounts/fireworks/models/kimi-k3"}, true},
 		{"open-model host together", &latest.ModelConfig{Provider: "together", Model: "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"}, true},
 		{"open-model host huggingface", &latest.ModelConfig{Provider: "huggingface", Model: "meta-llama/Llama-3.3-70B-Instruct"}, true},
 		{"open-model host gateway vercel", &latest.ModelConfig{Provider: "vercel", Model: "openai/gpt-5"}, true},
@@ -169,7 +253,7 @@ func TestShouldMergeConsecutiveMessages_Gating(t *testing.T) {
 		// First-party APIs with fixed model lineups: unchanged (no merge).
 		{"first-party mistral", &latest.ModelConfig{Provider: "mistral", Model: "mistral-small"}, false},
 		{"first-party xai", &latest.ModelConfig{Provider: "xai", Model: "grok-4"}, false},
-		{"first-party deepseek", &latest.ModelConfig{Provider: "deepseek", Model: "deepseek-chat"}, false},
+		{"first-party deepseek", &latest.ModelConfig{Provider: "deepseek", Model: "deepseek-v4-pro"}, false},
 		{"first-party moonshot", &latest.ModelConfig{Provider: "moonshot", Model: "kimi-k2-0905-preview"}, false},
 	}
 

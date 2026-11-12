@@ -1,19 +1,104 @@
 package root
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	"google.golang.org/protobuf/proto"
 )
 
+// A literal, not semconv.SchemaURL, so a semconv bump is an explicit,
+// reviewed change. NoError also guards against ErrSchemaURLConflict if
+// resource.Default()'s semconv version diverges.
 func TestNewOTelResourceUsesCurrentSchemaURL(t *testing.T) {
 	t.Parallel()
 
 	res, err := newOTelResource()
 	require.NoError(t, err)
-	assert.Equal(t, semconv.SchemaURL, res.SchemaURL())
+	assert.Equal(t, "https://opentelemetry.io/schemas/1.43.0", res.SchemaURL())
+}
+
+// TestTraceExportEmitsResourceSchemaURL verifies the schema URL on the
+// wire: the OTLP payload's resource schema_url must be the documented
+// literal, while the scope schema_url stays empty because docker-agent
+// sets none on its own tracers.
+func TestTraceExportEmitsResourceSchemaURL(t *testing.T) {
+	// Not parallel: t.Setenv. Clear env that would alter sampling or
+	// body encoding; endpoint env vars are already overridden by the
+	// explicit WithEndpointURL.
+	for _, key := range []string{
+		"OTEL_TRACES_SAMPLER",
+		"OTEL_TRACES_SAMPLER_ARG",
+		"OTEL_EXPORTER_OTLP_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+	} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+
+	// Empty ExportTraceServiceResponse: the full-success OTLP reply.
+	respBody, err := proto.Marshal(&coltracepb.ExportTraceServiceResponse{})
+	require.NoError(t, err)
+
+	type export struct {
+		path    string
+		body    []byte
+		readErr error
+	}
+	exports := make(chan export, 4)
+
+	// No assertions here — the handler runs on a server goroutine.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		select {
+		case exports <- export{path: r.URL.Path, body: body, readErr: readErr}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		_, _ = w.Write(respBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	res, err := newOTelResource()
+	require.NoError(t, err)
+	tp, err := newTracerProvider(t.Context(), res, srv.URL)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// t.Context() is already canceled in cleanup; WithoutCancel
+		// detaches it so shutdown still gets a bounded 5s window.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+		defer cancel()
+		_ = tp.Shutdown(ctx)
+	})
+
+	_, span := tp.Tracer("test").Start(t.Context(), "schema-url-probe")
+	span.End()
+	require.NoError(t, tp.ForceFlush(t.Context()))
+
+	var got export
+	select {
+	case got = <-exports:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no OTLP trace export received")
+	}
+	require.NoError(t, got.readErr)
+	assert.Equal(t, "/v1/traces", got.path)
+
+	var req coltracepb.ExportTraceServiceRequest
+	require.NoError(t, proto.Unmarshal(got.body, &req))
+	require.Len(t, req.ResourceSpans, 1)
+	rs := req.ResourceSpans[0]
+	assert.Equal(t, "https://opentelemetry.io/schemas/1.43.0", rs.SchemaUrl)
+	require.Len(t, rs.ScopeSpans, 1)
+	assert.Empty(t, rs.ScopeSpans[0].SchemaUrl)
 }
 
 // TestProvidersWithoutEndpoint verifies all three providers build cleanly

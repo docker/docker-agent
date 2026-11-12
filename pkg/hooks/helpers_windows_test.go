@@ -3,13 +3,26 @@
 package hooks
 
 import (
+	"context"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/shellpath"
 )
+
+func warmShell() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	shell, argsPrefix := shellpath.DetectShell()
+	_ = exec.CommandContext(ctx, shell, append(argsPrefix, "exit 0")...).Run()
+}
 
 // Command hooks run under PowerShell on Windows (shellpath.DetectShell).
 // These helpers generate PowerShell equivalents of the POSIX commands in
@@ -30,8 +43,10 @@ func emitContextEnvPwdCmd(envVars ...string) string {
 }
 
 // printStdinJSONFieldCmd returns a command printing one field of the JSON
-// document the hook receives on stdin.
-func printStdinJSONFieldCmd(field string) string {
+// document the hook receives on stdin. The signature mirrors the POSIX helper;
+// PowerShell's ConvertFrom-Json is built in, so this variant never skips.
+func printStdinJSONFieldCmd(t *testing.T, field string) string {
+	t.Helper()
 	return `([Console]::In.ReadToEnd() | ConvertFrom-Json).` + field
 }
 

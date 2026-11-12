@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	secretsengine "github.com/docker/secrets-engine/client"
+	"github.com/docker/secrets-engine/x/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -87,6 +90,84 @@ func TestPrintAuthInfoText(t *testing.T) {
 	assert.Contains(t, output, "sub-123")
 	assert.Contains(t, output, "docker")
 	assert.Contains(t, output, "✅ Valid")
+}
+
+func TestPrintAuthInfoText_SecretsEngine(t *testing.T) {
+	t.Parallel()
+
+	info := &authInfo{
+		Token: "eyJhbGciOiJIUzI1NiJ9.xxxxxxxxxxxx.yyyyyyyy1234567890",
+		SecretsEngine: &secretsEngineInfo{
+			Error:  "retrieve default account metadata: permission denied connecting to the secrets engine at /run/engine.sock: dial failed",
+			Reason: "permission denied",
+			Socket: "/run/engine.sock",
+			Hint:   "Grant access and retry.",
+		},
+	}
+
+	var buf bytes.Buffer
+	printAuthInfoText(&buf, info)
+
+	assert.Contains(t, buf.String(), "✅ Valid\n\nSecrets engine: permission denied\nSocket:         /run/engine.sock\nHint:           Grant access and retry.\n")
+}
+
+func TestPrintSecretsEngineText_WithoutReason(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	printSecretsEngineText(&buf, &secretsEngineInfo{Error: "retrieve default account metadata: access denied"})
+
+	assert.Equal(t, "\nSecrets engine: retrieve default account metadata: access denied\n", buf.String())
+}
+
+func TestNewSecretsEngineInfo(t *testing.T) {
+	t.Parallel()
+
+	notRunning := sdkConnectError(secretsengine.ReasonNotRunning)
+	denied := sdkConnectError(secretsengine.ReasonPermissionDenied)
+	require.NotEmpty(t, notRunning.Hint())
+	require.NotEmpty(t, denied.Hint())
+
+	unknown := sdkConnectError(secretsengine.ReasonUnknown)
+	wrappedDenied := fmt.Errorf("retrieve default account metadata: %w", denied)
+	accessDenied := fmt.Errorf("retrieve default account metadata: %w", errors.New("access denied"))
+	socket := api.DesktopSocketPath()
+
+	for _, tt := range []struct {
+		name       string
+		err        error
+		tokenFound bool
+		want       *secretsEngineInfo
+	}{
+		{name: "the engine answered"},
+		{name: "not running with a token from elsewhere", err: notRunning, tokenFound: true},
+		{
+			name: "not running without a token",
+			err:  notRunning,
+			want: &secretsEngineInfo{Error: notRunning.Error(), Reason: secretsengine.ReasonNotRunning.String(), Socket: socket, Hint: notRunning.Hint()},
+		},
+		{
+			name:       "permission denied with a token from elsewhere",
+			err:        wrappedDenied,
+			tokenFound: true,
+			want:       &secretsEngineInfo{Error: wrappedDenied.Error(), Reason: secretsengine.ReasonPermissionDenied.String(), Socket: socket, Hint: denied.Hint()},
+		},
+		{
+			name: "an unknown connection failure",
+			err:  unknown,
+			want: &secretsEngineInfo{Error: unknown.Error(), Socket: socket, Hint: unknown.Hint()},
+		},
+		{name: "not a connection failure", err: accessDenied, want: &secretsEngineInfo{Error: accessDenied.Error()}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, newSecretsEngineInfo(tt.err, tt.tokenFound))
+		})
+	}
+}
+
+func sdkConnectError(reason secretsengine.ConnectReason) *secretsengine.ConnectError {
+	return &secretsengine.ConnectError{Reason: reason, SocketPath: api.DesktopSocketPath(), Err: errors.New("dial failed")}
 }
 
 func TestPrintAuthInfoText_Expired(t *testing.T) {

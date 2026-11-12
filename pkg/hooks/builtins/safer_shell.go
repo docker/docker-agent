@@ -61,7 +61,7 @@ func saferShell(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, 
 		return nil, nil
 	}
 	warnSaferShellOnce()
-	if in.ToolName != safety.ShellToolName {
+	if !safety.IsCommandTool(in.ToolName) {
 		return nil, nil
 	}
 

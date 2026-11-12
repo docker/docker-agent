@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/environment"
 )
 
 func TestParseFrontmatter(t *testing.T) {
@@ -922,13 +924,13 @@ description: Subproject version
 	}
 }
 
-func TestFindGitRoot(t *testing.T) {
+func TestGitAnchoredDirs(t *testing.T) {
 	t.Parallel()
 	t.Run("git directory at current", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		require.NoError(t, os.Mkdir(filepath.Join(tmpDir, ".git"), 0o755))
-		got := findGitRoot(tmpDir)
-		assert.Equal(t, tmpDir, got)
+		got := gitAnchoredDirs(tmpDir)
+		assert.Equal(t, []string{tmpDir}, got)
 	})
 
 	t.Run("git directory at parent", func(t *testing.T) {
@@ -936,22 +938,24 @@ func TestFindGitRoot(t *testing.T) {
 		require.NoError(t, os.Mkdir(filepath.Join(tmpDir, ".git"), 0o755))
 		nestedDir := filepath.Join(tmpDir, "sub", "nested")
 		require.NoError(t, os.MkdirAll(nestedDir, 0o755))
-		got := findGitRoot(nestedDir)
-		assert.Equal(t, tmpDir, got)
+		got := gitAnchoredDirs(nestedDir)
+		assert.Equal(t, []string{tmpDir, filepath.Join(tmpDir, "sub"), nestedDir}, got)
 	})
 
 	t.Run("git file (worktree)", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		// .git as a file (like in worktrees)
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".git"), []byte("gitdir: /somewhere/else/.git"), 0o644))
-		got := findGitRoot(tmpDir)
-		assert.Equal(t, tmpDir, got)
+		nestedDir := filepath.Join(tmpDir, "sub")
+		require.NoError(t, os.Mkdir(nestedDir, 0o755))
+		got := gitAnchoredDirs(nestedDir)
+		assert.Equal(t, []string{tmpDir, nestedDir}, got)
 	})
 
 	t.Run("no git repo", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		got := findGitRoot(tmpDir)
-		assert.Empty(t, got)
+		got := gitAnchoredDirs(tmpDir)
+		assert.Equal(t, []string{tmpDir}, got)
 	})
 }
 
@@ -1070,4 +1074,23 @@ func TestProjectSearchDirs(t *testing.T) {
 		}, dirs)
 		assert.NotContains(t, dirs, home, "$HOME itself must be excluded")
 	})
+}
+
+func TestLoadWithWarningsFromDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, ".agents", "skills", "isolated-workspace-test")
+	require.NoError(t, os.MkdirAll(skillDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: isolated-workspace-test\ndescription: Test isolated skill discovery\n---\nOnly this workspace.\n"), 0o600))
+	loaded, warnings := LoadWithWarningsFromDir(t.Context(), []string{"local"}, environment.NewMapEnvProvider(nil), dir)
+	require.Empty(t, warnings)
+	var found *Skill
+	for i := range loaded {
+		if loaded[i].Name == "isolated-workspace-test" {
+			found = &loaded[i]
+			break
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, filepath.Join(skillDir, "SKILL.md"), found.FilePath)
 }

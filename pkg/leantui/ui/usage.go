@@ -32,6 +32,14 @@ func (u *UsageTracker) Reset() {
 	u.stack = nil
 }
 
+// RecoverIdle restores root context selection without discarding accounted usage.
+func (u *UsageTracker) RecoverIdle(sessionID string) {
+	u.stack = nil
+	if sessionID != "" {
+		u.rootSessionID = sessionID
+	}
+}
+
 // StreamStarted pushes a newly-started session onto the active stack, adopting
 // the first one as the root session.
 func (u *UsageTracker) StreamStarted(sessionID string) {

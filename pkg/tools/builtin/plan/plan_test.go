@@ -1491,15 +1491,13 @@ func TestPlanTool_ConcurrentWritesOptimisticLock(t *testing.T) {
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	for i := range n {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			results[i], errs[i] = tool.writePlan(ctx, WritePlanArgs{
 				Name:              "p",
 				Content:           fmt.Sprintf("by-%d", i),
 				LastKnownRevision: new(1),
 			})
-		}(i)
+		})
 	}
 	wg.Wait()
 

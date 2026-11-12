@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,7 +56,8 @@ func SaveRunSessions(ctx context.Context, run *EvalRun, outputDir string) (strin
 
 // SessionFromEvents reconstructs a session from raw container output events.
 // This parses the JSON events emitted by docker agent run --exec --json and builds a session
-// with the conversation history.
+// with the conversation history. WorkingDir is intentionally left empty: the
+// transcript ran inside a container, so no host workspace owns it.
 func SessionFromEvents(events []map[string]any, title string, questions []string) *session.Session {
 	sess := session.New(
 		session.WithTitle(title),
@@ -99,12 +101,17 @@ func SessionFromEvents(events []map[string]any, title string, questions []string
 	var currentCost float64
 	var currentTimestamp string
 
+	// Guards and results can interleave with sibling tool calls. Keep the
+	// assistant batch intact, then append these items in arrival order.
+	var pendingItems []session.Item
+	seenEvaluations := make(map[string]struct{})
+
 	// Track budget stop markers already imported (idempotence on repeats)
 	terminations := &terminationTracker{}
 
-	// Helper to flush current assistant message
+	// Flush the assistant batch before its deferred evaluations and results.
 	flushAssistantMessage := func() {
-		if currentContent.Len() > 0 || currentReasoningContent.Len() > 0 || len(currentToolCalls) > 0 {
+		if currentContent.Len() > 0 || currentReasoningContent.Len() > 0 || len(currentToolCalls) > 0 || currentUsage != nil {
 			msg := &session.Message{
 				AgentName: currentAgentName,
 				Message: chat.Message{
@@ -129,9 +136,18 @@ func SessionFromEvents(events []map[string]any, title string, questions []string
 			currentCost = 0
 			currentTimestamp = ""
 		}
+		for _, item := range pendingItems {
+			if item.Evaluation != nil {
+				sess.AddEvaluation(item.Evaluation)
+			} else {
+				sess.AddMessage(item.Message)
+			}
+		}
+		pendingItems = nil
 	}
 
-	for _, event := range events {
+	outputs := acceptedStructuredOutputs(events)
+	for index, event := range events {
 		eventType, _ := event["type"].(string)
 		eventTimestamp := parseEventTimestamp(event)
 
@@ -139,19 +155,26 @@ func SessionFromEvents(events []map[string]any, title string, questions []string
 		case "user_message":
 			// Use the event timestamp for the user message instead of time.Now()
 			if !userMessageAdded {
+				flushAssistantMessage()
 				addNextQuestion(eventTimestamp)
 			}
 
-		case "agent_choice":
+		case "agent_choice", "agent_choice_reasoning":
+			if currentUsage != nil || len(pendingItems) > 0 {
+				flushAssistantMessage()
+			}
 			// Ensure a user message has been added before the first agent response.
 			// This handles event streams that lack a "user_message" event.
 			if !userMessageAdded {
 				addNextQuestion(eventTimestamp)
 			}
 
-			// Accumulate agent response content
 			if content, ok := event["content"].(string); ok {
-				currentContent.WriteString(content)
+				if eventType == "agent_choice_reasoning" {
+					currentReasoningContent.WriteString(content)
+				} else {
+					currentContent.WriteString(content)
+				}
 			}
 			if agentName, ok := event["agent_name"].(string); ok && agentName != "" {
 				currentAgentName = agentName
@@ -160,16 +183,9 @@ func SessionFromEvents(events []map[string]any, title string, questions []string
 				currentTimestamp = eventTimestamp
 			}
 
-		case "agent_choice_reasoning":
-			// Accumulate reasoning content (for models like DeepSeek, Claude with extended thinking)
-			if content, ok := event["content"].(string); ok {
-				currentReasoningContent.WriteString(content)
-			}
-			if agentName, ok := event["agent_name"].(string); ok && agentName != "" {
-				currentAgentName = agentName
-			}
-			if eventTimestamp != "" {
-				currentTimestamp = eventTimestamp
+		case "partial_tool_call":
+			if currentUsage != nil || len(pendingItems) > 0 {
+				flushAssistantMessage()
 			}
 
 		case "tool_call":
@@ -194,9 +210,6 @@ func SessionFromEvents(events []map[string]any, title string, questions []string
 			}
 
 		case "tool_call_response":
-			// Flush any pending assistant message before adding tool response
-			flushAssistantMessage()
-
 			// The ToolCallResponseEvent serializes tool_call_id as a top-level string field,
 			// not nested under a "tool_call" map.
 			toolCallID, _ := event["tool_call_id"].(string)
@@ -210,11 +223,53 @@ func SessionFromEvents(events []map[string]any, title string, questions []string
 					CreatedAt:  eventTimestamp,
 				},
 			}
-			sess.AddMessage(msg)
+			if result, ok := event["result"].(map[string]any); ok {
+				msg.Message.IsError, _ = result["isError"].(bool)
+			}
+			pendingItems = append(pendingItems, session.Item{Message: msg})
+			if output, ok := outputs[index]; ok {
+				flushAssistantMessage()
+				agentName, _ := event["agent_name"].(string)
+				sess.AddMessage(&session.Message{AgentName: agentName, Message: chat.Message{
+					Role: chat.MessageRoleAssistant, Content: output, CreatedAt: eventTimestamp,
+				}})
+			}
+
+		case "evaluation_usage":
+			data, err := json.Marshal(event["evaluation"])
+			if err != nil {
+				slog.Warn("Failed to encode evaluator usage event", "error", err)
+				continue
+			}
+			var evaluation *session.Evaluation
+			if err := json.Unmarshal(data, &evaluation); err != nil {
+				slog.Warn("Failed to parse evaluator usage event", "error", err)
+				continue
+			}
+			if evaluation == nil || evaluation.ID == "" {
+				slog.Warn("Ignoring evaluator usage event without an evaluation ID")
+				continue
+			}
+			if _, seen := seenEvaluations[evaluation.ID]; seen {
+				continue
+			}
+			seenEvaluations[evaluation.ID] = struct{}{}
+			if !userMessageAdded {
+				addNextQuestion(eventTimestamp)
+			}
+			pendingItems = append(pendingItems, session.Item{Evaluation: evaluation})
 
 		case "token_usage":
 			// Update session token usage
 			if usage, ok := event["usage"].(map[string]any); ok {
+				// A new per-message usage record also bounds an empty response.
+				lastMsg, hasLastMessage := usage["last_message"].(map[string]any)
+				if hasLastMessage && (currentUsage != nil || len(pendingItems) > 0) {
+					flushAssistantMessage()
+				}
+				if !userMessageAdded {
+					addNextQuestion(eventTimestamp)
+				}
 				// Route the write through the locked setter, keeping the
 				// previous value for any field absent from the event. sess is
 				// local to this import, so the pre-read cannot race.
@@ -230,8 +285,14 @@ func SessionFromEvents(events []map[string]any, title string, questions []string
 				}
 				sess.SetTokensAndCost(sessInput, sessOutput, sessCost)
 				// Extract per-message usage if available
-				if lastMsg, ok := usage["last_message"].(map[string]any); ok {
+				if hasLastMessage {
 					currentUsage = parseMessageUsage(lastMsg)
+					if currentAgentName == "" {
+						currentAgentName, _ = event["agent_name"].(string)
+					}
+					if currentTimestamp == "" {
+						currentTimestamp = eventTimestamp
+					}
 					if model, ok := lastMsg["Model"].(string); ok {
 						currentModel = model
 					}
@@ -427,10 +488,13 @@ func SaveRunSessionsJSON(run *EvalRun, outputDir string) (string, error) {
 		Duration:  run.Duration.Round(time.Millisecond).String(),
 		Config: RunOutputConfig{
 			Agent:            run.Config.AgentFilename,
+			Flavors:          run.Config.Flavors,
 			JudgeModel:       run.Config.JudgeModel,
+			JudgeType:        run.Config.JudgeType,
 			Concurrency:      run.Config.Concurrency,
 			EvalsDir:         run.Config.EvalsDir,
 			BaseImage:        run.Config.BaseImage,
+			AgentImage:       ResolvedAgentImage(run.Config),
 			ContainerRuntime: run.Config.ContainerRuntime,
 		},
 		Summary:  run.Summary,
@@ -484,9 +548,10 @@ func populateEvalResult(result *Result) {
 		results := make([]session.RelevanceCriterionResult, 0, len(result.RelevanceResults))
 		for _, rr := range result.RelevanceResults {
 			results = append(results, session.RelevanceCriterionResult{
-				Criterion: rr.Criterion,
-				Passed:    rr.Passed,
-				Reason:    rr.Reason,
+				Criterion:   rr.Criterion,
+				Passed:      rr.Passed,
+				Reason:      rr.Reason,
+				Probability: rr.Probability,
 			})
 		}
 
@@ -495,6 +560,26 @@ func populateEvalResult(result *Result) {
 			PassedCount: result.RelevancePassed,
 			Total:       result.RelevanceExpected,
 			Results:     results,
+		}
+	}
+
+	// Populate assertions check if assertions were evaluated
+	if result.AssertionsTotal > 0 {
+		assertResults := make([]session.AssertionResult, 0, len(result.AssertionResults))
+		for _, ar := range result.AssertionResults {
+			assertResults = append(assertResults, session.AssertionResult{
+				Name:   ar.Name,
+				Type:   ar.Type,
+				Passed: ar.Passed,
+				Reason: ar.Reason,
+			})
+		}
+
+		evalResult.Checks.Assertions = &session.AssertionsCheck{
+			Passed:      result.AssertionsPassed >= result.AssertionsTotal,
+			PassedCount: result.AssertionsPassed,
+			Total:       result.AssertionsTotal,
+			Results:     assertResults,
 		}
 	}
 
@@ -531,7 +616,7 @@ func saveJSON(value any, outputPath string) (string, error) {
 		return "", err
 	}
 
-	if err := os.WriteFile(outputPath, data, 0o600); err != nil {
+	if err := os.WriteFile(outputPath, data, 0o600); err != nil { //rubocop:disable Lint/AtomicStateWrite // eval output file written once; atomicity not required
 		return "", err
 	}
 

@@ -103,7 +103,7 @@ models:
   # All four providers above behave identically once configured; pick one.
   claude:
     provider: anthropic-wif-k8s
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
 
 agents:
   root:

@@ -44,7 +44,7 @@ func (s *staticStrategy) CheckAndReindexChangedFiles(context.Context, []string, 
 	return nil
 }
 
-func (s *staticStrategy) StartFileWatcher(context.Context, []string, strategy.ChunkingConfig) error {
+func (s *staticStrategy) WatchFiles(context.Context, []string, strategy.ChunkingConfig) error {
 	return nil
 }
 

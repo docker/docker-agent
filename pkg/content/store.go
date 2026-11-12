@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +17,8 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
+	"github.com/docker/docker-agent/pkg/atomicfile"
+	"github.com/docker/docker-agent/pkg/configsize"
 	"github.com/docker/docker-agent/pkg/paths"
 )
 
@@ -75,12 +76,7 @@ func NewStore(opts ...Opt) (*Store, error) {
 	}
 
 	if store.baseDir == "" {
-		homeDir := paths.GetHomeDir()
-		if homeDir == "" {
-			return nil, errors.New("getting home directory: home directory is unavailable")
-		}
-
-		store.baseDir = filepath.Join(homeDir, ".cagent", "store")
+		store.baseDir = filepath.Join(paths.GetDataDir(), "store")
 	}
 
 	if err := os.MkdirAll(store.baseDir, 0o700); err != nil {
@@ -234,14 +230,15 @@ func (s *Store) GetArtifact(identifier string) (string, error) {
 	}
 	defer rc.Close()
 
-	// Read the full layer content into memory.
-	// Any I/O error here means the artifact cannot be trusted.
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, rc); err != nil {
+	data, err := configsize.Read(rc)
+	if err != nil {
+		if errors.Is(err, configsize.ErrTooLarge) {
+			return "", err
+		}
 		return "", ErrStoreCorrupted
 	}
 
-	return buf.String(), nil
+	return string(data), nil
 }
 
 // ListArtifacts returns a list of all stored artifacts
@@ -406,7 +403,7 @@ func (s *Store) saveMetadata(digest string, metadata *ArtifactMetadata) error {
 		return fmt.Errorf("marshaling metadata: %w", err)
 	}
 
-	return os.WriteFile(metadataPath, data, 0o600)
+	return atomicfile.Write(metadataPath, bytes.NewReader(data), 0o600)
 }
 
 // loadMetadata loads metadata for an artifact

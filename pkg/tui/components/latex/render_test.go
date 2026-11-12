@@ -1,12 +1,18 @@
 package latex
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/golden"
 )
+
+func ExampleRender() {
+	rendered, _ := Render(`\mathbb{C}^3 \to \mathbb{C}^3`, false)
+	fmt.Println(rendered) // Output: ℂ³ → ℂ³
+}
 
 func TestRender(t *testing.T) {
 	t.Parallel()

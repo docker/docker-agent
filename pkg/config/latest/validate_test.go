@@ -74,6 +74,8 @@ func TestModelConfigValidateFirstAvailable(t *testing.T) {
 		{name: "with compaction_model", model: ModelConfig{FirstAvailable: candidates, CompactionModel: "small"}, wantErr: "first_available cannot be combined with compaction_model"},
 		{name: "with compaction_threshold", model: ModelConfig{FirstAvailable: candidates, CompactionThreshold: new(0.5)}, wantErr: "first_available cannot be combined with compaction_threshold"},
 		{name: "with cost", model: ModelConfig{FirstAvailable: candidates, Cost: &CostConfig{Input: 1}}, wantErr: "first_available cannot be combined with cost"},
+		{name: "with output_capabilities", model: ModelConfig{FirstAvailable: candidates, OutputCapabilities: &OutputCapabilitiesConfig{Image: new(true)}}, wantErr: "first_available cannot be combined with output_capabilities"},
+		{name: "with output_capabilities false", model: ModelConfig{FirstAvailable: candidates, OutputCapabilities: &OutputCapabilitiesConfig{Image: new(false)}}, wantErr: "first_available cannot be combined with output_capabilities"},
 	}
 
 	for _, tt := range tests {
@@ -135,6 +137,7 @@ func TestAgentConfigValidateHarness(t *testing.T) {
 		{name: "codex", harness: &HarnessConfig{Type: "codex"}},
 		{name: "pi", harness: &HarnessConfig{Type: "pi"}},
 		{name: "opencode", harness: &HarnessConfig{Type: "opencode"}},
+		{name: "command-code", harness: &HarnessConfig{Type: "command-code"}},
 		{name: "missing type", harness: &HarnessConfig{}, wantErr: "harness.type is required"},
 		{name: "unsupported type", harness: &HarnessConfig{Type: "cursor"}, wantErr: `unsupported harness.type "cursor"`},
 		{name: "effort low", harness: &HarnessConfig{Type: "claude-code", Effort: "low"}},
@@ -142,6 +145,7 @@ func TestAgentConfigValidateHarness(t *testing.T) {
 		{name: "effort high", harness: &HarnessConfig{Type: "claude-code", Effort: "high"}},
 		{name: "effort xhigh", harness: &HarnessConfig{Type: "claude-code", Effort: "xhigh"}},
 		{name: "effort max", harness: &HarnessConfig{Type: "claude-code", Effort: "max"}},
+		{name: "effort on command-code", harness: &HarnessConfig{Type: "command-code", Effort: "low"}},
 		{name: "effort on wrong type", harness: &HarnessConfig{Type: "codex", Effort: "high"}, wantErr: "harness.effort can only be used with harness.type 'claude-code'"},
 		{name: "invalid effort", harness: &HarnessConfig{Type: "claude-code", Effort: "extreme"}, wantErr: "harness.effort must be one of: low, medium, high, xhigh, max"},
 		{name: "agent on opencode", harness: &HarnessConfig{Type: "opencode", Agent: "build"}},
@@ -179,10 +183,10 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 	}{
 		{name: "shell map on non-script", toolset: Toolset{Type: "shell", Shell: map[string]ScriptShellToolConfig{"greet": {}}}, wantErr: "shell can only be used with type 'script'"},
 		{name: "path on non-memory/tasks", toolset: Toolset{Type: "shell", Path: "/tmp/db"}, wantErr: "path can only be used with type 'memory' or 'tasks'"},
-		{name: "post_edit on non-filesystem", toolset: Toolset{Type: "shell", PostEdit: []PostEditConfig{{}}}, wantErr: "post_edit can only be used with type 'filesystem'"},
+		{name: "post_edit on unsupported toolset", toolset: Toolset{Type: "shell", PostEdit: []PostEditConfig{{}}}, wantErr: "post_edit can only be used with type 'filesystem' or 'file'"},
 		{name: "ignore_vcs on non-filesystem", toolset: Toolset{Type: "shell", IgnoreVCS: new(true)}, wantErr: "ignore_vcs can only be used with type 'filesystem'"},
-		{name: "allow_list on non-filesystem", toolset: Toolset{Type: "shell", AllowList: []string{"."}}, wantErr: "allow_list can only be used with type 'filesystem'"},
-		{name: "deny_list on non-filesystem", toolset: Toolset{Type: "shell", DenyList: []string{"/etc"}}, wantErr: "deny_list can only be used with type 'filesystem'"},
+		{name: "allow_list on unsupported toolset", toolset: Toolset{Type: "shell", AllowList: []string{"."}}, wantErr: "allow_list can only be used with type 'filesystem' or 'file'"},
+		{name: "deny_list on unsupported toolset", toolset: Toolset{Type: "shell", DenyList: []string{"/etc"}}, wantErr: "deny_list can only be used with type 'filesystem' or 'file'"},
 		{name: "blank allow_list entry", toolset: Toolset{Type: "filesystem", AllowList: []string{"  "}}, wantErr: "allow_list[0] must not be empty"},
 		{name: "blank deny_list entry", toolset: Toolset{Type: "filesystem", DenyList: []string{"/etc", ""}}, wantErr: "deny_list[1] must not be empty"},
 		{name: "env on wrong type", toolset: Toolset{Type: "filesystem", Env: map[string]string{"A": "b"}}, wantErr: "env can only be used with type 'shell', 'background_jobs', 'script', 'mcp' or 'lsp'"},
@@ -191,12 +195,13 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 		{name: "blocked_servers on non-mcp_catalog", toolset: Toolset{Type: "shell", BlockedServers: []string{"github"}}, wantErr: "blocked_servers can only be used with type 'mcp_catalog'"},
 		{name: "blank allowed_servers entry", toolset: Toolset{Type: "mcp_catalog", AllowedServers: []string{""}}, wantErr: "allowed_servers[0] must not be empty"},
 		{name: "blank blocked_servers entry", toolset: Toolset{Type: "mcp_catalog", BlockedServers: []string{"github", " "}}, wantErr: "blocked_servers[1] must not be empty"},
+		{name: "escape_html on non-fetch", toolset: Toolset{Type: "shell", EscapeHTML: new(true)}, wantErr: "escape_html can only be used with type 'fetch'"},
+		{name: "escape_html disabled on non-fetch", toolset: Toolset{Type: "shell", EscapeHTML: new(false)}, wantErr: "escape_html can only be used with type 'fetch'"},
 		{name: "allowed_domains on non-fetch", toolset: Toolset{Type: "shell", AllowedDomains: []string{"example.com"}}, wantErr: "allowed_domains can only be used with type 'fetch'"},
 		{name: "blocked_domains on non-fetch", toolset: Toolset{Type: "shell", BlockedDomains: []string{"example.com"}}, wantErr: "blocked_domains can only be used with type 'fetch'"},
 		{name: "allow_private_ips on wrong type", toolset: Toolset{Type: "shell", AllowPrivateIPs: new(true)}, wantErr: "allow_private_ips can only be used with type 'fetch', 'api', 'openapi', 'a2a' or remote MCP toolsets"},
 		{name: "sudo_askpass on non-shell", toolset: Toolset{Type: "fetch", SudoAskpass: new(true)}, wantErr: "sudo_askpass can only be used with type 'shell'"},
 		{name: "recall on non-background_jobs", toolset: Toolset{Type: "shell", Recall: new(true)}, wantErr: "recall can only be used with type 'background_jobs'"},
-		{name: "safer on non-shell", toolset: Toolset{Type: "fetch", Safer: new(true)}, wantErr: "safer can only be used with type 'shell'"},
 		{name: "allowed and blocked domains", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"a.example.com"}, BlockedDomains: []string{"b.example.com"}}, wantErr: "allowed_domains and blocked_domains are mutually exclusive"},
 		{name: "invalid allowed_domains pattern", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"foo.*"}}, wantErr: `allowed_domains[0] "foo.*" is invalid`},
 		{name: "invalid blocked_domains pattern", toolset: Toolset{Type: "fetch", BlockedDomains: []string{"10.0.0.0/33"}}, wantErr: `blocked_domains[0] "10.0.0.0/33" is invalid: not a valid CIDR`},
@@ -209,6 +214,7 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 		{name: "remote url on non-mcp", toolset: Toolset{Type: "shell", Remote: Remote{URL: "https://mcp.example.com"}}, wantErr: "remote can only be used with type 'mcp'"},
 		{name: "remote transport on non-mcp", toolset: Toolset{Type: "a2a", URL: "https://agent.example.com", Remote: Remote{TransportType: "sse"}}, wantErr: "remote can only be used with type 'mcp'"},
 		{name: "remote oauth on non-mcp", toolset: Toolset{Type: "shell", Remote: Remote{OAuth: &RemoteOAuthConfig{ClientID: "c"}}}, wantErr: "remote can only be used with type 'mcp'"},
+		{name: "remote standalone_sse on non-mcp", toolset: Toolset{Type: "shell", Remote: Remote{StandaloneSSE: true}}, wantErr: "remote can only be used with type 'mcp'"},
 		{name: "remote headers on wrong type", toolset: Toolset{Type: "shell", Remote: Remote{Headers: map[string]string{"A": "b"}}}, wantErr: "remote headers can only be used with type 'mcp' or 'a2a'"},
 		{name: "headers on wrong type", toolset: Toolset{Type: "shell", Headers: map[string]string{"A": "b"}}, wantErr: "headers can only be used with type 'openapi', 'a2a' or 'fetch'"},
 		{name: "config on non-mcp", toolset: Toolset{Type: "shell", Config: map[string]any{"k": "v"}}, wantErr: "config can only be used with type 'mcp'"},
@@ -248,6 +254,7 @@ func TestToolsetValidateTypeRequirements(t *testing.T) {
 		{name: "open_url without url", toolset: Toolset{Type: "open_url"}, wantErr: "open_url toolset requires a url to be set"},
 		{name: "model_picker without models", toolset: Toolset{Type: "model_picker"}, wantErr: "model_picker toolset requires at least one model in the 'models' list"},
 		{name: "rag without ref or config", toolset: Toolset{Type: "rag"}, wantErr: "rag toolset requires either ref or rag_config"},
+		{name: "rag inline config with negative indexing_timeout", toolset: Toolset{Type: "rag", RAGConfig: &RAGConfig{IndexingTimeout: &Duration{Duration: -time.Second}}}, wantErr: "indexing_timeout must not be negative"},
 	}
 
 	for _, tt := range tests {
@@ -271,6 +278,8 @@ func TestToolsetValidateOAuth(t *testing.T) {
 		wantErr string
 	}{
 		{name: "minimal oauth", toolset: remote(&RemoteOAuthConfig{ClientID: "client"})},
+		{name: "standalone_sse with remote url", toolset: Toolset{Type: "mcp", Remote: Remote{URL: "https://mcp.example.com", StandaloneSSE: true}}},
+		{name: "standalone_sse without remote url", toolset: Toolset{Type: "mcp", Command: "server", Remote: Remote{StandaloneSSE: true}}, wantErr: "standalone_sse requires remote url to be set"},
 		{name: "oauth without remote url", toolset: Toolset{Type: "mcp", Command: "server", Remote: Remote{OAuth: &RemoteOAuthConfig{ClientID: "client"}}}, wantErr: "oauth requires remote url to be set"},
 		{name: "missing clientId falls back to dynamic registration", toolset: remote(&RemoteOAuthConfig{})},
 		{name: "clientSecret without clientId", toolset: remote(&RemoteOAuthConfig{ClientSecret: "secret"}), wantErr: "oauth clientSecret requires clientId to be set"},
@@ -306,15 +315,19 @@ func TestToolsetValidateValidToolsets(t *testing.T) {
 		name    string
 		toolset Toolset
 	}{
-		{name: "shell", toolset: Toolset{Type: "shell", Env: map[string]string{"A": "b"}, SudoAskpass: new(true), Safer: new(true)}},
+		{name: "shell", toolset: Toolset{Type: "shell", Env: map[string]string{"A": "b"}, SudoAskpass: new(true)}},
 		{name: "background_jobs", toolset: Toolset{Type: "background_jobs", Env: map[string]string{"A": "b"}, Recall: new(true)}},
 		{name: "memory with path", toolset: Toolset{Type: "memory", Path: "/tmp/memory.db"}},
 		{name: "memory without path", toolset: Toolset{Type: "memory"}},
+		{name: "calculator", toolset: Toolset{Type: "calculator"}},
 		{name: "tasks", toolset: Toolset{Type: "tasks", Path: "./tasks.json"}},
 		{name: "todo shared", toolset: Toolset{Type: "todo", Shared: true}},
 		{name: "script", toolset: Toolset{Type: "script", Shell: map[string]ScriptShellToolConfig{"greet": {}}, Env: map[string]string{"A": "b"}}},
 		{name: "filesystem", toolset: Toolset{Type: "filesystem", PostEdit: []PostEditConfig{{}}, IgnoreVCS: new(false), AllowList: []string{".", "~/src"}, DenyList: []string{"/etc"}}},
+		{name: "file", toolset: Toolset{Type: "file", PostEdit: []PostEditConfig{{}}, AllowList: []string{".", "~/src"}, DenyList: []string{"/etc"}}},
 		{name: "fetch with allowed domains", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"example.com", "*.example.org", ".sub.example.net", "10.0.0.0/8"}, Headers: map[string]string{"Accept": "text/html"}, AllowPrivateIPs: new(true)}},
+		{name: "fetch with escape_html", toolset: Toolset{Type: "fetch", EscapeHTML: new(true)}},
+		{name: "fetch without escape_html", toolset: Toolset{Type: "fetch", EscapeHTML: new(false)}},
 		{name: "fetch with blocked domains", toolset: Toolset{Type: "fetch", BlockedDomains: []string{"internal.example.com"}}},
 		{name: "api with allow_private_ips", toolset: Toolset{Type: "api", AllowPrivateIPs: new(true)}},
 		{name: "mcp_catalog", toolset: Toolset{Type: "mcp_catalog", AllowedServers: []string{"github"}, BlockedServers: []string{"slack"}}},

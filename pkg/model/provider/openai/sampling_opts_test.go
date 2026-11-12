@@ -55,7 +55,7 @@ func TestApplySamplingProviderOpts(t *testing.T) {
 			params := oai.ChatCompletionNewParams{
 				Model: "test-model",
 			}
-			applySamplingProviderOpts(&params, tt.opts)
+			require.NoError(t, applyChatProviderOpts(&params, tt.opts))
 
 			// Marshal to JSON and check for expected keys
 			data, err := json.Marshal(params)

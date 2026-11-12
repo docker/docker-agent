@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
-	"sort"
 	"strings"
 	"unicode"
 
@@ -31,19 +30,17 @@ func toolToTypeScript(tool tools.Tool) string {
 		fmt.Fprintf(&doc, "type %s = %s;\n\n", inputName, schemaType(input, input, 0))
 	}
 	fmt.Fprintf(&doc, "type %s = %s;\n\n", outputName, schemaType(output, output, 0))
-	fmt.Fprintf(&doc, "declare function %s(args: %s): %s;\n", baseName, inputName, outputName)
+	fmt.Fprintf(&doc, "declare function %s(args: %s): Promise<%s>;\n", baseName, inputName, outputName)
 
 	return doc.String()
 }
 
 func schemaMap(schema any) map[string]any {
-	data, err := json.Marshal(schema)
-	if err != nil {
+	if schema == nil {
 		return nil
 	}
-
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
+	result, err := tools.SchemaToOrderedMap(schema)
+	if err != nil {
 		return nil
 	}
 	return result
@@ -89,7 +86,7 @@ func schemaType(schema, root map[string]any, level int) string {
 	if len(types) > 1 {
 		parts := make([]string, 0, len(types))
 		for _, typ := range types {
-			schemaCopy := cloneMap(schema)
+			schemaCopy := maps.Clone(schema)
 			schemaCopy["type"] = typ
 			parts = append(parts, schemaType(schemaCopy, root, level))
 		}
@@ -135,11 +132,7 @@ func schemaType(schema, root map[string]any, level int) string {
 func objectType(schema, root map[string]any, level int) string {
 	properties, _ := schema["properties"].(map[string]any)
 	required := stringSet(schema["required"])
-	keys := make([]string, 0, len(properties))
-	for key := range properties {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := tools.SchemaPropertyNames(schema)
 
 	indent := strings.Repeat("  ", level)
 	childIndent := strings.Repeat("  ", level+1)
@@ -201,11 +194,12 @@ func isObjectSchema(schema map[string]any) bool {
 }
 
 func resolveRef(root map[string]any, ref string) map[string]any {
-	if !strings.HasPrefix(ref, "#/") {
+	pointer, found := strings.CutPrefix(ref, "#/")
+	if !found {
 		return nil
 	}
 	var current any = root
-	for part := range strings.SplitSeq(strings.TrimPrefix(ref, "#/"), "/") {
+	for part := range strings.SplitSeq(pointer, "/") {
 		object, ok := current.(map[string]any)
 		if !ok {
 			return nil
@@ -214,12 +208,6 @@ func resolveRef(root map[string]any, ref string) map[string]any {
 	}
 	resolved, _ := current.(map[string]any)
 	return resolved
-}
-
-func cloneMap(value map[string]any) map[string]any {
-	result := make(map[string]any, len(value))
-	maps.Copy(result, value)
-	return result
 }
 
 func stringSet(value any) map[string]bool {
@@ -280,13 +268,9 @@ func writeLineComments(doc *strings.Builder, description, indent string) {
 }
 
 func writeDocComment(doc *strings.Builder, description string) {
-	writeIndentedDocComment(doc, description, "")
-}
-
-func writeIndentedDocComment(doc *strings.Builder, description, indent string) {
-	doc.WriteString(indent + "/**\n")
+	doc.WriteString("/**\n")
 	for line := range strings.SplitSeq(description, "\n") {
-		doc.WriteString(indent + " * " + strings.ReplaceAll(strings.TrimSpace(line), "*/", "*\\/") + "\n")
+		doc.WriteString(" * " + strings.ReplaceAll(strings.TrimSpace(line), "*/", "*\\/") + "\n")
 	}
-	doc.WriteString(indent + " */\n")
+	doc.WriteString(" */\n")
 }

@@ -1,15 +1,131 @@
 package vertexai
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
+
+func TestOpenAIClientRefreshesToken(t *testing.T) {
+	t.Parallel()
+
+	var got []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	calls := 0
+	tokens := func() string {
+		calls++
+		return fmt.Sprintf("token-%d", calls)
+	}
+	client, err := newOpenAIClientWithTokenSource(t.Context(), &latest.ModelConfig{
+		Provider:     "google",
+		Model:        "meta/test-model",
+		ProviderOpts: map[string]any{"publisher": "meta"},
+	}, environment.NewNoEnvProvider(), "test-project", "us-central1", func(context.Context) (string, error) {
+		token := tokens()
+		return token, nil
+	}, options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+		return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			req.URL.Scheme = "http"
+			req.URL.Host = strings.TrimPrefix(server.URL, "http://")
+			return server.Client().Transport.RoundTrip(req)
+		})
+	}))
+	require.NoError(t, err)
+
+	for range 2 {
+		stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, nil)
+		require.NoError(t, err)
+		for {
+			if _, err := stream.Recv(); err != nil {
+				break
+			}
+		}
+		stream.Close()
+	}
+
+	assert.Equal(t, []string{"Bearer token-2", "Bearer token-3"}, got)
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// An explicit token source replaces ADC for every Model Garden publisher and
+// is resolved with the request context.
+func TestNewClientWithTokenSource(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		publisher, model, wantPath string
+	}{
+		{"meta", "meta/llama-4-maverick-17b-128e-instruct-maas", "/v1beta1/projects/test-project/locations/us-central1/endpoints/openapi/chat/completions"},
+		{"anthropic", "claude-sonnet-4-6", "/v1/projects/test-project/locations/us-central1/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict"},
+	} {
+		t.Run(tt.publisher, func(t *testing.T) {
+			t.Parallel()
+
+			var got *http.Request
+			var sessions []string
+			source := func(ctx context.Context) (string, error) {
+				sessions = append(sessions, httpclient.SessionIDFromContext(ctx))
+				return "explicit-token", nil
+			}
+			client, err := NewClientWithTokenSource(t.Context(), &latest.ModelConfig{
+				Provider:     "google",
+				Model:        tt.model,
+				ProviderOpts: map[string]any{"publisher": tt.publisher, "project": "test-project", "location": "us-central1"},
+			}, environment.NewNoEnvProvider(), source,
+				options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+					return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						got = req
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+							Body:       io.NopCloser(strings.NewReader("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\ndata: [DONE]\n\n")),
+							Request:    req,
+						}, nil
+					})
+				}))
+			require.NoError(t, err)
+
+			stream, err := client.CreateChatCompletionStream(httpclient.ContextWithSessionID(t.Context(), "session-1"), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, nil)
+			require.NoError(t, err)
+			for {
+				if _, err := stream.Recv(); err != nil {
+					break
+				}
+			}
+			stream.Close()
+
+			assert.Equal(t, []string{"", "session-1"}, sessions)
+			require.NotNil(t, got)
+			assert.Equal(t, "us-central1-aiplatform.googleapis.com", got.URL.Host)
+			assert.Equal(t, tt.wantPath, got.URL.Path)
+			assert.Equal(t, "Bearer explicit-token", got.Header.Get("Authorization"))
+		})
+	}
+}
 
 func TestIsModelGardenConfig(t *testing.T) {
 	t.Parallel()
@@ -152,7 +268,8 @@ func TestWithModelsDevProvider(t *testing.T) {
 			originalProvider := tt.cfg.Provider
 			originalPublisher, _ := tt.cfg.ProviderOpts["publisher"].(string)
 
-			got := withModelsDevProvider(tt.cfg)
+			got, err := withModelsDevProvider(tt.cfg)
+			require.NoError(t, err)
 			require.NotNil(t, got)
 			require.NotSame(t, tt.cfg, got, "withModelsDevProvider must return a copy")
 			assert.Equal(t, tt.wantProvider, got.Provider)
@@ -228,7 +345,8 @@ func TestWithModelsDevProvider_CapabilityLookupIDs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rewritten := withModelsDevProvider(tt.cfg)
+			rewritten, err := withModelsDevProvider(tt.cfg)
+			require.NoError(t, err)
 			gotID := rewritten.Provider + "/" + rewritten.DisplayOrModel()
 			assert.Equal(t, tt.wantID, gotID)
 		})
@@ -425,4 +543,15 @@ func TestResolveProjectLocation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewClientAppliesOptionsOnce(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	_, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "google", Model: "claude-sonnet-4-6", ProviderOpts: map[string]any{"publisher": "anthropic", "project": "test-project", "location": "us-east5"}}, environment.NewNoEnvProvider(), func(o *options.ModelOptions) {
+		calls++
+		options.WithTokenSource(func(ctx context.Context) (string, error) { return "token", ctx.Err() })(o)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls)
 }

@@ -318,3 +318,31 @@ func hasAssistantMessage(sess *session.Session, content string) bool {
 	}
 	return false
 }
+
+func TestCacheMessageIDsDoNotExposeSuppressedXML(t *testing.T) {
+	t.Parallel()
+	for _, refusal := range []bool{false, true} {
+		c, err := cache.New(cache.Config{Enabled: true})
+		require.NoError(t, err)
+		secret := "private-tool-argument"
+		raw := "<tool_call>{\"name\":\"shell\",\"arguments\":\"" + secret
+		builder := newStreamBuilder().AddContent(raw)
+		if refusal {
+			builder.AddRefusal()
+		} else {
+			builder.AddStopWithUsage(1, 1)
+		}
+		prov := &messageRecordingProvider{id: "test/mock", streams: []*mockStream{builder.Build(), newStreamBuilder().AddContent("safe answer").AddStopWithUsage(1, 1).Build()}}
+		first := runWithCache(t, c, prov, session.New(session.WithUserMessage("question")))
+		assert.False(t, hasAgentChoice(first, secret))
+		cached, ok := c.Lookup("question")
+		require.True(t, ok)
+		assert.Contains(t, cached, secret)
+		second := runWithCache(t, c, prov, session.New(session.WithUserMessage("question")))
+		assert.False(t, hasAgentChoice(second, secret))
+		assert.True(t, hasAgentChoice(second, "safe answer"))
+		prov.mu.Lock()
+		assert.Len(t, prov.recordedMessages, 2)
+		prov.mu.Unlock()
+	}
+}

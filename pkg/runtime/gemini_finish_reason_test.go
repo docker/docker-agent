@@ -1,0 +1,168 @@
+package runtime
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/gemini"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/testutil/geminiintegration"
+	"github.com/docker/docker-agent/pkg/tools"
+)
+
+// TestRunStream_GeminiTerminalFinishReasons drives a real Gemini client
+// against a scripted GenerateContent stream through LocalRuntime: MAX_TOKENS
+// and a CONTINUATION the SDK can't resume must end the turn as length, a
+// SAFETY stop after a function call must end it as refusal, and a malformed
+// function call must fail it. None of them may run the tool.
+func TestRunStream_GeminiTerminalFinishReasons(t *testing.T) {
+	geminiintegration.Require(t)
+	t.Parallel()
+
+	const (
+		maxTokens = `data: {"candidates":[{"content":{"parts":[{"text":"partial"}],"role":"model"},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}}` + "\n\n"
+		callThen  = `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"x"}}}],"role":"model"}}]}` + "\n\n" +
+			`data: {"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}}` + "\n\n"
+		continuation = `data: {"candidates":[{"content":{"parts":[{"text":"partial"}],"role":"model"},"finishReason":"CONTINUATION"}]}` + "\n\n"
+		// Every hop returns the same token, so the SDK resumes once and then
+		// stops for lack of progress.
+		staleToken = `data: {"candidates":[{"content":{"parts":[{"text":"partial"}],"role":"model"},"finishReason":"CONTINUATION","continuationToken":"dG9r"}]}` + "\n\n"
+		malformed  = `data: {"candidates":[{"content":{"parts":[{"text":"Looking it up."}],"role":"model"}}]}` + "\n\n" +
+			`data: {"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL","finishMessage":"Malformed function call: lookup(q="}]}` + "\n\n"
+	)
+
+	tests := []struct {
+		name    string
+		sse     string
+		want    chat.FinishReason
+		wantErr bool
+	}{
+		{"max tokens", maxTokens, chat.FinishReasonLength, false},
+		{"safety after a function call", callThen, chat.FinishReasonRefusal, false},
+		{"continuation without a token", continuation, chat.FinishReasonLength, false},
+		{"continuation that makes no progress", staleToken, chat.FinishReasonLength, false},
+		{"malformed function call", malformed, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, tt.sse)
+			}))
+			t.Cleanup(srv.Close)
+
+			cfg := &latest.ModelConfig{Provider: "google", Model: "gemini-3.8-flash", BaseURL: srv.URL}
+			client, err := gemini.NewClient(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"GOOGLE_API_KEY": "test-key"}))
+			require.NoError(t, err)
+
+			var toolRuns atomic.Int64
+			lookup := tools.Tool{
+				Name:       "lookup",
+				Parameters: map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
+				Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+					toolRuns.Add(1)
+					return tools.ResultSuccess("ok"), nil
+				},
+			}
+			root := agent.New("root", "test", agent.WithModel(client), agent.WithToolSets(newStubToolSet(nil, []tools.Tool{lookup}, nil)))
+			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+			require.NoError(t, err)
+
+			sess := session.New(session.WithUserMessage("hi"), session.WithToolsApproved(true))
+			sess.NonInteractive = true
+
+			var stopped *StreamStoppedEvent
+			var failed *ErrorEvent
+			for ev := range rt.RunStream(t.Context(), sess) {
+				switch e := ev.(type) {
+				case *ErrorEvent:
+					failed = e
+				case *StreamStoppedEvent:
+					stopped = e
+				}
+			}
+			if tt.wantErr {
+				require.NotNil(t, failed, "the turn must fail")
+				assert.Contains(t, failed.Error, "MALFORMED_FUNCTION_CALL")
+			} else {
+				require.Nil(t, failed)
+				require.NotNil(t, stopped)
+				assert.Equal(t, tt.want, stopped.FinishReason)
+			}
+			assert.Zero(t, toolRuns.Load(), "a truncated, refused or failed turn must not run tools")
+		})
+	}
+}
+
+func TestRunStream_GeminiInvalidFunctionCallFallback(t *testing.T) {
+	geminiintegration.Require(t)
+	t.Parallel()
+
+	for _, reason := range []string{"MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"} {
+		for _, detail := range []string{"lookup(q=", "lookup(timeout=30", "lookup(limit=500", "lookup(limit=429", "lookup(q=token limit"} {
+			t.Run(reason+"/"+detail, func(t *testing.T) {
+				t.Parallel()
+
+				var primaryCalls atomic.Int64
+				message, err := json.Marshal("Malformed function call: " + detail)
+				require.NoError(t, err)
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					primaryCalls.Add(1)
+					assert.Contains(t, r.URL.Path, "/projects/test-project/locations/us-central1/")
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprintf(w, "data: {\"candidates\":[{\"finishReason\":%q,\"finishMessage\":%s}]}\n\n", reason, message)
+				}))
+				t.Cleanup(srv.Close)
+
+				cfg := &latest.ModelConfig{
+					Provider: "google", Model: "gemini-3.8-flash", BaseURL: srv.URL,
+					ProviderOpts: map[string]any{"project": "test-project", "location": "us-central1"},
+				}
+				client, err := gemini.NewClient(t.Context(), cfg, environment.NewNoEnvProvider(),
+					options.WithTokenSource(func(context.Context) (string, error) { return "test-token", nil }),
+				)
+				require.NoError(t, err)
+
+				fallback := &countingProvider{
+					id:     "fallback/success",
+					stream: newStreamBuilder().AddContent("Fallback answer").AddStopWithUsage(10, 5).Build(),
+				}
+				root := agent.New("root", "test", agent.WithModel(client), agent.WithFallbackModel(fallback))
+				rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}), WithRetryOnRateLimit())
+				require.NoError(t, err)
+
+				sess := session.New(session.WithUserMessage("hi"))
+				sess.NonInteractive = true
+				var content string
+				for ev := range rt.RunStream(t.Context(), sess) {
+					switch e := ev.(type) {
+					case *ErrorEvent:
+						t.Errorf("unexpected error: %s", e.Error)
+					case *AgentChoiceEvent:
+						content += e.Content
+					}
+				}
+				assert.Equal(t, "Fallback answer", content)
+				assert.EqualValues(t, 1, primaryCalls.Load(), "invalid calls must not retry the primary")
+				assert.Equal(t, 1, fallback.callCount)
+			})
+		}
+	}
+}

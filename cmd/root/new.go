@@ -7,12 +7,14 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/creator"
+	"github.com/docker/docker-agent/pkg/programstatus"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry"
@@ -71,6 +73,7 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 
 	rt, err := runtime.New(ctx, t,
 		runtime.WithProviderRegistry(loadResult.ProviderRegistry),
+		runtime.WithModelsDevFallback(f.runConfig.ModelsDevFallback),
 		runtime.WithTracer(otel.Tracer(AppName)),
 	)
 	if err != nil {
@@ -78,10 +81,17 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 	}
 
 	var appOpts []app.Opt
+	// The creator runs in the user's checkout and writes the generated agent
+	// YAML there; capture that workspace as the session's provenance.
+	workingDir, err := session.CaptureLocalWorkingDir(f.runConfig.WorkingDir)
+	if err != nil {
+		return err
+	}
 	sessOpts := []session.Opt{
 		session.WithTitle("New agent"),
 		session.WithMaxIterations(f.maxIterationsParam),
 		session.WithToolsApproved(true),
+		session.WithWorkingDir(workingDir),
 	}
 	if len(args) > 0 {
 		arg := strings.Join(args, " ")
@@ -134,10 +144,15 @@ func runTUIWrapped(ctx context.Context, rt runtime.Runtime, sess *session.Sessio
 		wd, _ = os.Getwd()
 	}
 	imageWriter := tuiimage.NewWriter(os.Stdout)
-	imageWriter.SetSupported(tuiimage.SupportsKittyGraphics(os.Stdin, os.Stdout))
 	imageWriter.SetEnabled(userconfig.Get().GetRenderImages())
+	imageWriter.SetSupported(imageWriter.Enabled() && tuiimage.SupportsKittyGraphics(os.Stdin, os.Stdout))
 	tuiimage.SetRenderingEnabled(imageWriter.RenderingEnabled())
 	tuiOpts = append(tuiOpts, tui.WithImageWriter(imageWriter))
+	if isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
+		reporter := &programstatus.Reporter{}
+		tuiOpts = append(tuiOpts, tui.WithProgramStatusProbe(reporter))
+		defer reporter.Finish(os.Stdout)
+	}
 	model := tui.New(ctx, spawner, a, wd, cleanup, tuiOpts...)
 	if wrap != nil {
 		model = wrap(model)

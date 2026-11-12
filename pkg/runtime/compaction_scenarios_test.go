@@ -18,7 +18,7 @@ import (
 func collectCompactionEvents(t *testing.T, rt *LocalRuntime, sess *session.Session) (kinds []string) {
 	t.Helper()
 	events := make(chan Event, 256) // ample headroom: a blocked sink would deadlock the test
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events)))
 	close(events)
 	for ev := range events {
 		switch e := ev.(type) {

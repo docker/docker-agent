@@ -903,32 +903,28 @@ func TestKeyringTokenStore_ConcurrentAccess(t *testing.T) {
 	const numOperations = 10
 
 	var wg sync.WaitGroup
-	wg.Add(numGoroutines * 3) // readers, writers, removers
 
 	for i := range numGoroutines {
-		go func(id int) {
-			defer wg.Done()
-			url := fmt.Sprintf("https://server-%d.example/mcp", id)
+		wg.Go(func() {
+			url := fmt.Sprintf("https://server-%d.example/mcp", i)
 			for range numOperations {
 				_, _ = store.GetToken(url)
 			}
-		}(i)
-		go func(id int) {
-			defer wg.Done()
-			url := fmt.Sprintf("https://server-%d.example/mcp", id)
+		})
+		wg.Go(func() {
+			url := fmt.Sprintf("https://server-%d.example/mcp", i)
 			for j := range numOperations {
 				_ = store.StoreToken(url, &mcp.OAuthToken{
-					AccessToken: fmt.Sprintf("token-%d-%d", id, j),
+					AccessToken: fmt.Sprintf("token-%d-%d", i, j),
 				})
 			}
-		}(i)
-		go func(id int) {
-			defer wg.Done()
-			url := fmt.Sprintf("https://server-%d.example/mcp", id)
+		})
+		wg.Go(func() {
+			url := fmt.Sprintf("https://server-%d.example/mcp", i)
 			for range numOperations {
 				_ = store.RemoveToken(url)
 			}
-		}(i)
+		})
 	}
 
 	wg.Wait()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"uuid"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,6 +21,17 @@ func todoToolSet(t *testing.T) tools.ToolSet {
 	toolSet, err := todo.CreateToolSet(latest.Toolset{})
 	require.NoError(t, err)
 	return toolSet
+}
+
+func TestNew_GeneratesV4UUID(t *testing.T) {
+	t.Parallel()
+
+	s := New()
+	id, err := uuid.Parse(s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, id.String(), s.ID)
+	assert.Equal(t, byte(4), id[6]>>4)
+	assert.Equal(t, byte(0x80), id[8]&0xc0)
 }
 
 func TestTrimMessagesWithToolCalls(t *testing.T) {
@@ -69,7 +81,8 @@ func TestTrimMessagesWithToolCalls(t *testing.T) {
 
 	result := trimMessages(messages, maxItems)
 
-	// Both user messages are protected, so result includes them plus the most recent assistant/tool pair
+	// Both user messages are protected; the removals hit the oldest non-user
+	// messages and the orphaned tool result is dropped
 	toolCalls := make(map[string]bool)
 	for _, msg := range result {
 		if msg.Role == chat.MessageRoleAssistant {
@@ -257,17 +270,45 @@ func TestGetMessages_Instructions(t *testing.T) {
 func TestAddMessage_StripsCacheControl(t *testing.T) {
 	t.Parallel()
 
-	// CacheControl is request-assembly state; transcripts must never
-	// carry it (e.g. a mark echoed back by an API client), or it would
-	// resurface on every future prompt assembly.
+	// CacheControl and TurnScoped are request-assembly state; transcripts
+	// must never carry them (e.g. marks echoed back by an API client), or
+	// they would resurface on every future prompt assembly.
 	s := New()
 	s.AddMessage(&Message{Message: chat.Message{
 		Role:         chat.MessageRoleUser,
 		Content:      "hello",
 		CacheControl: true,
+		TurnScoped:   true,
 	}})
 
 	assert.False(t, s.Messages[0].Message.Message.CacheControl)
+	assert.False(t, s.Messages[0].Message.Message.TurnScoped)
+}
+
+func TestGetMessages_ExtrasAreTurnScoped(t *testing.T) {
+	t.Parallel()
+
+	testAgent := agent.New("root", "instructions")
+	s := New()
+	s.AddMessage(UserMessage("hi"))
+	extras := []chat.Message{
+		{Role: chat.MessageRoleSystem, Content: "env"},
+		{Role: chat.MessageRoleSystem, Content: "date"},
+	}
+
+	messages := s.GetMessages(testAgent, extras...)
+
+	var scoped []string
+	for _, msg := range messages {
+		if msg.TurnScoped {
+			scoped = append(scoped, msg.Content)
+		}
+	}
+	assert.Equal(t, []string{"env", "date"}, scoped, "only the extras are turn-scoped")
+	assert.False(t, messages[0].TurnScoped, "agent instructions stay stable")
+	for _, extra := range extras {
+		assert.False(t, extra.TurnScoped, "the caller's messages are not mutated")
+	}
 }
 
 func TestGetMessages_CacheControl(t *testing.T) {
@@ -510,6 +551,14 @@ func TestEvalCriteriaUnmarshalJSON(t *testing.T) {
 				Size:       "M",
 				Setup:      "echo hello",
 				WorkingDir: "mydir",
+			},
+		},
+		{
+			name:  "valid with assertions",
+			input: `{"relevance":[],"assertions":[{"name":"has greeting","type":"contains","value":"hello"}]}`,
+			want: EvalCriteria{
+				Relevance:  []string{},
+				Assertions: []Assertion{{Name: "has greeting", Type: "contains", Value: "hello"}},
 			},
 		},
 		{
@@ -1054,4 +1103,25 @@ func TestGetAllErrors(t *testing.T) {
 	for _, msg := range sess.GetAllMessages() {
 		assert.NotContains(t, msg.Message.Content, "failure", "errors must not leak into messages")
 	}
+}
+
+func TestGetMessagesUsageOnlyDoesNotConsumeHistoryLimit(t *testing.T) {
+	t.Parallel()
+
+	s := New(WithMessages([]Item{
+		NewMessageItem(UserMessage("question")),
+		NewMessageItem(&Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "answer"}}),
+		NewMessageItem(&Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Usage: &chat.Usage{InputTokens: 10}, Cost: 0.01}}),
+	}))
+	a := agent.New("root", "", agent.WithNumHistoryItems(2))
+	var conversation []chat.Message
+	for _, msg := range s.GetMessages(a) {
+		if msg.Role != chat.MessageRoleSystem {
+			conversation = append(conversation, msg)
+		}
+	}
+	require.Len(t, conversation, 2)
+	assert.Equal(t, "question", conversation[0].Content)
+	assert.Equal(t, "answer", conversation[1].Content)
+	assert.InDelta(t, 0.01, s.TotalCost(), 1e-9)
 }

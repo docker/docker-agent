@@ -34,6 +34,10 @@
       url: /configuration/models/
     - title: Tool Config
       url: /configuration/tools/
+    - title: Budget
+      url: /configuration/budget/
+    - title: Evaluators
+      url: /configuration/evaluators/
     - title: Custom Commands
       url: /configuration/commands/
     - title: Hooks
@@ -52,15 +56,27 @@
       url: /configuration/routing/
     - title: User Settings
       url: /configuration/user-settings/
+    - title: Telemetry
+      url: /configuration/telemetry/
+    - title: OpenTelemetry Tracing
+      url: /configuration/opentelemetry/
 
 - section: Built-in Tools
   groups:
     - label: File & Shell
       items:
+        - title: File
+          url: /tools/file/
         - title: Filesystem
           url: /tools/filesystem/
+        - title: Git
+          url: /tools/git/
         - title: Shell
           url: /tools/shell/
+        - title: Environment
+          url: /tools/environment/
+        - title: Date and Time
+          url: /tools/datetime/
         - title: Script
           url: /tools/script/
         - title: Open URL
@@ -91,12 +107,14 @@
           url: /tools/mcp/
     - label: Planning & Reasoning
       items:
+        - title: Calculator
+          url: /tools/calculator/
+        - title: Random
+          url: /tools/random/
         - title: Think
           url: /tools/think/
         - title: Plan
           url: /tools/plan/
-        - title: Session Plan
-          url: /tools/session_plan/
         - title: Todo
           url: /tools/todo/
         - title: Tasks
@@ -115,6 +133,8 @@
           url: /tools/lsp/
         - title: OpenAPI
           url: /tools/openapi/
+        - title: Webhook
+          url: /tools/webhook/
         - title: API
           url: /tools/api/
 
@@ -157,6 +177,10 @@
       url: /providers/overview/
     - title: Anthropic
       url: /providers/anthropic/
+    - title: API Route
+      url: /providers/api-route/
+    - title: Atlas Cloud
+      url: /providers/atlascloud/
     - title: AWS Bedrock
       url: /providers/bedrock/
     - title: Baseten
@@ -169,6 +193,10 @@
       url: /providers/cloudflare-workers-ai/
     - title: ChatGPT
       url: /providers/chatgpt/
+    - title: CloudGPU
+      url: /providers/cloudgpu/
+    - title: DaoXE
+      url: /providers/daoxe/
     - title: DeepSeek
       url: /providers/deepseek/
     - title: Docker Model Runner
@@ -185,26 +213,38 @@
       url: /providers/huggingface/
     - title: Local Models
       url: /providers/local/
+    - title: Lunaroute
+      url: /providers/lunaroute/
     - title: MiniMax
       url: /providers/minimax/
     - title: Mistral
       url: /providers/mistral/
     - title: Moonshot AI
       url: /providers/moonshot/
+    - title: Nativ
+      url: /providers/nativ/
     - title: Nebius
       url: /providers/nebius/
     - title: NVIDIA
       url: /providers/nvidia/
+    - title: Obscurify.ai
+      url: /providers/obscurify/
     - title: OpenAI
       url: /providers/openai/
     - title: OpenCode Go
       url: /providers/opencode-go/
     - title: OpenCode Zen
       url: /providers/opencode-zen/
+    - title: Opper
+      url: /providers/opper/
     - title: OpenRouter
       url: /providers/openrouter/
+    - title: OrcaRouter
+      url: /providers/orcarouter/
     - title: OVHcloud
       url: /providers/ovhcloud/
+    - title: Runcrate
+      url: /providers/runcrate/
     - title: Together AI
       url: /providers/together/
     - title: Vercel AI Gateway
@@ -214,29 +254,26 @@
     - title: Provider Definitions
       url: /providers/custom/
 
-- section: Resources
-  groups:
-    - label: Guides
-      items:
-        - title: Tips & Best Practices
-          url: /guides/tips/
-        - title: Thinking / Reasoning
-          url: /guides/thinking/
-        - title: Managing Secrets
-          url: /guides/secrets/
-        - title: Go SDK
-          url: /guides/go-sdk/
-        - title: Managing Context & Compaction
-          url: /guides/compaction/
-        - title: Running Agents Headless & in CI
-          url: /guides/headless/
-    - label: Community
-      items:
-        - title: Contributing
-          url: /community/contributing/
-        - title: Troubleshooting
-          url: /community/troubleshooting/
-        - title: Telemetry
-          url: /community/telemetry/
-        - title: OpenTelemetry Tracing
-          url: /community/opentelemetry/
+- section: Guides
+  items:
+    - title: Tips & Best Practices
+      url: /guides/tips/
+    - title: Thinking / Reasoning
+      url: /guides/thinking/
+    - title: Managing Secrets
+      url: /guides/secrets/
+    - title: Go SDK
+      url: /guides/go-sdk/
+    - title: Managing Context & Compaction
+      url: /guides/compaction/
+    - title: Running Agents Headless & in CI
+      url: /guides/headless/
+    - title: Troubleshooting
+      url: /guides/troubleshooting/
+
+- section: Community
+  items:
+    - title: Contributing
+      url: /community/contributing/
+    - title: Community Resources
+      url: /community/resources/

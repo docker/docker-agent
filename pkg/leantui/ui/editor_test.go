@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/history"
 )
 
 func TestEditorInsertAndText(t *testing.T) {
@@ -25,6 +27,34 @@ func TestEditorInsertStripsCarriageReturns(t *testing.T) {
 	e := NewEditor("")
 	e.Insert([]rune("a\r\nb"))
 	assert.Equal(t, "a\nb", e.Text())
+}
+
+func TestEditorInsertCopiesInputs(t *testing.T) {
+	t.Parallel()
+	e := NewEditor("")
+	e.value = make([]rune, 4, 16)
+	copy(e.value, []rune("abcd"))
+	e.cursor = 2
+	original := e.value
+	e.Insert(original[:2])
+	assert.Equal(t, "ababcd", e.Text())
+	assert.Equal(t, 4, e.cursor)
+	e.value[0] = 'X'
+	assert.Equal(t, "abcd", string(original))
+}
+
+func TestEditorEmptyConcatenation(t *testing.T) {
+	t.Parallel()
+	e := NewEditor("")
+	e.Insert([]rune("\r"))
+	assert.True(t, e.IsEmpty())
+	assert.Zero(t, e.cursor)
+	e.SetText("word")
+	e.ReplaceCurrentWord("")
+	assert.True(t, e.IsEmpty())
+	assert.Zero(t, e.cursor)
+	e.Insert([]rune("next"))
+	assert.Equal(t, "next", e.Text())
 }
 
 func TestEditorBackspaceAndDelete(t *testing.T) {
@@ -108,8 +138,8 @@ func TestEditorVerticalMovement(t *testing.T) {
 func TestEditorHistory(t *testing.T) {
 	t.Parallel()
 	e := NewEditor("")
-	e.RememberHistory("first")
-	e.RememberHistory("second")
+	require.NoError(t, e.RememberHistory("first"))
+	require.NoError(t, e.RememberHistory("second"))
 
 	e.SetText("draft")
 	e.HistoryPrev()
@@ -125,10 +155,31 @@ func TestEditorHistory(t *testing.T) {
 	assert.Equal(t, "draft", e.Text()) // restored draft
 }
 
+func TestEditorPersistentHistory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := history.New(dir)
+	require.NoError(t, err)
+	require.NoError(t, store.Add("from full tui"))
+
+	store, err = history.New(dir)
+	require.NoError(t, err)
+	require.Empty(t, store.Messages, "history must still be unloaded")
+	e := NewEditor("", store)
+	e.HistoryPrev()
+	assert.Equal(t, "from full tui", e.Text())
+
+	require.NoError(t, e.RememberHistory("from lean tui"))
+	reloaded, err := history.New(dir)
+	require.NoError(t, err)
+	require.NoError(t, reloaded.Load())
+	assert.Equal(t, []string{"from full tui", "from lean tui"}, reloaded.Messages)
+}
+
 func TestEditorHistoryDeduplicates(t *testing.T) {
 	t.Parallel()
 	e := NewEditor("")
-	e.RememberHistory("same")
-	e.RememberHistory("same")
+	require.NoError(t, e.RememberHistory("same"))
+	require.NoError(t, e.RememberHistory("same"))
 	assert.Len(t, e.history, 1)
 }

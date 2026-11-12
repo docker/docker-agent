@@ -44,6 +44,16 @@ func TestNewDefaultProvider_UsesDefaultSources(t *testing.T) {
 	assert.Equal(t, "value", value)
 }
 
+func TestNewDefaultProvider_PrefixedNameWinsAcrossSources(t *testing.T) {
+	dir := withTempConfigDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("DOCKER_AGENT_ENV_MY_TEST_KEY=from-config-env\n"), 0o600))
+	t.Setenv("MY_TEST_KEY", "from-shell")
+
+	value, found := NewDefaultProvider().Get(t.Context(), "MY_TEST_KEY")
+	require.True(t, found)
+	assert.Equal(t, "from-config-env", value)
+}
+
 func defaultSourceNames() []string {
 	sources := DefaultSources()
 	names := make([]string, 0, len(sources))

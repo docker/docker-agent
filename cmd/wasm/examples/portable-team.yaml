@@ -1,0 +1,80 @@
+# A team that runs unchanged in the browser build (cmd/wasm) and in the CLI.
+# Everything here is portable: no process, no filesystem, no socket. The
+# session's env (createSession options.env) supplies OPENROUTER_API_KEY and
+# GITHUB_TOKEN; ${...} placeholders are JavaScript over that env only.
+#
+# In a browser the fetch/api/openapi tools need `toolProxy` (a trusted egress
+# proxy) unless a toolset opts in with `allow_private_ips: true`.
+
+providers:
+  openrouter:
+    provider: openai
+    base_url: https://openrouter.ai/api/v1
+    token_key: OPENROUTER_API_KEY
+
+models:
+  fast:
+    provider: openrouter
+    model: meta-llama/llama-3.3-70b-instruct:free
+  careful:
+    provider: openrouter
+    model: qwen/qwen3-235b-a22b:free
+
+agents:
+  root:
+    model: fast
+    description: Plans research and delegates lookups.
+    instruction: |
+      You coordinate a small research team for ${env.USER_NAME || "the user"}.
+      Break the request into todos, keep the shared plan up to date, and hand
+      lookups to the researcher. Ask the user with user_prompt when a choice
+      matters. Remember durable preferences with the memory tools.
+    sub_agents: [researcher]
+    add_date: true
+    toolsets:
+      - type: think
+      - type: todo
+        shared: true
+      - type: plan
+      - type: memory
+      - type: user_prompt
+      - type: model_picker
+        models: [fast, careful]
+    hooks:
+      turn_start:
+        - type: builtin
+          command: add_context
+          args: ["Answer in at most three paragraphs."]
+
+  researcher:
+    model: careful
+    description: Looks things up on the web and on GitHub.
+    instruction: |
+      Look things up, record findings in the shared plan and report back.
+      Prefer the GitHub tools for repository questions.
+    toolsets:
+      - type: todo
+        shared: true
+      - type: plan
+      - type: fetch
+        toon: fetch
+      - type: api
+        api_config:
+          name: github_search_repos
+          method: GET
+          endpoint: https://api.github.com/search/repositories?q=${q}&per_page=5
+          headers:
+            Authorization: Bearer ${env.GITHUB_TOKEN}
+            Accept: application/vnd.github+json
+          instruction: Search GitHub repositories. Returns the top five matches.
+          args:
+            q:
+              type: string
+              description: Search query.
+          required: [q]
+      - type: mcp
+        remote:
+          url: https://api.githubcopilot.com/mcp/
+          headers:
+            Authorization: Bearer ${env.GITHUB_TOKEN}
+        defer: true

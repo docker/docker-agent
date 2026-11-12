@@ -1,7 +1,7 @@
 
 agents:
   root:
-    model: gpt-5-minimal
+    model: gpt-minimal
     description: assistant that can search a knowledge base
     instruction: |
       You are a helpful assistant. You have access to a knowledge base you
@@ -14,9 +14,9 @@ agents:
         ref: blork_knowledge_base
 
 models:
-  gpt-5-minimal:
+  gpt-minimal:
     provider: openai
-    model: gpt-5
+    model: gpt-5.6-sol
     thinking_budget: minimal
 
 rag:

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -51,7 +52,7 @@ func recordingTool(name string, executed *bool) []tools.Tool {
 // further events are produced); used after processToolCalls returns.
 // Distinct from drainEvents in loop_steps_test.go, which is
 // non-blocking and intended for still-open channels.
-func collectClosedEvents(ch chan Event) []Event {
+func collectClosedEvents(ch <-chan Event) []Event {
 	var out []Event
 	for ev := range ch {
 		out = append(out, ev)
@@ -78,9 +79,9 @@ func hasEventOfType[E Event](evs []Event) bool {
 //
 // We construct the runtime first (so we have access to its private
 // registry), register the verdict builtin on it, and only then exercise
-// the agent — the hooks Executor is built lazily on first use, so by
-// the time the matcher resolves "command" against the registry, our
-// builtin is there.
+// the agent — executors are pre-built, but builtin names resolve
+// against the registry at dispatch time, so registering after
+// construction works.
 func makeJudgedRuntime(
 	t *testing.T,
 	verdict hooks.Decision,
@@ -128,9 +129,9 @@ func makeJudgedRuntime(
 }
 
 // runJudgedToolCall is the assertion-friendly wrapper around
-// processToolCalls used by the per-decision tests. It returns whether
-// the tool ran and the captured events so callers can also check that
-// the user prompt did or did not fire.
+// processToolCalls used by the per-decision tests. It returns the captured
+// events so callers can also check that the user prompt did or did not
+// fire; whether the tool ran is read from makeJudgedRuntime's executed flag.
 func runJudgedToolCall(t *testing.T, rt *LocalRuntime, sess *session.Session, agentTools []tools.Tool) []Event {
 	t.Helper()
 	calls := []tools.ToolCall{{
@@ -139,7 +140,7 @@ func runJudgedToolCall(t *testing.T, rt *LocalRuntime, sess *session.Session, ag
 		Function: tools.FunctionCall{Name: "the_tool", Arguments: "{}"},
 	}}
 	events := make(chan Event, 16)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 	return collectClosedEvents(events)
 }
@@ -199,7 +200,7 @@ func TestPreToolUseHook_AskEscalatesToUser(t *testing.T) {
 	events := make(chan Event, 16)
 	done := make(chan struct{})
 	go func() {
-		rt.processToolCalls(ctx, sess, calls, agentTools, NewChannelSink(events))
+		rt.processToolCalls(ctx, sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 		close(done)
 	}()
 
@@ -297,4 +298,42 @@ func TestPreToolUseHook_ReceivesAgentName(t *testing.T) {
 
 	assert.Equal(t, "root", gotAgentName,
 		"pre_tool_use hook Input must carry the dispatching agent's name")
+}
+
+func TestPreToolUseHookPipelinePreservesUnchangedArguments(t *testing.T) {
+	t.Parallel()
+
+	root := agent.New("root", "instr", agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}), agent.WithHooks(&latest.HooksConfig{
+		PreToolUse: []latest.HookMatcherConfig{{Hooks: []latest.HookDefinition{
+			{Type: hooks.HookTypeBuiltin, Command: "rewrite"},
+			{Type: hooks.HookTypeBuiltin, Command: "approve"},
+		}}},
+	}))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	require.NoError(t, rt.hooksRegistry.RegisterBuiltin("rewrite", func(_ context.Context, _ *hooks.Input, _ []string) (*hooks.Output, error) {
+		return &hooks.Output{HookSpecificOutput: &hooks.HookSpecificOutput{UpdatedInput: map[string]any{"cmd": "rewritten"}}}, nil
+	}))
+	require.NoError(t, rt.hooksRegistry.RegisterBuiltin("approve", func(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+		assert.Equal(t, map[string]any{"cmd": "rewritten", "cwd": "work"}, in.ToolInput)
+		return &hooks.Output{HookSpecificOutput: &hooks.HookSpecificOutput{
+			PermissionDecision: hooks.DecisionAllow,
+			UpdatedInput:       map[string]any{"cmd": in.ToolInput["cmd"].(string) + " and approved"},
+		}}, nil
+	}))
+	var received map[string]any
+	agentTools := []tools.Tool{{Name: "the_tool", Handler: func(_ context.Context, tc tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &received); err != nil {
+			return nil, err
+		}
+		return tools.ResultSuccess("ok"), nil
+	}}}
+	calls := []tools.ToolCall{{ID: "call", Type: "function", Function: tools.FunctionCall{
+		Name: "the_tool", Arguments: `{"cmd":"original","cwd":"work"}`,
+	}}}
+	events := make(chan Event, 32)
+	rt.processToolCalls(t.Context(), session.New(session.WithUserMessage("test")), rt.CurrentAgent(), calls, agentTools, NewChannelSink(events))
+	close(events)
+	assert.Equal(t, map[string]any{"cmd": "rewritten and approved", "cwd": "work"}, received)
+	assert.False(t, hasEventOfType[*ToolCallConfirmationEvent](collectClosedEvents(events)))
 }

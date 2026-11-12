@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"io"
+	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 )
@@ -10,7 +11,9 @@ import (
 // for context length errors. Both the standard and Beta stream adapters embed
 // this to share the retry logic.
 type retryableStream[T any] struct {
+	mu     sync.Mutex
 	stream *ssestream.Stream[T]
+	closed bool
 	// retryFn, when non-nil, is called once on a context-length error.
 	// It should return a new stream to use, or nil to skip retrying.
 	retryFn func() *ssestream.Stream[T]
@@ -30,11 +33,12 @@ func (r *retryableStream[T]) next() (bool, error) {
 	if err != nil && !r.retried && r.retryFn != nil && isContextLengthError(err) {
 		r.retried = true
 		if newStream := r.retryFn(); newStream != nil {
-			r.stream.Close()
-			r.stream = newStream
+			if !r.replace(newStream) {
+				return false, io.EOF
+			}
 			ok, err := r.next()
 			if !ok && err != nil {
-				r.stream.Close() // Clean up on retry failure
+				r.close() // Clean up on retry failure
 			}
 			return ok, err
 		}
@@ -43,4 +47,26 @@ func (r *retryableStream[T]) next() (bool, error) {
 		return false, err
 	}
 	return false, io.EOF
+}
+
+// replace publishes the retry unless Close won while retryFn was running.
+func (r *retryableStream[T]) replace(stream *ssestream.Stream[T]) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		stream.Close()
+		return false
+	}
+	r.stream.Close()
+	r.stream = stream
+	return true
+}
+
+func (r *retryableStream[T]) close() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.closed {
+		r.closed = true
+		r.stream.Close()
+	}
 }

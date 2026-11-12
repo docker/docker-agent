@@ -1,0 +1,13 @@
+agents:
+  root:
+    model: anthropic/claude-sonnet-4-5
+    description: Assistant with dependency-free session context.
+    instruction: You are a helpful assistant.
+    hooks:
+      session_start:
+        - type: builtin
+          command: add_context
+          args:
+            - "Current session ID: {{ .SessionID }}"
+            - "Agent: {{ .AgentName }}"
+            - "Working directory: {{ .Cwd }}"

@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/xeipuuv/gojsonschema"
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -30,7 +30,7 @@ const ToolName = "__structured_output__"
 // JSON schema so validation and the tool definition stay in sync.
 type OutputTool struct {
 	cfg    *latest.StructuredOutput
-	schema *gojsonschema.Schema
+	schema *jsonschema.Resolved
 }
 
 // New compiles cfg.Schema and returns the ready-to-expose tool. It fails
@@ -45,7 +45,7 @@ func New(cfg *latest.StructuredOutput) (*OutputTool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshaling schema: %w", err)
 	}
-	// Screen references on the marshaled form — exactly what gojsonschema
+	// Screen references on the marshaled form — exactly what the validator
 	// will see — rather than cfg.Schema, whose nested values may use
 	// arbitrary Go types.
 	var decoded any
@@ -55,18 +55,25 @@ func New(cfg *latest.StructuredOutput) (*OutputTool, error) {
 	if err := rejectNonLocalRefs(decoded); err != nil {
 		return nil, fmt.Errorf("invalid schema: %w", err)
 	}
-	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(raw))
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return nil, fmt.Errorf("invalid schema: %w", err)
+	}
+	if !supportedDraft(schema.Schema) {
+		return nil, fmt.Errorf("invalid schema: unsupported $schema %q: only draft-07 and draft 2020-12 are supported", schema.Schema)
+	}
+	resolved, err := schema.Resolve(nil)
 	if err != nil {
 		return nil, fmt.Errorf("compiling schema: %w", err)
 	}
-	return &OutputTool{cfg: cfg, schema: schema}, nil
+	return &OutputTool{cfg: cfg, schema: resolved}, nil
 }
 
 // rejectNonLocalRefs walks a decoded JSON schema and rejects any $ref that
-// is not a string starting with "#". gojsonschema resolves references at
-// compile time, so an http(s)://, file:// or cross-document ref in an
-// untrusted schema would trigger network or filesystem access (SSRF,
-// local-file disclosure). Only same-document fragments are allowed. The
+// is not a string starting with "#". The validator has no remote loader, so
+// non-local refs fail anyway; rejecting them here keeps that guarantee
+// explicit against SSRF and local-file disclosure, independent of the
+// library. Only same-document fragments are allowed. The
 // walk is deliberately conservative: even a property that merely happens
 // to be named "$ref" is rejected rather than risk missing a real one.
 func rejectNonLocalRefs(node any) error {
@@ -104,7 +111,8 @@ func (t *OutputTool) Definition() tools.Tool {
 		"Deliver the final answer of this conversation as structured output (%s). "+
 			"The arguments must be a JSON object matching the tool's parameter schema. "+
 			"Call this tool alone, with no other tool calls in the same response; a valid call ends the turn.",
-		t.cfg.Name)
+		t.cfg.Name,
+	)
 	if t.cfg.Description != "" {
 		description += " Expected content: " + t.cfg.Description
 	}
@@ -132,17 +140,12 @@ func (t *OutputTool) Validate(rawJSON string) (string, error) {
 	if err := json.Compact(&compacted, []byte(rawJSON)); err != nil {
 		return "", fmt.Errorf("arguments are not valid JSON: %w", err)
 	}
-	result, err := t.schema.Validate(gojsonschema.NewStringLoader(compacted.String()))
-	if err != nil {
-		return "", fmt.Errorf("validating arguments: %w", err)
+	var instance any
+	if err := json.Unmarshal(compacted.Bytes(), &instance); err != nil {
+		return "", fmt.Errorf("arguments are not valid JSON: %w", err)
 	}
-	if !result.Valid() {
-		details := make([]string, 0, len(result.Errors()))
-		for _, e := range result.Errors() {
-			details = append(details, e.String())
-		}
-		return "", fmt.Errorf("arguments do not match the %q schema: %s",
-			t.cfg.Name, strings.Join(details, "; "))
+	if err := t.schema.Validate(instance); err != nil {
+		return "", fmt.Errorf("arguments do not match the %q schema: %w", t.cfg.Name, err)
 	}
 	return compacted.String(), nil
 }
@@ -156,4 +159,16 @@ func (t *OutputTool) handle(_ context.Context, toolCall tools.ToolCall, _ tools.
 		return tools.ResultError(fmt.Sprintf("Structured output rejected: %v. Fix the arguments and call %s again.", err, ToolName)), nil
 	}
 	return tools.ResultSuccess(out), nil
+}
+
+// supportedDraft mirrors the $schema values the validator accepts (an
+// empty one means draft 2020-12), so other drafts fail at load time rather
+// than on every Validate call.
+func supportedDraft(uri string) bool {
+	switch uri {
+	case "", "http://json-schema.org/draft-07/schema#", "https://json-schema.org/draft-07/schema#",
+		"https://json-schema.org/draft/2020-12/schema":
+		return true
+	}
+	return false
 }

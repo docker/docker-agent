@@ -3,13 +3,17 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
@@ -131,13 +135,96 @@ func TestAgentConfigInfo_Inspector(t *testing.T) {
 	require.Len(t, got.Toolsets, 2)
 	fs := got.Toolsets[0]
 	assert.Equal(t, "filesystem", fs.Name)
-	assert.Equal(t, ToolsetStarted, fs.State)
+	assert.Equal(t, inspection.ToolsetStarted, fs.State)
 	assert.Equal(t, []string{"read_file", "write_file"}, fs.Tools, "started toolset reports live tool names")
 
 	git := got.Toolsets[1]
 	assert.Equal(t, "git", git.Name)
-	assert.Equal(t, ToolsetStopped, git.State)
+	assert.Equal(t, inspection.ToolsetStopped, git.State)
 	assert.Equal(t, []string{"status", "commit"}, git.Tools, "stopped toolset reports its declared allow-list")
+}
+
+// blockingNamedToolSet is a minimal Startable toolset whose Start blocks
+// until release is closed, modeling a toolset whose Start legitimately runs
+// for a long time in the background (e.g. RAG indexing a large knowledge
+// base, #4073).
+type blockingNamedToolSet struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingNamedToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+func (b *blockingNamedToolSet) Start(context.Context) error {
+	close(b.entered)
+	<-b.release
+	return nil
+}
+func (b *blockingNamedToolSet) Stop(context.Context) error { return nil }
+
+// TestAgentConfigInfo_ToolsetMidStartReportsStartingWithDeclaredTools pins
+// the #4073 fix end-to-end: while a toolset's Start is still running,
+// AgentConfigInfo (and the AgentToolsetStatuses it builds on) must not block
+// behind it, the lifecycle state must read as Starting rather than
+// Ready/Stopped, and the declared `tools:` allow-list is reported since no
+// live tool list exists yet.
+func TestAgentConfigInfo_ToolsetMidStartReportsStartingWithDeclaredTools(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		prov := &mockProvider{id: "openai/gpt-5"}
+
+		inner := &blockingNamedToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+		release := sync.OnceFunc(func() { close(inner.release) })
+		t.Cleanup(release)
+		ragTS := tools.WithName(inner, "docs")
+
+		root := agent.New("root", "", agent.WithModel(prov), agent.WithToolSets(ragTS))
+
+		cfg := latest.AgentConfig{
+			Name: "root",
+			Toolsets: []latest.Toolset{
+				{Type: "rag", Name: "docs", Tools: []string{"search_docs"}},
+			},
+		}
+
+		tm := team.New(
+			team.WithAgents(root),
+			team.WithAgentConfigs(map[string]latest.AgentConfig{"root": cfg}),
+		)
+		r := &LocalRuntime{team: tm, agents: newAgentRouter(tm, "root")}
+
+		startable := root.ToolSets()[0].(*tools.StartableToolSet)
+		startDone := make(chan error, 1)
+		go func() { startDone <- startable.Start(ctx) }()
+		<-inner.entered
+
+		infoDone := make(chan inspection.AgentConfigInfo, 1)
+		go func() { infoDone <- r.AgentConfigInfo(ctx, "root") }()
+
+		var got inspection.AgentConfigInfo
+		select {
+		case got = <-infoDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("AgentConfigInfo blocked behind an in-flight Start instead of reporting Starting")
+		}
+
+		require.Len(t, got.Toolsets, 1)
+		docs := got.Toolsets[0]
+		assert.Equal(t, "docs", docs.Name)
+		assert.Equal(t, inspection.ToolsetStarted, docs.State, "the Starting lifecycle state buckets as started/serving, not stopped or error")
+		assert.Equal(t, []string{"search_docs"}, docs.Tools, "mid-start toolset falls back to the declared allow-list, not an empty live list")
+
+		statuses := r.AgentToolsetStatuses("root")
+		require.Len(t, statuses, 1)
+		assert.Equal(t, lifecycle.StateStarting, statuses[0].State, "the underlying lifecycle state must read as Starting while the Start is in flight")
+
+		release()
+		require.NoError(t, <-startDone)
+
+		statuses = r.AgentToolsetStatuses("root")
+		assert.Equal(t, lifecycle.StateReady, statuses[0].State, "settled start reports Ready")
+	})
 }
 
 // TestAgentConfigInfo_Degrades verifies graceful degradation: an unknown agent
@@ -154,7 +241,7 @@ func TestAgentConfigInfo_Degrades(t *testing.T) {
 
 	r := &LocalRuntime{team: tm, agents: newAgentRouter(tm, "root")}
 
-	assert.Equal(t, AgentConfigInfo{}, r.AgentConfigInfo(t.Context(), "missing"), "unknown agent -> zero value")
+	assert.Equal(t, inspection.AgentConfigInfo{}, r.AgentConfigInfo(t.Context(), "missing"), "unknown agent -> zero value")
 
 	got := r.AgentConfigInfo(t.Context(), "other")
 	assert.False(t, got.IsCurrent, "non-current agent")

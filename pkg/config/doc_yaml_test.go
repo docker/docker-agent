@@ -27,6 +27,7 @@ var topLevelConfigKeys = map[string]bool{
 	"agents":      true,
 	"models":      true,
 	"providers":   true,
+	"evaluators":  true,
 	"rag":         true,
 	"metadata":    true,
 	"permissions": true,

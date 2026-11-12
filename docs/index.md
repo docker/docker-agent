@@ -329,7 +329,7 @@ $ docker agent run --exec agent.yaml "Create a Dockerfile for a Node.js app"
 $ cat error.log | docker agent run --exec agent.yaml "What's wrong in this log?"
 
 # Serve as an API
-$ docker agent serve api agent.yaml --listen :8080
+$ docker agent serve api agent.yaml --listen 127.0.0.1:8080
 ```
 
 <div class="callout callout-tip">

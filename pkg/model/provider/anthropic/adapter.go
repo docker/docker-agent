@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -28,6 +29,11 @@ type streamAdapter struct {
 	// we must remember the ID per block to route partial JSON correctly
 	// when multiple tool calls stream in parallel.
 	toolIDByBlock map[int64]string
+	// message accumulates the raw response so message_stop can hand the
+	// runtime the exact content blocks for replay. rawLost marks an
+	// accumulation failure; the stream keeps flowing without raw state.
+	message anthropic.Message
+	rawLost bool
 }
 
 func (c *Client) newStreamAdapter(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], trackUsage bool) *streamAdapter {
@@ -79,6 +85,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	}
 
 	event := a.stream.Current()
+	a.accumulate(event)
 
 	response := chat.MessageStreamResponse{
 		ID:     event.Message.ID,
@@ -143,21 +150,31 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case anthropic.MessageDeltaEvent:
 		a.stopReason = eventVariant.Delta.StopReason
 		if a.trackUsage {
-			response.Usage = usageFromDelta(eventVariant.Usage)
+			response.Usage = usageFromMessage(a.message.Usage)
 		}
 	case anthropic.MessageStopEvent:
 		response.Choices[0].FinishReason = finishReason(a.stopReason, a.toolCall)
+		if !a.rawLost {
+			response.Choices[0].Delta.ProviderState = newProviderState(a.message.ID, a.message.Model, a.message.Content)
+		}
 	}
 
 	return response, nil
 }
 
-// usageFromDelta maps the standard Messages API streaming usage onto chat.Usage.
-// ReasoningTokens comes from OutputTokensDetails.ThinkingTokens, which Anthropic
-// reports as a read-only decomposition of OutputTokens (thinking is already
-// billed inside output), so surfacing it never changes the cost computed in the
-// runtime — it only makes the otherwise-invisible thinking spend observable.
-func usageFromDelta(u anthropic.MessageDeltaUsage) *chat.Usage {
+func (a *streamAdapter) accumulate(event anthropic.MessageStreamEventUnion) {
+	// Usage must keep accumulating even if raw content capture failed.
+	if a.rawLost && event.Type != "message_start" && event.Type != "message_delta" {
+		return
+	}
+	if err := a.message.Accumulate(event); err != nil {
+		a.rawLost = true
+		slog.Debug("Anthropic: raw response capture disabled", "error", err)
+	}
+}
+
+// usageFromMessage maps accumulated usage; reasoning is already included in output.
+func usageFromMessage(u anthropic.Usage) *chat.Usage {
 	return &chat.Usage{
 		InputTokens:       u.InputTokens,
 		OutputTokens:      u.OutputTokens,
@@ -168,13 +185,15 @@ func usageFromDelta(u anthropic.MessageDeltaUsage) *chat.Usage {
 }
 
 // finishReason maps an Anthropic stop reason (received on message_delta) onto
-// the chat finish-reason vocabulary. An empty stop reason falls back to
+// the chat finish-reason vocabulary. model_context_window_exceeded means the
+// output filled the context window, so it is truncated just like max_tokens.
+// An empty stop reason falls back to
 // inferring tool_calls vs stop from whether a tool_use block was seen.
 func finishReason(stopReason anthropic.StopReason, sawToolUse bool) chat.FinishReason {
 	switch stopReason {
 	case anthropic.StopReasonToolUse:
 		return chat.FinishReasonToolCalls
-	case anthropic.StopReasonMaxTokens:
+	case anthropic.StopReasonMaxTokens, anthropic.StopReasonModelContextWindowExceeded:
 		return chat.FinishReasonLength
 	case anthropic.StopReasonRefusal:
 		return chat.FinishReasonRefusal
@@ -187,5 +206,5 @@ func finishReason(stopReason anthropic.StopReason, sawToolUse bool) chat.FinishR
 
 // Close closes the stream
 func (a *streamAdapter) Close() {
-	a.stream.Close()
+	a.close()
 }

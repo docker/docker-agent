@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  runcrate_model:
+    provider: runcrate
+    model: deepseek-ai/DeepSeek-V4.1-Flash
+
+agents:
+  root:
+    model: runcrate_model
+    description: Assistant using Runcrate
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think

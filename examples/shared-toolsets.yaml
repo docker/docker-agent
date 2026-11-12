@@ -7,7 +7,7 @@
 models:
   model:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     max_tokens: 64000
 
 # Define reusable toolsets once at the top level. Any toolset type is allowed.

@@ -21,7 +21,7 @@
 models:
   primary:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     # Summarize with a cheaper model, and start compacting at 80% of the
     # window instead of the default 90%. The model-level threshold overrides
     # any agent-level `compaction_threshold`.

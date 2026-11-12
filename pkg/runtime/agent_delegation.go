@@ -1,8 +1,8 @@
 package runtime
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -84,6 +85,8 @@ func validateDelegation(parent *session.Session, caller, target string) ([]strin
 	return childLineage, ""
 }
 
+const delegationPathInstructions = "\n\nIf the task references files, treat any absolute paths in <task> as authoritative and use them as-is. If a referenced file is given by name only (e.g. \"foo.go\"), do not guess: search the workspace or ask the calling agent for the absolute path before reading or modifying the file."
+
 // buildTaskSystemMessage constructs the system message for a delegated task.
 // attachedFiles, when non-empty, lists absolute paths of files the user
 // attached to the parent conversation; they are surfaced to the sub-agent so
@@ -103,7 +106,7 @@ func buildTaskSystemMessage(task, expectedOutput string, attachedFiles []string)
 		}
 		b.WriteString("\n</attached_files>")
 	}
-	b.WriteString("\n\nIf the task references files, treat any absolute paths in <task> as authoritative and use them as-is. If a referenced file is given by name only (e.g. \"foo.go\"), do not guess: search the workspace or ask the calling agent for the absolute path before reading or modifying the file.")
+	b.WriteString(delegationPathInstructions)
 	return b.String()
 }
 
@@ -113,13 +116,17 @@ func buildTaskSystemMessage(task, expectedOutput string, attachedFiles []string)
 // such a session (telemetry, current-agent switching, event forwarding)
 // lives in [LocalRuntime.runForwarding] and [LocalRuntime.runCollecting].
 type SubSessionConfig struct {
+	// workspace owns the isolated checkout and execution resources, when requested.
+	workspace *backgroundWorktree
+	// worktreePrompt describes a borrowed workspace without transferring ownership.
+	worktreePrompt worktreePrompt
 	// Task is the user-facing task description.
 	Task string
 	// ExpectedOutput is an optional description of what the sub-agent should produce.
 	ExpectedOutput string
 	// SystemMessage, when non-empty, replaces the default task-based system
-	// message. This is used by skill sub-agents whose system prompt is the
-	// skill content itself rather than the team delegation boilerplate.
+	// message. This is used by skill sub-agents, whose system prompt is a
+	// skill-specific preamble rather than the team delegation boilerplate.
 	SystemMessage string
 	// AgentName is the name of the agent that will execute the sub-session.
 	AgentName string
@@ -142,11 +149,13 @@ type SubSessionConfig struct {
 	NonInteractive bool
 	// PinAgent, when true, pins the child session to AgentName via
 	// session.WithAgentName. This is required for concurrent background
-	// tasks that must not share the runtime's mutable currentAgent field.
+	// tasks that must not share the runtime's shared current-agent slot.
 	PinAgent bool
+	// AllowHandoffs permits intentional routing inside a pinned skill fork.
+	AllowHandoffs bool
 	// ImplicitUserMessage, when non-empty, overrides the default "Please proceed."
 	// user message sent to the child session. This allows callers like skill
-	// sub-agents to pass the task description as the user message.
+	// sub-agents to pass the skill instructions (and task) as the user message.
 	ImplicitUserMessage string
 	// ExcludedTools lists tool names that should be filtered out of the agent's
 	// tool list for the child session. This prevents recursive tool calls
@@ -187,7 +196,7 @@ type SubSessionConfig struct {
 // The OpenTelemetry span is owned by the caller (each public-facing
 // handler opens its own span before calling runForwarding) so that
 // pre-delegation work — most importantly the model override applied
-// by [LocalRuntime.handleRunSkill] before forwarding — is recorded
+// by [LocalRuntime.runSkillFork] before forwarding — is recorded
 // under the caller's span.
 type delegationRequest struct {
 	SubSessionConfig
@@ -206,6 +215,9 @@ type delegationRequest struct {
 	// concurrent foreground loop and must not be mutated from a
 	// background task (#3886).
 	SwitchCurrentAgent bool
+	// directNativeTransfer enables the idle-stream recovery reserved for the
+	// native transfer_task handler. Other runForwarding callers leave it false.
+	directNativeTransfer bool
 }
 
 // newSubSession builds a *session.Session from a SubSessionConfig and a parent
@@ -222,6 +234,18 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 	sysMsg := cfg.SystemMessage
 	if sysMsg == "" {
 		sysMsg = buildTaskSystemMessage(cfg.Task, cfg.ExpectedOutput, attachedFiles)
+	}
+
+	workingDir := parent.WorkingDir
+	prompt := cfg.worktreePrompt
+	if cfg.workspace != nil {
+		workingDir = cfg.workspace.tree.Dir
+		prompt = cfg.workspace.prompt()
+	}
+	if prompt.isolationInstructions != "" {
+		sysMsg = strings.TrimSuffix(sysMsg, delegationPathInstructions)
+		sysMsg = joinPrompts(prompt.setupContext, sysMsg)
+		sysMsg += "\n\n" + prompt.isolationInstructions
 	}
 
 	userMsg := cfg.ImplicitUserMessage
@@ -248,8 +272,13 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithSendUserMessage(false),
 		session.WithStructuredOutputDisabled(cfg.DisableStructuredOutput),
 		session.WithParentID(parent.ID),
+		// Preserve workspace provenance, including an isolated checkout override.
+		session.WithWorkingDir(workingDir),
 		session.WithAttachedFiles(attachedFiles),
 		session.WithAttributes(parent.AttributesSnapshot()),
+	}
+	if cfg.AllowHandoffs {
+		opts = append(opts, session.WithAgentHandoffs())
 	}
 	if cfg.PinAgent {
 		opts = append(opts, session.WithAgentName(cfg.AgentName))
@@ -271,7 +300,14 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 	if len(cfg.ExtraToolSets) > 0 {
 		opts = append(opts, session.WithExtraToolSets(cfg.ExtraToolSets))
 	}
-	return session.New(opts...)
+	s := session.New(opts...)
+	if cfg.workspace != nil {
+		wt := cfg.workspace.tree
+		s.SetAttribute("worktree.path", wt.Dir)
+		s.SetAttribute("worktree.branch", wt.Branch)
+		s.SetAttribute("worktree.base_commit", wt.BaseCommit)
+	}
+	return s
 }
 
 // mergeExcludedTools combines two excluded-tool lists, deduplicating entries.
@@ -306,12 +342,16 @@ func mergeExcludedTools(parent, child []string) []string {
 // Use as `defer r.swapCurrentAgent(ctx, sessionID, from, to, evts)()` so the
 // swap takes effect immediately and the restore runs at function exit.
 func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, from, to *agent.Agent, evts EventSink) func() {
+	// Restore the shared agent the conversation actually had, not the caller:
+	// a hook-routed caller runs on a session-local agent, and writing it back
+	// would replace the conversation's entry agent.
+	shared := r.currentAgentName()
 	evts.Emit(AgentSwitching(true, from.Name(), to.Name()))
 	r.executeOnAgentSwitchHooks(ctx, from, sessionID, from.Name(), to.Name(), agentSwitchKindTransferTask)
 	r.setCurrentAgent(to.Name())
 	evts.Emit(AgentInfo(to.Name(), agentModelLabel(ctx, to), to.Description(), to.WelcomeMessage()))
 	return func() {
-		r.setCurrentAgent(from.Name())
+		r.setCurrentAgent(cmp.Or(shared, from.Name()))
 		evts.Emit(AgentSwitching(false, to.Name(), from.Name()))
 		r.executeOnAgentSwitchHooks(ctx, from, sessionID, to.Name(), from.Name(), agentSwitchKindTransferTaskReturn)
 		evts.Emit(AgentInfo(from.Name(), agentModelLabel(ctx, from), from.Description(), from.WelcomeMessage()))
@@ -325,26 +365,23 @@ func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, f
 // the user sees the child's events live.
 //
 // On success it returns a tool result whose output is the child's last
-// assistant message. On error it has already forwarded the ErrorEvent to
-// evts and returns a wrapped error.
+// assistant message. On error it returns a non-nil error; when the child
+// stream failed, its ErrorEvent or BudgetExceededEvent has already been
+// forwarded to evts.
 //
 // The caller is expected to have opened a tracing span before calling
 // runForwarding; the function records sub-session status (Ok / Error)
 // on whatever span is attached to ctx — a no-op if none.
 //
 // runForwarding handles every concern the callers used to duplicate:
-// resolving the caller from the parent session, swapping the current agent
+// rejecting a nil caller agent (callers resolve it), swapping the current agent
 // (if requested; downgraded to pinning the child when the parent session is
 // itself pinned), resolving the child agent, building the sub-session,
 // driving RunStream, and recording the sub-session on the parent.
-func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Session, evts EventSink, req delegationRequest) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Session, callerAgent *agent.Agent, evts EventSink, req delegationRequest) (*tools.ToolCallResult, error) {
 	span := trace.SpanFromContext(ctx)
 
-	// The caller resolves from the parent session, not the shared current
-	// agent: a nested transfer from a pinned background session must
-	// attribute events, hooks, and completion to the pinned agent, no
-	// matter where the concurrent foreground loop points (#3886).
-	callerAgent := r.resolveSessionAgent(parent)
+	// Retain the requesting agent for completion hooks, even if routing changed during preparation.
 	if callerAgent == nil {
 		return nil, errors.New("no agent resolved for the parent session")
 	}
@@ -363,26 +400,34 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 			// resolves pinned sessions directly, so the child still
 			// executes as the target agent, without switch events/hooks.
 			req.PinAgent = true
+			req.AllowHandoffs = parent.AllowsAgentHandoffs()
 		}
 	}
 
+	req.worktreePrompt = r.worktreePrompt
 	s := newSubSession(parent, req.SubSessionConfig, child)
 
 	// subagent_stop fires after the child's stream has fully drained,
 	// using the *parent* agent's executor so handlers configured on the
 	// orchestrator see every child completion in one place — success or
-	// failure. The deferred call ensures we don't lose the event when an
-	// ErrorEvent triggers an early return below; handlers can detect a
-	// failed run by an empty stop_response (or by correlating with the
-	// session-level error event the parent already received).
+	// failure. On failure, stop_response carries any assistant content the
+	// child produced before stopping; an empty value means no content existed.
 	defer func() {
 		r.executeSubagentStopHooks(ctx, parent, s, callerAgent, req.AgentName, s.GetLastAssistantMessageContent())
 	}()
 
-	childEvents := r.RunStream(ctx, s)
+	idleRetryPolicy := defaultIdleStreamRetryPolicy()
+	if req.directNativeTransfer {
+		idleRetryPolicy = idleStreamRetryPolicy{enabled: true, parentSessionID: parent.ID}
+	}
+	childEvents := r.runStream(ctx, s, idleRetryPolicy)
 	var subSessionErr error
 	for event := range childEvents {
 		evts.Emit(event)
+		if budgetEvent, ok := event.(*BudgetExceededEvent); ok &&
+			req.directNativeTransfer && budgetEvent.SessionID == s.ID && subSessionErr == nil {
+			subSessionErr = errors.New(budgetEvent.Message)
+		}
 		if errEvent, ok := event.(*ErrorEvent); ok && subSessionErr == nil {
 			// Capture the first ErrorEvent but keep draining the channel so
 			// the sub-session's full transcript still streams through. The
@@ -401,6 +446,9 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	parent.AddLiveSubSession(s)
 	evts.Emit(SubSessionCompleted(parent.ID, s, callerAgent.Name()))
 
+	if subSessionErr == nil && ctx.Err() != nil {
+		subSessionErr = ctx.Err()
+	}
 	if subSessionErr != nil {
 		span.RecordError(subSessionErr)
 		span.SetStatus(codes.Error, "sub-session error")
@@ -421,6 +469,15 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 // callers like background agents PinAgent the child session so the
 // runtime never mutates the shared currentAgent state.
 func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Session, cfg SubSessionConfig, onContent func(string)) *agenttool.RunResult {
+	var s *session.Session
+	defer func() {
+		if cfg.workspace != nil {
+			closeWorktreeRuntime(ctx, cfg.workspace.runtime)
+		}
+		if s != nil {
+			r.emitBackgroundEvent(context.WithoutCancel(ctx), BackgroundAgentStatus(s.ID, cfg.AgentName, false))
+		}
+	}()
 	// The caller resolves from the parent session, not the shared current
 	// agent: a nested background dispatch from a pinned session must
 	// attribute the child's completion to the pinned agent, no matter
@@ -431,12 +488,17 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	if callerAgent == nil {
 		return &agenttool.RunResult{ErrMsg: "no agent resolved for the parent session"}
 	}
-	child, err := r.team.Agent(cfg.AgentName)
+	executionRuntime := r
+	if cfg.workspace != nil {
+		executionRuntime = cfg.workspace.runtime
+	}
+	child, err := executionRuntime.team.Agent(cfg.AgentName)
 	if err != nil {
 		return &agenttool.RunResult{ErrMsg: fmt.Sprintf("agent %q not found: %s", cfg.AgentName, err)}
 	}
 
-	s := newSubSession(parent, cfg, child)
+	s = newSubSession(parent, cfg, child)
+	r.emitBackgroundEvent(ctx, BackgroundAgentStatus(s.ID, cfg.AgentName, true))
 
 	// subagent_stop fires after the background sub-session has fully
 	// drained — success or failure. The caller agent (whoever dispatched
@@ -448,8 +510,9 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	}()
 
 	var errMsg string
-	events := r.RunStream(ctx, s)
+	events := executionRuntime.RunStream(ctx, s)
 	for event := range events {
+		r.forwardBackgroundUsage(ctx, event)
 		if ctx.Err() != nil {
 			break
 		}
@@ -457,12 +520,6 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 			if onContent != nil {
 				onContent(choice.Content)
 			}
-		}
-		// Token usage is the one event a background sub-session surfaces
-		// out-of-band: it carries the sub-session id and agent name, so the
-		// UI can keep per-agent context accounting for background agents.
-		if usage, ok := event.(*TokenUsageEvent); ok {
-			r.emitBackgroundEvent(usage)
 		}
 		// Elicitation requests are NOT re-forwarded here: elicitationHandler
 		// already delivered this event to the OnElicitationRequest sink
@@ -477,15 +534,26 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 			errMsg = errEvt.Error
 			break
 		}
+		if cfg.workspace != nil {
+			switch e := event.(type) {
+			case *BudgetExceededEvent:
+				if e.SessionID == s.ID {
+					errMsg = e.Message
+				}
+			case *StreamStoppedEvent:
+				if e.SessionID == s.ID && e.Reason != "" && e.Reason != turnEndReasonNormal && e.Reason != turnEndReasonCanceled {
+					errMsg = "background task stopped: " + e.Reason
+				}
+			}
+		}
 	}
 	// Drain remaining events so the RunStream goroutine can complete and
 	// close the channel without blocking on a full buffer.
-	for range events {
+	for event := range events {
+		r.forwardBackgroundUsage(ctx, event)
 	}
 
-	// The loop above stops forwarding on ctx cancellation / first ErrorEvent,
-	// so the drain can discard TokenUsageEvents carrying the child's latest
-	// recorded usage. Emit one authoritative final snapshot before the child
+	// Emit one authoritative final snapshot before the child
 	// is attached: AddLiveSubSession marks it live-attached, so the parent's
 	// own events will never fold this cost back in. UI snapshots replace by
 	// session ID, which makes the duplicate on the clean path harmless.
@@ -500,7 +568,7 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 		// usageCtx: the context-limit lookup must still resolve for a
 		// cancelled task.
 		finalUsage.ContextLimit = r.contextLimitForAgentModel(usageCtx, child, r.getEffectiveModelID(usageCtx, child))
-		r.emitBackgroundEvent(NewTokenUsageEvent(s.ID, cfg.AgentName, finalUsage))
+		r.emitBackgroundEvent(ctx, NewTokenUsageEvent(s.ID, cfg.AgentName, finalUsage))
 	}
 
 	// Persist the sub-session unconditionally — the partial transcript is
@@ -533,29 +601,15 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	// no explanation. Prepend an actionable note so the model (and, through it,
 	// the user) learns the server must be authorized interactively first.
 	if note := backgroundAuthRequiredNote(child); note != "" {
-		result = prependNote(result, note)
+		result = joinPrompts(note, result)
 	}
 	// Mid-call elicitations that were auto-declined because this background
 	// session had no UI to answer them (see elicitationHandler) are recorded
 	// against this sub-session's ID; surface them the same way (#3584).
-	for _, note := range r.elicitationDeclines.drain(s.ID) {
-		result = prependNote(result, note)
+	for _, note := range executionRuntime.elicitationDeclines.drain(s.ID) {
+		result = joinPrompts(note, result)
 	}
 	return &agenttool.RunResult{Result: result}
-}
-
-// prependNote prepends note to result, separated by a blank line, handling
-// the case where either side is empty. Used to surface model-readable
-// context (OAuth-required, elicitation auto-declined) ahead of a background
-// sub-session's actual response.
-func prependNote(result, note string) string {
-	if note == "" {
-		return result
-	}
-	if result == "" {
-		return note
-	}
-	return note + "\n\n" + result
 }
 
 // backgroundAuthRequiredNote returns a model-readable note naming the child
@@ -568,7 +622,7 @@ func prependNote(result, note string) string {
 func backgroundAuthRequiredNote(child *agent.Agent) string {
 	var needAuth []string
 	for _, ts := range child.ToolSets() {
-		status := toolsetStatusFor(ts)
+		status := inspection.ToolsetStatus(ts)
 		if tools.IsAuthorizationRequired(status.LastError) {
 			needAuth = append(needAuth, status.Name)
 		}
@@ -643,6 +697,9 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	// Caller identity must come from the parent session, not the shared
 	// current agent: nested background delegation runs on pinned sessions
 	// whose agent can differ from whatever the foreground loop points at.
+	if r.isolatedWorktree {
+		return &agenttool.RunResult{ErrMsg: "nested background agents are not supported inside an isolated worktree; dispatch sibling worktree tasks from the top-level agent or use transfer_task"}
+	}
 	caller := r.resolveSessionAgent(params.ParentSession)
 	if caller == nil {
 		return &agenttool.RunResult{ErrMsg: "no agent resolved for the parent session"}
@@ -651,7 +708,7 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	if guardErr != "" {
 		return &agenttool.RunResult{ErrMsg: guardErr}
 	}
-	return r.runCollecting(ctx, params.ParentSession, SubSessionConfig{
+	cfg := SubSessionConfig{
 		Task:              params.Task,
 		ExpectedOutput:    params.ExpectedOutput,
 		AgentName:         params.AgentName,
@@ -662,23 +719,27 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 		NonInteractive:    true,
 		PinAgent:          true,
 		DelegationLineage: childLineage,
-	}, params.OnContent)
+	}
+	if params.Worktree {
+		workspace, err := r.prepareBackgroundWorktree(ctx, params)
+		if err != nil {
+			return &agenttool.RunResult{ErrMsg: err.Error()}
+		}
+		cfg.workspace = workspace
+	}
+	return r.runCollecting(ctx, params.ParentSession, cfg, params.OnContent)
 }
 
-func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, a *agent.Agent) (*tools.ToolCallResult, error) {
 	var params struct {
 		Agent          string `json:"agent"`
 		Task           string `json:"task"`
 		ExpectedOutput string `json:"expected_output"`
 	}
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// Resolve the caller session-aware: nested transfer_task from a pinned
-	// background session must attribute the call to the pinned agent, not
-	// the shared current agent (#3886).
-	a := r.resolveSessionAgent(sess)
 	if a == nil {
 		return nil, errors.New("no agent resolved for the calling session")
 	}
@@ -723,32 +784,30 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 	ctx, span := r.startSpan(ctx, "runtime.task_transfer", trace.WithAttributes(delegationAttrs...))
 	defer span.End()
 
-	return r.runForwarding(ctx, sess, evts, delegationRequest{
-		SubSessionConfig: SubSessionConfig{
-			Task:              params.Task,
-			ExpectedOutput:    params.ExpectedOutput,
-			AgentName:         params.Agent,
-			Title:             "Transferred task",
-			ToolsApproved:     sess.IsToolsApproved(),
-			SafetyPolicy:      sess.GetSafetyPolicy(),
-			Permissions:       sess.ClonePermissions(),
-			NonInteractive:    sess.NonInteractive,
-			DelegationLineage: childLineage,
-		},
-		SwitchCurrentAgent: true,
+	return r.runForwarding(ctx, sess, a, evts, delegationRequest{
+		Task:                 params.Task,
+		ExpectedOutput:       params.ExpectedOutput,
+		AgentName:            params.Agent,
+		Title:                "Transferred task",
+		ToolsApproved:        sess.IsToolsApproved(),
+		SafetyPolicy:         sess.GetSafetyPolicy(),
+		Permissions:          sess.ClonePermissions(),
+		NonInteractive:       sess.NonInteractive,
+		DelegationLineage:    childLineage,
+		SwitchCurrentAgent:   true,
+		directNativeTransfer: true,
 	})
 }
 
-func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, currentAgent *agent.Agent) (*tools.ToolCallResult, error) {
 	var params handoff.Args
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	ca := r.currentAgentName()
-	currentAgent, err := r.team.Agent(ca)
-	if err != nil {
-		return nil, fmt.Errorf("current agent not found: %w", err)
+	ca := currentAgent.Name()
+	if sess.AgentName != "" && !sess.AllowsAgentHandoffs() {
+		return tools.ResultError("handoffs are disabled for this pinned session"), nil
 	}
 
 	if errResult := validateAgentInList(ca, params.Agent, "hand off to", "handoffs list", currentAgent.Handoffs()); errResult != nil {
@@ -781,7 +840,7 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 	defer span.End()
 
 	r.executeOnAgentSwitchHooks(ctx, currentAgent, sess.ID, ca, next.Name(), agentSwitchKindHandoff)
-	r.setCurrentAgent(next.Name())
+	r.switchSessionAgent(sess, next.Name())
 	handoffMessage := "The agent " + ca + " handed off the conversation to you. " +
 		"Your available handoff agents and tools are specified in the system messages that follow. " +
 		"Only use those capabilities - do not attempt to use tools or hand off to agents that you see " +
@@ -805,14 +864,24 @@ func (r *LocalRuntime) applyForceHandoff(ctx context.Context, sess *session.Sess
 	slog.InfoContext(ctx, "Forced handoff", "from_agent", from.Name(), "to_agent", to.Name(), "session_id", sess.ID)
 
 	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), to.Name(), agentSwitchKindForceHandoff)
-	r.setCurrentAgent(to.Name())
+	r.switchSessionAgent(sess, to.Name())
+	sess.AddMessage(session.ImplicitUserMessage(forcedHandoffNote(from.Name())))
+}
 
-	sess.AddMessage(session.ImplicitUserMessage(
-		"The agent " + from.Name() + " finished its response and the conversation was automatically " +
-			"handed off to you. Your available handoff agents and tools are specified in the system " +
-			"messages that follow. Only use those capabilities - do not attempt to use tools or hand " +
-			"off to agents that you see in the conversation history from previous agents, as those were " +
-			"available to different agents with different capabilities. Look at the conversation history " +
-			"for context, continue the work from where the previous agent stopped, and complete your " +
-			"part of the task."))
+func forcedHandoffNote(from string) string {
+	return "The agent " + from + " finished its response and the conversation was automatically " +
+		"handed off to you. Your available handoff agents and tools are specified in the system " +
+		"messages that follow. Only use those capabilities - do not attempt to use tools or hand " +
+		"off to agents that you see in the conversation history from previous agents, as those were " +
+		"available to different agents with different capabilities. Look at the conversation history " +
+		"for context, continue the work from where the previous agent stopped, and complete your " +
+		"part of the task."
+}
+
+// Preserve accounting during cancellation drains, including nested children.
+func (r *LocalRuntime) forwardBackgroundUsage(ctx context.Context, event Event) {
+	switch event.(type) {
+	case *TokenUsageEvent, *EvaluationUsageEvent:
+		r.emitBackgroundEvent(ctx, event)
+	}
 }

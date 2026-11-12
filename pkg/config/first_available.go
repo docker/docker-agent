@@ -9,7 +9,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
-	modelprovider "github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
 // ResolveFirstAvailableModels resolves reachable `first_available` models in the
@@ -51,8 +51,7 @@ func resolveFirstAvailableModel(ctx context.Context, cfg *latest.Config, name st
 	m := cfg.Models[name]
 	chosen, ref, err := selectFirstAvailable(ctx, cfg, m.FirstAvailable, selectors, modelsGateway, env)
 	if err != nil {
-		var missingErr *firstAvailableMissingEnvError
-		if errors.As(err, &missingErr) {
+		if missingErr, ok := errors.AsType[*firstAvailableMissingEnvError](err); ok {
 			return missingErr
 		}
 		return fmt.Errorf("model '%s': %w", name, err)
@@ -229,7 +228,7 @@ func resolveCandidate(cfg *latest.Config, ref string, selectors map[string]bool)
 }
 
 func validateCandidateProvider(cfg *latest.Config, ref, provider string) error {
-	if provider == "" || modelprovider.IsKnownProvider(provider) {
+	if provider == "" || catalog.IsKnownProvider(provider) {
 		return nil
 	}
 	if _, exists := cfg.Providers[provider]; exists {

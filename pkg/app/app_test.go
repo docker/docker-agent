@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -16,6 +17,8 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
+	"github.com/docker/docker-agent/pkg/runtime/remote"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -92,7 +95,9 @@ func (m *mockRuntime) Stop()                                                    
 func (m *mockRuntime) Steer(_ context.Context, _ runtime.QueuedMessage) error    { return nil }
 func (m *mockRuntime) FollowUp(_ context.Context, _ runtime.QueuedMessage) error { return nil }
 func (m *mockRuntime) QueueStatus() runtime.QueueStatus                          { return runtime.QueueStatus{} }
-func (m *mockRuntime) TogglePause(context.Context) (bool, error)                 { return false, nil }
+
+func (m *mockRuntime) TogglePause(context.Context) (bool, error) { return false, nil }
+
 func (m *mockRuntime) SetAgentModel(context.Context, string, string) error {
 	return nil
 }
@@ -104,11 +109,11 @@ func (m *mockRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.L
 func (m *mockRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
-func (m *mockRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
-func (m *mockRuntime) SupportsModelSwitching() bool                          { return false }
-func (m *mockRuntime) OnToolsChanged(func(runtime.Event))                    {}
-func (m *mockRuntime) OnBackgroundEvent(func(runtime.Event))                 {}
-func (m *mockRuntime) OnElicitationRequest(func(runtime.Event))              {}
+func (m *mockRuntime) AvailableModels(context.Context) []modelcatalog.ModelChoice { return nil }
+func (m *mockRuntime) SupportsModelSwitching() bool                               { return false }
+func (m *mockRuntime) OnToolsChanged(func(runtime.Event))                         {}
+func (m *mockRuntime) OnBackgroundEvent(func(runtime.Event))                      {}
+func (m *mockRuntime) OnElicitationRequest(func(runtime.Event))                   {}
 
 // Verify mockRuntime implements runtime.Runtime
 var _ runtime.Runtime = (*mockRuntime)(nil)
@@ -166,37 +171,41 @@ func (r *blockingRunStreamRuntime) RunStream(ctx context.Context, _ *session.Ses
 func TestApp_Run_HoldsStreamGuardForStreamDuration(t *testing.T) {
 	t.Parallel()
 
-	release := make(chan struct{})
-	rt := &blockingRunStreamRuntime{release: release}
-	var guard sync.Mutex
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		rt := &blockingRunStreamRuntime{release: release}
+		var guard sync.Mutex
 
-	app := &App{
-		runtime:     rt,
-		session:     session.New(),
-		events:      make(chan tea.Msg, 16),
-		streamGuard: &guard,
-	}
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	app.Run(ctx, cancel, "hello", nil)
-
-	// isLocked probes guard without leaking a spurious lock acquisition:
-	// TryLock succeeding would otherwise leave the test goroutine holding
-	// the mutex, making the later "released" check hang forever.
-	isLocked := func() bool {
-		if guard.TryLock() {
-			guard.Unlock()
-			return false
+		app := &App{
+			runtime:     rt,
+			session:     session.New(),
+			events:      make(chan tea.Msg, 16),
+			streamGuard: &guard,
 		}
-		return true
-	}
 
-	require.Eventually(t, isLocked, time.Second, time.Millisecond, "streamGuard should be held while RunStream is active")
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		app.Run(ctx, cancel, "hello", nil)
 
-	close(release)
+		// isLocked probes guard without leaking a spurious lock acquisition:
+		// TryLock succeeding would otherwise leave the test goroutine holding
+		// the mutex, making the later "released" check hang forever.
+		isLocked := func() bool {
+			if guard.TryLock() {
+				guard.Unlock()
+				return false
+			}
+			return true
+		}
 
-	require.Eventually(t, func() bool { return !isLocked() }, time.Second, time.Millisecond, "streamGuard should be released once RunStream ends")
+		synctest.Wait()
+		require.True(t, isLocked(), "streamGuard should be held while RunStream is active")
+
+		close(release)
+
+		synctest.Wait()
+		require.False(t, isLocked(), "streamGuard should be released once RunStream ends")
+	})
 }
 
 // TestApp_AcquireStreamGuard_NoopWhenUnset verifies that a bare App with no
@@ -213,41 +222,44 @@ func TestApp_AcquireStreamGuard_NoopWhenUnset(t *testing.T) {
 func TestApp_Retry_SuppressesReEmittedUserMessage(t *testing.T) {
 	t.Parallel()
 
-	events := make(chan tea.Msg, 16)
-	app := &App{
-		runtime: &retryMockRuntime{},
-		session: session.New(),
-		events:  events,
-	}
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	app.Retry(ctx, cancel)
-
-	var userMessages []string
-	var sawStreamStarted, sawStreamStopped bool
-	deadline := time.After(2 * time.Second)
-	for !sawStreamStopped {
-		select {
-		case ev := <-events:
-			switch e := ev.(type) {
-			case *runtime.UserMessageEvent:
-				userMessages = append(userMessages, e.Message)
-			case *runtime.StreamStartedEvent:
-				sawStreamStarted = true
-			case *runtime.StreamStoppedEvent:
-				sawStreamStopped = true
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for StreamStopped")
+	synctest.Test(t, func(t *testing.T) {
+		events := make(chan tea.Msg, 16)
+		app := &App{
+			runtime: &retryMockRuntime{},
+			session: session.New(),
+			events:  events,
 		}
-	}
 
-	assert.True(t, sawStreamStarted, "StreamStarted should be forwarded")
-	// The pre-StreamStarted re-emission is dropped; the post-StreamStarted
-	// (steered) user message is kept.
-	assert.Equal(t, []string{"steered"}, userMessages,
-		"only the post-StreamStarted user message should be forwarded")
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		app.Retry(ctx, cancel)
+
+		var userMessages []string
+		var sawStreamStarted, sawStreamStopped bool
+		deadline := time.After(2 * time.Second)
+		for !sawStreamStopped {
+			select {
+			case ev := <-events:
+				ev = unwrappedTestEvent(ev)
+				switch e := ev.(type) {
+				case *runtime.UserMessageEvent:
+					userMessages = append(userMessages, e.Message)
+				case *runtime.StreamStartedEvent:
+					sawStreamStarted = true
+				case *runtime.StreamStoppedEvent:
+					sawStreamStopped = true
+				}
+			case <-deadline:
+				t.Fatal("timed out waiting for StreamStopped")
+			}
+		}
+
+		assert.True(t, sawStreamStarted, "StreamStarted should be forwarded")
+		// The pre-StreamStarted re-emission is dropped; the post-StreamStarted
+		// (steered) user message is kept.
+		assert.Equal(t, []string{"steered"}, userMessages,
+			"only the post-StreamStarted user message should be forwarded")
+	})
 }
 
 // backgroundEventMockRuntime captures the handler App.Start registers via
@@ -268,29 +280,32 @@ func (m *backgroundEventMockRuntime) OnBackgroundEvent(handler func(runtime.Even
 func TestApp_Start_ForwardsBackgroundEvents(t *testing.T) {
 	t.Parallel()
 
-	rt := &backgroundEventMockRuntime{}
-	events := make(chan tea.Msg, 16)
-	app := &App{
-		runtime: rt,
-		session: session.New(),
-		events:  events,
-	}
+	synctest.Test(t, func(t *testing.T) {
+		rt := &backgroundEventMockRuntime{}
+		events := make(chan tea.Msg, 16)
+		app := &App{
+			runtime: rt,
+			session: session.New(),
+			events:  events,
+		}
 
-	app.Start(t.Context())
-	require.NotNil(t, rt.handler, "Start must register the background-event handler")
+		app.Start(t.Context())
+		require.NotNil(t, rt.handler, "Start must register the background-event handler")
 
-	usage := runtime.NewTokenUsageEvent("bg-session", "worker", &runtime.Usage{
-		ContextLength: 150,
-		ContextLimit:  1000,
+		usage := runtime.NewTokenUsageEvent("bg-session", "worker", &runtime.Usage{
+			ContextLength: 150,
+			ContextLimit:  1000,
+		})
+		rt.handler(usage)
+
+		select {
+		case msg := <-events:
+			msg = unwrappedTestEvent(msg)
+			assert.Equal(t, usage, msg, "the background event must reach the app's event stream unchanged")
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for the forwarded background event")
+		}
 	})
-	rt.handler(usage)
-
-	select {
-	case msg := <-events:
-		assert.Equal(t, usage, msg, "the background event must reach the app's event stream unchanged")
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the forwarded background event")
-	}
 }
 
 // elicitationRequestMockRuntime captures the handler App.Start registers via
@@ -334,26 +349,29 @@ func (m *elicitationRequestMockRuntime) ResumeElicitation(_ context.Context, act
 func TestApp_Start_ForwardsElicitationRequests(t *testing.T) {
 	t.Parallel()
 
-	rt := &elicitationRequestMockRuntime{}
-	events := make(chan tea.Msg, 16)
-	app := &App{
-		runtime: rt,
-		session: session.New(),
-		events:  events,
-	}
+	synctest.Test(t, func(t *testing.T) {
+		rt := &elicitationRequestMockRuntime{}
+		events := make(chan tea.Msg, 16)
+		app := &App{
+			runtime: rt,
+			session: session.New(),
+			events:  events,
+		}
 
-	app.Start(t.Context())
-	require.NotNil(t, rt.handler, "Start must register the OnElicitationRequest handler")
+		app.Start(t.Context())
+		require.NotNil(t, rt.handler, "Start must register the OnElicitationRequest handler")
 
-	ev := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "sess-1", nil, "worker")
-	rt.handler(ev)
+		ev := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "sess-1", nil, "worker")
+		rt.handler(ev)
 
-	select {
-	case msg := <-events:
-		assert.Equal(t, ev, msg, "the elicitation request must reach the app's event stream unchanged")
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the forwarded elicitation request")
-	}
+		select {
+		case msg := <-events:
+			msg = unwrappedTestEvent(msg)
+			assert.Equal(t, ev, msg, "the elicitation request must reach the app's event stream unchanged")
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for the forwarded elicitation request")
+		}
+	})
 }
 
 // TestApp_SendEvent_DeliversElicitationWithoutDedupe pins the #3584 fix that
@@ -553,6 +571,7 @@ func TestApp_UpdateSessionTitle(t *testing.T) {
 		// Check that an event was emitted
 		select {
 		case event := <-events:
+			event = unwrappedTestEvent(event)
 			titleEvent, ok := event.(*runtime.SessionTitleEvent)
 			require.True(t, ok, "should emit SessionTitleEvent")
 			assert.Equal(t, "New Title", titleEvent.Title)
@@ -678,43 +697,43 @@ func TestApp_SnapshotsEnabled_DoesNotRequireSession(t *testing.T) {
 func TestApp_SubscribeWith_FanOutToMultipleSubscribers(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
 
-	rt := &mockRuntime{}
-	app := New(t.Context(), rt, session.New())
+		rt := &mockRuntime{}
+		app := New(t.Context(), rt, session.New())
 
-	recv := func() (chan tea.Msg, context.CancelFunc) {
-		subCtx, subCancel := context.WithCancel(ctx)
-		ch := make(chan tea.Msg, 16)
-		go app.SubscribeWith(subCtx, func(m tea.Msg) { ch <- m })
-		return ch, subCancel
-	}
-
-	a, cancelA := recv()
-	b, cancelB := recv()
-	defer cancelA()
-	defer cancelB()
-
-	// Wait until both subscribers are registered before publishing.
-	require.Eventually(t, func() bool {
-		app.subsMu.Lock()
-		defer app.subsMu.Unlock()
-		return len(app.subs) == 2
-	}, time.Second, 5*time.Millisecond)
-
-	app.events <- runtime.SessionTitle("sess", "hello")
-
-	for _, ch := range []chan tea.Msg{a, b} {
-		select {
-		case msg := <-ch:
-			ev, ok := msg.(*runtime.SessionTitleEvent)
-			require.True(t, ok)
-			assert.Equal(t, "hello", ev.Title)
-		case <-time.After(time.Second):
-			t.Fatal("subscriber did not receive event")
+		recv := func() (chan tea.Msg, context.CancelFunc) {
+			subCtx, subCancel := context.WithCancel(ctx)
+			ch := make(chan tea.Msg, 16)
+			go app.SubscribeWith(subCtx, func(m tea.Msg) { ch <- m })
+			return ch, subCancel
 		}
-	}
+
+		a, cancelA := recv()
+		b, cancelB := recv()
+		defer cancelA()
+		defer cancelB()
+
+		// Wait until both subscribers are registered before publishing.
+		synctest.Wait()
+		require.Len(t, app.subs, 2)
+
+		app.events <- runtime.SessionTitle("sess", "hello")
+
+		for _, ch := range []chan tea.Msg{a, b} {
+			select {
+			case msg := <-ch:
+				msg = unwrappedTestEvent(msg)
+				ev, ok := msg.(*runtime.SessionTitleEvent)
+				require.True(t, ok)
+				assert.Equal(t, "hello", ev.Title)
+			case <-time.After(time.Second):
+				t.Fatal("subscriber did not receive event")
+			}
+		}
+	})
 }
 
 func TestApp_RegenerateSessionTitle(t *testing.T) {
@@ -793,6 +812,7 @@ func TestApp_InjectUserMessage(t *testing.T) {
 
 	select {
 	case msg := <-events:
+		msg = unwrappedTestEvent(msg)
 		sendMsg, ok := msg.(messages.SendMsg)
 		require.True(t, ok, "should emit a SendMsg, got %T", msg)
 		assert.Equal(t, "do the thing", sendMsg.Content)
@@ -978,21 +998,24 @@ func TestApp_LiveSessions_PassesCurrentSession(t *testing.T) {
 func TestApp_CompactLiveSession_BridgesEventsIntoStream(t *testing.T) {
 	t.Parallel()
 
-	rt := &liveSessionsMockRuntime{}
-	app := New(t.Context(), rt, session.New())
+	synctest.Test(t, func(t *testing.T) {
+		rt := &liveSessionsMockRuntime{}
+		app := New(t.Context(), rt, session.New())
 
-	require.NoError(t, app.CompactLiveSession(t.Context(), "child-1", ""))
-	assert.Equal(t, "child-1", rt.compactedID)
+		require.NoError(t, app.CompactLiveSession(t.Context(), "child-1", ""))
+		assert.Equal(t, "child-1", rt.compactedID)
 
-	select {
-	case msg := <-app.events:
-		evt, ok := msg.(*runtime.SessionCompactionEvent)
-		require.True(t, ok, "expected SessionCompactionEvent, got %T", msg)
-		assert.Equal(t, "child-1", evt.SessionID)
-		assert.Equal(t, "completed", evt.Status)
-	case <-time.After(time.Second):
-		t.Fatal("compaction event was not bridged into the app event stream")
-	}
+		select {
+		case msg := <-app.events:
+			msg = unwrappedTestEvent(msg)
+			evt, ok := msg.(*runtime.SessionCompactionEvent)
+			require.True(t, ok, "expected SessionCompactionEvent, got %T", msg)
+			assert.Equal(t, "child-1", evt.SessionID)
+			assert.Equal(t, "completed", evt.Status)
+		case <-time.After(time.Second):
+			t.Fatal("compaction event was not bridged into the app event stream")
+		}
+	})
 }
 
 func TestApp_CompactLiveSession_ForwardsRuntimeError(t *testing.T) {
@@ -1082,6 +1105,7 @@ func countElicitationDeliveries(t *testing.T, events <-chan tea.Msg) int {
 	for {
 		select {
 		case msg := <-events:
+			msg = unwrappedTestEvent(msg)
 			if _, ok := msg.(*runtime.ElicitationRequestEvent); ok {
 				n++
 			}
@@ -1107,17 +1131,19 @@ func countElicitationDeliveries(t *testing.T, events <-chan tea.Msg) int {
 func TestReview_RemoteRuntimeElicitationIsStillDelivered(t *testing.T) {
 	t.Parallel()
 
-	rt := &remoteLikeMockRuntime{}
-	events := make(chan tea.Msg, 16)
-	app := &App{runtime: rt, session: session.New(), events: events}
+	synctest.Test(t, func(t *testing.T) {
+		rt := &remoteLikeMockRuntime{}
+		events := make(chan tea.Msg, 16)
+		app := &App{runtime: rt, session: session.New(), events: events}
 
-	app.Start(t.Context())
+		app.Start(t.Context())
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	app.Run(ctx, cancel, "hello", nil)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		app.Run(ctx, cancel, "hello", nil)
 
-	assert.Equal(t, 1, countElicitationDeliveries(t, events), "a remote/no-sink runtime's elicitation must still reach the app via RunStream")
+		assert.Equal(t, 1, countElicitationDeliveries(t, events), "a remote/no-sink runtime's elicitation must still reach the app via RunStream")
+	})
 }
 
 // TestReview_ForegroundElicitationIsNotDeliveredTwice is the reviewer's
@@ -1129,18 +1155,20 @@ func TestReview_RemoteRuntimeElicitationIsStillDelivered(t *testing.T) {
 func TestReview_ForegroundElicitationIsNotDeliveredTwice(t *testing.T) {
 	t.Parallel()
 
-	rt := &composedElicitationMockRuntime{}
-	events := make(chan tea.Msg, 16)
-	app := &App{runtime: rt, session: session.New(), events: events}
+	synctest.Test(t, func(t *testing.T) {
+		rt := &composedElicitationMockRuntime{}
+		events := make(chan tea.Msg, 16)
+		app := &App{runtime: rt, session: session.New(), events: events}
 
-	app.Start(t.Context())
-	require.NotNil(t, rt.handler, "Start must register the OnElicitationRequest handler")
+		app.Start(t.Context())
+		require.NotNil(t, rt.handler, "Start must register the OnElicitationRequest handler")
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	app.Run(ctx, cancel, "hello", nil)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		app.Run(ctx, cancel, "hello", nil)
 
-	assert.Equal(t, 1, countElicitationDeliveries(t, events), "a single foreground elicitation must open exactly one dialog")
+		assert.Equal(t, 1, countElicitationDeliveries(t, events), "a single foreground elicitation must open exactly one dialog")
+	})
 }
 
 // TestMustSkipMirroredElicitation_ConcreteRuntimeClassification pins
@@ -1160,7 +1188,7 @@ func TestMustSkipMirroredElicitation_ConcreteRuntimeClassification(t *testing.T)
 
 	assert.True(t, mustSkipMirroredElicitation((*runtime.LocalRuntime)(nil)),
 		"LocalRuntime mirrors OnElicitationRequest sink deliveries onto RunStream; App must skip the duplicate RunStream copy")
-	assert.False(t, mustSkipMirroredElicitation((*runtime.RemoteRuntime)(nil)),
+	assert.False(t, mustSkipMirroredElicitation((*remote.Runtime)(nil)),
 		"RemoteRuntime delivers elicitations ONLY via RunStream (its OnElicitationRequest sink is a no-op); App must not skip that copy")
 }
 
@@ -1206,35 +1234,273 @@ func TestElicitationDeliveryAcrossEntryPoints(t *testing.T) {
 			t.Run("mirrored runtime delivers exactly once", func(t *testing.T) {
 				t.Parallel()
 
-				rt := &composedElicitationMockRuntime{}
-				events := make(chan tea.Msg, 16)
-				app := &App{runtime: rt, session: session.New(), events: events}
-				app.Start(t.Context())
-				require.NotNil(t, rt.handler, "Start must register the OnElicitationRequest handler")
+				synctest.Test(t, func(t *testing.T) {
+					rt := &composedElicitationMockRuntime{}
+					events := make(chan tea.Msg, 16)
+					app := &App{runtime: rt, session: session.New(), events: events}
+					app.Start(t.Context())
+					require.NotNil(t, rt.handler, "Start must register the OnElicitationRequest handler")
 
-				ctx, cancel := context.WithCancel(t.Context())
-				defer cancel()
-				ep.invoke(app, ctx, cancel)
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					ep.invoke(app, ctx, cancel)
 
-				assert.Equal(t, 1, countElicitationDeliveries(t, events),
-					"a mirrored/local-shaped runtime's foreground elicitation must open exactly one dialog")
+					assert.Equal(t, 1, countElicitationDeliveries(t, events),
+						"a mirrored/local-shaped runtime's foreground elicitation must open exactly one dialog")
+				})
 			})
 
 			t.Run("unmirrored runtime still delivers once", func(t *testing.T) {
 				t.Parallel()
 
-				rt := &remoteLikeMockRuntime{}
-				events := make(chan tea.Msg, 16)
-				app := &App{runtime: rt, session: session.New(), events: events}
-				app.Start(t.Context())
+				synctest.Test(t, func(t *testing.T) {
+					rt := &remoteLikeMockRuntime{}
+					events := make(chan tea.Msg, 16)
+					app := &App{runtime: rt, session: session.New(), events: events}
+					app.Start(t.Context())
 
-				ctx, cancel := context.WithCancel(t.Context())
-				defer cancel()
-				ep.invoke(app, ctx, cancel)
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					ep.invoke(app, ctx, cancel)
 
-				assert.Equal(t, 1, countElicitationDeliveries(t, events),
-					"an unmirrored/remote-shaped runtime's elicitation must still reach the app via RunStream")
+					assert.Equal(t, 1, countElicitationDeliveries(t, events),
+						"an unmirrored/remote-shaped runtime's elicitation must still reach the app via RunStream")
+				})
 			})
 		})
 	}
+}
+
+// scriptedStreamMockRuntime replays a fixed sequence of events on RunStream
+// and then closes the channel, without appending a StreamStoppedEvent
+// unless the script itself contains one. This drives the #4136 regression
+// tests below through every shape the drain loop must fall back for: no
+// stop at all, a real root stop, a sub-session-only stop, a mid-stream
+// cancellation, and a root error — uniformly across every entry point in
+// elicitationEntryPoints.
+type scriptedStreamMockRuntime struct {
+	mockRuntime
+
+	script []runtime.Event
+	// cancelAfterScript, when set, is called after every scripted event has
+	// been pushed onto the channel and before it closes, simulating ctx
+	// being cancelled mid-stream (e.g. Esc) with the channel closing right
+	// after — without it ever carrying a StreamStoppedEvent of its own.
+	cancelAfterScript context.CancelFunc
+}
+
+func (m *scriptedStreamMockRuntime) RunStream(_ context.Context, _ *session.Session) <-chan runtime.Event {
+	ch := make(chan runtime.Event, len(m.script)+1)
+	go func() {
+		defer close(ch)
+		for _, ev := range m.script {
+			ch <- ev
+		}
+		if m.cancelAfterScript != nil {
+			m.cancelAfterScript()
+		}
+	}()
+	return ch
+}
+
+// collectUntilQuietWindow is how long collectUntilQuiet waits for a lull
+// before deciding the producer is done.
+const collectUntilQuietWindow = 500 * time.Millisecond
+
+// collectUntilQuiet drains events until no further message arrives within
+// collectUntilQuietWindow, returning everything collected in order. The
+// #4136 regression tests below have no single sentinel event to stop on (a
+// synthesized StreamStoppedEvent looks just like a real one, and a
+// sub-session stop can arrive before it), so a fixed quiet window is the
+// simplest way to know forwardRunStreamEvents' goroutine has finished.
+func collectUntilQuiet(t *testing.T, events <-chan tea.Msg) []tea.Msg {
+	t.Helper()
+
+	var collected []tea.Msg
+	for {
+		select {
+		case msg := <-events:
+			msg = unwrappedTestEvent(msg)
+			collected = append(collected, msg)
+		case <-time.After(collectUntilQuietWindow):
+			return collected
+		}
+	}
+}
+
+// streamStoppedEvents returns every *runtime.StreamStoppedEvent in msgs, in
+// order.
+func streamStoppedEvents(msgs []tea.Msg) []*runtime.StreamStoppedEvent {
+	var stops []*runtime.StreamStoppedEvent
+	for _, msg := range msgs {
+		if stop, ok := msg.(*runtime.StreamStoppedEvent); ok {
+			stops = append(stops, stop)
+		}
+	}
+	return stops
+}
+
+// TestForwardRunStreamEvents_SynthesizesRootStreamStopped is the regression
+// coverage for #4136 (TUI stuck on "Working…" after the stream ends): the
+// runtime documents the channel close, not receipt of StreamStoppedEvent,
+// as the terminal signal, and drops the event under back-pressure
+// (LocalRuntime.finalizeEventChannel's non-blocking emit) — a fast local
+// model streaming faster than the persistence observer can keep up
+// reliably triggers this. Run/Retry/RunWithMessage all funnel through
+// forwardRunStreamEvents, so every case is driven across all three via
+// elicitationEntryPoints, mirroring TestElicitationDeliveryAcrossEntryPoints.
+func TestForwardRunStreamEvents_SynthesizesRootStreamStopped(t *testing.T) {
+	t.Parallel()
+
+	for _, ep := range elicitationEntryPoints {
+		t.Run(ep.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("no stop event: synthesizes exactly one, reason normal, as the last event", func(t *testing.T) {
+				t.Parallel()
+
+				synctest.Test(t, func(t *testing.T) {
+					sess := session.New()
+					rt := &scriptedStreamMockRuntime{script: []runtime.Event{
+						runtime.StreamStarted(sess.ID, "mock"),
+						runtime.AgentChoice("mock", sess.ID, "partial content"),
+					}}
+					events := make(chan tea.Msg, 16)
+					app := &App{runtime: rt, session: sess, events: events}
+
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					ep.invoke(app, ctx, cancel)
+
+					collected := collectUntilQuiet(t, events)
+					require.NotEmpty(t, collected, "the script's own events must still be forwarded")
+					stops := streamStoppedEvents(collected)
+					require.Len(t, stops, 1, "exactly one StreamStoppedEvent must be synthesized")
+					assert.Equal(t, sess.ID, stops[0].SessionID)
+					assert.Equal(t, "normal", stops[0].Reason)
+					assert.Equal(t, "mock", stops[0].AgentName, "must fall back to the last observed root-session agent name")
+					assert.Same(t, tea.Msg(stops[0]), collected[len(collected)-1],
+						"the synthesized stop must be the last event forwarded")
+				})
+			})
+
+			t.Run("real root stop: no duplicate is synthesized", func(t *testing.T) {
+				t.Parallel()
+
+				synctest.Test(t, func(t *testing.T) {
+					sess := session.New()
+					rt := &scriptedStreamMockRuntime{script: []runtime.Event{
+						runtime.StreamStarted(sess.ID, "mock"),
+						runtime.AgentChoice("mock", sess.ID, "partial content"),
+						runtime.StreamStopped(sess.ID, "mock", "normal"),
+					}}
+					events := make(chan tea.Msg, 16)
+					app := &App{runtime: rt, session: sess, events: events}
+
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					ep.invoke(app, ctx, cancel)
+
+					collected := collectUntilQuiet(t, events)
+					stops := streamStoppedEvents(collected)
+					require.Len(t, stops, 1, "the real StreamStoppedEvent must not be duplicated")
+					assert.Equal(t, sess.ID, stops[0].SessionID)
+					assert.Equal(t, "normal", stops[0].Reason)
+				})
+			})
+
+			t.Run("sub-session stop only: root stop is still synthesized", func(t *testing.T) {
+				t.Parallel()
+
+				synctest.Test(t, func(t *testing.T) {
+					sess := session.New()
+					const subSessionID = "sub-session"
+					rt := &scriptedStreamMockRuntime{script: []runtime.Event{
+						runtime.StreamStarted(sess.ID, "mock"),
+						runtime.StreamStopped(subSessionID, "worker", "normal"),
+					}}
+					events := make(chan tea.Msg, 16)
+					app := &App{runtime: rt, session: sess, events: events}
+
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					ep.invoke(app, ctx, cancel)
+
+					collected := collectUntilQuiet(t, events)
+					stops := streamStoppedEvents(collected)
+					require.Len(t, stops, 2, "the sub-session stop must not satisfy the root fallback")
+					assert.Equal(t, subSessionID, stops[0].SessionID, "the sub-session's own stop is forwarded first")
+					assert.Equal(t, sess.ID, stops[1].SessionID, "a root stop must still be synthesized")
+					assert.Equal(t, "normal", stops[1].Reason)
+					assert.Equal(t, "mock", stops[1].AgentName,
+						"must use the root StreamStarted's agent name, not the sub-session's")
+					assert.Same(t, tea.Msg(stops[1]), collected[len(collected)-1],
+						"the synthesized root stop must be the last event forwarded")
+				})
+			})
+
+			t.Run("ctx cancelled mid-stream: synthesized with reason canceled", func(t *testing.T) {
+				t.Parallel()
+
+				synctest.Test(t, func(t *testing.T) {
+					sess := session.New()
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					rt := &scriptedStreamMockRuntime{
+						script: []runtime.Event{
+							runtime.StreamStarted(sess.ID, "mock"),
+							runtime.AgentChoice("mock", sess.ID, "partial content"),
+						},
+						cancelAfterScript: cancel,
+					}
+					events := make(chan tea.Msg, 16)
+					app := &App{runtime: rt, session: sess, events: events}
+
+					ep.invoke(app, ctx, cancel)
+
+					collected := collectUntilQuiet(t, events)
+					stops := streamStoppedEvents(collected)
+					require.Len(t, stops, 1, "exactly one StreamStoppedEvent must be synthesized")
+					assert.Equal(t, sess.ID, stops[0].SessionID)
+					assert.Equal(t, "canceled", stops[0].Reason)
+				})
+			})
+
+			t.Run("root error event: synthesized with reason error", func(t *testing.T) {
+				t.Parallel()
+
+				synctest.Test(t, func(t *testing.T) {
+					sess := session.New()
+					rt := &scriptedStreamMockRuntime{script: []runtime.Event{
+						runtime.StreamStarted(sess.ID, "mock"),
+						runtime.ErrorForSession(sess.ID, "boom"),
+					}}
+					events := make(chan tea.Msg, 16)
+					app := &App{runtime: rt, session: sess, events: events}
+
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					ep.invoke(app, ctx, cancel)
+
+					collected := collectUntilQuiet(t, events)
+					stops := streamStoppedEvents(collected)
+					require.Len(t, stops, 1, "exactly one StreamStoppedEvent must be synthesized")
+					assert.Equal(t, sess.ID, stops[0].SessionID)
+					assert.Equal(t, "error", stops[0].Reason)
+					assert.Equal(t, "mock", stops[0].AgentName)
+				})
+			})
+		})
+	}
+}
+
+func (m *mockRuntime) ReadSkillContent(context.Context, *session.Session, string) (string, error) {
+	return "", nil
+}
+
+func unwrappedTestEvent(msg tea.Msg) tea.Msg {
+	if event, ok := msg.(generationEvent); ok {
+		return event.inner
+	}
+	return msg
 }

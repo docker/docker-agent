@@ -3,6 +3,7 @@ package fsx
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -134,4 +135,18 @@ func TestReadAgentsIgnoreGlobs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"secrets.env", "*.key", "!keep.key"}, globs,
 		"comments and blanks are dropped, order and negation preserved")
+}
+
+func TestReadAgentsIgnoreGlobsLongLine(t *testing.T) {
+	dir := t.TempDir()
+	long := strings.Repeat("x", 100_000)
+	writeAgentsIgnore(t, dir, long+"\n# comment\n\n*.log\n")
+
+	globs, err := ReadAgentsIgnoreGlobs(filepath.Join(dir, AgentsIgnoreFile))
+	require.NoError(t, err, "an over-long line must not fail the whole load")
+	assert.Equal(t, []string{long, "*.log"}, globs)
+
+	patterns, err := readAgentsIgnorePatterns(filepath.Join(dir, AgentsIgnoreFile))
+	require.NoError(t, err)
+	assert.Len(t, patterns, 2)
 }

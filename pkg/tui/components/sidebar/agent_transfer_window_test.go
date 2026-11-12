@@ -2,6 +2,7 @@ package sidebar
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
@@ -232,9 +233,11 @@ func TestTransferSwitchResultTimers(t *testing.T) {
 func TestTransferTimerCmdDeliversPayload(t *testing.T) {
 	t.Parallel()
 
-	payload := transferTimerMsg{gen: 7, kind: transferTimerMax}
-	timer := TransferTimer{Duration: time.Millisecond, Msg: payload}
-	assert.Equal(t, payload, timer.Cmd()())
+	synctest.Test(t, func(t *testing.T) {
+		payload := transferTimerMsg{gen: 7, kind: transferTimerMax}
+		timer := TransferTimer{Duration: time.Millisecond, Msg: payload}
+		assert.Equal(t, payload, timer.Cmd()())
+	})
 }
 
 // TestTransferClearedWhenOutermostStreamStops verifies the safety net for

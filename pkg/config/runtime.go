@@ -10,26 +10,33 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 type RuntimeConfig struct {
 	Config
 
+	// EnvProviderOverride bypasses host environment and credential discovery.
+	EnvProviderOverride environment.Provider
+	// EnvProviderForTests is retained for compatibility; prefer EnvProviderOverride.
 	EnvProviderForTests environment.Provider
 	envProviderCached   environment.Provider
 	envProviderOnce     sync.Once
 	envFilesErr         error
 
+	// ModelsDevFallback supplies optional catalog data after a cache/network miss.
+	ModelsDevFallback      func() *modelsdev.Database
 	ModelsDevStoreOverride *modelsdev.Store
 	modelsDevStore         *modelsdev.Store
 	modelsDevStoreErr      error
 	modelsDevStoreOnce     sync.Once
 
 	// ProviderRegistry instantiates model providers for toolsets that build
-	// providers at load time (e.g. RAG embeddings/reranking). It is populated
-	// by the team loader with the same registry used for agent models. When
-	// nil, ProviderRegistryOrDefault falls back to provider.DefaultRegistry.
+	// providers at load time (e.g. RAG embeddings/reranking). The team loader
+	// sets it on its per-load clone with the registry used for agent models.
+	// When nil, ProviderRegistryOrDefault falls back to provider.EmptyRegistry.
 	ProviderRegistry *provider.Registry
 }
 
@@ -41,6 +48,17 @@ type Config struct {
 	WorkingDir     string
 	Models         map[string]latest.ModelConfig
 	Providers      map[string]latest.ProviderConfig
+
+	// EncryptedConfig is an opaque, encrypted representation of the full agent
+	// YAML (as produced by `docker agent share push --key --encrypt`). When set
+	// and the configured models gateway is a trusted Docker gateway, it is
+	// forwarded to the gateway on every request via the
+	// `X-Cagent-Encrypted-Config` header. It is ignored for non-Docker
+	// gateways and when no gateway is configured.
+	EncryptedConfig string
+
+	// EvaluatorOptions carries host overrides, such as the recording transport.
+	EvaluatorOptions []options.Opt
 
 	// Flavors are the config flavor patches to enable when loading agent
 	// configs, applied in order. Names a config does not define are ignored.
@@ -85,10 +103,12 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 	env := runConfig.EnvProvider()
 	clone := &RuntimeConfig{
 		Config:                 runConfig.Config,
+		EnvProviderOverride:    runConfig.EnvProviderOverride,
 		EnvProviderForTests:    runConfig.EnvProviderForTests,
 		envProviderCached:      env,
 		envFilesErr:            runConfig.envFilesErr,
 		ModelsDevStoreOverride: runConfig.ModelsDevStoreOverride,
+		ModelsDevFallback:      runConfig.ModelsDevFallback,
 		modelsDevStore:         store,
 		modelsDevStoreErr:      storeErr,
 		ProviderRegistry:       runConfig.ProviderRegistry,
@@ -97,6 +117,7 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 	clone.modelsDevStoreOnce.Do(func() {}) // mark as resolved
 	clone.EnvFiles = slices.Clone(runConfig.EnvFiles)
 	clone.Flavors = slices.Clone(runConfig.Flavors)
+	clone.EvaluatorOptions = slices.Clone(runConfig.EvaluatorOptions)
 	clone.Models = maps.Clone(runConfig.Models)
 	clone.Providers = maps.Clone(runConfig.Providers)
 	clone.DefaultModel = runConfig.DefaultModel.Clone()
@@ -109,6 +130,17 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 	return clone
 }
 
+// CloneWithFreshEnvironment reloads credential sources without changing the
+// original snapshot. Explicit provider overrides retain their existing ownership.
+func (runConfig *RuntimeConfig) CloneWithFreshEnvironment() *RuntimeConfig {
+	clone := runConfig.Clone()
+	if clone.EnvProviderOverride == nil && clone.EnvProviderForTests == nil {
+		clone.envFilesErr = nil
+		clone.envProviderCached = clone.computedEnvProvider()
+	}
+	return clone
+}
+
 // ModelsDevStore returns the lazily-initialized models.dev store.
 // The store is created on first access and shared across clones.
 // If ModelsDevStoreOverride is set, it is returned directly.
@@ -118,25 +150,28 @@ func (runConfig *RuntimeConfig) ModelsDevStore() (*modelsdev.Store, error) {
 	}
 	runConfig.modelsDevStoreOnce.Do(func() {
 		runConfig.modelsDevStore, runConfig.modelsDevStoreErr = modelsdev.NewStore(
-			modelsdev.WithKnownProvider(provider.IsKnownProvider),
+			modelsdev.WithKnownProvider(catalog.IsKnownProvider),
+			modelsdev.WithFallback(runConfig.ModelsDevFallback),
 		)
 	})
 	return runConfig.modelsDevStore, runConfig.modelsDevStoreErr
 }
 
-// ProviderRegistryOrDefault returns the configured provider registry, or the
-// package default registry when none was set (including when the receiver is
-// nil). The default registry only contains providers the core package can
-// expose without optional SDK dependencies, so callers that need the full
-// provider set must ensure the team loader populated ProviderRegistry.
+// ProviderRegistryOrDefault returns the configured provider registry, or an
+// empty registry when none was set. The provider package cannot link concrete
+// implementations; applications that construct models must populate
+// ProviderRegistry explicitly.
 func (runConfig *RuntimeConfig) ProviderRegistryOrDefault() *provider.Registry {
 	if runConfig != nil && runConfig.ProviderRegistry != nil {
 		return runConfig.ProviderRegistry
 	}
-	return provider.DefaultRegistry()
+	return provider.EmptyRegistry()
 }
 
 func (runConfig *RuntimeConfig) EnvProvider() environment.Provider {
+	if runConfig.EnvProviderOverride != nil {
+		return runConfig.EnvProviderOverride
+	}
 	if runConfig.EnvProviderForTests != nil {
 		return runConfig.EnvProviderForTests
 	}
@@ -157,17 +192,18 @@ func (runConfig *RuntimeConfig) EnvFilesError() error {
 }
 
 func (runConfig *RuntimeConfig) computedEnvProvider() environment.Provider {
-	defaultEnv := environment.NewDefaultProvider()
+	sources := environment.SourceProviders(environment.DefaultSources())
+	defaultEnv := environment.NewChain(sources...)
 
 	// Make env file paths absolute relative to the working directory.
-	var err error
-	runConfig.EnvFiles, err = environment.AbsolutePaths(runConfig.WorkingDir, runConfig.EnvFiles)
+	absolutePaths, err := environment.AbsolutePaths(runConfig.WorkingDir, runConfig.EnvFiles)
 	if err != nil {
 		slog.Error("Failed to make env file paths absolute", "error", err)
 		runConfig.envFilesErr = err
 		return defaultEnv
 	}
 
+	runConfig.EnvFiles = absolutePaths
 	envFilesProviders, err := environment.NewEnvFilesProvider(runConfig.EnvFiles)
 	if err != nil {
 		slog.Error("Failed to read env files", "error", err)
@@ -175,6 +211,6 @@ func (runConfig *RuntimeConfig) computedEnvProvider() environment.Provider {
 		return defaultEnv
 	}
 
-	// Update the env provider to include env files
-	return environment.NewMultiProvider(envFilesProviders, defaultEnv)
+	// Env files join the same chain so overrides apply across all sources.
+	return environment.NewChain(append([]environment.Provider{envFilesProviders}, sources...)...)
 }

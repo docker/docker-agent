@@ -31,7 +31,7 @@ func TestConvertDocumentAnthropic_StrategyB64_Image(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	visionCaps := modelinfo.CapsWith(true, true)
+	visionCaps := modelinfo.CapsWith(true, true, false, false)
 	blocks, err := convertDocumentWithCaps(t.Context(), doc, visionCaps)
 	require.NoError(t, err)
 	require.Len(t, blocks, 1, "expected exactly one block")
@@ -49,7 +49,7 @@ func TestConvertDocumentAnthropic_StrategyB64_PDF(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minPDF},
 	}
 
-	pdfCaps := modelinfo.CapsWith(true, true)
+	pdfCaps := modelinfo.CapsWith(true, true, false, false)
 	blocks, err := convertDocumentWithCaps(t.Context(), doc, pdfCaps)
 	require.NoError(t, err)
 	require.Len(t, blocks, 1, "expected exactly one block")
@@ -167,8 +167,26 @@ func TestConvertDocumentAnthropic_Drop_UnsupportedMIME(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	textOnlyCaps := modelinfo.CapsWith(false, false)
+	textOnlyCaps := modelinfo.CapsWith(false, false, false, false)
 	blocks, err := convertDocumentWithCaps(t.Context(), doc, textOnlyCaps)
 	require.NoError(t, err)
 	assert.Nil(t, blocks, "image should be dropped for text-only model")
+}
+
+func TestConvertDocument_JSONText(t *testing.T) {
+	t.Parallel()
+	doc := chat.Document{Name: "settings.json", MimeType: "application/json", Source: chat.DocumentSource{InlineText: `{"enabled":true}`}}
+	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	require.NotNil(t, parts[0].OfText)
+	assert.Contains(t, parts[0].OfText.Text, doc.Source.InlineText)
+}
+
+func TestConvertDocumentDoesNotEncodeAudioAsDocument(t *testing.T) {
+	t.Parallel()
+	doc := chat.Document{Name: "audio", MimeType: "audio/wav", Source: chat.DocumentSource{InlineData: []byte{1, 2, 3}}}
+	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.CapsWith(false, false, true, false))
+	require.NoError(t, err)
+	assert.Empty(t, parts)
 }

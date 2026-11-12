@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -20,19 +21,16 @@ func TestInstructions_Concurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 100 {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// Simulate a concurrent writer (the supervisor's Connect updates
 			// instructions under ts.mu after a successful Initialize).
 			ts.mu.Lock()
 			defer ts.mu.Unlock()
 			ts.instructions = "updated"
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			_ = ts.Instructions()
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -44,39 +42,41 @@ func TestInstructions_Concurrent(t *testing.T) {
 func TestSupervisorRespectsContextCancellation(t *testing.T) {
 	t.Parallel()
 
-	// A connector that always fails: the supervisor will spin in its
-	// restart loop until ctx is cancelled.
-	failing := failingConnector{err: context.DeadlineExceeded}
+	synctest.Test(t, func(t *testing.T) {
+		// A connector that always fails: the supervisor will spin in its
+		// restart loop until ctx is cancelled.
+		failing := failingConnector{err: context.DeadlineExceeded}
 
-	policy := lifecycle.Policy{
-		MaxAttempts: 100, // large, so cancellation must be the exit reason
-		Backoff:     lifecycle.Backoff{Initial: 5 * time.Second},
-	}
-	s := lifecycle.New("ctx-test", &failing, policy)
+		policy := lifecycle.Policy{
+			MaxAttempts: 100, // large, so cancellation must be the exit reason
+			Backoff:     lifecycle.Backoff{Initial: 5 * time.Second},
+		}
+		s := lifecycle.New("ctx-test", &failing, policy)
 
-	// Drive the supervisor manually: simulate a session failure that the
-	// watcher would react to, by starting then forcing a reconnect under
-	// our cancellable ctx.
-	ctx, cancel := context.WithCancel(t.Context())
+		// Drive the supervisor manually: simulate a session failure that the
+		// watcher would react to, by starting then forcing a reconnect under
+		// our cancellable ctx.
+		ctx, cancel := context.WithCancel(t.Context())
 
-	// Start fails immediately because the connector errors.
-	err := s.Start(ctx)
-	require.Error(t, err, "Start must propagate connector error")
+		// Start fails immediately because the connector errors.
+		err := s.Start(ctx)
+		require.Error(t, err, "Start must propagate connector error")
 
-	// Now exercise RestartAndWait + cancel: it should return promptly.
-	// Whether the cancellation lands before or after RestartAndWait parks
-	// in its select, the ctx path must win over the 10s timeout.
-	done := make(chan error, 1)
-	go func() { done <- s.RestartAndWait(ctx, 10*time.Second) }()
+		// Now exercise RestartAndWait + cancel: it should return promptly.
+		// Whether the cancellation lands before or after RestartAndWait parks
+		// in its select, the ctx path must win over the 10s timeout.
+		done := make(chan error, 1)
+		go func() { done <- s.RestartAndWait(ctx, 10*time.Second) }()
 
-	cancel()
+		cancel()
 
-	select {
-	case got := <-done:
-		require.Error(t, got, "RestartAndWait should return after cancel")
-	case <-time.After(2 * time.Second):
-		t.Fatal("RestartAndWait did not return promptly after context cancellation")
-	}
+		select {
+		case got := <-done:
+			require.Error(t, got, "RestartAndWait should return after cancel")
+		case <-time.After(2 * time.Second):
+			t.Fatal("RestartAndWait did not return promptly after context cancellation")
+		}
+	})
 }
 
 type failingConnector struct{ err error }

@@ -104,14 +104,13 @@ func (c *mermaidCursor) readFlowchartConnector() (string, bool) {
 }
 
 func mermaidFlowchartDirective(statement string) bool {
-	fields := strings.Fields(statement)
-	if len(fields) == 0 {
-		return true
+	for field := range strings.FieldsSeq(statement) {
+		switch strings.ToLower(field) {
+		case "direction", "classdef", "class", "style", "click", "linkstyle":
+			return true
+		default:
+			return false
+		}
 	}
-	switch strings.ToLower(fields[0]) {
-	case "direction", "classdef", "class", "style", "click", "linkstyle":
-		return true
-	default:
-		return false
-	}
+	return true
 }

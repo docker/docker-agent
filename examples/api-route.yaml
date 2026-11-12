@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  api_route_model:
+    provider: api-route
+    model: gpt-6.1-sol
+
+agents:
+  root:
+    model: api_route_model
+    description: Assistant using API Route
+    instruction: You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think

@@ -3,16 +3,28 @@ package leantui
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/mattn/go-isatty"
+	"github.com/muesli/cancelreader"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/gitbranch"
+	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
+	"github.com/docker/docker-agent/pkg/programstatus"
+	"github.com/docker/docker-agent/pkg/sound"
+	"github.com/docker/docker-agent/pkg/tui/components/completion"
+	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/streamcontent"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // Config wires the lean TUI to a prepared App and the initial run parameters.
@@ -20,6 +32,7 @@ type Config struct {
 	App        *app.App
 	WorkingDir string
 	Cleanup    func()
+	History    *history.History
 
 	FirstMessage           *string
 	FirstMessageAttachment string
@@ -28,6 +41,9 @@ type Config struct {
 	AppName          string
 	DisabledCommands []string
 	RenderImages     *bool
+	// ShowBanner displays the ASCII-art welcome banner. Defaults to true
+	// when nil.
+	ShowBanner *bool
 
 	// Banner overrides the ASCII-art welcome banner. When nil the built-in
 	// bannerLines ("docker agent") is used; embedders set it to brand the lean
@@ -47,38 +63,71 @@ func Run(ctx context.Context, cfg Config) error {
 	loopCtx, loopCancel := context.WithCancel(ctx)
 	defer loopCancel()
 
+	if cfg.History == nil {
+		cfg.History, err = history.New("")
+		if err == nil {
+			err = cfg.History.Load()
+		}
+		if err != nil {
+			cfg.History = nil
+			slog.WarnContext(ctx, "Failed to initialize command history", "error", err)
+		}
+	}
+
 	m := newModel(term, cfg)
+	if isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
+		m.programStatus = &programstatus.Reporter{}
+		defer m.programStatus.Finish(os.Stdout)
+		m.programStatusProbe = true
+		_, _ = term.Writer().WriteString("\x1b]7501;?\x1b\\")
+		_ = term.Writer().Flush()
+	}
+	branchWatcher, err := gitbranch.Watch(loopCtx, cfg.WorkingDir)
+	if err != nil {
+		return err
+	}
+	m.status.Branch = branchWatcher.Current()
 	m.commitWelcome()
+	m.loadInitialSessionTranscript()
 	m.refreshCommands(loopCtx)
 
 	keys := make(chan ui.Key, 64)
 	events := make(chan any, 256)
-	resizes := make(chan [2]int, 4)
 	done := make(chan struct{})
-	defer close(done)
 
-	go readKeys(term.Reader(), keys, done)
+	fileCompletion := completions.NewFileCompletionAt(loopCtx, cfg.WorkingDir)
+	if loader, ok := fileCompletion.(completions.AsyncLoader); ok {
+		go func() {
+			items := <-loader.LoadItemsAsync(loopCtx)
+			select {
+			case events <- fileCompletionsLoaded(items):
+			case <-done:
+			}
+		}()
+	}
+
+	keysDone := make(chan struct{})
 	go func() {
-		m.app.SubscribeWith(loopCtx, func(msg tea.Msg) {
+		defer close(keysDone)
+		readKeys(term.Reader(), keys, done)
+	}()
+	defer func() {
+		close(done)
+		<-keysDone
+	}()
+	subscriptionReady := make(chan struct{})
+	go func() {
+		m.app.SubscribeReliable(loopCtx, func(msg tea.Msg) {
 			select {
 			case events <- msg:
 			case <-done:
 			}
-		})
+		}, app.WithSubscriptionReady(func() { close(subscriptionReady) }), app.WithGenerationEventMapper(func(msg tea.Msg, generation uint64) tea.Msg {
+			return leanEvent{generation: m.eventGeneration.Load(), inner: msg, valid: func() bool { return m.app.IsEventGeneration(generation) }}
+		}))
 	}()
-	go func() {
-		for {
-			w, h, ok := term.Resized()
-			if !ok {
-				return
-			}
-			select {
-			case resizes <- [2]int{w, h}:
-			case <-done:
-				return
-			}
-		}
-	}()
+	<-subscriptionReady
+	m.app.Start(loopCtx)
 
 	if cfg.FirstMessage != nil || cfg.FirstMessageAttachment != "" {
 		first := ""
@@ -88,32 +137,61 @@ func Run(ctx context.Context, cfg Config) error {
 		m.sendFirstMessage(loopCtx, first, cfg.FirstMessageAttachment)
 	}
 	for _, msg := range cfg.QueuedMessages {
+		if command, ok := strings.CutPrefix(strings.TrimSpace(msg), "!"); ok {
+			m.runBangCommand(loopCtx, command)
+			continue
+		}
 		m.enqueueFollowUp(msg, msg)
 	}
 
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	animationTicker := time.NewTicker(100 * time.Millisecond)
+	defer animationTicker.Stop()
+	resizeTicker := time.NewTicker(250 * time.Millisecond)
+	defer resizeTicker.Stop()
+	branchChanges := branchWatcher.Changes()
 
+	probeTimer := time.NewTimer(200 * time.Millisecond)
+	defer probeTimer.Stop()
+	m.publishProgramStatus()
 	m.render()
 	for !m.quitting {
 		select {
 		case <-loopCtx.Done():
 			m.quitting = true
+		case <-probeTimer.C:
+			m.programStatusProbe = false
+			m.programStatusUnsupported = m.programStatus != nil && !m.programStatusSupported
 		case k := <-keys:
+			if k.Typ == ui.KeyProgramStatus {
+				if m.programStatusProbe {
+					m.programStatusProbe = false
+					m.programStatusSupported = true
+					m.publishProgramStatus()
+				}
+				continue
+			}
+			m.statusSession.Acknowledge()
 			m.handleKey(loopCtx, k)
+			m.publishProgramStatus()
 			m.render()
 		case ev := <-events:
 			m.handleEvent(loopCtx, ev)
+			m.publishProgramStatus()
 			m.render()
-		case sz := <-resizes:
-			m.width, m.height = sz[0], sz[1]
-			m.r.SetSize(sz[0], sz[1])
-			m.render()
-		case <-ticker.C:
-			if m.busy {
+		case <-resizeTicker.C:
+			m.resize(term.Size())
+		case <-animationTicker.C:
+			if m.busy || m.screen.Transcript.ToolCount() > 0 {
 				m.spinnerFrame++
 				m.render()
 			}
+		case branch, ok := <-branchChanges:
+			if !ok {
+				branchChanges = nil
+				continue
+			}
+			m.status.Branch = branch
+			m.render()
 		}
 	}
 
@@ -124,28 +202,101 @@ func Run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
+type fileCompletionsLoaded []completion.Item
+
 func readKeys(r io.Reader, keys chan<- ui.Key, done <-chan struct{}) {
-	p := &ui.InputParser{}
-	buf := make([]byte, 8192)
-	for {
-		n, err := r.Read(buf)
-		for _, k := range p.Feed(buf[:n]) {
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	reads := make(chan readResult)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			buf := make([]byte, 8192)
+			n, err := r.Read(buf)
 			select {
-			case keys <- k:
+			case reads <- readResult{buf[:n], err}:
 			case <-done:
 				return
 			}
+			if err != nil {
+				return
+			}
 		}
-		if err != nil {
+	}()
+	defer func() {
+		select {
+		case <-readerDone:
+			return
+		default:
+		}
+		// Some terminals cannot interrupt Read; do not hang shutdown in that case.
+		if reader, ok := r.(cancelreader.CancelReader); ok && reader.Cancel() {
+			<-readerDone
+		}
+	}()
+	p := &ui.InputParser{}
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	var timeout <-chan time.Time
+	send := func(events []ui.Key) bool {
+		for _, key := range events {
+			select {
+			case keys <- key:
+			case <-done:
+				return false
+			}
+		}
+		return true
+	}
+	for {
+		select {
+		case result := <-reads:
+			if !send(p.Feed(result.data)) {
+				return
+			}
+			if result.err != nil {
+				send(p.Expire())
+				return
+			}
+			if p.Waiting() {
+				timer.Reset(30 * time.Millisecond)
+				timeout = timer.C
+			} else {
+				timer.Stop()
+				timeout = nil
+			}
+		case <-timeout:
+			if !send(p.Expire()) {
+				return
+			}
+			timeout = nil
+		case <-done:
 			return
 		}
 	}
 }
 
+type leanEvent struct {
+	generation uint64
+	inner      tea.Msg
+	valid      func() bool
+}
+
 type model struct {
-	app  *app.App
-	term *ui.Terminal
-	r    *ui.Renderer
+	programStatus            *programstatus.Reporter
+	programStatusProbe       bool
+	programStatusSupported   bool
+	programStatusUnsupported bool
+	statusSession            programstatus.Session
+	confirmationEvent        tea.Msg
+	eventGeneration          atomic.Uint64
+	app                      *app.App
+	term                     *ui.Terminal
+	r                        *ui.Renderer
 
 	width  int
 	height int
@@ -156,18 +307,28 @@ type model struct {
 	sessionState *service.SessionState
 	usage        *ui.UsageTracker
 
-	busy         bool
-	spinnerFrame int
-	runCancel    context.CancelFunc
-	queue        []ui.PendingUserMessage
-	pendingUsers []ui.PendingUserMessage
-	ignoredUsers []string
+	contentIdentity     streamcontent.Tracker
+	streamDepth         int
+	streamStartTime     time.Time
+	playSound           func(context.Context, sound.Event)
+	busy                bool
+	spinnerFrame        int
+	runCancel           context.CancelFunc
+	cancelMarkerPending bool
+	queue               []ui.PendingUserMessage
+	pendingUsers        []ui.PendingUserMessage
+	ignoredUsers        []string
 
 	quitting         bool
 	appName          string
 	banner           []string
 	disabledCommands map[string]bool
 	renderImages     bool
+	imageSupport     bool
+	sendMode         messages.SendMode
+	settings         *leanSettings
+	// hideBanner drops the ASCII-art welcome banner; the zero value keeps it.
+	hideBanner bool
 }
 
 func newModel(term *ui.Terminal, cfg Config) *model {
@@ -188,27 +349,44 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 
 	renderImages := cfg.RenderImages == nil || *cfg.RenderImages
 
+	branch := gitbranch.Current(cfg.WorkingDir)
+	screen := ui.NewScreen(cfg.WorkingDir, branch, "", cfg.History)
+	screen.Transcript.SetFullFilePreview(userconfig.Get().LeanFullFilePreview)
+
 	return &model{
 		app:              cfg.App,
+		playSound:        sound.Play,
 		term:             term,
 		r:                ui.NewRenderer(term.Writer(), w, h),
 		width:            w,
 		height:           h,
-		screen:           ui.NewScreen(cfg.WorkingDir, gitbranch.Current(cfg.WorkingDir), "Type a message, / for commands"),
-		status:           ui.StatusModel{WorkingDir: cfg.WorkingDir, Branch: gitbranch.Current(cfg.WorkingDir)},
+		screen:           screen,
+		status:           ui.StatusModel{WorkingDir: cfg.WorkingDir, Branch: branch},
 		sessionState:     sessionState,
 		usage:            ui.NewUsageTracker(),
 		appName:          appName,
 		banner:           cfg.Banner,
 		disabledCommands: disabled,
 		renderImages:     renderImages,
+		imageSupport:     renderImages,
+		sendMode:         messages.ParseSendMode(userconfig.Get().GetBusySendMode()),
+		hideBanner:       cfg.ShowBanner != nil && !*cfg.ShowBanner,
 	}
+}
+
+func (m *model) resize(width, height int) {
+	if width == m.width && height == m.height {
+		return
+	}
+	m.width, m.height = width, height
+	m.r.SetSize(width, height)
+	m.render()
 }
 
 // render assembles the full frame and reconciles it with the terminal.
 func (m *model) render() {
 	lines, cursorLine, cursorCol := m.buildLines()
-	m.r.Frame(lines, cursorLine, cursorCol)
+	m.r.Frame(lines, cursorLine, cursorCol, m.screen.Transcript.LiveToolRows())
 }
 
 // renderFinal repaints the current state, then erases the input box and footer
@@ -223,6 +401,9 @@ func (m *model) commitWelcome() {
 	banner := m.banner
 	if len(banner) == 0 {
 		banner = bannerLines
+	}
+	if m.hideBanner {
+		banner = nil
 	}
 	m.screen.Transcript.AddBlock(func(int) []string {
 		lines := make([]string, 0, bannerTopPadding+len(banner)+2)

@@ -12,14 +12,12 @@ func TestClone_DefaultModelDeepCopy(t *testing.T) {
 	t.Parallel()
 	temp := 0.7
 	original := &RuntimeConfig{
-		Config: Config{
-			DefaultModel: &latest.ModelConfig{
-				Provider:    "openai",
-				Model:       "gpt-4o",
-				Temperature: &temp,
-			},
-			WorkingDir: "/original",
+		DefaultModel: &latest.ModelConfig{
+			Provider:    "openai",
+			Model:       "gpt-4o",
+			Temperature: &temp,
 		},
+		WorkingDir: "/original",
 	}
 
 	clone := original.Clone()
@@ -36,10 +34,8 @@ func TestClone_DefaultModelDeepCopy(t *testing.T) {
 func TestClone_NilDefaultModel(t *testing.T) {
 	t.Parallel()
 	original := &RuntimeConfig{
-		Config: Config{
-			DefaultModel: nil,
-			WorkingDir:   "/app",
-		},
+		DefaultModel: nil,
+		WorkingDir:   "/app",
 	}
 
 	clone := original.Clone()
@@ -51,9 +47,7 @@ func TestClone_NilDefaultModel(t *testing.T) {
 func TestClone_EnvFilesIsolated(t *testing.T) {
 	t.Parallel()
 	original := &RuntimeConfig{
-		Config: Config{
-			EnvFiles: []string{"a.env", "b.env"},
-		},
+		EnvFiles: []string{"a.env", "b.env"},
 	}
 
 	clone := original.Clone()
@@ -67,13 +61,11 @@ func TestClone_ModelsIsolated(t *testing.T) {
 	t.Parallel()
 	temp := 0.7
 	original := &RuntimeConfig{
-		Config: Config{
-			Models: map[string]latest.ModelConfig{
-				"model1": {
-					Provider:    "openai",
-					Model:       "gpt-4o",
-					Temperature: &temp,
-				},
+		Models: map[string]latest.ModelConfig{
+			"model1": {
+				Provider:    "openai",
+				Model:       "gpt-4o",
+				Temperature: &temp,
 			},
 		},
 	}
@@ -108,9 +100,7 @@ func TestClone_ModelsIsolated(t *testing.T) {
 func TestClone_NilModels(t *testing.T) {
 	t.Parallel()
 	original := &RuntimeConfig{
-		Config: Config{
-			Models: nil,
-		},
+		Models: nil,
 	}
 
 	clone := original.Clone()

@@ -19,7 +19,7 @@ func TestInstructionObservationLegacyMessagesIncludesSemanticContext(t *testing.
 			{Group: "core/prompt-files", SetMarker: true},
 			{Key: "core/unavailable", Content: "stale", Unavailable: true},
 		},
-	})
+	}, false)
 
 	messages := observation.legacyMessages()
 	require.Len(t, messages, 3)
@@ -31,4 +31,15 @@ func TestInstructionObservationLegacyMessagesIncludesSemanticContext(t *testing.
 	for _, message := range messages {
 		assert.Equal(t, chat.MessageRoleSystem, message.Role)
 	}
+}
+
+func TestInstructionObservationLoaderFailureRequiresConfiguredGuard(t *testing.T) {
+	t.Parallel()
+	failure := &hooks.Result{FailedHooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "add_prompt_files"}}}
+	assert.Empty(t, observeInstructions(failure, false).sources)
+	guarded := observeInstructions(failure, true)
+	require.Len(t, guarded.sources, 1)
+	assert.False(t, guarded.sources[0].Available)
+	assert.True(t, guarded.sources[0].SetMarker)
+	assert.Equal(t, "core/prompt-files", guarded.sources[0].Group)
 }

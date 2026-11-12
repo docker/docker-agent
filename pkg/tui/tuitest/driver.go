@@ -24,6 +24,7 @@
 package tuitest
 
 import (
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -107,9 +108,20 @@ type programReady interface {
 	SetProgram(p *tea.Program)
 }
 
+// resourceOwner is implemented by models that hold resources outliving the
+// tea.Program (tui.New's model: the tui_state.db store, theme watcher,
+// session supervisor). Quit alone does not release them — the model relies on
+// context cancellation, which in tests races t.Cleanup. The driver closes them
+// synchronously after the program stops so files under t.TempDir can be
+// deleted, which Windows refuses while a handle is open.
+type resourceOwner interface {
+	Shutdown()
+}
+
 // New starts model in a real, renderer-less tea.Program and returns a Driver.
 // width and height seed the initial window size. The program is stopped and
-// awaited automatically via t.Cleanup.
+// awaited automatically via t.Cleanup, and a model implementing Shutdown has
+// its resources released right after.
 //
 // model is typically the value returned by tui.New. If it implements
 // SetProgram (as the docker-agent TUI does) the running program is wired into
@@ -128,6 +140,7 @@ func New(tb testing.TB, model tea.Model, width, height int, opts ...Option) *Dri
 	// surface to the test runner.
 	p := tea.NewProgram(capture,
 		tea.WithoutRenderer(),
+		tea.WithOutput(io.Discard),
 		tea.WithoutSignals(),
 		tea.WithoutCatchPanics(),
 		tea.WithInput(nil),
@@ -164,6 +177,9 @@ func New(tb testing.TB, model tea.Model, width, height int, opts ...Option) *Dri
 
 	tb.Cleanup(func() {
 		d.stop()
+		if ro, ok := model.(resourceOwner); ok {
+			ro.Shutdown()
+		}
 		restoreClipboard()
 	})
 	return d

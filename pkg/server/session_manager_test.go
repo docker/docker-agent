@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -24,7 +27,12 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
+	modelprovider "github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
@@ -80,7 +88,47 @@ func (f *fakeRuntime) ResumeElicitation(_ context.Context, _ tools.ElicitationAc
 // (with nil) on server-owned runtimes to silence the manager's sink.
 func (f *fakeRuntime) OnElicitationRequest(func(runtime.Event)) {}
 
+func (f *fakeRuntime) OnBackgroundEvent(func(runtime.Event)) {}
+
 func (f *fakeRuntime) CurrentAgentName(context.Context) string { return "root" }
+
+// delayedTitleProvider lets a RunSession title request finish after the
+// runtime stream has already closed.
+type delayedTitleProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *delayedTitleProvider) ID() modelsdev.ID { return modelsdev.NewID("test", "title") }
+
+func (p *delayedTitleProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	close(p.started)
+	return &delayedTitleStream{release: p.release}, nil
+}
+
+func (p *delayedTitleProvider) BaseConfig() base.Config {
+	cfg := base.Config{}
+	cfg.RebuildProvider = func(context.Context, *latest.ModelConfig, ...options.Opt) (modelprovider.Provider, error) {
+		return p, nil
+	}
+	return cfg
+}
+
+type delayedTitleStream struct {
+	release  chan struct{}
+	received bool
+}
+
+func (s *delayedTitleStream) Recv() (chat.MessageStreamResponse, error) {
+	if s.received {
+		return chat.MessageStreamResponse{}, io.EOF
+	}
+	<-s.release
+	s.received = true
+	return chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: "Delayed title"}}}}, nil
+}
+
+func (s *delayedTitleStream) Close() {}
 
 // SupportsModelSwitching reports false by default. Tests that exercise
 // the /models endpoints embed fakeRuntime and override this.
@@ -134,6 +182,82 @@ func TestAttachRuntime_RegistersRuntimeForExternalDriver(t *testing.T) {
 
 	// Steer routes through the attached runtime, not a freshly built one.
 	require.NoError(t, sm.SteerSession(ctx, sess.ID, []api.Message{{Content: "hi"}}))
+}
+
+func TestRunSession_TitleCanFinishAfterRuntimeStream(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		sess := session.New()
+		sm := newTestSessionManager(t, sess, &fakeRuntime{})
+		provider := &delayedTitleProvider{started: make(chan struct{}), release: make(chan struct{})}
+		runtimeSession, ok := sm.runtimeSessions.Load(sess.ID)
+		require.True(t, ok)
+		runtimeSession.titleGen = sessiontitle.New(provider)
+
+		events, err := sm.RunSession(ctx, sess.ID, "agent", "root", []api.Message{{Content: "hello"}}, "")
+		require.NoError(t, err)
+
+		select {
+		case <-provider.started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("title generation did not start")
+		}
+		for range events {
+		}
+
+		close(provider.release)
+		synctest.Wait()
+		require.Equal(t, "Delayed title", sess.TitleSnapshot())
+	})
+}
+
+func TestRunSession_CancellationUnblocksExistingTitle(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		sess := session.New(session.WithTitle("Existing title"))
+		sm := newTestSessionManager(t, sess, &fakeRuntime{})
+
+		events, err := sm.RunSession(ctx, sess.ID, "agent", "root", []api.Message{{Content: "hello"}}, "")
+		require.NoError(t, err)
+		assertSessionStreamingUnlocked(t, sm, sess.ID)
+		for range events {
+		}
+	})
+}
+
+func TestSendStreamEvent_CancellationUnblocks(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		result := make(chan bool)
+		go func() {
+			result <- sendStreamEvent(ctx, make(chan runtime.Event), runtime.SessionTitle("session", "title"))
+		}()
+		cancel()
+
+		select {
+		case sent := <-result:
+			require.False(t, sent)
+		case <-time.After(2 * time.Second):
+			t.Fatal("event send did not stop after cancellation")
+		}
+	})
+}
+
+func assertSessionStreamingUnlocked(t *testing.T, sm *SessionManager, sessionID string) {
+	t.Helper()
+
+	runtimeSession, ok := sm.runtimeSessions.Load(sessionID)
+	require.True(t, ok)
+	synctest.Wait()
+	require.True(t, runtimeSession.streaming.TryLock(), "session must no longer be streaming")
+	runtimeSession.streaming.Unlock()
 }
 
 // TestRunSession_ConcurrentRequestReturnsErrSessionBusy verifies that a
@@ -235,6 +359,37 @@ func TestAddMessage_RejectsWhileSessionStreaming(t *testing.T) {
 	require.NoError(t, sm.AddMessage(ctx, sess.ID, session.UserMessage("accepted")))
 }
 
+func TestUpdateMessageRejectsWrongSessionAndMalformedID(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	owner := session.New()
+	other := session.New()
+	require.NoError(t, store.AddSession(ctx, owner))
+	require.NoError(t, store.AddSession(ctx, other))
+	messageID, err := store.AddMessage(ctx, owner.ID, session.UserMessage("original"))
+	require.NoError(t, err)
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	guard := sm.AttachRuntime(ctx, owner.ID, &fakeRuntime{}, owner)
+	guard.Lock()
+	defer guard.Unlock()
+
+	err = sm.UpdateMessage(ctx, other.ID, strconv.FormatInt(messageID, 10), session.UserMessage("wrong session"))
+	require.ErrorIs(t, err, session.ErrNotFound)
+	err = sm.UpdateMessage(ctx, owner.ID, strconv.FormatInt(messageID, 10), session.UserMessage("busy bypass"))
+	require.ErrorIs(t, err, ErrSessionBusy)
+	err = sm.UpdateMessage(ctx, other.ID, strconv.FormatInt(messageID, 10)+"junk", session.UserMessage("malformed"))
+	require.ErrorContains(t, err, "invalid message ID")
+
+	stored, err := store.GetSession(ctx, owner.ID)
+	require.NoError(t, err)
+	messages := stored.GetAllMessages()
+	require.Len(t, messages, 1)
+	assert.Equal(t, "original", messages[0].Message.Content)
+}
+
 // TestUpdateMessage_RejectsWhileSessionStreaming mirrors
 // TestAddMessage_RejectsWhileSessionStreaming for UpdateMessage.
 func TestUpdateMessage_RejectsWhileSessionStreaming(t *testing.T) {
@@ -334,10 +489,10 @@ func (s *blockingStore) AddMessage(ctx context.Context, sessionID string, msg *s
 	return s.Store.AddMessage(ctx, sessionID, msg)
 }
 
-func (s *blockingStore) UpdateMessage(ctx context.Context, messageID int64, msg *session.Message) error {
+func (s *blockingStore) UpdateMessage(ctx context.Context, sessionID string, messageID int64, msg *session.Message) error {
 	close(s.entered)
 	<-s.release
-	return s.Store.UpdateMessage(ctx, messageID, msg)
+	return s.Store.UpdateMessage(ctx, sessionID, messageID, msg)
 }
 
 // assertAttachedGuardBlockedDuringMutation drives the reviewer's
@@ -568,23 +723,20 @@ func TestRunSession_DifferentSessionsConcurrently(t *testing.T) {
 	})
 
 	var wg sync.WaitGroup
-	wg.Add(2)
 
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		ch, err := sm.RunSession(ctx, sess1.ID, "agent", "root", []api.Message{{Content: "a"}}, "")
 		assert.NoError(t, err)
 		for range ch {
 		}
-	}()
+	})
 
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		ch, err := sm.RunSession(ctx, sess2.ID, "agent", "root", []api.Message{{Content: "b"}}, "")
 		assert.NoError(t, err)
 		for range ch {
 		}
-	}()
+	})
 
 	wg.Wait()
 
@@ -612,7 +764,7 @@ func (r *recordingFollowUpRuntime) FollowUp(_ context.Context, msg runtime.Queue
 func (r *recordingFollowUpRuntime) followUpContents() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.followUps...)
+	return slices.Clone(r.followUps)
 }
 
 // TestFollowUpSession_RoutesToInjectorWhenRegistered verifies that an
@@ -945,6 +1097,117 @@ func TestUserMessageOrdinalToItemIndex(t *testing.T) {
 	require.ErrorIs(t, err, ErrForkOutOfRange)
 }
 
+func TestUpdateSessionPermissionsUsesActiveSession(t *testing.T) {
+	t.Parallel()
+
+	stores := []struct {
+		name string
+		new  func(*testing.T) session.Store
+	}{
+		{
+			name: "in-memory",
+			new: func(*testing.T) session.Store {
+				return session.NewInMemorySessionStore()
+			},
+		},
+		{
+			name: "sqlite",
+			new: func(t *testing.T) session.Store {
+				t.Helper()
+				store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "sessions.db"))
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = store.Close() })
+				return store
+			},
+		},
+	}
+
+	for _, tc := range stores {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := tc.new(t)
+			stored := session.New(session.WithTitle("stored"), session.WithPermissions(&session.PermissionsConfig{Allow: []string{"old"}}))
+			require.NoError(t, store.AddSession(t.Context(), stored))
+			require.NoError(t, store.UpdateSession(t.Context(), stored))
+
+			live := stored
+			live.SetTitle("live")
+			sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{})
+			sm.runtimeSessions.Store(live.ID, &activeRuntimes{runtime: &fakeRuntime{}, session: live})
+
+			perms := &session.PermissionsConfig{Allow: []string{"new"}, Deny: []string{"dangerous"}}
+			require.NoError(t, sm.UpdateSessionPermissions(t.Context(), live.ID, perms))
+			perms.Allow[0] = "mutated-by-caller"
+
+			assert.Equal(t, []string{"new"}, live.ClonePermissions().Allow)
+			got, err := sm.GetSession(t.Context(), live.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "live", got.TitleSnapshot(), "active state must win over the stale store clone")
+			assert.Equal(t, []string{"new"}, got.ClonePermissions().Allow)
+
+			// A later runtime save must retain the policy update.
+			live.SetTitle("saved later")
+			require.NoError(t, store.UpdateSession(t.Context(), live))
+			reloaded, err := store.GetSession(t.Context(), live.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "saved later", reloaded.TitleSnapshot())
+			assert.Equal(t, []string{"new"}, reloaded.ClonePermissions().Allow)
+			assert.Equal(t, []string{"dangerous"}, reloaded.ClonePermissions().Deny)
+		})
+	}
+}
+
+func TestUpdateSessionPermissionsConcurrentReads(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewInMemorySessionStore()
+	live := session.New()
+	require.NoError(t, store.AddSession(t.Context(), live))
+	require.NoError(t, store.UpdateSession(t.Context(), live))
+
+	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.runtimeSessions.Store(live.ID, &activeRuntimes{runtime: &fakeRuntime{}, session: live})
+
+	const iterations = 100
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range iterations {
+			if err := sm.UpdateSessionPermissions(t.Context(), live.ID, &session.PermissionsConfig{
+				Allow: []string{strconv.Itoa(i)},
+			}); err != nil {
+				errs <- err
+				return
+			}
+		}
+	})
+	wg.Go(func() {
+		for range iterations {
+			got, err := sm.GetSession(t.Context(), live.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			_ = got.ClonePermissions()
+
+			snapshot, err := sm.GetSessionSnapshot(t.Context(), live.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if snapshot.Permissions != nil {
+				_ = snapshot.Permissions.Allow
+			}
+		}
+	})
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+}
+
 // TestAddMessage_SQLitePersistedToolResultCappedOnReload pins the read-time
 // backstop for the generic API path: SessionManager.AddMessage persists a
 // tool result through the store without Session.AddMessage's ingest-time
@@ -1046,17 +1309,11 @@ func (m *mirroredScriptedStreamRuntime) MirrorsElicitationOnRunStream() {}
 // recall/run pump goroutine has fully finished appending to the event log.
 func waitSessionIdle(t *testing.T, sm *SessionManager, sessionID string) {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		rt, ok := sm.runtimeSessions.Load(sessionID)
-		if !ok {
-			return false
-		}
-		if !rt.streaming.TryLock() {
-			return false
-		}
-		rt.streaming.Unlock()
-		return true
-	}, 2*time.Second, time.Millisecond)
+	synctest.Wait()
+	rt, ok := sm.runtimeSessions.Load(sessionID)
+	require.True(t, ok)
+	require.True(t, rt.streaming.TryLock(), "session must be idle")
+	rt.streaming.Unlock()
 }
 
 // replaySessionEvents streams sessionID's event log until want events have
@@ -1079,17 +1336,14 @@ func replaySessionEvents(t *testing.T, sm *SessionManager, sessionID string, wan
 		})
 		assert.True(t, ok, "expected an event log for session %s", sessionID)
 	}()
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(events) >= want
-	}, 2*time.Second, time.Millisecond)
+	synctest.Wait()
+	require.GreaterOrEqual(t, len(events), want)
 	cancel()
 	<-done
 
 	mu.Lock()
 	defer mu.Unlock()
-	return append([]any(nil), events...)
+	return slices.Clone(events)
 }
 
 // TestSessionElicitationSink_MakesSessionEventSourceReplayable pins the fix
@@ -1105,22 +1359,24 @@ func replaySessionEvents(t *testing.T, sm *SessionManager, sessionID string, wan
 func TestSessionElicitationSink_MakesSessionEventSourceReplayable(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-	sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
 
-	require.False(t, sm.HasEventSource("sess-1"),
-		"a session that was never attached and produced no out-of-band event must have no event source")
+		require.False(t, sm.HasEventSource("sess-1"),
+			"a session that was never attached and produced no out-of-band event must have no event source")
 
-	sink := sm.sessionElicitationSink("sess-1")
-	ev := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "agent")
-	sink(ev)
+		sink := sm.sessionElicitationSink("sess-1")
+		ev := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "agent")
+		sink(ev)
 
-	require.True(t, sm.HasEventSource("sess-1"),
-		"the sink must lazily create a session-scoped event source on first use")
+		require.True(t, sm.HasEventSource("sess-1"),
+			"the sink must lazily create a session-scoped event source on first use")
 
-	replayed := replaySessionEvents(t, sm, "sess-1", 1)
-	require.Len(t, replayed, 1)
-	assert.Same(t, ev, replayed[0], "the elicitation event must be replayable via GET .../events")
+		replayed := replaySessionEvents(t, sm, "sess-1", 1)
+		require.Len(t, replayed, 1)
+		assert.Same(t, ev, replayed[0], "the elicitation event must be replayable via GET .../events")
+	})
 }
 
 // TestSessionElicitationSink_AccumulatesAcrossCalls verifies repeated sink
@@ -1129,23 +1385,25 @@ func TestSessionElicitationSink_MakesSessionEventSourceReplayable(t *testing.T) 
 func TestSessionElicitationSink_AccumulatesAcrossCalls(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-	sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
 
-	sink := sm.sessionElicitationSink("sess-2")
-	first := runtime.ElicitationRequest("first", "form", nil, "", "eid-1", "", "bg-child-1", nil, "agent")
-	second := runtime.ElicitationRequest("second", "form", nil, "", "eid-2", "", "bg-child-2", nil, "agent")
-	sink(first)
-	sink(second)
+		sink := sm.sessionElicitationSink("sess-2")
+		first := runtime.ElicitationRequest("first", "form", nil, "", "eid-1", "", "bg-child-1", nil, "agent")
+		second := runtime.ElicitationRequest("second", "form", nil, "", "eid-2", "", "bg-child-2", nil, "agent")
+		sink(first)
+		sink(second)
 
-	seq, ok := sm.LastEventSeq("sess-2")
-	require.True(t, ok)
-	assert.Equal(t, uint64(2), seq, "both sink deliveries must land in the same event log")
+		seq, ok := sm.LastEventSeq("sess-2")
+		require.True(t, ok)
+		assert.Equal(t, uint64(2), seq, "both sink deliveries must land in the same event log")
 
-	replayed := replaySessionEvents(t, sm, "sess-2", 2)
-	require.Len(t, replayed, 2)
-	assert.Same(t, first, replayed[0])
-	assert.Same(t, second, replayed[1])
+		replayed := replaySessionEvents(t, sm, "sess-2", 2)
+		require.Len(t, replayed, 2)
+		assert.Same(t, first, replayed[0])
+		assert.Same(t, second, replayed[1])
+	})
 }
 
 // TestSessionElicitationSink_ReusesAttachedEventLog verifies the sink never
@@ -1156,41 +1414,43 @@ func TestSessionElicitationSink_AccumulatesAcrossCalls(t *testing.T) {
 func TestSessionElicitationSink_ReusesAttachedEventLog(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-	sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
 
-	pumped := make(chan struct{})
-	sm.RegisterEventSource("sess-3", func(ctx context.Context, send func(any)) {
-		send("attached-event")
-		close(pumped)
-		<-ctx.Done() // keep the source alive so the pump doesn't close the log
+		pumped := make(chan struct{})
+		sm.RegisterEventSource("sess-3", func(ctx context.Context, send func(any)) {
+			send("attached-event")
+			close(pumped)
+			<-ctx.Done() // keep the source alive so the pump doesn't close the log
+		})
+		// The pump ctx is detached from t.Context(); stop it explicitly.
+		t.Cleanup(func() {
+			if pe, ok := sm.eventLogs.Load("sess-3"); ok {
+				pe.cancel()
+			}
+		})
+		<-pumped
+
+		attached, ok := sm.eventLogs.Load("sess-3")
+		require.True(t, ok)
+
+		ev := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "agent")
+		sm.sessionElicitationSink("sess-3")(ev)
+
+		current, ok := sm.eventLogs.Load("sess-3")
+		require.True(t, ok)
+		assert.Same(t, attached, current, "the sink must reuse the attached event log, not overwrite it")
+
+		seq, ok := sm.LastEventSeq("sess-3")
+		require.True(t, ok)
+		assert.Equal(t, uint64(2), seq, "the elicitation must continue the attached log's sequence")
+
+		replayed := replaySessionEvents(t, sm, "sess-3", 2)
+		require.Len(t, replayed, 2)
+		assert.Equal(t, "attached-event", replayed[0])
+		assert.Same(t, ev, replayed[1])
 	})
-	// The pump ctx is detached from t.Context(); stop it explicitly.
-	t.Cleanup(func() {
-		if pe, ok := sm.eventLogs.Load("sess-3"); ok {
-			pe.cancel()
-		}
-	})
-	<-pumped
-
-	attached, ok := sm.eventLogs.Load("sess-3")
-	require.True(t, ok)
-
-	ev := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "agent")
-	sm.sessionElicitationSink("sess-3")(ev)
-
-	current, ok := sm.eventLogs.Load("sess-3")
-	require.True(t, ok)
-	assert.Same(t, attached, current, "the sink must reuse the attached event log, not overwrite it")
-
-	seq, ok := sm.LastEventSeq("sess-3")
-	require.True(t, ok)
-	assert.Equal(t, uint64(2), seq, "the elicitation must continue the attached log's sequence")
-
-	replayed := replaySessionEvents(t, sm, "sess-3", 2)
-	require.Len(t, replayed, 2)
-	assert.Equal(t, "attached-event", replayed[0])
-	assert.Same(t, ev, replayed[1])
 }
 
 // TestRuntimeForSession_RegistersSessionScopedElicitationSink is an
@@ -1271,7 +1531,7 @@ func (e *elicitationRecordingRuntime) ResumeElicitation(_ context.Context, actio
 func (e *elicitationRecordingRuntime) recordedCalls() []recordedElicitationResume {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return append([]recordedElicitationResume(nil), e.calls...)
+	return slices.Clone(e.calls)
 }
 
 // TestElicitationEndpoint_RoutesAnswerToSessionRuntime pins the server half
@@ -1327,27 +1587,29 @@ func TestElicitationEndpoint_RoutesAnswerToSessionRuntime(t *testing.T) {
 func TestRecallSession_SkipsMirroredElicitationOnRunStream(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-	sess := session.New()
-	elicit := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "root")
-	other := runtime.Warning("heads up", "root")
-	fake := &mirroredScriptedStreamRuntime{scriptedStreamRuntime{events: []runtime.Event{elicit, other}}}
-	sm := newTestSessionManager(t, sess, fake)
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		sess := session.New()
+		elicit := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "root")
+		other := runtime.Warning("heads up", "root")
+		fake := &mirroredScriptedStreamRuntime{scriptedStreamRuntime{events: []runtime.Event{elicit, other}}}
+		sm := newTestSessionManager(t, sess, fake)
 
-	// Reliable path: the sink already delivered the request exactly once.
-	sm.sessionElicitationSink(sess.ID)(elicit)
+		// Reliable path: the sink already delivered the request exactly once.
+		sm.sessionElicitationSink(sess.ID)(elicit)
 
-	require.NoError(t, sm.recallSession(ctx, sess.ID, runtime.QueuedMessage{Content: "wake up"}))
-	waitSessionIdle(t, sm, sess.ID)
+		require.NoError(t, sm.recallSession(ctx, sess.ID, runtime.QueuedMessage{Content: "wake up"}))
+		waitSessionIdle(t, sm, sess.ID)
 
-	seq, ok := sm.LastEventSeq(sess.ID)
-	require.True(t, ok)
-	require.Equal(t, uint64(2), seq,
-		"the RunStream mirror copy of an elicitation must not be appended a second time")
+		seq, ok := sm.LastEventSeq(sess.ID)
+		require.True(t, ok)
+		require.Equal(t, uint64(2), seq,
+			"the RunStream mirror copy of an elicitation must not be appended a second time")
 
-	replayed := replaySessionEvents(t, sm, sess.ID, 2)
-	assert.Same(t, elicit, replayed[0], "the sink-delivered elicitation must be first")
-	assert.Same(t, other, replayed[1], "non-elicitation stream events must still be pumped")
+		replayed := replaySessionEvents(t, sm, sess.ID, 2)
+		assert.Same(t, elicit, replayed[0], "the sink-delivered elicitation must be first")
+		assert.Same(t, other, replayed[1], "non-elicitation stream events must still be pumped")
+	})
 }
 
 // TestRecallSession_KeepsElicitationFromNonMirroringRuntime is the
@@ -1358,25 +1620,27 @@ func TestRecallSession_SkipsMirroredElicitationOnRunStream(t *testing.T) {
 func TestRecallSession_KeepsElicitationFromNonMirroringRuntime(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-	sess := session.New()
-	elicit := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "root")
-	fake := &scriptedStreamRuntime{events: []runtime.Event{elicit}}
-	sm := newTestSessionManager(t, sess, fake)
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		sess := session.New()
+		elicit := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "root")
+		fake := &scriptedStreamRuntime{events: []runtime.Event{elicit}}
+		sm := newTestSessionManager(t, sess, fake)
 
-	// Pre-create the session's event log (as an attached session would have).
-	sm.ensureEventLog(sess.ID)
+		// Pre-create the session's event log (as an attached session would have).
+		sm.ensureEventLog(sess.ID)
 
-	require.NoError(t, sm.recallSession(ctx, sess.ID, runtime.QueuedMessage{Content: "wake up"}))
-	waitSessionIdle(t, sm, sess.ID)
+		require.NoError(t, sm.recallSession(ctx, sess.ID, runtime.QueuedMessage{Content: "wake up"}))
+		waitSessionIdle(t, sm, sess.ID)
 
-	seq, ok := sm.LastEventSeq(sess.ID)
-	require.True(t, ok)
-	require.Equal(t, uint64(1), seq,
-		"a non-mirroring runtime's RunStream copy is the only delivery and must not be skipped")
+		seq, ok := sm.LastEventSeq(sess.ID)
+		require.True(t, ok)
+		require.Equal(t, uint64(1), seq,
+			"a non-mirroring runtime's RunStream copy is the only delivery and must not be skipped")
 
-	replayed := replaySessionEvents(t, sm, sess.ID, 1)
-	assert.Same(t, elicit, replayed[0])
+		replayed := replaySessionEvents(t, sm, sess.ID, 1)
+		assert.Same(t, elicit, replayed[0])
+	})
 }
 
 // TestDeleteSession_ClosesLazyElicitationEventLog guards ensureEventLog's
@@ -1391,55 +1655,54 @@ func TestRecallSession_KeepsElicitationFromNonMirroringRuntime(t *testing.T) {
 func TestDeleteSession_ClosesLazyElicitationEventLog(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-	store := session.NewInMemorySessionStore()
-	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		store := session.NewInMemorySessionStore()
+		sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
 
-	sess := session.New()
-	require.NoError(t, store.AddSession(ctx, sess))
+		sess := session.New()
+		require.NoError(t, store.AddSession(ctx, sess))
 
-	// Lazily create the session's event log the way runtimeForSession's
-	// sessionElicitationSink does for a background job's elicitation — no
-	// runtime/RegisterEventSource pump is ever registered for this session.
-	sm.sessionElicitationSink(sess.ID)(runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", sess.ID, nil, "root"))
-	require.True(t, sm.HasEventSource(sess.ID))
+		// Lazily create the session's event log the way runtimeForSession's
+		// sessionElicitationSink does for a background job's elicitation — no
+		// runtime/RegisterEventSource pump is ever registered for this session.
+		sm.sessionElicitationSink(sess.ID)(runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", sess.ID, nil, "root"))
+		require.True(t, sm.HasEventSource(sess.ID))
 
-	streamCtx, cancelStream := context.WithCancel(ctx)
-	defer cancelStream()
-	var mu sync.Mutex
-	var received []any
-	streamDone := make(chan struct{})
-	go func() {
-		defer close(streamDone)
-		sm.StreamEvents(streamCtx, sess.ID, nil, func(_ uint64, event any) {
-			mu.Lock()
-			defer mu.Unlock()
-			received = append(received, event)
-		})
-	}()
+		streamCtx, cancelStream := context.WithCancel(ctx)
+		defer cancelStream()
+		var mu sync.Mutex
+		var received []any
+		streamDone := make(chan struct{})
+		go func() {
+			defer close(streamDone)
+			sm.StreamEvents(streamCtx, sess.ID, nil, func(_ uint64, event any) {
+				mu.Lock()
+				defer mu.Unlock()
+				received = append(received, event)
+			})
+		}()
 
-	// Wait for the replay of the elicitation event so the stream is known to
-	// be actively connected (not merely about to start) before we delete.
-	require.Eventually(t, func() bool {
+		// Wait for the replay of the elicitation event so the stream is known to
+		// be actively connected (not merely about to start) before we delete.
+		synctest.Wait()
+		require.Len(t, received, 1)
+
+		require.NoError(t, sm.DeleteSession(ctx, sess.ID))
+
+		select {
+		case <-streamDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("StreamEvents must return once the session is deleted; a no-op cancel on the lazily-created event log leaves connected /events streams blocked forever")
+		}
+
 		mu.Lock()
 		defer mu.Unlock()
-		return len(received) == 1
-	}, 2*time.Second, time.Millisecond)
-
-	require.NoError(t, sm.DeleteSession(ctx, sess.ID))
-
-	select {
-	case <-streamDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("StreamEvents must return once the session is deleted; a no-op cancel on the lazily-created event log leaves connected /events streams blocked forever")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.Len(t, received, 2, "expected the elicitation event followed by a terminal session_exited event")
-	exited, ok := received[1].(sessionExitedEvent)
-	require.True(t, ok, "expected sessionExitedEvent, got %T", received[1])
-	assert.Equal(t, "session_exited", exited.Type)
+		require.Len(t, received, 2, "expected the elicitation event followed by a terminal session_exited event")
+		exited, ok := received[1].(sessionExitedEvent)
+		require.True(t, ok, "expected sessionExitedEvent, got %T", received[1])
+		assert.Equal(t, "session_exited", exited.Type)
+	})
 }
 
 // TestBatchDeleteSessions_ClosesLazyElicitationEventLog is the batch variant
@@ -1448,52 +1711,51 @@ func TestDeleteSession_ClosesLazyElicitationEventLog(t *testing.T) {
 func TestBatchDeleteSessions_ClosesLazyElicitationEventLog(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-	store := session.NewInMemorySessionStore()
-	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		store := session.NewInMemorySessionStore()
+		sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
 
-	sess := session.New()
-	require.NoError(t, store.AddSession(ctx, sess))
+		sess := session.New()
+		require.NoError(t, store.AddSession(ctx, sess))
 
-	sm.sessionElicitationSink(sess.ID)(runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", sess.ID, nil, "root"))
-	require.True(t, sm.HasEventSource(sess.ID))
+		sm.sessionElicitationSink(sess.ID)(runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", sess.ID, nil, "root"))
+		require.True(t, sm.HasEventSource(sess.ID))
 
-	streamCtx, cancelStream := context.WithCancel(ctx)
-	defer cancelStream()
-	var mu sync.Mutex
-	var received []any
-	streamDone := make(chan struct{})
-	go func() {
-		defer close(streamDone)
-		sm.StreamEvents(streamCtx, sess.ID, nil, func(_ uint64, event any) {
-			mu.Lock()
-			defer mu.Unlock()
-			received = append(received, event)
-		})
-	}()
+		streamCtx, cancelStream := context.WithCancel(ctx)
+		defer cancelStream()
+		var mu sync.Mutex
+		var received []any
+		streamDone := make(chan struct{})
+		go func() {
+			defer close(streamDone)
+			sm.StreamEvents(streamCtx, sess.ID, nil, func(_ uint64, event any) {
+				mu.Lock()
+				defer mu.Unlock()
+				received = append(received, event)
+			})
+		}()
 
-	require.Eventually(t, func() bool {
+		synctest.Wait()
+		require.Len(t, received, 1)
+
+		deleted, failed := sm.BatchDeleteSessions(ctx, []string{sess.ID})
+		assert.Equal(t, 1, deleted)
+		assert.Empty(t, failed)
+
+		select {
+		case <-streamDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("StreamEvents must return once the session is batch-deleted; a no-op cancel on the lazily-created event log leaves connected /events streams blocked forever")
+		}
+
 		mu.Lock()
 		defer mu.Unlock()
-		return len(received) == 1
-	}, 2*time.Second, time.Millisecond)
-
-	deleted, failed := sm.BatchDeleteSessions(ctx, []string{sess.ID})
-	assert.Equal(t, 1, deleted)
-	assert.Empty(t, failed)
-
-	select {
-	case <-streamDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("StreamEvents must return once the session is batch-deleted; a no-op cancel on the lazily-created event log leaves connected /events streams blocked forever")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.Len(t, received, 2, "expected the elicitation event followed by a terminal session_exited event")
-	exited, ok := received[1].(sessionExitedEvent)
-	require.True(t, ok, "expected sessionExitedEvent, got %T", received[1])
-	assert.Equal(t, "session_exited", exited.Type)
+		require.Len(t, received, 2, "expected the elicitation event followed by a terminal session_exited event")
+		exited, ok := received[1].(sessionExitedEvent)
+		require.True(t, ok, "expected sessionExitedEvent, got %T", received[1])
+		assert.Equal(t, "session_exited", exited.Type)
+	})
 }
 
 // --- #3584 review: deletion vs. lazy event-log creation race ---
@@ -1656,8 +1918,10 @@ func (s *sinkRegistrationRecordingRuntime) OnElicitationRequest(handler func(run
 func (s *sinkRegistrationRecordingRuntime) registrations() []func(runtime.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]func(runtime.Event), len(s.sinks))
-	copy(out, s.sinks)
+	out := slices.Clone(s.sinks)
+	if out == nil {
+		out = []func(runtime.Event){}
+	}
 	return out
 }
 
@@ -1780,71 +2044,70 @@ func TestDeleteSession_SilencesLiveRuntimeElicitationDelivery(t *testing.T) {
 func TestRegisterEventSource_AdoptsLazyEventLog(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-	sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
 
-	ev := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "agent")
-	sm.sessionElicitationSink("sess-adopt")(ev)
+		ev := runtime.ElicitationRequest("need input", "form", nil, "", "eid-1", "", "bg-child", nil, "agent")
+		sm.sessionElicitationSink("sess-adopt")(ev)
 
-	lazyPE, ok := sm.eventLogs.Load("sess-adopt")
-	require.True(t, ok)
+		lazyPE, ok := sm.eventLogs.Load("sess-adopt")
+		require.True(t, ok)
 
-	// Connect a listener before the source attaches; it must survive the
-	// attachment and keep receiving on the same stream.
-	streamCtx, cancelStream := context.WithCancel(ctx)
-	defer cancelStream()
-	var mu sync.Mutex
-	var received []any
-	streamDone := make(chan struct{})
-	go func() {
-		defer close(streamDone)
-		sm.StreamEvents(streamCtx, "sess-adopt", nil, func(_ uint64, event any) {
-			mu.Lock()
-			defer mu.Unlock()
-			received = append(received, event)
+		// Connect a listener before the source attaches; it must survive the
+		// attachment and keep receiving on the same stream.
+		streamCtx, cancelStream := context.WithCancel(ctx)
+		defer cancelStream()
+		var mu sync.Mutex
+		var received []any
+		streamDone := make(chan struct{})
+		go func() {
+			defer close(streamDone)
+			sm.StreamEvents(streamCtx, "sess-adopt", nil, func(_ uint64, event any) {
+				mu.Lock()
+				defer mu.Unlock()
+				received = append(received, event)
+			})
+		}()
+		synctest.Wait()
+		require.Len(t, received, 1)
+
+		pumped := make(chan struct{})
+		sm.RegisterEventSource("sess-adopt", func(ctx context.Context, send func(any)) {
+			send("source-event")
+			close(pumped)
+			<-ctx.Done()
 		})
-	}()
-	require.Eventually(t, func() bool {
+		<-pumped
+
+		current, ok := sm.eventLogs.Load("sess-adopt")
+		require.True(t, ok)
+		assert.Same(t, lazyPE.log, current.log,
+			"RegisterEventSource must adopt the lazily-created log, not replace it")
+
+		seq, ok := sm.LastEventSeq("sess-adopt")
+		require.True(t, ok)
+		assert.Equal(t, uint64(2), seq, "the source's events must continue the adopted log's sequence")
+
+		// Cancelling the registered entry must stop the pump; its deferred close
+		// then delivers session_exited and disconnects the listener — the same
+		// lifecycle a brand-new attached source has.
+		current.cancel()
+		select {
+		case <-streamDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("cancelling the adopted source must close the log and end connected streams")
+		}
+
 		mu.Lock()
 		defer mu.Unlock()
-		return len(received) == 1
-	}, 2*time.Second, time.Millisecond)
-
-	pumped := make(chan struct{})
-	sm.RegisterEventSource("sess-adopt", func(ctx context.Context, send func(any)) {
-		send("source-event")
-		close(pumped)
-		<-ctx.Done()
+		require.Len(t, received, 3)
+		assert.Same(t, ev, received[0], "the buffered out-of-band event must survive the adoption")
+		assert.Equal(t, "source-event", received[1])
+		exited, ok := received[2].(sessionExitedEvent)
+		require.True(t, ok, "expected sessionExitedEvent, got %T", received[2])
+		assert.Equal(t, "session_exited", exited.Type)
 	})
-	<-pumped
-
-	current, ok := sm.eventLogs.Load("sess-adopt")
-	require.True(t, ok)
-	assert.Same(t, lazyPE.log, current.log,
-		"RegisterEventSource must adopt the lazily-created log, not replace it")
-
-	seq, ok := sm.LastEventSeq("sess-adopt")
-	require.True(t, ok)
-	assert.Equal(t, uint64(2), seq, "the source's events must continue the adopted log's sequence")
-
-	// Cancelling the registered entry must stop the pump; its deferred close
-	// then delivers session_exited and disconnects the listener — the same
-	// lifecycle a brand-new attached source has.
-	current.cancel()
-	select {
-	case <-streamDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("cancelling the adopted source must close the log and end connected streams")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.Len(t, received, 3)
-	assert.Same(t, ev, received[0], "the buffered out-of-band event must survive the adoption")
-	assert.Equal(t, "source-event", received[1])
-	exited, ok := received[2].(sessionExitedEvent)
-	require.True(t, ok, "expected sessionExitedEvent, got %T", received[2])
-	assert.Equal(t, "session_exited", exited.Type)
 }
 
 // --- #3584 review cycle 2: deletion vs. RegisterEventSource race ---
@@ -1899,20 +2162,24 @@ func testRegisterEventSourceAfterDelete(t *testing.T, del func(sm *SessionManage
 func TestDeleteSession_RegisterEventSourceAfterDeleteIsNoOp(t *testing.T) {
 	t.Parallel()
 
-	testRegisterEventSourceAfterDelete(t, func(sm *SessionManager, ids []string) {
-		for _, id := range ids {
-			require.NoError(t, sm.DeleteSession(t.Context(), id))
-		}
+	synctest.Test(t, func(t *testing.T) {
+		testRegisterEventSourceAfterDelete(t, func(sm *SessionManager, ids []string) {
+			for _, id := range ids {
+				require.NoError(t, sm.DeleteSession(t.Context(), id))
+			}
+		})
 	})
 }
 
 func TestBatchDeleteSessions_RegisterEventSourceAfterDeleteIsNoOp(t *testing.T) {
 	t.Parallel()
 
-	testRegisterEventSourceAfterDelete(t, func(sm *SessionManager, ids []string) {
-		deleted, failed := sm.BatchDeleteSessions(t.Context(), ids)
-		assert.Equal(t, len(ids), deleted)
-		assert.Empty(t, failed)
+	synctest.Test(t, func(t *testing.T) {
+		testRegisterEventSourceAfterDelete(t, func(sm *SessionManager, ids []string) {
+			deleted, failed := sm.BatchDeleteSessions(t.Context(), ids)
+			assert.Equal(t, len(ids), deleted)
+			assert.Empty(t, failed)
+		})
 	})
 }
 

@@ -35,11 +35,12 @@ type Renderer struct {
 	width  int
 	height int
 
-	prev        []string
-	viewportTop int // index in prev of the topmost visible row
-	cursorRow   int // buffer row the hardware cursor currently sits on
-	initialized bool
-	needsRedraw bool
+	prev         []string
+	viewportTop  int // index in prev of the topmost visible row
+	cursorRow    int // buffer row the hardware cursor currently sits on
+	initialized  bool
+	needsRedraw  bool
+	liveToolRows [2]int
 }
 
 func NewRenderer(w *bufio.Writer, width, height int) *Renderer {
@@ -61,7 +62,12 @@ func (r *Renderer) Repaint() {
 
 // Frame reconciles the screen with newLines and places the hardware cursor at
 // (cursorLine, cursorCol), where cursorLine is an index into newLines.
-func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int) {
+func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int, liveToolRows ...[2]int) {
+	var liveRows [2]int
+	if len(liveToolRows) > 0 {
+		liveRows = liveToolRows[0]
+	}
+	defer func() { r.liveToolRows = liveRows }()
 	if len(newLines) == 0 {
 		newLines = []string{""}
 	}
@@ -87,11 +93,17 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int) {
 		return
 	}
 
-	newViewportTop := max(0, len(newLines)-r.height)
-	// A change above the visible region, or content shrinking enough to pull
-	// scrolled-off lines back into view, can't be patched incrementally.
-	if first < r.viewportTop || newViewportTop < r.viewportTop {
-		r.fullRedraw(newLines, cursorLine, cursorCol, true)
+	// Shrinking content cannot pull immutable scrollback back into the viewport.
+	newViewportTop := max(r.viewportTop, len(newLines)-r.height)
+	// Changes to a live block may start above the viewport. Repaint only the
+	// visible rows rather than clearing terminal scrollback on every update.
+	if first < r.viewportTop || len(newLines) < len(r.prev) {
+		if first < newViewportTop {
+			// Scrollback cannot be edited; replay the changed suffix without erasing history.
+			r.redrawSuffix(newLines, first, cursorLine, cursorCol, liveRows)
+			return
+		}
+		r.repaintVisible(newLines, cursorLine, cursorCol)
 		return
 	}
 
@@ -123,13 +135,6 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int) {
 	}
 	cur = renderEnd
 
-	// Clear stale trailing rows that remain when content shrank.
-	for i := len(newLines); i < len(r.prev); i++ {
-		b.WriteString("\r\n")
-		b.WriteString(seqEraseLine)
-		cur++
-	}
-
 	r.viewportTop = newViewportTop
 	cur = r.moveCursor(&b, cur, cursorLine, cursorCol)
 
@@ -138,6 +143,80 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int) {
 	r.write(b.String())
 
 	r.cursorRow = cur
+	r.prev = newLines
+}
+
+// repaintVisible reconciles changes that start above the viewport without
+// erasing the terminal's scrollback. Growth scrolls the screen before painting
+// the new visible tail; shrinkage simply replaces the visible rows.
+func (r *Renderer) repaintVisible(newLines []string, cursorLine, cursorCol int) {
+	top := max(r.viewportTop, len(newLines)-r.height)
+	var b strings.Builder
+	b.WriteString(seqSyncStart)
+	b.WriteString(seqHideCursor)
+	if delta := top - r.viewportTop; delta > 0 {
+		r.moveRow(&b, r.cursorRow, r.viewportTop+r.height-1)
+		for range delta {
+			b.WriteString("\r\n")
+		}
+	}
+	b.WriteString("\x1b[H")
+	for i := range r.height {
+		if i > 0 {
+			b.WriteString("\r\n")
+		}
+		b.WriteString(seqEraseLine)
+		if top+i < len(newLines) {
+			b.WriteString(newLines[top+i])
+		}
+	}
+	r.viewportTop = top
+	cur := r.moveCursor(&b, top+r.height-1, cursorLine, cursorCol)
+	b.WriteString(seqShowCursor)
+	b.WriteString(seqSyncEnd)
+	r.write(b.String())
+	r.cursorRow = cur
+	r.prev = newLines
+}
+
+// redrawSuffix archives only changed offscreen rows, then restores the visible tail.
+// Scrollback is immutable; replaying the whole suffix would duplicate old answers.
+func (r *Renderer) redrawSuffix(newLines []string, first, cursorLine, cursorCol int, liveRows [2]int) {
+	top := max(0, len(newLines)-r.height)
+	oldEnd, newEnd := len(r.prev), len(newLines)
+	for oldEnd > first && newEnd > first && r.prev[oldEnd-1] == newLines[newEnd-1] {
+		oldEnd--
+		newEnd--
+	}
+	var changed []string
+	for i := first; i < min(newEnd, top); i++ {
+		if i < r.viewportTop && i >= liveRows[0] && i < liveRows[1] && i >= r.liveToolRows[0] && i < r.liveToolRows[1] {
+			// Offscreen tool animations must not become new scrollback entries.
+			continue
+		}
+		// Formatting can change as markdown wraps, but archived text must not replay.
+		if i < r.viewportTop && i < len(r.prev) && ansi.Strip(r.prev[i]) == ansi.Strip(newLines[i]) {
+			continue
+		}
+		changed = append(changed, newLines[i])
+	}
+	var b strings.Builder
+	b.WriteString(seqSyncStart)
+	b.WriteString(seqHideCursor)
+	b.WriteString("\x1b[2J\x1b[H")
+	rows := append(changed, newLines[top:]...)
+	for i, line := range rows {
+		if i > 0 {
+			b.WriteString("\r\n")
+		}
+		b.WriteString(seqEraseLine)
+		b.WriteString(line)
+	}
+	r.viewportTop = top
+	r.cursorRow = r.moveCursor(&b, len(newLines)-1, cursorLine, cursorCol)
+	b.WriteString(seqShowCursor)
+	b.WriteString(seqSyncEnd)
+	r.write(b.String())
 	r.prev = newLines
 }
 

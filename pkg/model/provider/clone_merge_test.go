@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,7 +29,8 @@ func TestMergeCloneOptions_NoOverrides(t *testing.T) {
 		},
 	}
 
-	got, mergedOpts := mergeCloneOptions(cfg, nil)
+	got, mergedOpts, err := mergeCloneOptions(cfg, nil)
+	require.NoError(t, err)
 
 	require.NotNil(t, got.MaxTokens)
 	assert.Equal(t, originalMax, *got.MaxTokens, "MaxTokens should be untouched when no overrides")
@@ -45,7 +48,8 @@ func TestMergeCloneOptions_MaxTokensOverride(t *testing.T) {
 	}
 
 	newMax := int64(2048)
-	got, mergedOpts := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(newMax)})
+	got, mergedOpts, err := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(newMax)})
+	require.NoError(t, err)
 
 	require.NotNil(t, got.MaxTokens)
 	assert.Equal(t, newMax, *got.MaxTokens, "MaxTokens should follow explicit override")
@@ -67,7 +71,8 @@ func TestMergeCloneOptions_NoThinking(t *testing.T) {
 		},
 	}
 
-	got, _ := mergeCloneOptions(cfg, []options.Opt{options.WithNoThinking()})
+	got, _, err := mergeCloneOptions(cfg, []options.Opt{options.WithNoThinking()})
+	require.NoError(t, err)
 
 	require.NotNil(t, got.ThinkingBudget, "WithNoThinking must write the disabled sentinel, not nil")
 	assert.True(t, got.ThinkingBudget.IsDisabled(),
@@ -88,7 +93,8 @@ func TestMergeCloneOptions_PreservesBaseOptions(t *testing.T) {
 		ModelConfig:  latest.ModelConfig{Provider: "openai", Model: "gpt-4o"},
 	}
 
-	_, mergedOpts := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(1024)})
+	_, mergedOpts, err := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(1024)})
+	require.NoError(t, err)
 
 	// Replay the merged opts and check all three flags survived.
 	var probe options.ModelOptions
@@ -113,23 +119,28 @@ func TestMergeCloneOptions_LaterOverridesWin(t *testing.T) {
 		ModelConfig:  latest.ModelConfig{Provider: "openai", Model: "gpt-4o"},
 	}
 
-	got, _ := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(int64(4096))})
+	got, _, err := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(int64(4096))})
+	require.NoError(t, err)
 
 	require.NotNil(t, got.MaxTokens)
 	assert.Equal(t, int64(4096), *got.MaxTokens, "later opt must override earlier opt")
 }
 
-// TestCloneWithOptions_FallbackOnError verifies the previously-uncovered
-// fallback path: when NewWithModels fails, CloneWithOptions returns the
-// original base provider unchanged.
-func TestCloneWithOptions_FallbackOnError(t *testing.T) {
+// A legacy clone must expose reconstruction failures without base inference.
+func TestCloneWithOptions_ErrorProvider(t *testing.T) {
 	t.Parallel()
 
-	// fakeProvider returns a zero-valued base.Config, so its Provider type is
-	// empty; that always fails the factory-registry lookup in createDirectProvider.
-	original := &fakeProvider{id: modelsdev.NewID("test", "original")}
+	original := &fakeProvider{
+		id: modelsdev.NewID("test", "original"),
+		config: base.Config{RebuildProvider: func(_ context.Context, _ *latest.ModelConfig, _ ...options.Opt) (Provider, error) {
+			return nil, errors.New("rebuild failed")
+		}},
+	}
 
 	got := CloneWithOptions(t.Context(), original, options.WithMaxTokens(int64(2048)))
 
-	assert.Same(t, original, got, "should fall back to base provider when cloning fails")
+	assert.NotSame(t, original, got)
+	stream, err := got.CreateChatCompletionStream(t.Context(), nil, nil)
+	assert.Nil(t, stream)
+	require.ErrorContains(t, err, "rebuild failed")
 }

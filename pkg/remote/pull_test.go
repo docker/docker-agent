@@ -407,6 +407,40 @@ func testImage(t *testing.T, contents string) v1.Image {
 	return img
 }
 
+func TestPullKeepsRegistryScopedReferences(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	serverA := httptest.NewServer(testregistry.New(testregistry.Logger(log.New(io.Discard, "", 0))))
+	defer serverA.Close()
+	serverB := httptest.NewServer(testregistry.New(testregistry.Logger(log.New(io.Discard, "", 0))))
+	defer serverB.Close()
+
+	refA := strings.TrimPrefix(serverA.URL, "http://") + "/same/agent:latest"
+	refB := strings.TrimPrefix(serverB.URL, "http://") + "/same/agent:latest"
+	imageA := mutate.Annotations(testImage(t, "registry-a"), map[string]string{"io.docker.agent.version": "test"}).(v1.Image)
+	imageB := mutate.Annotations(testImage(t, "registry-b"), map[string]string{"io.docker.agent.version": "test"}).(v1.Image)
+	require.NoError(t, crane.Push(imageA, refA, crane.Insecure))
+	require.NoError(t, crane.Push(imageB, refB, crane.Insecure))
+
+	_, err := Pull(t.Context(), refA, false, crane.Insecure)
+	require.NoError(t, err)
+	_, err = Pull(t.Context(), refB, false, crane.Insecure)
+	require.NoError(t, err)
+
+	store, err := content.NewStore()
+	require.NoError(t, err)
+	storedA, err := store.GetArtifact(refA)
+	require.NoError(t, err)
+	storedB, err := store.GetArtifact(refB)
+	require.NoError(t, err)
+	assert.Equal(t, "registry-a", storedA)
+	assert.Equal(t, "registry-b", storedB)
+	_, err = store.GetArtifact("same/agent:latest")
+	require.ErrorIs(t, err, content.ErrStoreCorrupted, "Pull must not populate a registry-less legacy key")
+}
+
 func TestPullRegistryNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -461,7 +495,7 @@ func TestPullIntegration(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestNormalizeReference(t *testing.T) {
+func TestFullyQualifiedReference(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -472,44 +506,44 @@ func TestNormalizeReference(t *testing.T) {
 		{
 			name:     "short reference gets normalized",
 			ref:      "myorg/review-pr",
-			expected: "myorg/review-pr:latest",
+			expected: "index.docker.io/myorg/review-pr:latest",
 		},
 		{
 			name:     "fully qualified reference gets normalized to same key",
 			ref:      "index.docker.io/myorg/review-pr:latest",
-			expected: "myorg/review-pr:latest",
+			expected: "index.docker.io/myorg/review-pr:latest",
 		},
 		{
 			name:     "tagged reference preserves tag",
 			ref:      "myorg/review-pr:v1",
-			expected: "myorg/review-pr:v1",
+			expected: "index.docker.io/myorg/review-pr:v1",
 		},
 		{
 			name:     "digest reference preserves digest",
 			ref:      "myorg/review-pr@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-			expected: "myorg/review-pr@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+			expected: "index.docker.io/myorg/review-pr@sha256:0000000000000000000000000000000000000000000000000000000000000000",
 		},
 		{
 			name:     "non-docker-hub registry",
 			ref:      "ghcr.io/myorg/agent:v2",
-			expected: "myorg/agent:v2",
+			expected: "ghcr.io/myorg/agent:v2",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result, err := NormalizeReference(tt.ref)
+			result, err := FullyQualifiedReference(tt.ref)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
 
-func TestNormalizeReference_InvalidReference(t *testing.T) {
+func TestFullyQualifiedReference_InvalidReference(t *testing.T) {
 	t.Parallel()
 
-	_, err := NormalizeReference(":::invalid")
+	_, err := FullyQualifiedReference(":::invalid")
 	require.Error(t, err)
 }
 
@@ -532,45 +566,6 @@ func TestIsDigestReference(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.expected, IsDigestReference(tt.ref))
-		})
-	}
-}
-
-func TestSeparator(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		ref      string
-		expected string
-	}{
-		{
-			name:     "tag reference uses colon",
-			ref:      "docker.io/library/alpine:latest",
-			expected: ":",
-		},
-		{
-			name:     "digest reference uses at sign",
-			ref:      "docker.io/library/alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-			expected: "@",
-		},
-		{
-			name:     "short tag reference uses colon",
-			ref:      "alpine:v1.0",
-			expected: ":",
-		},
-		{
-			name:     "short digest reference uses at sign",
-			ref:      "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-			expected: "@",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ref, err := name.ParseReference(tt.ref)
-			require.NoError(t, err)
-			assert.Equal(t, tt.expected, separator(ref))
 		})
 	}
 }

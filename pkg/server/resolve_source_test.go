@@ -67,7 +67,7 @@ func TestResolveSource_AmbiguousFallbackFails(t *testing.T) {
 
 	// A third tag not present exactly; two candidates share its identity.
 	_, err := sm.resolveSource(gordonKey("v9-canary"))
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrAgentNotFound)
 	assert.Contains(t, err.Error(), "agent not found")
 }
 
@@ -83,7 +83,7 @@ func TestResolveSource_NoMatchFails(t *testing.T) {
 	}
 
 	_, err := sm.resolveSource(url.QueryEscape("http://localhost:7777/other-agent?gordonTag=v9-dev"))
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrAgentNotFound)
 	assert.Contains(t, err.Error(), "agent not found")
 }
 

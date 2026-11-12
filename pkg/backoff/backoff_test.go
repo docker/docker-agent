@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -46,25 +47,27 @@ func TestSleepWithContext(t *testing.T) {
 
 	t.Run("completes normally", func(t *testing.T) {
 		t.Parallel()
-		ctx := t.Context()
-		start := time.Now()
-		completed := SleepWithContext(ctx, 10*time.Millisecond)
-		elapsed := time.Since(start)
+		synctest.Test(t, func(t *testing.T) {
+			start := time.Now()
+			completed := SleepWithContext(t.Context(), 10*time.Millisecond)
 
-		assert.True(t, completed, "should complete normally")
-		assert.GreaterOrEqual(t, elapsed, 10*time.Millisecond)
+			assert.True(t, completed, "should complete normally")
+			assert.Equal(t, 10*time.Millisecond, time.Since(start))
+		})
 	})
 
 	t.Run("interrupted by context", func(t *testing.T) {
 		t.Parallel()
-		ctx, cancel := context.WithCancel(t.Context())
-		time.AfterFunc(10*time.Millisecond, cancel)
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			time.AfterFunc(10*time.Millisecond, cancel)
 
-		start := time.Now()
-		completed := SleepWithContext(ctx, 1*time.Second)
-		elapsed := time.Since(start)
+			start := time.Now()
+			completed := SleepWithContext(ctx, time.Second)
 
-		assert.False(t, completed, "should be interrupted")
-		assert.Less(t, elapsed, 100*time.Millisecond, "should return quickly after cancel")
+			assert.False(t, completed, "should be interrupted")
+			assert.Equal(t, 10*time.Millisecond, time.Since(start))
+		})
 	})
 }

@@ -3,7 +3,6 @@ package filesystem
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -179,12 +179,7 @@ func TestFilesystemTool_ReadFile(t *testing.T) {
 		Path: "nonexistent.txt",
 	})
 	require.NoError(t, err)
-	assert.Contains(t, result.Output, "not found")
-	// The hint must name the resolved path and the working directory so the
-	// model can correct a wrong base instead of retrying the same path.
-	// %q-quoted, so Windows separators appear escaped in the output.
-	assert.Contains(t, result.Output, fmt.Sprintf("%q", filepath.Join(tmpDir, "nonexistent.txt")))
-	assert.Contains(t, result.Output, fmt.Sprintf("%q", tmpDir))
+	assert.Equal(t, "not found", result.Output)
 }
 
 // TestFilesystemTool_ReadFile_LineRange is a regression test for issue
@@ -407,7 +402,7 @@ func TestFilesystemTool_ReadImageFile(t *testing.T) {
 	result, err = tool.handleReadFile(t.Context(), ReadFileArgs{Path: "missing.png"})
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
-	assert.Contains(t, result.Output, "not found")
+	assert.Equal(t, "not found", result.Output)
 }
 
 func TestFilesystemTool_ReadMultipleFiles(t *testing.T) {
@@ -462,7 +457,7 @@ func TestFilesystemTool_ListDirectory(t *testing.T) {
 		Path: "nonexistent",
 	})
 	require.NoError(t, err)
-	assert.Contains(t, result.Output, "not found")
+	assert.Contains(t, result.Output, "Error reading directory")
 }
 
 // TestFilesystemTool_ListDirectoryEmpty pins the empty-directory message:
@@ -582,206 +577,6 @@ func TestFilesystemTool_EditFileRejectsEmptyOldText(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, original, string(after), "no edit may be persisted when a later one is rejected")
 	})
-}
-
-func TestParseEditFileArgs(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		input      string
-		wantPath   string
-		wantEdits  []Edit
-		wantErr    bool
-		wantErrMsg string
-	}{
-		{
-			name:     "normal array edits",
-			input:    `{"path": "test.txt", "edits": [{"oldText": "hello", "newText": "world"}]}`,
-			wantPath: "test.txt",
-			wantEdits: []Edit{
-				{OldText: "hello", NewText: "world"},
-			},
-		},
-		{
-			name:     "double-serialized string edits",
-			input:    `{"path": "test.txt", "edits": "[{\"oldText\": \"hello\", \"newText\": \"world\"}]"}`,
-			wantPath: "test.txt",
-			wantEdits: []Edit{
-				{OldText: "hello", NewText: "world"},
-			},
-		},
-		{
-			name:     "double-serialized multiple edits",
-			input:    `{"path": "f.go", "edits": "[{\"oldText\": \"a\", \"newText\": \"b\"}, {\"oldText\": \"c\", \"newText\": \"d\"}]"}`,
-			wantPath: "f.go",
-			wantEdits: []Edit{
-				{OldText: "a", NewText: "b"},
-				{OldText: "c", NewText: "d"},
-			},
-		},
-		{
-			name:       "invalid JSON",
-			input:      `not json at all`,
-			wantErr:    true,
-			wantErrMsg: "invalid character",
-		},
-		{
-			name:       "edits is neither array nor string",
-			input:      `{"path": "test.txt", "edits": 42}`,
-			wantErr:    true,
-			wantErrMsg: "edits field is neither an array nor a JSON string",
-		},
-		{
-			name:       "double-serialized but inner JSON is invalid",
-			input:      `{"path": "test.txt", "edits": "not valid json"}`,
-			wantErr:    true,
-			wantErrMsg: "failed to parse double-serialized edits string",
-		},
-		{
-			name:     "repair: double-serialized with extra closing brace in inner payload",
-			input:    `{"edits": "[{\"oldText\": \"a\", \"newText\": \"b\"}}]", "path": "docker-compose.yml"}`,
-			wantPath: "docker-compose.yml",
-			wantEdits: []Edit{
-				{OldText: "a", NewText: "b"},
-			},
-		},
-		{
-			name:     "repair: double-serialized with extra closing bracket in inner payload",
-			input:    `{"path": "f.go", "edits": "[{\"oldText\": \"a\", \"newText\": \"b\"}]]"}`,
-			wantPath: "f.go",
-			wantEdits: []Edit{
-				{OldText: "a", NewText: "b"},
-			},
-		},
-		{
-			name:     "repair: double-serialized with extra closing brace between inner array elements",
-			input:    `{"path": "f.go", "edits": "[{\"oldText\": \"a\", \"newText\": \"b\"}}, {\"oldText\": \"c\", \"newText\": \"d\"}]"}`,
-			wantPath: "f.go",
-			wantEdits: []Edit{
-				{OldText: "a", NewText: "b"},
-				{OldText: "c", NewText: "d"},
-			},
-		},
-		{
-			name:       "repair: rejected when inner repair yields an edit with empty oldText",
-			input:      `{"path": "f.go", "edits": "[{\"oldText\": \"a\"}}, {\"newText\": \"b\"}]"}`,
-			wantErr:    true,
-			wantErrMsg: "empty oldText",
-		},
-		{
-			name:     "missing edits field (partial/streaming args)",
-			input:    `{"path": "/tmp/test.txt"}`,
-			wantPath: "/tmp/test.txt",
-		},
-		{
-			name:     "null edits field",
-			input:    `{"path": "test.txt", "edits": null}`,
-			wantPath: "test.txt",
-		},
-		{
-			name:  "missing path with double-serialized edits",
-			input: `{"edits": "[{\"oldText\": \"a\", \"newText\": \"b\"}]"}`,
-			wantEdits: []Edit{
-				{OldText: "a", NewText: "b"},
-			},
-		},
-		{
-			name:  "missing path with normal array edits",
-			input: `{"edits": [{"oldText": "a", "newText": "b"}]}`,
-			wantEdits: []Edit{
-				{OldText: "a", NewText: "b"},
-			},
-		},
-
-		// Malformed outer JSON — LLM brace/bracket counting errors.
-		{
-			name:     "repair: extra closing brace before array close",
-			input:    `{"path": "ci.yml", "edits": [{"oldText": "old", "newText": "new"}}]}`,
-			wantPath: "ci.yml",
-			wantEdits: []Edit{
-				{OldText: "old", NewText: "new"},
-			},
-		},
-		{
-			name:     "repair: extra closing brace with trailing newline",
-			input:    "{\"path\": \"ci.yml\", \"edits\": [{\"oldText\": \"old\", \"newText\": \"new\"}}]\n}",
-			wantPath: "ci.yml",
-			wantEdits: []Edit{
-				{OldText: "old", NewText: "new"},
-			},
-		},
-		{
-			name:     "repair: extra closing bracket (spurious array wrapper)",
-			input:    `{"path": "build.sh", "edits": [{"oldText": "a", "newText": "b"}]]}`,
-			wantPath: "build.sh",
-			wantEdits: []Edit{
-				{OldText: "a", NewText: "b"},
-			},
-		},
-		{
-			name:     "repair: stray backslash-n between tokens",
-			input:    "{\"path\": \"Dockerfile\", \"edits\": [{\"oldText\": \"a\", \"newText\": \"b\"}\\n]}",
-			wantPath: "Dockerfile",
-			wantEdits: []Edit{
-				{OldText: "a", NewText: "b"},
-			},
-		},
-		{
-			name:     "repair: stray backslash before property name",
-			input:    `{"path": "f.go", "edits": [{"oldText": "a", "newText": "b"},{\"oldText": "c", "newText": "d"}]}`,
-			wantPath: "f.go",
-			wantEdits: []Edit{
-				{OldText: "a", NewText: "b"},
-				{OldText: "c", NewText: "d"},
-			},
-		},
-		{
-			name:       "unrepairable garbage",
-			input:      `{totally broken <<<>>>`,
-			wantErr:    true,
-			wantErrMsg: "failed to parse edit_file arguments",
-		},
-		// Dropping the stray backslash closes the string early, leaving an empty
-		// oldText. That means the repair removed a load-bearing character, so the
-		// payload must be rejected — the double-serialized path already does this.
-		{
-			name:       "repair that empties oldText is rejected (outer payload)",
-			input:      `{"path": "target.txt", "edits": [{"oldText":\"", "newText": "INJECTED"}]}`,
-			wantErr:    true,
-			wantErrMsg: "empty oldText",
-		},
-		{
-			name:       "repair that empties oldText is rejected (double-serialized payload)",
-			input:      `{"path": "target.txt", "edits": "[{\"oldText\":\\\"\",\"newText\":\"INJECTED\"}]"}`,
-			wantErr:    true,
-			wantErrMsg: "empty oldText",
-		},
-		// Well-formed JSON is never second-guessed here: the TUI parses
-		// partially-streamed arguments with this function, where a not-yet-filled
-		// oldText is normal. handleEditFile is the layer that refuses to apply it.
-		{
-			name:      "well-formed empty oldText still parses for streaming renderers",
-			input:     `{"path": "target.txt", "edits": [{"oldText": "", "newText": "x"}]}`,
-			wantPath:  "target.txt",
-			wantEdits: []Edit{{OldText: "", NewText: "x"}},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			args, err := ParseEditFileArgs([]byte(tc.input))
-			if tc.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErrMsg)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantPath, args.Path)
-			assert.Equal(t, tc.wantEdits, args.Edits)
-		})
-	}
 }
 
 func TestFilesystemTool_SearchFilesContent(t *testing.T) {
@@ -924,6 +719,64 @@ func TestFilesystemTool_SearchFilesContent_SkipsBinaryFiles(t *testing.T) {
 	assert.NotContains(t, result.Output, "program.bin")
 	assert.NotContains(t, result.Output, "doc.pdf")
 	assert.Equal(t, SearchFilesContentMeta{MatchCount: 1, FileCount: 1}, result.Meta)
+}
+
+// TestFilesystemTool_SearchFilesContent_LineNumbering verifies that line
+// numbers in results are 1-based and correct across a variety of file shapes.
+func TestFilesystemTool_SearchFilesContent_LineNumbering(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tool := New(tmpDir)
+
+	// File with a trailing newline: "a\nb\n" has 3 segments from Split("\n")
+	// but only 2 real lines. The trailing empty segment must not produce a
+	// phantom line-3 match when searching for an empty string.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "trailing.txt"), []byte("alpha\nbeta\n"), 0o644))
+	// File without trailing newline.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "notrailing.txt"), []byte("gamma\ndelta"), 0o644))
+	// Empty file: should produce no matches.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "empty.txt"), []byte(""), 0o644))
+
+	// Literal match: check 1-based line numbers.
+	res, err := tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:  ".",
+		Query: "beta",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, res.Output, "trailing.txt:2:")
+	assert.NotContains(t, res.Output, "trailing.txt:3:")
+	assert.NotContains(t, res.Output, "empty.txt")
+
+	res, err = tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:  ".",
+		Query: "delta",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, res.Output, "notrailing.txt:2:")
+}
+
+// TestFilesystemTool_SearchFilesContent_RegexEmptyLine verifies that the ^$
+// regex matches blank lines (including those produced by trailing newlines)
+// with correct 1-based numbering.
+func TestFilesystemTool_SearchFilesContent_RegexEmptyLine(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tool := New(tmpDir)
+
+	// "line1\n\nline3\n" → segments: "line1", "", "line3", ""
+	// ^$ matches segments 2 and 4 (lines 2 and 4).
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "gaps.txt"), []byte("line1\n\nline3\n"), 0o644))
+
+	res, err := tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:    ".",
+		Query:   `^$`,
+		IsRegex: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, res.Output, "gaps.txt:2:")
+	assert.Contains(t, res.Output, "gaps.txt:4:")
+	assert.NotContains(t, res.Output, "gaps.txt:1:")
+	assert.NotContains(t, res.Output, "gaps.txt:3:")
 }
 
 func TestIsBinaryContent(t *testing.T) {
@@ -1809,4 +1662,40 @@ func TestFilesystemTool_EditFileHandlerRefusesWellFormedEmptyOldText(t *testing.
 	after, err := os.ReadFile(filepath.Join(tmpDir, "f.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, original, string(after))
+}
+
+// BenchmarkSearchFilesContent_Batch measures per-file line scanning cost with
+// 40 files × 2000 lines (literal + regex), where strings.SplitSeq avoids
+// allocating the full []string. Run with -bench=. -benchmem to compare.
+func BenchmarkSearchFilesContent_Batch(b *testing.B) {
+	root := b.TempDir()
+	var sb strings.Builder
+	for i := range 2000 {
+		if i%97 == 0 {
+			sb.WriteString("func handleNeedle(ctx context.Context) error { return nil }\n")
+		} else {
+			sb.WriteString("\tresult = append(result, computeValue(index, offset+1)) // filler\n")
+		}
+	}
+	content := []byte(sb.String())
+	for i := range 40 {
+		name := filepath.Join(root, "file"+strconv.Itoa(i)+".go")
+		require.NoError(b, os.WriteFile(name, content, 0o644))
+	}
+	tool := New(root)
+	b.Cleanup(func() { _ = tool.Close() })
+	ctx := b.Context()
+	queries := []SearchFilesContentArgs{
+		{Path: ".", Query: "handleNeedle"},
+		{Path: ".", Query: `func handle\w+\(`, IsRegex: true},
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		for _, q := range queries {
+			res, err := tool.handleSearchFilesContent(ctx, q)
+			if err != nil || res.IsError {
+				b.Fatal(err, res.Output)
+			}
+		}
+	}
 }

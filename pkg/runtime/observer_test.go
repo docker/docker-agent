@@ -2,9 +2,12 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,8 +45,10 @@ func (o *recordingObserver) OnEvent(_ context.Context, _ *session.Session, e Eve
 func (o *recordingObserver) snapshot() []Event {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	out := make([]Event, len(o.events))
-	copy(out, o.events)
+	out := slices.Clone(o.events)
+	if out == nil {
+		out = []Event{}
+	}
 	return out
 }
 
@@ -186,6 +191,32 @@ func TestObserver_NilOptIsIgnored(t *testing.T) {
 	assert.Len(t, r.observers, 1, "nil observer must not be appended")
 }
 
+func TestObserverFactoryCreatesPerRunState(t *testing.T) {
+	t.Parallel()
+	var instances []*recordingObserver
+	rt := &LocalRuntime{}
+	WithEventObserverFactory(nil)(rt)
+	WithEventObserverFactory(func() EventObserver { return nil })(rt)
+	WithEventObserverFactory(func() EventObserver {
+		obs := &recordingObserver{}
+		instances = append(instances, obs)
+		return obs
+	})(rt)
+	for range 2 {
+		input := make(chan Event, 1)
+		input <- Warning("test", "root")
+		close(input)
+		for range rt.observe(t.Context(), session.New(), input) {
+		}
+	}
+	require.Len(t, instances, 2)
+	assert.NotSame(t, instances[0], instances[1])
+	for _, obs := range instances {
+		assert.Equal(t, int64(1), obs.startCalls.Load())
+		assert.Len(t, obs.snapshot(), 1)
+	}
+}
+
 // fnObserver adapts function values to the [EventObserver] interface
 // for tests that only need to observe a subset of the lifecycle hooks.
 type fnObserver struct {
@@ -203,4 +234,60 @@ func (f *fnObserver) OnEvent(ctx context.Context, sess *session.Session, e Event
 	if f.onEvent != nil {
 		f.onEvent(ctx, sess, e)
 	}
+}
+
+func TestObserverFlush(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		entered, release := make(chan struct{}), make(chan struct{})
+		rt := &LocalRuntime{}
+		WithEventObserver(&fnObserver{onEvent: func(context.Context, *session.Session, Event) {
+			close(entered)
+			<-release
+		}})(rt)
+		inner := make(chan Event, 2)
+		observed := rt.observe(t.Context(), session.New(), inner)
+		inner <- Warning("test", "root")
+		<-entered
+		flushed := make(chan struct{})
+		go func() {
+			assert.NoError(t, flushObservers(withObserverFlush(t.Context(), inner)))
+			close(flushed)
+		}()
+		synctest.Wait()
+		select {
+		case <-flushed:
+			t.Fatal("flush returned before the observer finished")
+		default:
+		}
+		close(release)
+		<-flushed
+		close(inner)
+		var events []Event
+		for event := range observed {
+			events = append(events, event)
+		}
+		require.Len(t, events, 1, "barriers must not reach observers or consumers")
+	})
+}
+
+func TestObserverFlushCanceled(t *testing.T) {
+	t.Parallel()
+
+	for _, capacity := range []int{0, 1} {
+		t.Run(fmt.Sprintf("capacity=%d", capacity), func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				inner := make(chan Event, capacity)
+				ctx, cancel := context.WithCancel(withObserverFlush(t.Context(), inner))
+				finished := make(chan error, 1)
+				go func() { finished <- flushObservers(ctx) }()
+				synctest.Wait()
+				cancel()
+				require.ErrorIs(t, <-finished, context.Canceled)
+			})
+		})
+	}
+	assert.NoError(t, flushObservers(t.Context()), "standalone compaction has no observer queue")
 }

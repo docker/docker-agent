@@ -76,6 +76,46 @@ func TestRecordBudgetEmitsNonZeroReading(t *testing.T) {
 	assert.Equal(t, int64(1200), run.PerAgent[0].Tokens)
 }
 
+func TestRecordBudgetCacheTokensExceedNamedLimit(t *testing.T) {
+	t.Parallel()
+
+	r := budgetRuntime(t, func() time.Time { return budgetEpoch })
+	r.ensureBudget()
+
+	sess := session.New()
+	a := agent.New("root", "test")
+	sink := &collectSink{}
+	r.recordBudget(sess, a, &chat.Usage{
+		InputTokens:       100,
+		OutputTokens:      50,
+		CachedInputTokens: 10000,
+		CacheWriteTokens:  2000,
+	}, new(0.01), time.Second, sink)
+
+	usages := sink.budgetUsages()
+	require.Len(t, usages, 1)
+	require.Len(t, usages[0].Budgets, 2)
+	for _, b := range usages[0].Budgets {
+		assert.Equal(t, int64(12150), b.Tokens)
+		assert.InDelta(t, 0.01, b.Cost, 1e-9)
+		require.Len(t, b.PerAgent, 1)
+		assert.Equal(t, "root", b.PerAgent[0].AgentName)
+		assert.Equal(t, int64(12150), b.PerAgent[0].Tokens)
+	}
+
+	require.Equal(t, iterationStop, r.enforceBudget(t.Context(), sess, a, sink))
+	var exceeded *BudgetExceededEvent
+	for _, e := range sink.events {
+		if ev, ok := e.(*BudgetExceededEvent); ok {
+			exceeded = ev
+		}
+	}
+	require.NotNil(t, exceeded)
+	assert.Equal(t, "budgets.shell-work.max_tokens", exceeded.ConfigPath)
+	assert.Equal(t, "12150 tokens", exceeded.Used)
+	assert.Equal(t, "8000 tokens", exceeded.Max)
+}
+
 func TestRecordBudgetAccumulatesAcrossTurns(t *testing.T) {
 	now := budgetEpoch
 	r := budgetRuntime(t, func() time.Time { return now })

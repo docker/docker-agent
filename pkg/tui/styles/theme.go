@@ -347,8 +347,7 @@ func DefaultTheme() *Theme {
 	}
 
 	// Return a copy to prevent callers from modifying the cached theme
-	themeCopy := *cachedDefaultTheme
-	return &themeCopy
+	return new(*cachedDefaultTheme)
 }
 
 // UserThemePrefix is used to distinguish user themes from built-in themes

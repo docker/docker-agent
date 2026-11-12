@@ -148,3 +148,45 @@ func makeDir(t *testing.T, parent, name string) string {
 	require.NoError(t, os.Mkdir(dir, 0o755))
 	return dir
 }
+
+func TestPathsDiscoveryFailureKeepsPartialMatches(t *testing.T) {
+	t.Parallel()
+	for _, location := range []string{"hierarchy", "home", "kit"} {
+		t.Run(location, func(t *testing.T) {
+			t.Parallel()
+			parent, home, kit := t.TempDir(), t.TempDir(), ""
+			valid := writePrompt(t, parent, "ancestor")
+			work := makeDir(t, parent, "project")
+			brokenDir := work
+			switch location {
+			case "home":
+				brokenDir = home
+			case "kit":
+				kit = t.TempDir()
+				brokenDir = makeDir(t, kit, KitSubdir)
+			}
+			broken := filepath.Join(brokenDir, promptFile)
+			if err := os.Symlink(broken, broken); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			paths, err := PathsWithError(work, home, kit, promptFile)
+			require.Error(t, err)
+			assert.Equal(t, []string{valid}, paths)
+			assert.Equal(t, paths, Paths(work, home, kit, promptFile))
+			found, lookupErr := findInHierarchy(work, promptFile)
+			assert.Equal(t, valid, found)
+			if location == "hierarchy" {
+				require.Error(t, lookupErr)
+			} else {
+				require.NoError(t, lookupErr)
+			}
+		})
+	}
+}
+
+func TestPathsWithErrorMissingFiles(t *testing.T) {
+	t.Parallel()
+	paths, err := PathsWithError(t.TempDir(), t.TempDir(), "", "missing.md")
+	require.NoError(t, err)
+	assert.Empty(t, paths)
+}

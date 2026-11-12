@@ -2,22 +2,23 @@ package a2a
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
-	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
-	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	adksession "google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 
 	dagent "github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
@@ -29,7 +30,7 @@ import (
 // newDockerAgentAdapter creates a new ADK agent adapter from a docker agent team and agent name.
 // When agentName is empty, the team's default agent (one explicitly named "root" if it
 // exists, otherwise the first agent declared) is used.
-func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved) (agent.Agent, error) {
+func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir string) (agent.Agent, error) {
 	a, err := t.AgentOrDefault(agentName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get agent %s: %w", agentName, err)
@@ -42,13 +43,13 @@ func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Sto
 		Name:        agentName,
 		Description: desc,
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*adksession.Event, error] {
-			return runDockerAgent(ctx, t, agentName, a, sessStore, safety)
+			return runDockerAgent(ctx, t, agentName, a, sessStore, safety, workingDir)
 		},
 	})
 }
 
 // runDockerAgent executes a docker agent and returns ADK session events
-func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved) iter.Seq2[*adksession.Event, error] {
+func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved, workingDir string) iter.Seq2[*adksession.Event, error] {
 	return func(yield func(*adksession.Event, error) bool) {
 		// Decorate the inbound `a2a.message` SERVER span (created by
 		// otelhttp.NewHandler in server.go) with the GenAI semconv
@@ -78,6 +79,11 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		switch {
 		case err == nil:
 			sess = existing
+			// Reapply agent configuration; tool/history limits are not persisted.
+			session.WithMaxIterations(a.MaxIterations())(sess)
+			session.WithMaxConsecutiveToolCalls(a.MaxConsecutiveToolCalls())(sess)
+			session.WithMaxOldToolCallTokens(a.MaxOldToolCallTokens())(sess)
+			session.WithMaxToolResultTokens(a.MaxToolResultTokens())(sess)
 			sess.AddMessage(session.UserMessage(message))
 			sess.SetSafetyPolicy(servesafety.ResumeCeiling(sess.GetSafetyPolicy(), safety.Policy))
 			sess.NonInteractive = true
@@ -94,7 +100,6 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 				yield(nil, fmt.Errorf("check A2A context ID: %w", err))
 				return
 			default:
-				workingDir, _ := os.Getwd()
 				sess = session.New(
 					session.WithID(sessionID),
 					session.WithOrigin("a2a"),
@@ -114,6 +119,7 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		// Create runtime
 		rt, err := runtime.New(ctx, t,
 			runtime.WithCurrentAgent(agentName),
+			runtime.WithModelsDevFallback(embedded.Snapshot),
 			runtime.WithSessionStore(sessStore),
 			// Match the tracer scope used by `cmd/root/run.go` so
 			// MCP / A2A / API spans share the same instrumentation
@@ -129,17 +135,38 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			return
 		}
 
-		// Run the agent and collect events
-		eventsChan := rt.RunStream(ctx, sess)
+		// Early iterator exits must cancel and join the runtime.
+		streamCtx, cancel := context.WithCancel(ctx)
+		eventsChan := rt.RunStream(streamCtx, sess)
+		defer func() {
+			cancel()
+			for range eventsChan {
+			}
+		}()
 
 		// Track accumulated content for chunked responses
 		var contentBuilder strings.Builder
+
+		// finalEvent builds the turn-complete ADK event from whatever content
+		// was accumulated so far. Shared by the StreamStoppedEvent case and the
+		// post-loop fallback below, so both paths build an identical event.
+		finalEvent := func() *adksession.Event {
+			return &adksession.Event{
+				Author: agentName,
+				LLMResponse: model.LLMResponse{
+					Content:      genai.NewContentFromParts([]*genai.Part{{Text: contentBuilder.String()}}, genai.RoleModel),
+					Partial:      false,
+					TurnComplete: true,
+					FinishReason: genai.FinishReasonStop,
+				},
+			}
+		}
 
 		// Convert docker agent events to ADK events and yield them
 
 		for event := range eventsChan {
 			if ctx.Ended() {
-				slog.Debug("Invocation ended, stopping agent", "agent", agentName)
+				slog.DebugContext(ctx, "Invocation ended, stopping agent", "agent", agentName)
 				return
 			}
 
@@ -171,19 +198,18 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			case *runtime.StreamStoppedEvent:
 				// Send final complete event with all accumulated content
 				if contentBuilder.Len() > 0 {
-					finalEvent := &adksession.Event{
-						Author: agentName,
-						LLMResponse: model.LLMResponse{
-							Content:      genai.NewContentFromParts([]*genai.Part{{Text: contentBuilder.String()}}, genai.RoleModel),
-							Partial:      false,
-							TurnComplete: true,
-							FinishReason: genai.FinishReasonStop,
-						},
-					}
-					yield(finalEvent, nil)
+					yield(finalEvent(), nil)
 					return
 				}
 			}
+		}
+
+		// The channel closed without a StreamStoppedEvent: the runtime bounds
+		// how long it waits to deliver that event (#4136), but a consumer that
+		// abandoned the channel or an unexpected close should still complete
+		// the ADK turn rather than leave it hanging.
+		if contentBuilder.Len() > 0 {
+			yield(finalEvent(), nil)
 		}
 	}
 }

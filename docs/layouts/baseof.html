@@ -14,8 +14,7 @@
   {{ if not .IsHome }}{{ with .File }}{{ $editPath = .Path }}{{ end }}{{ end }}
   <meta name="docs-edit-url" content="https://github.com/docker/docker-agent/edit/main/docs/{{ $editPath }}">
 
-  {{/* Pages mirrored on docs.docker.com set `canonical:` in their front
-       matter so search engines treat the stable docs as authoritative. */}}
+  {{/* Each page declares its authoritative surface in front matter. */}}
   {{ with .Params.canonical }}<link rel="canonical" href="{{ . }}">{{ end }}
 
   <meta property="og:title" content="{{ if .IsHome }}Docker Agent — Run AI agents from YAML, like containers{{ else }}{{ .Title }} – Docker Agent Docs{{ end }}">

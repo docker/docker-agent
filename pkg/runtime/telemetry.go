@@ -26,7 +26,7 @@ type Telemetry interface {
 	RecordError(ctx context.Context, message string)
 	// RecordToolCall is fired after every tool invocation, regardless of outcome.
 	RecordToolCall(ctx context.Context, toolName, sessionID, agentName string, duration time.Duration, err error)
-	// RecordTokenUsage is fired after each model response that reports usage.
+	// RecordTokenUsage reports per-call tokens and cost, not cumulative session totals.
 	RecordTokenUsage(ctx context.Context, model string, inputTokens, outputTokens int64, cost float64)
 }
 

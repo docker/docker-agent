@@ -1,6 +1,7 @@
 package backgroundjobs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"path/filepath"
@@ -14,12 +15,22 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func newTestTool(t *testing.T) *ToolSet {
 	t.Helper()
 	return New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
+}
+
+// pkg/safety duplicates the tool name to classify background commands
+// without importing this package; a rename must update both.
+func TestToolNameMatchesSafetyPackage(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, ToolNameRunBackgroundJob, safety.BackgroundJobToolName)
 }
 
 func TestRunBackgroundJobArgs_UnmarshalJSON_AcceptsCmdAndCommand(t *testing.T) {
@@ -37,6 +48,25 @@ func TestRunBackgroundJobArgs_UnmarshalJSON_AcceptsCmdAndCommand(t *testing.T) {
 	var blankCmd RunBackgroundJobArgs
 	require.NoError(t, json.Unmarshal([]byte(`{"cmd":"   ","command":"sleep 1"}`), &blankCmd))
 	assert.Equal(t, "sleep 1", blankCmd.Cmd)
+
+	// Mixed-case keys must not override the exact key the runtime
+	// classified (encoding/json struct decoding would let them).
+	for _, input := range []string{
+		`{"cmd":"git status","CMD":"rm -rf /tmp/x"}`,
+		`{"command":"git status","Command":"rm -rf /tmp/x"}`,
+	} {
+		var plain RunBackgroundJobArgs
+		require.NoError(t, json.Unmarshal([]byte(input), &plain))
+		var recall RunBackgroundJobRecallArgs
+		require.NoError(t, json.Unmarshal([]byte(input), &recall))
+
+		var fields map[string]any
+		require.NoError(t, json.Unmarshal([]byte(input), &fields))
+		classified, _ := safety.CommandArg(fields)
+		assert.Equal(t, "git status", classified)
+		assert.Equal(t, classified, plain.Cmd, input)
+		assert.Equal(t, classified, recall.Cmd, input)
+	}
 }
 
 func TestRunBackgroundJobRecallArgs_UnmarshalJSON_AcceptsRecall(t *testing.T) {
@@ -250,6 +280,83 @@ func TestBackgroundJobsTool_WaitBackgroundJob_Stopped(t *testing.T) {
 	assert.Contains(t, result.Output, "stopped")
 	assert.NotContains(t, result.Output, "Exit Code:",
 		"stopped jobs should not show an exit code")
+}
+
+func TestBackgroundJobsTool_StopEscalatesWhenSIGTERMIgnored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signals; skipped on Windows")
+	}
+
+	tool := newTestTool(t)
+	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{
+		Cmd: `trap '' TERM; echo ready; while :; do sleep 1; done`,
+	}, tools.NopRuntime{})
+	require.NoError(t, err)
+
+	var job *backgroundJob
+	tool.handler.jobs.Range(func(_ string, candidate *backgroundJob) bool {
+		job = candidate
+		return false
+	})
+	require.NotNil(t, job)
+	require.Eventually(t, func() bool {
+		job.outputMu.RLock()
+		defer job.outputMu.RUnlock()
+		return strings.Contains(job.output.String(), "ready")
+	}, time.Second, 10*time.Millisecond)
+
+	started := time.Now()
+	result, err := tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: job.id})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Less(t, time.Since(started), 5*time.Second)
+	select {
+	case <-job.done:
+	case <-time.After(time.Second):
+		t.Fatal("process survived stop escalation")
+	}
+	assert.Equal(t, statusStopped, job.status.Load())
+
+	result, err = tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: job.id})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Output, "not running")
+}
+
+func TestBackgroundJobsTool_StopWaitsForRealExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signals; skipped on Windows")
+	}
+
+	tool := newTestTool(t)
+	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{
+		Cmd: `trap 'sleep 0.1; exit 0' TERM; echo ready; while :; do sleep 1; done`,
+	}, tools.NopRuntime{})
+	require.NoError(t, err)
+
+	var job *backgroundJob
+	tool.handler.jobs.Range(func(_ string, candidate *backgroundJob) bool {
+		job = candidate
+		return false
+	})
+	require.NotNil(t, job)
+	require.Eventually(t, func() bool {
+		job.outputMu.RLock()
+		defer job.outputMu.RUnlock()
+		return strings.Contains(job.output.String(), "ready")
+	}, time.Second, 10*time.Millisecond)
+
+	result, err := tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: job.id})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	select {
+	case <-job.done:
+	default:
+		t.Fatal("stop returned before the command exited")
+	}
+	assert.Equal(t, statusStopped, job.status.Load())
 }
 
 func TestBackgroundJobsTool_RunBackgroundJob(t *testing.T) {
@@ -468,4 +575,77 @@ func TestBackgroundJobsTool_BackgroundedChildDoesNotBlockReturn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, listResult.Output, "Status: completed")
 	assert.Contains(t, listResult.Output, "Exit Code: 0")
+}
+
+func TestBackgroundJobsTool_WithoutBackgroundJobs(t *testing.T) {
+	t.Parallel()
+
+	for _, recall := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no recall", true: "recall"}[recall], func(t *testing.T) {
+			t.Parallel()
+
+			toolset := newTestTool(t)
+			toolset.handler.recall = recall
+			available, err := toolset.Tools(t.Context())
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(WithoutBackgroundJobs(t.Context()))
+			defer cancel()
+			result, err := available[0].Handler(ctx, tools.ToolCall{
+				Function: tools.FunctionCall{
+					Name:      ToolNameRunBackgroundJob,
+					Arguments: `{"cmd":"echo must-not-run","recall":true}`,
+				},
+			}, tools.NopRuntime{})
+			require.ErrorContains(t, err, "background jobs are not supported by this host")
+			assert.Nil(t, result)
+			assert.Zero(t, toolset.handler.jobCounter.Load(), "rejection must precede spawning a process")
+		})
+	}
+}
+
+func TestBackgroundJobRecallBoundsLogAndPreservesStatus(t *testing.T) {
+	t.Parallel()
+	job := &backgroundJob{id: "job_1", cmd: strings.Repeat("c", 100_000)}
+	got := formatBackgroundJobRecall(job, statusFailed, 42, strings.Repeat("世", 4*1024*1024)+"last diagnostic")
+	assert.LessOrEqual(t, len(got), 50*1024)
+	assert.Contains(t, got, "job_1 finished with status failed (exit code 42)")
+	assert.Contains(t, got, "last diagnostic")
+	assert.Contains(t, got, "view_background_job")
+	assert.Equal(t, got, strings.ToValidUTF8(got, ""))
+}
+
+func TestBackgroundJobViewAndWaitOutputPipeline(t *testing.T) {
+	t.Parallel()
+	tool := newTestTool(t)
+	payload := strings.Repeat("x", maxBackgroundJobOutputBytes)
+	job := &backgroundJob{id: "job_big", cmd: "download", output: bytes.NewBufferString(payload), startTime: time.Now(), done: make(chan struct{}), exitCode: 7}
+	job.status.Store(statusFailed)
+	close(job.done)
+	tool.handler.jobs.Store(job.id, job)
+	registry := hooks.NewRegistry()
+	require.NoError(t, builtins.Register(registry))
+	executor := hooks.NewExecutorWithRegistry(builtins.ApplyAgentDefaults(nil, builtins.AgentDefaults{}), t.TempDir(), nil, registry)
+	t.Cleanup(func() {
+		_, _ = executor.Dispatch(context.WithoutCancel(t.Context()), hooks.EventSessionEnd, &hooks.Input{SessionID: t.Name()})
+	})
+	for _, name := range []string{ToolNameViewBackgroundJob, ToolNameWaitBackgroundJob} {
+		var result *tools.ToolCallResult
+		var err error
+		if name == ToolNameViewBackgroundJob {
+			result, err = tool.handler.ViewBackgroundJob(t.Context(), ViewBackgroundJobArgs{JobID: job.id})
+		} else {
+			result, err = tool.handler.WaitBackgroundJob(t.Context(), WaitBackgroundJobArgs{JobID: job.id})
+		}
+		require.NoError(t, err)
+		transformed, err := executor.Dispatch(t.Context(), hooks.EventToolResponseTransform, &hooks.Input{SessionID: t.Name(), ToolCategory: "background_jobs", ToolName: name, ToolResponse: result.Output})
+		require.NoError(t, err)
+		require.NotNil(t, transformed.UpdatedToolResponse)
+		got := *transformed.UpdatedToolResponse
+		assert.LessOrEqual(t, len(got), 50*1024)
+		assert.Contains(t, got, "Job ID: job_big")
+		assert.Contains(t, got, "Status: failed")
+		assert.Contains(t, got, "Exit Code: 7")
+		assert.Contains(t, got, "available in a file:")
+	}
+	assert.Equal(t, payload, job.output.String())
 }

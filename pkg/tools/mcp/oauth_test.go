@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -202,6 +203,75 @@ func TestGetValidToken_UsesStoredCredentialsForRefresh(t *testing.T) {
 	}
 	assert.Equal(t, []string{"read", "write"}, updated.RequestedScopes,
 		"RequestedScopes must survive a silent refresh unchanged")
+	assert.Empty(t, updated.TokenEndpointAuthMethod,
+		"a legacy token with no auth method must keep posting the secret")
+}
+
+func TestGetValidToken_RefreshKeepsNegotiatedBasic(t *testing.T) {
+	t.Parallel()
+
+	var auth string
+	var form url.Values
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 srv.URL,
+			"token_endpoint":         srv.URL + "/token",
+			"authorization_endpoint": srv.URL + "/authorize",
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		form, _ = url.ParseQuery(string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "fresh-at",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+			"refresh_token": "fresh-rt",
+		})
+	})
+
+	raw, err := json.Marshal(&OAuthToken{
+		AccessToken:             "old-at",
+		TokenType:               "Bearer",
+		RefreshToken:            "old-rt",
+		ExpiresAt:               time.Now().Add(-time.Hour),
+		ClientID:                "ci d+1",
+		ClientSecret:            "s@ec:ret",
+		TokenEndpointAuthMethod: "client_secret_basic",
+	})
+	require.NoError(t, err)
+	var expired OAuthToken
+	require.NoError(t, json.Unmarshal(raw, &expired))
+
+	store := NewInMemoryTokenStore()
+	require.NoError(t, store.StoreToken(srv.URL, &expired))
+
+	transport := &oauthTransport{
+		base:       newTestTransport(t),
+		tokenStore: store,
+		baseURL:    srv.URL,
+	}
+	got := transport.getValidToken(t.Context())
+	require.NotNil(t, got)
+	assert.Equal(t, "fresh-at", got.AccessToken)
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte(url.QueryEscape("ci d+1")+":"+url.QueryEscape("s@ec:ret")))
+	assert.Equal(t, want, auth)
+	assert.Empty(t, form.Get("client_id"))
+	assert.Empty(t, form.Get("client_secret"))
+
+	updated, err := store.GetToken(srv.URL)
+	require.NoError(t, err)
+	assert.Equal(t, "client_secret_basic", updated.TokenEndpointAuthMethod)
 }
 
 // TestGetValidToken_UsesStoredAuthServerForRefresh verifies that silent
@@ -380,37 +450,6 @@ func TestRefreshAccessToken_SendsEmptyClientIDWhenNotStored(t *testing.T) {
 	}
 }
 
-// TestCallbackServer_RejectsCallbackBeforeStateSet verifies that a callback
-// arriving before SetExpectedState is called is rejected (CSRF protection).
-func TestCallbackServer_RejectsCallbackBeforeStateSet(t *testing.T) {
-	t.Parallel()
-
-	cs, err := NewCallbackServer(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cs.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cs.Shutdown(t.Context()) }()
-
-	// Send a callback before SetExpectedState has been called.
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, cs.GetRedirectURI()+"?code=authcode&state=anything", http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &http.Client{Transport: newTestTransport(t)}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d — callback accepted without expected state set", resp.StatusCode)
-	}
-}
-
 // TestExchangeCodeForToken_SlackNestedResponse verifies that Slack's
 // oauth.v2.user.access response shape (where the user access_token is
 // nested inside an `authed_user` object) is decoded correctly. Before
@@ -530,7 +569,7 @@ func TestOAuthTransport_DoesNotForwardBearerAcrossOrigins(t *testing.T) {
 	store := NewInMemoryTokenStore()
 	require.NoError(t, store.StoreToken(source.URL, &OAuthToken{AccessToken: "stored-at"}))
 	transport := &oauthTransport{
-		base:       http.DefaultTransport,
+		base:       newTestTransport(t),
 		tokenStore: store,
 		baseURL:    source.URL,
 	}
@@ -1490,6 +1529,7 @@ type unmanagedOAuthTestServer struct {
 
 	tokenCalls atomic.Int32
 	lastForm   url.Values
+	lastAuth   string
 	prmHeaders http.Header
 }
 
@@ -1526,6 +1566,7 @@ func newUnmanagedOAuthTestServer(t *testing.T) *unmanagedOAuthTestServer {
 		srv.tokenCalls.Add(1)
 		_ = r.ParseForm()
 		srv.lastForm = r.Form
+		srv.lastAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"access_token":"exchanged-at","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-tok"}`))
 	})
@@ -1637,7 +1678,9 @@ func TestUnmanagedOAuthFlow_DriveFlow_ExchangesCodeForToken(t *testing.T) {
 	assert.Equal(t, "abc", srv.lastForm.Get("code"))
 	assert.Equal(t, redirectURI, srv.lastForm.Get("redirect_uri"),
 		"redirect_uri sent at /token must match the one used at /authorize per RFC 6749 §4.1.3")
-	assert.Equal(t, "registered-client-id", srv.lastForm.Get("client_id"))
+	assert.Empty(t, srv.lastForm.Get("client_id"))
+	assert.Empty(t, srv.lastForm.Get("client_secret"))
+	assert.Equal(t, "Basic "+base64.StdEncoding.EncodeToString([]byte("registered-client-id:registered-secret")), srv.lastAuth)
 	assert.NotEmpty(t, srv.lastForm.Get("code_verifier"), "PKCE verifier must be sent at exchange")
 
 	// Verify the token landed in the store with the credentials stamped on
@@ -1649,6 +1692,7 @@ func TestUnmanagedOAuthFlow_DriveFlow_ExchangesCodeForToken(t *testing.T) {
 	assert.Equal(t, "refresh-tok", tok.RefreshToken)
 	assert.Equal(t, "registered-client-id", tok.ClientID)
 	assert.Equal(t, "registered-secret", tok.ClientSecret)
+	assert.Equal(t, "client_secret_basic", tok.TokenEndpointAuthMethod)
 	assert.Equal(t, srv.URL, tok.AuthServer)
 }
 
@@ -2242,10 +2286,12 @@ func TestRegisterClient_GrantTypesIncludeRefreshToken(t *testing.T) {
 	meta := &AuthorizationServerMetadata{
 		RegistrationEndpoint: srv.URL,
 	}
-	clientID, clientSecret, err := RegisterClient(t.Context(), meta, "https://example.test/oauth/cb", nil)
+	clientID, clientSecret, authMethod, err := RegisterClient(t.Context(), meta, "https://example.test/oauth/cb", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "test-client", clientID)
 	assert.Equal(t, "test-secret", clientSecret)
+	assert.Equal(t, "client_secret_basic", authMethod)
+	assert.Equal(t, "client_secret_basic", registrationBody["token_endpoint_auth_method"])
 
 	grantTypes, _ := registrationBody["grant_types"].([]any)
 	require.Len(t, grantTypes, 2, "grant_types must list both grants the client uses")
@@ -2372,7 +2418,7 @@ func TestRoundTrip_ServerInvalidTokenEvictsAndRefreshes(t *testing.T) {
 
 	var oauthSuccessFired atomic.Bool
 	transport := newTransportWithStaleToken(t, srv.URL)
-	transport.onOAuthSuccess = func() { oauthSuccessFired.Store(true) }
+	transport.onOAuthSuccess = func(context.Context) { oauthSuccessFired.Store(true) }
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
 	require.NoError(t, err)
@@ -2559,7 +2605,7 @@ func TestRoundTrip_ConcurrentInvalidToken_RefreshesOnce(t *testing.T) {
 	srv, tokenCalls := newInvalidTokenTestServer(t)
 
 	transport := newTransportWithStaleToken(t, srv.URL)
-	transport.onOAuthSuccess = func() {}
+	transport.onOAuthSuccess = func(context.Context) {}
 
 	const n = 6
 	results := make(chan error, n)
@@ -2886,9 +2932,10 @@ func TestResolveClientCredentials_NoDCR_PromptsUser(t *testing.T) {
 		oauthConfig: &latest.RemoteOAuthConfig{Scopes: []string{"read", "write"}},
 	}
 
-	clientID, clientSecret, scopes, err := transport.resolveClientCredentials(
+	clientID, clientSecret, scopes, _, err := transport.resolveClientCredentials(
 		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb",
-		[]string{"challenge-scope"}, []string{"prm-scope"})
+		[]string{"challenge-scope"}, []string{"prm-scope"},
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "user-client-id", clientID)
 	assert.Equal(t, "user-secret", clientSecret)
@@ -2928,7 +2975,7 @@ func TestResolveClientCredentials_DCRFails_PromptsUser(t *testing.T) {
 		oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(true),
 	}
 
-	clientID, clientSecret, scopes, err := transport.resolveClientCredentials(
+	clientID, clientSecret, scopes, _, err := transport.resolveClientCredentials(
 		t.Context(),
 		&AuthorizationServerMetadata{RegistrationEndpoint: srv.URL},
 		"https://example.test/cb",
@@ -2983,7 +3030,7 @@ func TestResolveClientCredentials_ExplicitClientID_ConfiguredOnly(t *testing.T) 
 				oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(true),
 			}
 
-			clientID, clientSecret, scopes, err := transport.resolveClientCredentials(
+			clientID, clientSecret, scopes, _, err := transport.resolveClientCredentials(
 				t.Context(),
 				&AuthorizationServerMetadata{RegistrationEndpoint: srv.URL},
 				"https://example.test/cb",
@@ -3016,8 +3063,9 @@ func TestResolveClientCredentials_PromptDeclined(t *testing.T) {
 				requestElicitation: clientCredsElicit(&captured, tools.ElicitationResult{Action: action}),
 			}
 
-			clientID, clientSecret, _, err := transport.resolveClientCredentials(
-				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil)
+			clientID, clientSecret, _, _, err := transport.resolveClientCredentials(
+				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil,
+			)
 			require.Error(t, err)
 			assert.Empty(t, clientID)
 			assert.Empty(t, clientSecret)
@@ -3051,8 +3099,9 @@ func TestResolveClientCredentials_PromptMissingClientID(t *testing.T) {
 				}),
 			}
 
-			clientID, clientSecret, _, err := transport.resolveClientCredentials(
-				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil)
+			clientID, clientSecret, _, _, err := transport.resolveClientCredentials(
+				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil,
+			)
 			require.Error(t, err)
 			assert.Empty(t, clientID)
 			assert.Empty(t, clientSecret)
@@ -3070,8 +3119,9 @@ func TestResolveClientCredentials_NoElicitationBridgeDefersAuth(t *testing.T) {
 
 	transport := &oauthTransport{baseURL: "https://mcp.example.test/mcp"}
 
-	clientID, clientSecret, _, err := transport.resolveClientCredentials(
-		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil)
+	clientID, clientSecret, _, _, err := transport.resolveClientCredentials(
+		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil,
+	)
 	require.Error(t, err)
 	assert.Empty(t, clientID)
 	assert.Empty(t, clientSecret)
@@ -3552,7 +3602,7 @@ func TestResolveClientCredentials_DCRSuccess_ScopeSelection(t *testing.T) {
 				oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(true),
 			}
 
-			clientID, _, scopes, err := transport.resolveClientCredentials(
+			clientID, _, scopes, _, err := transport.resolveClientCredentials(
 				t.Context(),
 				&AuthorizationServerMetadata{RegistrationEndpoint: srv.URL},
 				"https://example.test/cb",
@@ -3753,12 +3803,19 @@ func fakeBrowserOpener(t *testing.T) <-chan string {
 }
 
 // requireCapturedAuthorizeURL waits for the fake browser opener to deliver
-// the authorization URL, timing out after 15 seconds.
-func requireCapturedAuthorizeURL(t *testing.T, urlCh <-chan string) string {
+// the authorization URL, or fail early if the optional login result arrives.
+func requireCapturedAuthorizeURL(t *testing.T, urlCh <-chan string, loginResults ...<-chan error) string {
 	t.Helper()
+	var errCh <-chan error
+	if len(loginResults) > 0 {
+		errCh = loginResults[0]
+	}
 	select {
 	case u := <-urlCh:
 		return u
+	case err := <-errCh:
+		t.Fatalf("OAuth login ended before opening the browser: %v", err)
+		return ""
 	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for the fake browser opener to receive the authorize URL")
 		return ""

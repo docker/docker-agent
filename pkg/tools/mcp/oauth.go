@@ -231,6 +231,8 @@ func validateAndFillDefaults(metadata *AuthorizationServerMetadata, authServerUR
 		metadata.GrantTypesSupported = []string{"authorization_code", "implicit"}
 	}
 	if len(metadata.TokenEndpointAuthMethodsSupported) == 0 {
+		// RFC 8414: omitting token_endpoint_auth_methods_supported means
+		// only client_secret_basic is supported.
 		metadata.TokenEndpointAuthMethodsSupported = []string{"client_secret_basic"}
 	}
 	if len(metadata.RevocationEndpointAuthMethodsSupported) == 0 {
@@ -389,7 +391,8 @@ func parseAuthParams(wwwAuth string) map[string]string {
 		}
 		name := strings.ToLower(s[:nameEnd])
 		s = strings.TrimLeft(s[nameEnd:], " \t")
-		if !strings.HasPrefix(s, "=") {
+		rest, found := strings.CutPrefix(s, "=")
+		if !found {
 			// A bare token rather than a name=value auth-param. In a
 			// multi-challenge header this is the next challenge's
 			// auth-scheme token (e.g. "Bearer" in
@@ -403,7 +406,7 @@ func parseAuthParams(wwwAuth string) map[string]string {
 			// documented, deterministic behavior on such input.
 			continue
 		}
-		s = strings.TrimLeft(s[1:], " \t")
+		s = strings.TrimLeft(rest, " \t")
 
 		var value string
 		if strings.HasPrefix(s, `"`) {
@@ -454,7 +457,7 @@ func callbackRedirectURLFrom(c *latest.RemoteOAuthConfig) string {
 
 // callbackPortFrom is a nil-safe accessor for the optional CallbackPort
 // field on a RemoteOAuthConfig; zero means "let the OS pick a free port",
-// both here and as NewCallbackServerOnPort's port argument.
+// both here and for the callback listener.
 func callbackPortFrom(c *latest.RemoteOAuthConfig) int {
 	if c == nil {
 		return 0
@@ -474,7 +477,7 @@ type oauthTransport struct {
 	// onOAuthSuccess notifies the runtime that a token was obtained or
 	// silently refreshed; production wiring points it at
 	// sessionClient.oauthSuccess. May be nil (tests); then it's a no-op.
-	onOAuthSuccess            func()
+	onOAuthSuccess            func(context.Context)
 	tokenStore                OAuthTokenStore
 	baseURL                   string
 	managed                   bool
@@ -500,6 +503,12 @@ type oauthTransport struct {
 	// swallows in favor of a bare http.StatusText.
 	lastErrStatus int
 	lastErrBody   []byte
+	// lastErrRetryAfter captures the raw Retry-After header value (if any) of
+	// the most recent non-2xx response, so enrichConnectError can forward it
+	// to modelerrors.WrapHTTPError and have the StartableToolSet backoff gate
+	// honor a server-supplied retry hint instead of falling back to the
+	// generic computed delay.
+	lastErrRetryAfter string
 	// lastAuthRequired records when the transport short-circuited an
 	// interactive OAuth flow because the request context disallowed
 	// prompts (see WithoutInteractivePrompts). The MCP SDK wraps transport
@@ -534,9 +543,9 @@ func (t *oauthTransport) elicit(ctx context.Context, params *mcpsdk.ElicitParams
 }
 
 // notifyOAuthSuccess invokes the injected OAuth-success callback, if any.
-func (t *oauthTransport) notifyOAuthSuccess() {
+func (t *oauthTransport) notifyOAuthSuccess(ctx context.Context) {
 	if t.onOAuthSuccess != nil {
-		t.onOAuthSuccess()
+		t.onOAuthSuccess(ctx)
 	}
 }
 
@@ -595,7 +604,7 @@ func (t *oauthTransport) handleServerRejectedToken(ctx context.Context, prev *OA
 		_, err := t.refreshStoredToken(ctx, prev)
 		if err == nil {
 			slog.DebugContext(ctx, "Silently refreshed server-rejected token", "url", sanitizeURLForLog(t.baseURL))
-			t.notifyOAuthSuccess()
+			t.notifyOAuthSuccess(ctx)
 			return nil
 		}
 		slog.DebugContext(ctx, "Refresh failed after server-side token rejection; falling back to interactive auth",
@@ -657,8 +666,7 @@ func (t *oauthTransport) startInteractiveFlowLocked(ctx context.Context, authSer
 		// next iteration. Setting this after returning would race: the queued
 		// goroutine could acquire the mutex first and start a fresh flow while
 		// we are still bubbling the error up the stack.
-		var declinedErr *OAuthDeclinedError
-		if errors.As(err, &declinedErr) {
+		if _, ok := errors.AsType[*OAuthDeclinedError](err); ok {
 			t.mu.Lock()
 			t.lastOAuthDeclined = true
 			t.mu.Unlock()
@@ -779,8 +787,7 @@ func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Respo
 				// for the user). Treat the same as the explicit non-interactive
 				// path: flag the toolset as needing auth and let it retry on
 				// the next conversation turn with a properly-wired bridge.
-				var authErr *AuthorizationRequiredError
-				if errors.As(err, &authErr) {
+				if authErr, ok := errors.AsType[*AuthorizationRequiredError](err); ok {
 					slog.Debug("OAuth flow deferred: elicitation bridge not ready", "url", sanitizeURLForLog(t.baseURL))
 					if authErr.URL == "" {
 						authErr.URL = t.baseURL
@@ -797,8 +804,7 @@ func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Respo
 				// "%w: %v") otherwise destroys the unwrap chain. See
 				// remote.go enrichConnectError + the lastAuthRequired
 				// pattern this mirrors.
-				var declinedErr *OAuthDeclinedError
-				if errors.As(err, &declinedErr) {
+				if declinedErr, ok := errors.AsType[*OAuthDeclinedError](err); ok {
 					slog.Debug("OAuth flow declined by user", "url", sanitizeURLForLog(t.baseURL))
 					if declinedErr.URL == "" {
 						declinedErr.URL = t.baseURL
@@ -874,6 +880,7 @@ func (t *oauthTransport) logErrorResponse(req *http.Request, resp *http.Response
 	t.mu.Lock()
 	t.lastErrStatus = resp.StatusCode
 	t.lastErrBody = body
+	t.lastErrRetryAfter = resp.Header.Get("Retry-After")
 	t.mu.Unlock()
 
 	slog.Warn("Authenticated MCP request was rejected by the server",
@@ -885,23 +892,33 @@ func (t *oauthTransport) logErrorResponse(req *http.Request, resp *http.Response
 	)
 }
 
-// lastServerError returns the status code and a short, human-readable
-// explanation drawn from the most recent non-2xx response seen by this
-// transport. The string is empty when no such response has been captured
-// or when the body yielded no useful text.
+// lastServerErrorSnapshot returns the status code, a short human-readable
+// explanation, and the raw Retry-After header value, all captured together
+// under a single lock from the most recent non-2xx response seen by this
+// transport. status is 0 when no such response has been captured; msg and
+// retryAfter are "" when the body yielded no useful text / no header was
+// present, respectively.
+//
+// The three fields are read under one lock (rather than via separate
+// accessors) so a caller building a combined error never pairs a status
+// captured from one response with a Retry-After header captured from a
+// different, concurrent one: this transport's RoundTrip can be invoked
+// concurrently for a single logical connect attempt (e.g. a standalone SSE
+// probe alongside the initialize call).
 //
 // This is how the transport surfaces provider-specific errors (e.g. Slack's
 // "App is not enabled for Slack MCP server access") that would otherwise
 // be hidden behind the MCP SDK's generic http.StatusText-derived messages.
-func (t *oauthTransport) lastServerError() (int, string) {
+func (t *oauthTransport) lastServerErrorSnapshot() (status int, msg, retryAfter string) {
 	t.mu.Lock()
-	status := t.lastErrStatus
+	status = t.lastErrStatus
 	body := t.lastErrBody
+	retryAfter = t.lastErrRetryAfter
 	t.mu.Unlock()
 	if status == 0 {
-		return 0, ""
+		return 0, "", ""
 	}
-	return status, extractServerMessage(body)
+	return status, extractServerMessage(body), retryAfter
 }
 
 // authorizationRequired reports whether the transport short-circuited an
@@ -1070,6 +1087,7 @@ func (t *oauthTransport) refreshStoredToken(ctx context.Context, prev *OAuthToke
 		prev.RefreshToken,
 		prev.ClientID,
 		prev.ClientSecret,
+		prev.TokenEndpointAuthMethod,
 	)
 	if err != nil {
 		slog.DebugContext(ctx, "Token refresh failed, will require interactive auth", "error", err)
@@ -1252,78 +1270,66 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)
 	}
 
-	slog.DebugContext(ctx, "Creating OAuth callback server")
-	callbackServer, err := NewCallbackServerOnPort(ctx, callbackPortFrom(t.oauthConfig))
-	if err != nil {
-		return fmt.Errorf("failed to create callback server: %w", err)
-	}
-	defer func() {
-		// Detach from ctx's cancellation (the request may be done) but
-		// keep its trace context for the shutdown.
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if err := callbackServer.Shutdown(shutdownCtx); err != nil {
-			slog.ErrorContext(ctx, "Failed to shutdown callback server", "error", err)
-		}
-	}()
-
-	if err := callbackServer.Start(); err != nil {
-		return fmt.Errorf("failed to start callback server: %w", err)
-	}
-
-	redirectURI := callbackServer.ResolveRedirectURI(callbackRedirectURLFrom(t.oauthConfig))
-	slog.DebugContext(ctx, "Using redirect URI", "uri", redirectURI)
-
-	clientID, clientSecret, scopes, err := t.resolveClientCredentials(ctx, authServerMetadata, redirectURI, challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported)
-	if err != nil {
-		return err
-	}
-
-	state, err := GenerateState()
-	if err != nil {
-		return fmt.Errorf("failed to generate state: %w", err)
-	}
-
-	callbackServer.SetExpectedState(state)
-	verifier := GeneratePKCEVerifier()
+	var redirectURI, clientID, clientSecret, authMethod, verifier, state string
+	var scopes []string
 	resourceIndicator := cmp.Or(resourceMetadata.Resource, t.baseURL)
+	prepared := false
+	code, receivedState, err := RequestAuthorizationCode(ctx, callbackPortFrom(t.oauthConfig), func(ctx context.Context, address CallbackAddress) (AuthorizationRequest, error) {
+		redirectURI = address.ResolveRedirectURI(callbackRedirectURLFrom(t.oauthConfig))
+		slog.DebugContext(ctx, "Using redirect URI", "uri", redirectURI)
 
-	authURL := BuildAuthorizationURL(
-		authServerMetadata.AuthorizationEndpoint,
-		clientID,
-		redirectURI,
-		state,
-		oauth2.S256ChallengeFromVerifier(verifier),
-		resourceIndicator,
-		scopes,
-	)
+		clientID, clientSecret, scopes, authMethod, err = t.resolveClientCredentials(ctx, authServerMetadata, redirectURI, challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported)
+		if err != nil {
+			return AuthorizationRequest{}, err
+		}
 
-	result, err := t.elicit(ctx, &mcpsdk.ElicitParams{
-		Message:         fmt.Sprintf("The MCP server at %s requires OAuth authorization. Do you want to proceed?", t.baseURL),
-		RequestedSchema: nil,
-		Meta: map[string]any{
-			"docker-agent/type":       "oauth_flow",
-			"docker-agent/server_url": t.baseURL,
-		},
+		state, err = GenerateState()
+		if err != nil {
+			return AuthorizationRequest{}, fmt.Errorf("failed to generate state: %w", err)
+		}
+
+		verifier = GeneratePKCEVerifier()
+
+		authURL := BuildAuthorizationURL(
+			authServerMetadata.AuthorizationEndpoint,
+			clientID,
+			redirectURI,
+			state,
+			oauth2.S256ChallengeFromVerifier(verifier),
+			resourceIndicator,
+			scopes,
+		)
+
+		result, err := t.elicit(ctx, &mcpsdk.ElicitParams{
+			Message:         fmt.Sprintf("The MCP server at %s requires OAuth authorization. Do you want to proceed?", t.baseURL),
+			RequestedSchema: nil,
+			Meta: map[string]any{
+				"docker-agent/type":       "oauth_flow",
+				"docker-agent/server_url": t.baseURL,
+			},
+		})
+		if err != nil {
+			return AuthorizationRequest{}, fmt.Errorf("failed to send elicitation request: %w", err)
+		}
+
+		slog.DebugContext(ctx, "Elicitation response received", "result", result)
+
+		if result.Action != tools.ElicitationActionAccept {
+			return AuthorizationRequest{}, errors.New("user declined OAuth authorization")
+		}
+
+		slog.DebugContext(ctx, "Requesting authorization code", "url", sanitizeURLForLog(authURL))
+		span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "request_authorization_code")))
+
+		prepared = true
+		return AuthorizationRequest{URL: authURL, State: state}, nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to send elicitation request: %w", err)
-	}
-
-	slog.DebugContext(ctx, "Elicitation response received", "result", result)
-
-	if result.Action != tools.ElicitationActionAccept {
-		return errors.New("user declined OAuth authorization")
-	}
-
-	slog.DebugContext(ctx, "Requesting authorization code", "url", sanitizeURLForLog(authURL))
-	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "request_authorization_code")))
-
-	code, receivedState, err := RequestAuthorizationCode(ctx, authURL, callbackServer, state)
-	if err != nil {
+		if !prepared {
+			return err
+		}
 		return fmt.Errorf("failed to get authorization code: %w", err)
 	}
-
 	if receivedState != state {
 		return errors.New("state mismatch in authorization response")
 	}
@@ -1340,6 +1346,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		clientSecret,
 		redirectURI,
 		resourceIndicator,
+		authMethod,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to exchange code for token: %w", err)
@@ -1347,6 +1354,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 
 	token.ClientID = clientID
 	token.ClientSecret = clientSecret
+	token.TokenEndpointAuthMethod = authMethod
 	token.AuthServer = resourceMetadata.AuthorizationServers[0]
 	token.RequestedScopes = scopes
 
@@ -1355,7 +1363,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	// Notify the runtime that the OAuth flow was successful
-	t.notifyOAuthSuccess()
+	t.notifyOAuthSuccess(ctx)
 
 	slog.DebugContext(ctx, "OAuth flow completed successfully")
 	return nil
@@ -1375,19 +1383,19 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 // stored token's RequestedScopes. The explicit-credentials and prompt-
 // fallback branches never widen scope via discovery: they always return
 // only the configured scopes (nil when none are configured).
-func (t *oauthTransport) resolveClientCredentials(ctx context.Context, authServerMetadata *AuthorizationServerMetadata, redirectURI string, challengeScopes, prmScopesSupported []string) (clientID, clientSecret string, scopes []string, err error) {
+func (t *oauthTransport) resolveClientCredentials(ctx context.Context, authServerMetadata *AuthorizationServerMetadata, redirectURI string, challengeScopes, prmScopesSupported []string) (clientID, clientSecret string, scopes []string, authMethod string, err error) {
 	switch {
 	case t.oauthConfig != nil && t.oauthConfig.ClientID != "":
 		// Use explicit credentials from config
 		slog.DebugContext(ctx, "Using explicit OAuth credentials from config")
-		return t.oauthConfig.ClientID, t.oauthConfig.ClientSecret, t.oauthConfig.Scopes, nil
+		return t.oauthConfig.ClientID, t.oauthConfig.ClientSecret, t.oauthConfig.Scopes, "", nil
 	case authServerMetadata.RegistrationEndpoint != "":
 		slog.DebugContext(ctx, "Attempting dynamic client registration")
 		// Select before registering so the exact same scopes go into the
 		// DCR request and are returned for reuse at /authorize and on the
 		// stored token.
 		requestedScopes := selectDCRScopes(configuredScopes(t.oauthConfig), challengeScopes, prmScopesSupported)
-		clientID, clientSecret, err = oauthflow.RegisterClientWithClient(
+		clientID, clientSecret, authMethod, err = oauthflow.RegisterClientWithClient(
 			ctx,
 			t.oauthClient(),
 			authServerMetadata,
@@ -1398,18 +1406,18 @@ func (t *oauthTransport) resolveClientCredentials(ctx context.Context, authServe
 			slog.DebugContext(ctx, "Dynamic registration failed, asking the user for client credentials", "error", err)
 			promptedID, promptedSecret, promptErr := t.promptForClientCredentials(ctx, "Dynamic client registration failed.")
 			if promptErr != nil {
-				return "", "", nil, fmt.Errorf("dynamic client registration failed (%w): %w", err, promptErr)
+				return "", "", nil, "", fmt.Errorf("dynamic client registration failed (%w): %w", err, promptErr)
 			}
-			return promptedID, promptedSecret, configuredScopes(t.oauthConfig), nil
+			return promptedID, promptedSecret, configuredScopes(t.oauthConfig), "", nil
 		}
-		return clientID, clientSecret, requestedScopes, nil
+		return clientID, clientSecret, requestedScopes, authMethod, nil
 	default:
 		slog.DebugContext(ctx, "Authorization server does not support dynamic client registration, asking the user for client credentials")
 		promptedID, promptedSecret, promptErr := t.promptForClientCredentials(ctx, "The authorization server does not support dynamic client registration.")
 		if promptErr != nil {
-			return "", "", nil, fmt.Errorf("authorization server does not support dynamic client registration and no explicit OAuth credentials configured: %w", promptErr)
+			return "", "", nil, "", fmt.Errorf("authorization server does not support dynamic client registration and no explicit OAuth credentials configured: %w", promptErr)
 		}
-		return promptedID, promptedSecret, configuredScopes(t.oauthConfig), nil
+		return promptedID, promptedSecret, configuredScopes(t.oauthConfig), "", nil
 	}
 }
 
@@ -1538,13 +1546,14 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 		clientID          string
 		clientSecret      string
 		scopes            []string
+		authMethod        string
 		expectedState     string
 		pkceVerifier      string
 		resourceIndicator string
 	)
 
 	if driveFlow {
-		clientID, clientSecret, scopes, err = t.resolveClientCredentials(ctx, authServerMetadata, redirectURI, challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported)
+		clientID, clientSecret, scopes, authMethod, err = t.resolveClientCredentials(ctx, authServerMetadata, redirectURI, challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported)
 		if err != nil {
 			return err
 		}
@@ -1689,7 +1698,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 		// generated and is currently awaiting. Re-validating against
 		// `expectedState` here would be a tautology, so we go
 		// straight to the token exchange.
-		token, consumeErr = t.exchangeAuthorizationCode(ctx, cb.Code, authServerMetadata, pkceVerifier, clientID, clientSecret, redirectURI, resourceIndicator)
+		token, consumeErr = t.exchangeAuthorizationCode(ctx, cb.Code, authServerMetadata, pkceVerifier, clientID, clientSecret, redirectURI, resourceIndicator, authMethod)
 	case er := <-elicCh:
 		if er.err != nil {
 			return fmt.Errorf("failed to send elicitation request: %w", er.err)
@@ -1720,6 +1729,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 			clientSecret,
 			redirectURI,
 			resourceIndicator,
+			authMethod,
 		)
 	}
 	if consumeErr != nil {
@@ -1731,6 +1741,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 		// stamp them onto the token for silent refresh later.
 		token.ClientID = clientID
 		token.ClientSecret = clientSecret
+		token.TokenEndpointAuthMethod = authMethod
 		token.RequestedScopes = scopes
 	} else if t.oauthConfig != nil {
 		token.RequestedScopes = t.oauthConfig.Scopes
@@ -1742,7 +1753,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	}
 
 	// Notify the runtime that the OAuth flow was successful
-	t.notifyOAuthSuccess()
+	t.notifyOAuthSuccess(ctx)
 
 	slog.DebugContext(ctx, "Unmanaged OAuth flow completed successfully")
 	return nil
@@ -1767,7 +1778,7 @@ func (t *oauthTransport) consumeUnmanagedElicitationReply(
 	content map[string]any,
 	authServerMetadata *AuthorizationServerMetadata,
 	driveFlow bool,
-	expectedState, pkceVerifier, clientID, clientSecret, redirectURI, resourceIndicator string,
+	expectedState, pkceVerifier, clientID, clientSecret, redirectURI, resourceIndicator, authMethod string,
 ) (*OAuthToken, error) {
 	if accessToken, ok := content["access_token"].(string); ok && accessToken != "" {
 		token := &OAuthToken{AccessToken: accessToken}
@@ -1797,7 +1808,7 @@ func (t *oauthTransport) consumeUnmanagedElicitationReply(
 	if subtle.ConstantTimeCompare([]byte(state), []byte(expectedState)) != 1 {
 		return nil, errors.New("state mismatch in elicitation reply")
 	}
-	return t.exchangeAuthorizationCode(ctx, code, authServerMetadata, pkceVerifier, clientID, clientSecret, redirectURI, resourceIndicator)
+	return t.exchangeAuthorizationCode(ctx, code, authServerMetadata, pkceVerifier, clientID, clientSecret, redirectURI, resourceIndicator, authMethod)
 }
 
 // exchangeAuthorizationCode posts to the auth server's token endpoint and
@@ -1809,7 +1820,7 @@ func (t *oauthTransport) exchangeAuthorizationCode(
 	ctx context.Context,
 	code string,
 	authServerMetadata *AuthorizationServerMetadata,
-	pkceVerifier, clientID, clientSecret, redirectURI, resourceIndicator string,
+	pkceVerifier, clientID, clientSecret, redirectURI, resourceIndicator, authMethod string,
 ) (*OAuthToken, error) {
 	slog.DebugContext(ctx, "Exchanging authorization code received from client")
 	token, err := oauthflow.ExchangeCodeForTokenWithClient(
@@ -1822,6 +1833,7 @@ func (t *oauthTransport) exchangeAuthorizationCode(
 		clientSecret,
 		redirectURI,
 		resourceIndicator,
+		authMethod,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange code for token: %w", err)

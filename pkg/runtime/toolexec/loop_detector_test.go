@@ -3,10 +3,30 @@ package toolexec
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/docker/docker-agent/pkg/tools"
 	bgagent "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 )
+
+func TestCanonicalJSON(t *testing.T) {
+	t.Parallel()
+	for input, want := range map[string]string{
+		`[{"z":[{"b":2,"a":1},null,[],{}],"a":true},{"b":false}]`: `[{"a":true,"z":[{"a":1,"b":2},null,[],{}]},{"b":false}]`,
+		` null `:                        `null`,
+		` [ ] `:                         `[]`,
+		` { } `:                         `{}`,
+		`{"x":{"a":1},"x":{"b":2}}`:     `{"x":{"b":2}}`,
+		`[1.0,1e2,-0,9007199254740993]`: `[1,100,-0,9007199254740992]`,
+		`{"<":"<&>\u2028\u2029","s":"quote\"\\\n"}`: `{"\u003c":"\u003c\u0026\u003e\u2028\u2029","s":"quote\"\\\n"}`,
+		` {"a":1,} `:    ` {"a":1,} `,
+		` {"a":1e999} `: ` {"a":1e999} `,
+		"":              "",
+	} {
+		assert.Equal(t, want, canonicalJSON(input), "input: %q", input)
+	}
+}
 
 func TestLoopDetector(t *testing.T) {
 	t.Parallel()
@@ -129,6 +149,18 @@ func TestLoopDetector(t *testing.T) {
 			wantCount: 0,
 		},
 		{
+			name:        "repeated background agent joins do not count as a loop",
+			threshold:   2,
+			exemptTools: []string{bgagent.ToolNameWaitBackgroundAgents},
+			batches: [][]tools.ToolCall{
+				makeCalls(bgagent.ToolNameWaitBackgroundAgents, `{"task_ids":["task1","task2"]}`),
+				makeCalls(bgagent.ToolNameWaitBackgroundAgents, `{"task_ids":["task1","task2"]}`),
+				makeCalls(bgagent.ToolNameWaitBackgroundAgents, `{"task_ids":["task1","task2"]}`),
+			},
+			wantTrip:  false,
+			wantCount: 0,
+		},
+		{
 			name:        "mixed batch with exempt and non exempt tools still counts",
 			threshold:   2,
 			exemptTools: []string{bgagent.ToolNameViewBackgroundAgent, backgroundjobs.ToolNameViewBackgroundJob},
@@ -238,4 +270,23 @@ func TestToolLoopDetector_Reset(t *testing.T) {
 	if d.Consecutive() != 1 {
 		t.Errorf("consecutive = %d, want 1 after first record post-reset", d.Consecutive())
 	}
+}
+
+func TestLoopDetectorSuccessfulCallExemptions(t *testing.T) {
+	t.Parallel()
+
+	d := NewLoopDetector(2, "poll")
+	draw := tools.ToolCall{ID: "draw", Function: tools.FunctionCall{Name: "random_int", Arguments: `{"min":1,"max":6}`}}
+	poll := tools.ToolCall{ID: "poll", Function: tools.FunctionCall{Name: "poll"}}
+	other := tools.ToolCall{ID: "other", Function: tools.FunctionCall{Name: "other"}}
+
+	assert.False(t, d.Record([]tools.ToolCall{draw}))
+	assert.False(t, d.Record([]tools.ToolCall{draw}, draw.ID))
+	assert.False(t, d.Record([]tools.ToolCall{draw, poll}, draw.ID))
+	assert.Equal(t, 1, d.Consecutive(), "successful draws and polling do not reset the failed-call count")
+	assert.True(t, d.Record([]tools.ToolCall{draw}))
+
+	d.Reset()
+	assert.False(t, d.Record([]tools.ToolCall{draw, other}, draw.ID))
+	assert.True(t, d.Record([]tools.ToolCall{draw, other}, draw.ID), "mixed batches still count")
 }

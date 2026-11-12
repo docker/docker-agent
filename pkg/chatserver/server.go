@@ -28,18 +28,19 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/openai/openai-go/v3"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/echolog"
 	"github.com/docker/docker-agent/pkg/httpsec"
-	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -143,6 +144,18 @@ func Run(ctx context.Context, agentFilename string, opts Options, ln net.Listene
 		opts.OnSafetyPolicy(resolvedSafety)
 	}
 
+	// Clients are remote, but tools run against the server's own local
+	// workspace; capture it once so per-request sessions don't depend on a
+	// cwd that may change while the server runs.
+	var configuredWd string
+	if opts.RunConfig != nil {
+		configuredWd = opts.RunConfig.WorkingDir
+	}
+	workingDir, err := session.CaptureLocalWorkingDir(configuredWd)
+	if err != nil {
+		return err
+	}
+
 	// Wrap with otelhttp so incoming /v1/chat/completions requests
 	// (including SSE streams) extract the caller's trace context.
 	// otelhttp ends the span when the response body is closed, so
@@ -156,6 +169,7 @@ func Run(ctx context.Context, agentFilename string, opts Options, ln net.Listene
 			conversations:     newConversationStore(opts.ConversationsMaxSessions, conversationTTL(opts)),
 			conversationLocks: newConversationLockSet(),
 			runtimes:          newRuntimePool(ctx, t, opts.MaxIdleRuntimes),
+			workingDir:        workingDir,
 		}, opts),
 		"chatserver",
 	)
@@ -175,7 +189,7 @@ func conversationTTL(opts Options) time.Duration {
 
 // loadTeam resolves and loads the team referenced by agentFilename.
 func loadTeam(ctx context.Context, agentFilename string, runConfig *config.RuntimeConfig) (*team.Team, error) {
-	src, err := config.Resolve(agentFilename, nil)
+	src, err := sources.Resolve(agentFilename, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -217,6 +231,9 @@ type server struct {
 	conversations     *conversationStore
 	conversationLocks *conversationLockSet
 	runtimes          *runtimePool
+	// workingDir is the server's absolute workspace root, captured once at
+	// startup; every request session persists it as workspace provenance.
+	workingDir string
 }
 
 func newRouter(s *server, opts Options) http.Handler {
@@ -356,19 +373,34 @@ func (s *server) handleChatCompletions(c echo.Context) error {
 	if !s.conversationLocks.tryAcquire(conversationID) {
 		return writeError(c, http.StatusConflict, "another request is already in flight for this conversation id")
 	}
-	defer s.conversationLocks.release(conversationID)
+	agentName := s.policy.pick(req.Model)
+	var rt runtimeRunner
+	runFinished := false
+	release := sync.OnceFunc(func() {
+		// A panic before the run drains must not recycle an active runtime.
+		if runFinished {
+			s.runtimes.Put(agentName, rt)
+		}
+		s.conversationLocks.release(conversationID)
+	})
+	defer release()
 
 	sess, err := s.resolveSession(conversationID, req.Messages)
 	if err != nil {
+		release()
 		return writeError(c, http.StatusBadRequest, err.Error())
 	}
 
-	agentName := s.policy.pick(req.Model)
-	rt, err := s.runtimes.Get(agentName)
+	rt, err = s.runtimes.Get(agentName)
 	if err != nil {
+		release()
 		return writeError(c, http.StatusInternalServerError, fmt.Sprintf("failed to acquire runtime: %v", err))
 	}
-	defer s.runtimes.Put(agentName, rt)
+	finish := func(runErr error) {
+		runFinished = true
+		s.commitConversation(conversationID, sess, runErr)
+		release()
+	}
 
 	// Echo back the requested model verbatim when set, so clients matching
 	// on the model field stay happy. Otherwise expose the actual agent.
@@ -378,15 +410,13 @@ func (s *server) handleChatCompletions(c echo.Context) error {
 	}
 
 	if req.Stream {
-		runErr := s.streamChatCompletion(c, rt, sess, model, req.StreamOptions.IncludeUsage)
-		s.commitConversation(conversationID, sess, runErr)
+		s.streamChatCompletion(c, rt, sess, model, req.StreamOptions.IncludeUsage, finish)
 		// The agent run outcome is reported in-band (SSE error event for
 		// streams, JSON error envelope otherwise), so the HTTP handler
 		// itself always succeeds once we've started writing the response.
 		return nil
 	}
-	runErr := s.chatCompletion(c, rt, sess, model)
-	s.commitConversation(conversationID, sess, runErr)
+	s.chatCompletion(c, rt, sess, model, finish)
 	return nil
 }
 
@@ -413,7 +443,7 @@ func (s *server) resolveSession(id string, msgs []ChatCompletionMessage) (*sessi
 			return working, nil
 		}
 	}
-	sess := buildSession(msgs)
+	sess := buildSession(msgs, s.workingDir)
 	if sess == nil {
 		return nil, errors.New("no user message provided")
 	}
@@ -438,11 +468,10 @@ func (s *server) commitConversation(id string, sess *session.Session, runErr err
 }
 
 // chatCompletion runs the agent to completion and replies with one
-// non-streaming OpenAI ChatCompletion object. It returns the agent run
-// error (nil on success) so the caller can decide whether to commit the
-// conversation; the HTTP response — success or error envelope — is always
-// written here.
-func (s *server) chatCompletion(c echo.Context, rt runtime.Runtime, sess *session.Session, model string) error {
+// non-streaming OpenAI ChatCompletion object. Response fields are captured
+// before finish commits the run and releases its runtime and conversation.
+// Transport errors do not roll back a successful run.
+func (s *server) chatCompletion(c echo.Context, rt runtimeRunner, sess *session.Session, model string, finish func(error)) {
 	var toolCalls []ToolCallReference
 	emit := agentEmit{
 		onToolCall: func(tc ToolCallReference) {
@@ -450,11 +479,13 @@ func (s *server) chatCompletion(c echo.Context, rt runtime.Runtime, sess *sessio
 		},
 	}
 	if err := runAgentLoop(c.Request().Context(), rt, sess, emit); err != nil {
-		_ = writeError(c, http.StatusInternalServerError, fmt.Sprintf("agent execution failed: %v", err))
-		return err
+		message := fmt.Sprintf("agent execution failed: %v", err)
+		finish(err)
+		_ = writeError(c, http.StatusInternalServerError, message)
+		return
 	}
 
-	return c.JSON(http.StatusOK, ChatCompletionResponse{
+	response := ChatCompletionResponse{
 		ID:      newChatID(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
@@ -469,17 +500,16 @@ func (s *server) chatCompletion(c echo.Context, rt runtime.Runtime, sess *sessio
 			FinishReason: "stop",
 		}},
 		Usage: sessionUsage(sess),
-	})
+	}
+	finish(nil)
+	_ = c.JSON(http.StatusOK, response)
 }
 
 // streamChatCompletion runs the agent and streams its response back to the
 // client as Server-Sent Events in OpenAI's chat.completion.chunk format.
 //
-// It returns the agent run error (nil on success) so the caller can decide
-// whether to commit the conversation. The error is *also* reported in-band
-// as an SSE error event, so the HTTP handler itself still returns nil; the
-// return value here exists purely to drive the commit decision.
-func (s *server) streamChatCompletion(c echo.Context, rt runtime.Runtime, sess *session.Session, model string, includeUsage bool) error {
+// finish commits the run and releases ownership before any terminal event.
+func (s *server) streamChatCompletion(c echo.Context, rt runtimeRunner, sess *session.Session, model string, includeUsage bool, finish func(error)) {
 	stream := newSSEStream(c.Response(), newChatID(), model)
 
 	// Initial "role: assistant" delta so clients can start rendering.
@@ -501,25 +531,22 @@ func (s *server) streamChatCompletion(c echo.Context, rt runtime.Runtime, sess *
 		},
 	}
 	runErr := runAgentLoop(c.Request().Context(), rt, sess, emit)
+	var usage *ChatCompletionUsage
+	if includeUsage {
+		usage = sessionUsage(sess)
+	}
+	finish(runErr)
+
+	finishReason := "stop"
 	if runErr != nil {
-		// Emit a structured error envelope (OpenAI streams use a regular
-		// `data:` line carrying an `error` object, then close the stream
-		// with finish_reason "error" instead of "stop"). Clients matching
-		// on the OpenAI protocol can therefore distinguish a model error
-		// from a normal completion.
 		stream.sendError(runErr)
-		stream.send(ChatCompletionStreamDelta{}, "error")
-		if includeUsage {
-			stream.sendUsage(sessionUsage(sess))
-		}
-	} else {
-		stream.send(ChatCompletionStreamDelta{}, "stop")
-		if includeUsage {
-			stream.sendUsage(sessionUsage(sess))
-		}
+		finishReason = "error"
+	}
+	stream.send(ChatCompletionStreamDelta{}, finishReason)
+	if includeUsage {
+		stream.sendUsage(usage)
 	}
 	stream.done()
-	return runErr
 }
 
 // sseStream writes OpenAI-style chat.completion.chunk events to a response.
@@ -613,7 +640,7 @@ func (s *sseStream) sendError(err error) {
 }
 
 // newChatID returns a fresh OpenAI-style chat completion id.
-func newChatID() string { return "chatcmpl-" + uuid.NewString() }
+func newChatID() string { return "chatcmpl-" + uuid.NewV4().String() }
 
 // writeError writes an OpenAI-style error envelope.
 func writeError(c echo.Context, status int, message string) error {

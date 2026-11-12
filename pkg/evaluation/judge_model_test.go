@@ -33,6 +33,7 @@ func TestCreateJudgeModelKnownProvider(t *testing.T) {
 		"anthropic/claude-opus-4-5-20251101", // the default judge model that triggered #3219
 		"anthropic/claude-sonnet-4-0",
 		"openai/gpt-5",
+		"openai/gpt-5.6-terra",
 		"google/gemini-2.5-flash",
 	} {
 		judge, err := createJudgeModel(t.Context(), judgeModel, runConfig)

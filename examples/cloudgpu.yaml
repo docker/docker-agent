@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  cloudgpu_model:
+    provider: cloudgpu
+    model: deepseek-v4.1-flash
+
+agents:
+  root:
+    model: cloudgpu_model
+    description: Assistant using CloudGPU
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think

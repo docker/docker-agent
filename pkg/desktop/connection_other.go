@@ -17,7 +17,7 @@ func dial(ctx context.Context, path string) (net.Conn, error) {
 	dialer := net.Dialer{}
 
 	conn, err := dialer.DialContext(ctx, "unix", path)
-	if err != nil && strings.Contains(err.Error(), "invalid argument") {
+	if err != nil && strings.Contains(err.Error(), "invalid argument") { //rubocop:disable Lint/ErrorStringMatching // net returns no portable sentinel for an overlong Unix socket path
 		// The socket path is too long: unix domain socket paths are limited to:
 		// * 104 - 1 (NULL) characters on macOS
 		// * 108 - 1 (NULL) characters on Linux.

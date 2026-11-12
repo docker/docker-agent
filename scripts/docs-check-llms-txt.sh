@@ -5,7 +5,7 @@
 # "llms.txt"). A plain `hugo` build succeeding is not enough: a broken
 # groups[].items traversal (or similar template regression) can
 # silently drop entries — e.g. dropping from 99 to 64 with the
-# groups-only "Built-in Tools" and "Resources" sections left empty —
+# groups-only sections such as "Built-in Tools" left empty —
 # while the build itself stays green. This script builds the site and
 # asserts the *content* of public/llms.txt matches nav.yml exactly:
 # same sections, same order, same titles, same count, every link
@@ -142,7 +142,7 @@ fi
 
 # Sections declared via `groups:` (as opposed to a flat `items:`) —
 # these are exactly the ones a broken groups[].items traversal would
-# silently empty out (currently Built-in Tools, Resources).
+# silently empty out (currently Built-in Tools).
 groups_sections=()
 while IFS= read -r line; do
   groups_sections+=("$line")
@@ -151,14 +151,14 @@ done < <(awk '
   /^  groups:/  { print s }
 ' "$NAV")
 
-# (c) exactly 7 `## ` section headings, in nav.yml order.
+# (c) exactly 8 `## ` section headings, in nav.yml order.
 actual_sections=()
 while IFS= read -r line; do
   actual_sections+=("$line")
 done < <(grep -E '^## ' "$LLMS" | sed -E 's/^## //')
 
-if [ "${#expected_sections[@]}" -ne 7 ]; then
-  fail "${NAV} defines ${#expected_sections[@]} sections, want 7"
+if [ "${#expected_sections[@]}" -ne 8 ]; then
+  fail "${NAV} defines ${#expected_sections[@]} sections, want 8"
 fi
 if [ "${#actual_sections[@]}" -ne "${#expected_sections[@]}" ]; then
   fail "${LLMS} has ${#actual_sections[@]} '## ' section(s), want ${#expected_sections[@]} (from ${NAV})"
@@ -223,7 +223,7 @@ for i in "${!entry_lines[@]}"; do
 done
 
 # (d) items and groups[].items are both flattened: every groups-based
-# section (Built-in Tools, Resources) must contribute a non-empty run
+# section must contribute a non-empty run
 # of entries between its heading and the next.
 for section in "${groups_sections[@]}"; do
   count=$(awk -v s="## ${section}" '

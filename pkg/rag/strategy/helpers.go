@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"cmp"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -20,21 +21,13 @@ func MergeDocPaths(sharedDocs, strategyDocs []string, parentDir string) []string
 	seen := make(map[string]bool)
 	var result []string
 
-	// Add shared docs first
-	for _, doc := range sharedDocs {
-		absPath := makeAbsolute(doc, parentDir)
-		if !seen[absPath] {
-			seen[absPath] = true
-			result = append(result, absPath)
-		}
-	}
-
-	// Add strategy-specific docs
-	for _, doc := range strategyDocs {
-		absPath := makeAbsolute(doc, parentDir)
-		if !seen[absPath] {
-			seen[absPath] = true
-			result = append(result, absPath)
+	for _, docs := range [2][]string{sharedDocs, strategyDocs} {
+		for _, doc := range docs {
+			absPath := makeAbsolute(doc, parentDir)
+			if !seen[absPath] {
+				seen[absPath] = true
+				result = append(result, absPath)
+			}
 		}
 	}
 
@@ -44,8 +37,19 @@ func MergeDocPaths(sharedDocs, strategyDocs []string, parentDir string) []string
 // ResolveDatabasePath resolves database configuration to a path
 func ResolveDatabasePath(dbCfg latest.RAGDatabaseConfig, parentDir, defaultName string) (string, error) {
 	if dbCfg.IsEmpty() {
-		// Use default path in data directory
-		return filepath.Join(paths.GetDataDir(), defaultName), nil
+		// Indexes from different checkouts must not share rows or prune each other's files.
+		root := paths.GetDataDir()
+		if parentDir != "" {
+			dir, err := filepath.Abs(parentDir)
+			if err != nil {
+				return "", fmt.Errorf("resolving index workspace: %w", err)
+			}
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				dir = resolved
+			}
+			root = filepath.Join(root, "rag", fmt.Sprintf("%x", sha256.Sum256([]byte(dir))))
+		}
+		return filepath.Join(root, defaultName), nil
 	}
 
 	dbStr, err := dbCfg.AsString()
@@ -134,34 +138,26 @@ func GetParamPtr[T any](params map[string]any, key string) *T {
 	case int:
 		switch v := raw.(type) {
 		case int:
-			val := any(v).(T)
-			return &val
+			return new(any(v).(T))
 		case int64:
-			val := any(int(v)).(T)
-			return &val
+			return new(any(int(v)).(T))
 		case uint64:
-			val := any(int(v)).(T) //nolint:gosec // value comes from validated config; bounds enforced upstream
-			return &val
+			return new(any(int(v)).(T)) //nolint:gosec // value comes from validated config; bounds enforced upstream
 		case float64:
-			val := any(int(v)).(T)
-			return &val
+			return new(any(int(v)).(T))
 		default:
 			return nil
 		}
 	case float64:
 		switch v := raw.(type) {
 		case float64:
-			val := any(v).(T)
-			return &val
+			return new(any(v).(T))
 		case int:
-			val := any(float64(v)).(T)
-			return &val
+			return new(any(float64(v)).(T))
 		case int64:
-			val := any(float64(v)).(T)
-			return &val
+			return new(any(float64(v)).(T))
 		case uint64:
-			val := any(float64(v)).(T)
-			return &val
+			return new(any(float64(v)).(T))
 		default:
 			return nil
 		}

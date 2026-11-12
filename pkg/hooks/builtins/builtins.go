@@ -3,14 +3,18 @@
 //
 // Available builtins:
 //
+//   - add_context           (context events)  — Go templates rendered against hook input
 //   - add_date              (turn_start)      — today's date
 //   - add_environment_info  (session_start)   — cwd, git, OS, arch
-//   - add_prompt_files      (turn_start)      — contents of prompt files
+//   - add_prompt_files      (turn_start)      — contents of prompt files,
+//     plus (with args=['--depth=<N>']) a path-only listing of the same
+//     filenames found up to N levels below the working dir
 //   - add_git_status        (turn_start)      — `git status --short --branch`
 //   - add_git_diff          (turn_start)      — `git diff --stat` (or full)
 //   - add_directory_listing (session_start)   — top-level entries of cwd
 //   - add_user_info         (session_start)   — current OS user and host
 //   - add_recent_commits    (session_start)   — `git log --oneline -n N`
+//   - transform_json         (tool_response_transform) — keep selected JSON fields
 //   - max_iterations        (before_llm_call) — hard stop after N model calls
 //   - unload                (on_agent_switch) — release the previous
 //     agent's local-engine resources via HTTP unload (DMR today)
@@ -20,7 +24,8 @@
 //     session_end) — shadow-git snapshots. Installed via
 //     [RegisterSnapshot] (separate entry point) so the embedder receives
 //     a [SnapshotController] to drive /undo, /snapshots, /reset.
-//   - redact_secrets        (pre_tool_use,
+//   - redact_secrets        (tool_input_transform
+//     or pre_tool_use,
 //     before_llm_call,
 //     tool_response_transform) — scrub secrets
 //     from tool args, outgoing chat content, and
@@ -37,6 +42,8 @@
 //     tool name internally; no-op for non-shell
 //     calls.
 //   - http_post              (any event)       — POST args[1] to args[0]
+//   - keep_awake             (session_start, session_end) — CLI-owned sleep
+//     inhibitor, installed via [RegisterKeepAwake] and controlled by user settings.
 //
 // Reference any of them from a hook YAML entry as
 // `{type: builtin, command: "<name>"}`. The runtime additionally
@@ -62,6 +69,7 @@ package builtins
 
 import (
 	"errors"
+	"strconv"
 
 	"github.com/docker/docker-agent/pkg/hooks"
 )
@@ -101,6 +109,8 @@ func Register(r *hooks.Registry, opts ...Option) error {
 	}
 
 	return errors.Join(
+		r.RegisterBuiltin(AddContext, addContext),
+		r.RegisterBuiltin(TransformJSON, transformJSON),
 		r.RegisterBuiltin(AddDate, addDate),
 		r.RegisterBuiltin(AddEnvironmentInfo, addEnvironmentInfo),
 		r.RegisterBuiltin(AddPromptFiles, addPromptFiles),
@@ -124,12 +134,16 @@ type AgentDefaults struct {
 	AddDate            bool
 	AddEnvironmentInfo bool
 	AddPromptFiles     []string
+	// AddPromptFilesDepth is forwarded to the add_prompt_files builtin as its
+	// nested-scan depth (0 = no scan). See [AddPromptFiles] in
+	// add_prompt_files.go.
+	AddPromptFilesDepth int
 	// RedactSecrets auto-injects the redact_secrets builtin under
-	// pre_tool_use, before_llm_call, and tool_response_transform — the
-	// three legs of the feature. Equivalent to writing those three
+	// tool_input_transform, before_llm_call, and tool_response_transform
+	// — the three legs of the feature. Equivalent to writing those three
 	// hook entries by hand; the dedup in [hooks.Executor.hooksFor]
-	// makes the auto-injection idempotent against an explicit YAML
-	// entry that already names the same builtin.
+	// makes auto-injection idempotent against an identical explicit
+	// entry (including its name and per-hook options).
 	RedactSecrets bool
 }
 
@@ -158,16 +172,16 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 	if cfg == nil {
 		cfg = &hooks.Config{}
 	}
-	cfg.ToolResponseTransform = append([]hooks.MatcherConfig{{
-		Matcher: "*",
-		Hooks:   []hooks.Hook{builtinHook(LimitLargeToolResults)},
-	}}, cfg.ToolResponseTransform...)
 	cfg.SessionEnd = append(cfg.SessionEnd, builtinHook(LimitLargeToolResults))
 	if d.AddDate {
 		cfg.TurnStart = append(cfg.TurnStart, builtinHook(AddDate))
 	}
 	if len(d.AddPromptFiles) > 0 {
-		cfg.TurnStart = append(cfg.TurnStart, builtinHook(AddPromptFiles, d.AddPromptFiles...))
+		args := d.AddPromptFiles
+		if d.AddPromptFilesDepth > 0 {
+			args = append([]string{depthArgPrefix + strconv.Itoa(d.AddPromptFilesDepth)}, args...)
+		}
+		cfg.TurnStart = append(cfg.TurnStart, builtinHook(AddPromptFiles, args...))
 	}
 	if d.AddEnvironmentInfo {
 		cfg.SessionStart = append(cfg.SessionStart, builtinHook(AddEnvironmentInfo))
@@ -179,8 +193,10 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 		// inject explicit entries here so the resulting effective
 		// config is self-describing (a user inspecting it sees that
 		// args, messages, and tool output are all covered, without
-		// having to read the dispatch table).
-		cfg.PreToolUse = append(cfg.PreToolUse, hooks.MatcherConfig{
+		// having to read the dispatch table). Arguments are scrubbed on
+		// tool_input_transform so the approval pipeline never sees the
+		// raw secret.
+		cfg.ToolInputTransform = append(cfg.ToolInputTransform, hooks.MatcherConfig{
 			Matcher: "*",
 			Hooks:   []hooks.Hook{builtinHook(RedactSecrets)},
 		})
@@ -190,6 +206,11 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 			Hooks:   []hooks.Hook{builtinHook(RedactSecrets)},
 		})
 	}
+	// Redact before the limiter writes oversized responses to disk.
+	cfg.ToolResponseTransform = append(cfg.ToolResponseTransform, hooks.MatcherConfig{
+		Matcher: "*",
+		Hooks:   []hooks.Hook{builtinHook(LimitLargeToolResults)},
+	})
 	if cfg.IsEmpty() {
 		return nil
 	}

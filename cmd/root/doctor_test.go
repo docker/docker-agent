@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/docker/cli/cli"
@@ -31,6 +32,7 @@ func withDoctorTestEnv(env map[string]string, dmrModels []string, dmrErr error) 
 		mapProvider := environment.NewMapEnvProvider(env)
 		f.runConfig.EnvProviderForTests = mapProvider
 		f.sourcesForTests = []environment.Source{{Name: "environment", Provider: mapProvider}}
+		f.loadHookDropIns = func() *latest.HooksConfig { return nil }
 		f.dmrLister = func(context.Context) ([]string, error) { return dmrModels, dmrErr }
 		f.loadUserConfig = func() (*userconfig.Config, error) { return &userconfig.Config{}, nil }
 		f.claudeProbe = func(context.Context) codingharness.ClaudeCLIStatus {
@@ -65,12 +67,13 @@ func TestDoctorCommand_ReportsCredentialSource(t *testing.T) {
 
 	output, err := executeDoctor(t, nil, withDoctorTestEnv(
 		map[string]string{"ANTHROPIC_API_KEY": "sk-secret-value"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.Regexp(t, `anthropic\s+found\s+ANTHROPIC_API_KEY\s+environment`, output)
 	assert.Regexp(t, `openai\s+not set\s+OPENAI_API_KEY\s+-`, output)
-	assert.Contains(t, output, "auto -> anthropic/claude-sonnet-4-6")
+	assert.Contains(t, output, "auto -> anthropic/claude-sonnet-5")
 	assert.Contains(t, output, "No issues found.")
 	assert.NotContains(t, output, "sk-secret-value", "secret values must never be printed")
 }
@@ -138,7 +141,8 @@ func TestDoctorCommand_EmptyValueIsNotACredential(t *testing.T) {
 
 	output, err := executeDoctor(t, nil, withDoctorTestEnv(
 		map[string]string{"OPENAI_API_KEY": "", "MISTRAL_API_KEY": "key"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.Regexp(t, `openai\s+not set`, output)
@@ -269,7 +273,8 @@ func TestDoctorCommand_JSON(t *testing.T) {
 
 	output, err := executeDoctor(t, []string{"--json"}, withDoctorTestEnv(
 		map[string]string{"OPENAI_API_KEY": "sk-json-secret"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.NotContains(t, output, "sk-json-secret", "secret values must never be printed")
@@ -299,7 +304,8 @@ func TestDoctorCommand_JSONReportsGitHubCopilot(t *testing.T) {
 
 	output, err := executeDoctor(t, []string{"--json"}, withDoctorTestEnv(
 		map[string]string{"GH_TOKEN": "gh-token"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.NotContains(t, output, "gh-token", "secret values must never be printed")
@@ -341,7 +347,8 @@ func TestDoctorCommand_AgentFileMissingVars(t *testing.T) {
 
 	output, err := executeDoctor(t, []string{path}, withDoctorTestEnv(
 		map[string]string{"ANTHROPIC_API_KEY": "key"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.Error(t, err)
 	statusErr, ok := errors.AsType[cli.StatusError](err)
@@ -360,10 +367,27 @@ func TestDoctorCommand_AgentFileVarsSatisfied(t *testing.T) {
 
 	output, err := executeDoctor(t, []string{path}, withDoctorTestEnv(
 		map[string]string{"OPENAI_API_KEY": "key"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.Regexp(t, `OPENAI_API_KEY\s+models\s+found\s+environment`, output)
+	assert.Contains(t, output, "No issues found.")
+}
+
+func TestDoctorCommand_AgentFileVarsSatisfiedByPrefixedName(t *testing.T) {
+	t.Parallel()
+
+	path := writeDoctorAgentFile(t)
+
+	output, err := executeDoctor(t, []string{path}, withDoctorTestEnv(
+		map[string]string{"DOCKER_AGENT_ENV_OPENAI_API_KEY": "key"},
+		[]string{"ai/qwen3:latest"}, nil,
+	))
+
+	require.NoError(t, err)
+	assert.Regexp(t, `OPENAI_API_KEY\s+models\s+found\s+environment \(DOCKER_AGENT_ENV_OPENAI_API_KEY\)`, output)
+	assert.Regexp(t, `openai\s+found\s+OPENAI_API_KEY\s+environment \(DOCKER_AGENT_ENV_OPENAI_API_KEY\)`, output)
 	assert.Contains(t, output, "No issues found.")
 }
 
@@ -451,7 +475,7 @@ func TestDoctorCommand_ClaudeHarnessNotInstalled(t *testing.T) {
 	assert.Contains(t, output, "Claude Code harness")
 	assert.Contains(t, output, "not found in PATH")
 	assert.Contains(t, output, codingharness.ClaudeInstallDocsURL)
-	assert.Contains(t, output, "claude auth login --claudeai")
+	assert.Contains(t, output, "log in with `claude auth login --claudeai`")
 }
 
 func TestDoctorCommand_ClaudeHarnessUnauthenticated(t *testing.T) {
@@ -468,7 +492,7 @@ func TestDoctorCommand_ClaudeHarnessUnauthenticated(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, output, "Status: installed (2.1.210 (Claude Code)), not logged in")
-	assert.Contains(t, output, "claude auth login --claudeai")
+	assert.Contains(t, output, "run `claude auth login --claudeai`")
 	assert.Contains(t, output, "same OS user and environment")
 }
 
@@ -640,6 +664,66 @@ func TestCredentialCandidates(t *testing.T) {
 	assert.Equal(t, "GOOGLE_API_KEY (+2 more)", credentialCandidates([]string{"GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"}))
 }
 
+func TestDoctorCommand_AutoSelectionSeesOverride(t *testing.T) {
+	t.Parallel()
+
+	output, err := executeDoctor(t, nil, withDoctorTestEnv(
+		map[string]string{"DOCKER_AGENT_ENV_ANTHROPIC_API_KEY": "key"},
+		nil, errors.New("connection refused"),
+	))
+
+	require.NoError(t, err)
+	assert.Contains(t, output, "auto -> anthropic/claude-sonnet-5")
+}
+
+func TestDoctorCommand_ProviderJSONKeepsCanonicalEnvVar(t *testing.T) {
+	t.Parallel()
+
+	output, err := executeDoctor(t, []string{"--json"}, withDoctorTestEnv(
+		map[string]string{"DOCKER_AGENT_ENV_ANTHROPIC_API_KEY": "key"},
+		[]string{"ai/qwen3:latest"}, nil,
+	))
+
+	require.NoError(t, err)
+	var report doctorReport
+	require.NoError(t, json.Unmarshal([]byte(output), &report))
+	idx := slices.IndexFunc(report.Providers, func(p doctorProviderStatus) bool { return p.Provider == "anthropic" })
+	require.GreaterOrEqual(t, idx, 0)
+	assert.Equal(t, "ANTHROPIC_API_KEY", report.Providers[idx].EnvVar)
+	assert.Equal(t, "DOCKER_AGENT_ENV_ANTHROPIC_API_KEY", report.Providers[idx].FoundAs)
+}
+
+func TestFindSource_EmptyOverrideFallsBack(t *testing.T) {
+	t.Parallel()
+
+	sources := []environment.Source{
+		{Name: "environment", Provider: environment.NewMapEnvProvider(map[string]string{"KEY": "plain"})},
+		{Name: "config-env-file", Provider: environment.NewMapEnvProvider(map[string]string{"DOCKER_AGENT_ENV_KEY": ""})},
+	}
+
+	source, foundAs, found := findSource(t.Context(), sources, "KEY")
+	require.True(t, found)
+	assert.Equal(t, "environment", source)
+	assert.Equal(t, "KEY", foundAs)
+}
+
+func TestFindSource_EmptyOverrideDoesNotHideLaterOverride(t *testing.T) {
+	t.Parallel()
+
+	sources := []environment.Source{
+		{Name: "environment", Provider: environment.NewMapEnvProvider(map[string]string{"DOCKER_AGENT_ENV_KEY": ""})},
+		{Name: "config-env-file", Provider: environment.NewMapEnvProvider(map[string]string{"DOCKER_AGENT_ENV_KEY": "override"})},
+	}
+
+	source, foundAs, found := findSource(t.Context(), sources, "KEY")
+	require.True(t, found)
+	assert.Equal(t, "config-env-file", source)
+	assert.Equal(t, "DOCKER_AGENT_ENV_KEY", foundAs)
+
+	value, _ := environment.NewPrefixedProvider(environment.SourceProviders(sources)...).Get(t.Context(), "KEY")
+	assert.Equal(t, "override", value, "doctor and the run-time chain must agree")
+}
+
 func TestFindSource_SkipsSourcesWithoutValue(t *testing.T) {
 	t.Parallel()
 
@@ -649,10 +733,137 @@ func TestFindSource_SkipsSourcesWithoutValue(t *testing.T) {
 		{Name: "filled", Provider: environment.NewMapEnvProvider(map[string]string{"KEY": "value"})},
 	}
 
-	source, found := findSource(t.Context(), sources, "KEY")
+	source, foundAs, found := findSource(t.Context(), sources, "KEY")
 	require.True(t, found)
 	assert.Equal(t, "filled", source)
+	assert.Equal(t, "KEY", foundAs)
 
-	_, found = findSource(t.Context(), sources, "OTHER")
+	_, _, found = findSource(t.Context(), sources, "OTHER")
 	assert.False(t, found)
+}
+
+func TestFindSource_PrefixedNameWinsAcrossSources(t *testing.T) {
+	t.Parallel()
+
+	sources := []environment.Source{
+		{Name: "environment", Provider: environment.NewMapEnvProvider(map[string]string{"KEY": "plain"})},
+		{Name: "config-env-file", Provider: environment.NewMapEnvProvider(map[string]string{"DOCKER_AGENT_ENV_KEY": "prefixed"})},
+	}
+
+	source, foundAs, found := findSource(t.Context(), sources, "KEY")
+	require.True(t, found)
+	assert.Equal(t, "config-env-file", source)
+	assert.Equal(t, "DOCKER_AGENT_ENV_KEY", foundAs)
+}
+
+func TestDoctorEvaluatorGlobalProvider(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+evaluators:
+  risk:
+    provider: corporate
+    model: jev-latest
+    type: boolean
+    instructions: Assess risk.
+agents:
+  root:
+    model: openai/gpt-5-mini
+    hooks:
+      tool_guard:
+        - hooks:
+            - type: evaluator
+              evaluator: risk
+              evaluator_policy:
+                decisions: {"true": ask}
+                min_probability: 0.9
+                fallback: ask
+`), 0o600))
+	output, err := executeDoctor(t, []string{path}, withDoctorTestEnv(map[string]string{"OPENAI_API_KEY": "test"}, nil, nil), func(f *doctorFlags) {
+		f.loadUserConfig = func() (*userconfig.Config, error) {
+			return &userconfig.Config{Providers: map[string]latest.ProviderConfig{"corporate": {Provider: "typesafe", TokenKey: "CORPORATE_KEY"}}}, nil
+		}
+	})
+	require.Error(t, err)
+	assert.Contains(t, output, "CORPORATE_KEY")
+	assert.Contains(t, output, "evaluators")
+}
+
+func TestDoctorEvaluatorResolutionErrors(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		provider *latest.ProviderConfig
+		want     string
+	}{
+		{name: "missing provider", want: `unsupported evaluator provider "corporate"`},
+		{name: "unsupported backend", provider: &latest.ProviderConfig{Provider: "anthropic"}, want: `unsupported evaluator provider "anthropic"`},
+		{name: "chat api type", provider: &latest.ProviderConfig{Provider: "typesafe", BaseURL: "https://example.com", APIType: "openai_responses"}, want: "evaluator providers do not support auth or api_type"},
+		{name: "invalid inherited url", provider: &latest.ProviderConfig{Provider: "typesafe", BaseURL: "https://user:private-secret@example.com"}, want: "base_url must be an HTTP(S) URL without credentials, query, or fragment"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "agent.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(`
+evaluators:
+  risk:
+    provider: corporate
+    model: jev-latest
+    type: boolean
+    instructions: Assess risk.
+agents:
+  root:
+    model: openai/gpt-5-mini
+    hooks:
+      tool_guard:
+        - hooks:
+            - type: evaluator
+              evaluator: risk
+              evaluator_policy:
+                decisions: {"true": ask}
+                min_probability: 0.9
+                fallback: ask
+`), 0o600))
+			output, err := executeDoctor(t, []string{"--json", path}, withDoctorTestEnv(map[string]string{"OPENAI_API_KEY": "test"}, nil, nil), func(f *doctorFlags) {
+				f.loadUserConfig = func() (*userconfig.Config, error) {
+					cfg := &userconfig.Config{}
+					if tc.provider != nil {
+						cfg.Providers = map[string]latest.ProviderConfig{"corporate": *tc.provider}
+					}
+					return cfg, nil
+				}
+			})
+			require.Error(t, err)
+			var report doctorReport
+			require.NoError(t, json.Unmarshal([]byte(output), &report))
+			assert.Contains(t, report.Issues, "evaluators.risk: "+tc.want)
+			assert.NotContains(t, output, "private-secret")
+		})
+	}
+}
+
+func TestDoctorEvaluatorGatewayCredentials(t *testing.T) {
+	t.Parallel()
+	for _, backend := range []string{"typesafe", "openai"} {
+		t.Run(backend, func(t *testing.T) {
+			t.Parallel()
+			cfg := &latest.Config{
+				Evaluators: map[string]latest.EvaluatorConfig{"risk": {
+					Provider: backend, Model: "model", Type: "boolean", Instructions: "Assess risk.", TokenKey: "CUSTOM_EVALUATOR_KEY",
+				}},
+				Agents: latest.Agents{{Name: "root", Model: "openai/gpt-5-mini"}},
+			}
+			config.MergeAgentHooks(cfg, &latest.HooksConfig{ToolGuard: latest.HookMatcherConfigs{{Hooks: latest.HookDefinitions{{
+				Type: "evaluator", Evaluator: "risk", EvaluatorPolicy: &latest.EvaluatorPolicy{
+					Decisions: map[string]string{"true": "ask"}, MinProbability: 0.9, Fallback: "ask",
+				},
+			}}}}})
+			f := &doctorFlags{runConfig: config.RuntimeConfig{Config: config.Config{ModelsGateway: "http://localhost:7777"}}}
+			report := &doctorReport{}
+			f.checkAgentFile(t.Context(), "agent.yaml", cfg, environment.NewNoEnvProvider(), nil, report)
+			require.NotNil(t, report.AgentFile)
+			assert.Empty(t, report.AgentFile.Requirements)
+			assert.Empty(t, report.Issues)
+		})
+	}
 }

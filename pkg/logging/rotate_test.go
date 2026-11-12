@@ -3,6 +3,7 @@ package logging
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,7 +15,7 @@ func TestRotatingFile_Write(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")
 
-	rf, err := NewRotatingFile(path, WithMaxSize(100), WithMaxBackups(2))
+	rf, err := NewRotatingFile(path, withMaxSize(100), withMaxBackups(2))
 	require.NoError(t, err)
 	defer rf.Close()
 
@@ -33,7 +34,7 @@ func TestRotatingFile_Rotate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")
 
-	rf, err := NewRotatingFile(path, WithMaxSize(50), WithMaxBackups(2))
+	rf, err := NewRotatingFile(path, withMaxSize(50), withMaxBackups(2))
 	require.NoError(t, err)
 	defer rf.Close()
 
@@ -70,7 +71,7 @@ func TestRotatingFile_MaxBackups(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")
 
-	rf, err := NewRotatingFile(path, WithMaxSize(20), WithMaxBackups(2))
+	rf, err := NewRotatingFile(path, withMaxSize(20), withMaxBackups(2))
 	require.NoError(t, err)
 	defer rf.Close()
 
@@ -109,7 +110,7 @@ func TestRotatingFile_AppendsToExisting(t *testing.T) {
 	err := os.WriteFile(path, []byte("existing\n"), 0o600)
 	require.NoError(t, err)
 
-	rf, err := NewRotatingFile(path, WithMaxSize(1000), WithMaxBackups(2))
+	rf, err := NewRotatingFile(path, withMaxSize(1000), withMaxBackups(2))
 	require.NoError(t, err)
 	defer rf.Close()
 
@@ -135,4 +136,37 @@ func TestRotatingFile_CreatesDirectory(t *testing.T) {
 
 	_, err = os.Stat(path)
 	require.NoError(t, err)
+}
+
+func withMaxSize(size int64) Option {
+	return func(r *RotatingFile) {
+		r.maxSize = size
+	}
+}
+
+func withMaxBackups(count int) Option {
+	return func(r *RotatingFile) {
+		r.maxBackups = count
+	}
+}
+
+func TestRotatingFileConfiguredBackups(t *testing.T) {
+	t.Parallel()
+	for _, count := range []int{1, 2, 3} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "test.log")
+			rf, err := NewRotatingFile(path, withMaxSize(1), withMaxBackups(count))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, rf.Close()) })
+			for range count + 2 {
+				_, err := rf.Write([]byte("x"))
+				require.NoError(t, err)
+			}
+			for i := 1; i <= count; i++ {
+				assert.FileExists(t, path+"."+strconv.Itoa(i))
+			}
+			assert.NoFileExists(t, path+"."+strconv.Itoa(count+1))
+		})
+	}
 }

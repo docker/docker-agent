@@ -24,7 +24,7 @@ func TestConvertDocumentGemini_StrategyB64_Image(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	visionCaps := modelinfo.CapsWith(true, true)
+	visionCaps := modelinfo.CapsWith(true, true, false, false)
 	part, err := convertDocumentWithCaps(t.Context(), doc, visionCaps)
 	require.NoError(t, err)
 	require.NotNil(t, part, "expected a non-nil part for B64 image")
@@ -44,7 +44,7 @@ func TestConvertDocumentGemini_StrategyB64_ImageDropped(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	textOnlyCaps := modelinfo.CapsWith(false, false)
+	textOnlyCaps := modelinfo.CapsWith(false, false, false, false)
 	part, err := convertDocumentWithCaps(t.Context(), doc, textOnlyCaps)
 	require.NoError(t, err)
 	assert.Nil(t, part, "image should be dropped for text-only model")
@@ -91,4 +91,28 @@ func TestConvertDocumentGemini_Drop_NoContent(t *testing.T) {
 	part, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	assert.Nil(t, part, "should be nil when no inline content")
+}
+
+func TestConvertDocument_JSONText(t *testing.T) {
+	t.Parallel()
+	doc := chat.Document{Name: "settings.json", MimeType: "application/json", Source: chat.DocumentSource{InlineText: `{"enabled":true}`}}
+	part, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
+	require.NoError(t, err)
+	require.NotNil(t, part)
+	assert.Contains(t, part.Text, doc.Source.InlineText)
+}
+
+func TestConvertDocumentGeminiAudio(t *testing.T) {
+	t.Parallel()
+	for _, mime := range []string{"audio/wav", "audio/mpeg", "audio/ogg", "audio/pcm; rate=24000"} {
+		doc := chat.Document{Name: "audio", MimeType: mime, Source: chat.DocumentSource{InlineData: []byte{0, 1, 255}}}
+		part, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.CapsWith(false, false, true, false))
+		require.NoError(t, err)
+		require.NotNil(t, part)
+		assert.Equal(t, mime, part.InlineData.MIMEType)
+		assert.Equal(t, doc.Source.InlineData, part.InlineData.Data)
+		part, err = convertDocumentWithCaps(t.Context(), doc, modelinfo.CapsWith(false, false, false, false))
+		require.NoError(t, err)
+		assert.Nil(t, part)
+	}
 }

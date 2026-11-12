@@ -2,7 +2,7 @@
 
 models:
   together_model:
-    provider: together
+    provider: togetherai
     model: meta-llama/Llama-3.3-70B-Instruct-Turbo
 
 agents:

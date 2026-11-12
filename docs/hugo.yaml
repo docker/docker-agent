@@ -70,6 +70,7 @@ module:
       target: content/features
     - source: guides
       target: content/guides
+    # github.io-only section; docker/docs mount removal is managed separately.
     - source: community
       target: content/community
     # github.io-only pages.

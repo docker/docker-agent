@@ -51,7 +51,7 @@ func newMCPCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for HTTP MCP requests; only valid with --http")
 	cmd.PersistentFlags().BoolVar(&flags.insecureNoAuth, "insecure-no-auth", false, "Allow unauthenticated non-loopback HTTP binding (insecure); only valid with --http")
 	cmd.PersistentFlags().StringVar(&flags.runConfig.MCPToolName, "tool-name", "", "Override the MCP tool identifier clients call (defaults to agent name); only valid when exposing a single agent")
-	cmd.PersistentFlags().DurationVar(&flags.runConfig.MCPKeepAlive, "mcp-keepalive", 0, "Interval between MCP keep-alive pings (e.g. 30s); 0 disables keep-alive")
+	cmd.PersistentFlags().DurationVar(&flags.runConfig.MCPKeepAlive, "mcp-keepalive", 0, "Interval between MCP keep-alive pings (e.g. 30s); 0 disables keep-alive; only valid when serving an agent over stdio (not --http or --attach)")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
 	return cmd
@@ -68,11 +68,17 @@ func (f *mcpFlags) runMCPCommand(cmd *cobra.Command, args []string) (commandErr 
 		if f.http || f.safety != "" || f.authToken != "" || f.insecureNoAuth {
 			return errors.New("--http-only safety and authentication flags cannot be used with --attach")
 		}
+		if f.runConfig.MCPKeepAlive != 0 {
+			return errors.New("--mcp-keepalive cannot be used with --attach: the attach proxy ignores runtime configuration")
+		}
 		return f.runAttach(ctx)
 	}
 
 	if !f.http && (f.safety != "" || f.authToken != "" || f.insecureNoAuth) {
 		return errors.New("--safety, --auth-token, and --insecure-no-auth require --http")
+	}
+	if f.http && f.runConfig.MCPKeepAlive != 0 {
+		return errors.New("--mcp-keepalive is not supported with --http: stateless HTTP MCP does not support server-initiated keep-alive pings; use the stdio transport instead")
 	}
 	if err := validateSafetyFlag(f.safety); err != nil {
 		return err
@@ -100,6 +106,7 @@ func (f *mcpFlags) runMCPCommand(cmd *cobra.Command, args []string) (commandErr 
 	return mcp.StartHTTPServer(ctx, agentFilename, f.agentName, &f.runConfig, ln, mcp.HTTPOptions{
 		CLISafety: session.SafetyPolicy(f.safety),
 		AuthToken: f.authToken,
+		Out:       cmd.OutOrStdout(),
 		OnSafetyPolicy: func(resolved servesafety.Resolved) {
 			fmt.Fprintf(cmd.OutOrStdout(), "Tool safety policy: %s (source: %s)\n", resolved.Policy, resolved.Source)
 		},

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,12 +72,12 @@ func TestBuildLinesPlacesCursorOnInput(t *testing.T) {
 	assert.Equal(t, ui.PromptWidth+5, cursorCol)
 }
 
-func TestConversationLinesShowsSpinnerWhenBusy(t *testing.T) {
+func TestBuildLinesShowsSpinnerWhenBusy(t *testing.T) {
 	t.Parallel()
 	m := bareModel(24)
 	m.busy = true
-	lines := m.screen.Transcript.Lines(80, m.spinnerFrame, m.busy, m.sessionState, nil)
-	assert.Contains(t, strings.Join(lines, ""), "Working")
+	lines, cursorLine, _ := m.buildLines()
+	assert.Contains(t, lines[cursorLine-1], "Working")
 }
 
 func TestToolConfirmationReplacesRunningTool(t *testing.T) {

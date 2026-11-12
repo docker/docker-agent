@@ -29,12 +29,7 @@ func GetTelemetryEnabled() bool {
 // getTelemetryEnabledFromEnv checks only the environment variable,
 // without the test detection bypass. This allows testing the env var logic.
 func getTelemetryEnabledFromEnv() bool {
-	if env := os.Getenv("TELEMETRY_ENABLED"); env != "" {
-		// Only disable if explicitly set to "false"
-		return env != "false"
-	}
-	// Default to true (telemetry enabled)
-	return true
+	return os.Getenv("TELEMETRY_ENABLED") != "false"
 }
 
 // getUserUUID returns the persistent UUID identifying this cagent

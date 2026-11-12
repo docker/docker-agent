@@ -1,14 +1,12 @@
 package runtime
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,27 +17,33 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/agent"
-	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/effort"
+	"github.com/docker/docker-agent/pkg/evaluator"
+	"github.com/docker/docker-agent/pkg/harness"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/runtime/artifacts"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 	"github.com/docker/docker-agent/pkg/tools/builtin/skills"
-	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
 
-// ToolHandlerFunc is a function type for handling tool calls
-type ToolHandlerFunc func(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, events EventSink) (*tools.ToolCallResult, error)
+// ToolHandlerFunc handles a runtime-managed tool call. rt is the dispatcher's
+// per-call handle, used by handlers that need to talk back to the in-flight
+// call (streaming output, asking the user to approve an action).
+type ToolHandlerFunc func(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, events EventSink, rt tools.Runtime) (*tools.ToolCallResult, error)
 
 // Runtime defines the contract for runtime execution
 type Runtime interface {
@@ -74,7 +78,9 @@ type Runtime interface {
 	EmitAgentInfo(ctx context.Context, events EventSink)
 	// ResetStartupInfo resets the startup info emission flag, allowing re-emission
 	ResetStartupInfo()
-	// RunStream starts the agent's interaction loop and returns a channel of events
+	// RunStream starts the agent's interaction loop and returns a channel of events.
+	// Consumers must drain it to closure before releasing turn ownership, even
+	// after cancellation. Cancel the supplied context before draining on errors.
 	RunStream(ctx context.Context, sess *session.Session) <-chan Event
 	// Run starts the agent's interaction loop and returns the final messages
 	Run(ctx context.Context, sess *session.Session) ([]session.Message, error)
@@ -102,6 +108,9 @@ type Runtime interface {
 	// Returns nil if no permissions are configured.
 	PermissionsInfo() *PermissionsInfo
 
+	// ReadSkillContent loads a skill for sess without executing embedded commands.
+	ReadSkillContent(ctx context.Context, sess *session.Session, name string) (string, error)
+
 	// CurrentAgentSkillsToolset returns the skills toolset for the current agent, or nil if skills are not enabled.
 	CurrentAgentSkillsToolset() *skills.ToolSet
 
@@ -123,7 +132,8 @@ type Runtime interface {
 	UpdateSessionTitle(ctx context.Context, sess *session.Session, title string) error
 
 	// TitleGenerator returns a generator for automatic session titles, or nil
-	// if the runtime does not support local title generation (e.g. remote runtimes).
+	// if the runtime does not support local title generation (e.g. remote
+	// runtimes) or no configured model is a usable title candidate.
 	TitleGenerator(ctx context.Context) *sessiontitle.Generator
 
 	// Steer enqueues a user message for urgent mid-turn injection into the
@@ -162,7 +172,7 @@ type Runtime interface {
 	// AvailableModels returns the models the user can pick from in the
 	// /model picker. Returns nil for runtimes that don't expose model
 	// switching; see SupportsModelSwitching for a cheap pre-check.
-	AvailableModels(ctx context.Context) []ModelChoice
+	AvailableModels(ctx context.Context) []modelcatalog.ModelChoice
 
 	// SupportsModelSwitching reports whether SetAgentModel and
 	// AvailableModels are wired for this runtime. Use it to gate UI
@@ -172,8 +182,8 @@ type Runtime interface {
 
 	// OnToolsChanged registers a handler invoked outside of any RunStream
 	// when a toolset reports a tool list change (e.g. after an MCP
-	// ToolListChanged notification). Runtimes that don't emit such events
-	// can implement this as a no-op.
+	// ToolListChanged notification). A nil handler unregisters. Runtimes
+	// that don't emit such events can implement this as a no-op.
 	OnToolsChanged(handler func(Event))
 
 	// OnBackgroundEvent registers a handler invoked outside of any RunStream
@@ -228,18 +238,27 @@ type ModelStore interface {
 
 // LocalRuntime manages the execution of agents
 type LocalRuntime struct {
+	isolatedWorktree  bool
+	worktreePrompt    worktreePrompt
+	worktreeRoot      string
+	liveSessionParent *LocalRuntime
+	harnessFactory    *harness.Factory
+	commandEvaluator  *CommandEvaluatorFactory
+
 	ctx                       func() context.Context
 	toolMap                   map[string]ToolHandlerFunc
 	toolDeferrals             tools.DeferralTracker
 	team                      *team.Team
 	agents                    *agentRouter
-	resumeChan                chan ResumeRequest
+	resumeChan                chan ResumeRequest // Queues a decision delivered before the prompt emitter parks.
 	tracer                    trace.Tracer
+	modelsDevFallback         func() *modelsdev.Database
 	modelsStore               ModelStore
 	sessionCompaction         bool
 	managedOAuth              bool
 	unmanagedOAuthRedirectURI string
 	nonInteractive            bool
+	directElicitation         tools.ElicitationHandler
 	startupInfoEmitted        atomic.Bool        // Track if startup info has been emitted to avoid unnecessary duplication
 	elicitation               elicitationBridge  // Owns the per-stream events channel for outbound elicitation requests
 	elicitationWaiters        elicitationWaiters // Routes elicitation responses to the request awaiting them, keyed by ID (#3584)
@@ -250,41 +269,55 @@ type LocalRuntime struct {
 	// the sink being (re)registered.
 	elicitationSinkMu    sync.RWMutex
 	onElicitationRequest func(Event)
+	onElicitationContext func(context.Context, Event)
 	sessionStore         session.Store
-	workingDir           string   // Working directory for hooks execution
-	env                  []string // Environment variables for hooks execution
-	modelSwitcherCfg     *ModelSwitcherConfig
-	providerRegistry     *provider.Registry
-	gatewayModels        gatewayModelsCache
-	dmrModels            dmrModelsCache
+	// generatedFiles caches per-owner-session workspace roots and manifest
+	// records for [LocalRuntime.ResolveGeneratedFile]. Seeded by
+	// materialization, filled lazily for restored sessions.
+	artifactsOnce    sync.Once
+	artifactService  *artifacts.Service
+	workingDir       string   // Working directory for hooks execution
+	env              []string // Environment variables for hooks execution
+	modelSwitcherCfg *modelcatalog.Config
+	providerRegistry *provider.Registry
+	catalogOnce      sync.Once
+	modelCatalog     *modelcatalog.Catalog
+	modelContexts    modelContextCache
 
 	// hooksRegistry is the runtime-private hooks.Registry used to build
-	// every Executor. It carries the runtime-owned builtin hooks
-	// (add_date, add_environment_info) registered once during
-	// NewLocalRuntime, so they're available to every agent without
+	// every Executor. It carries the stock builtins from [builtins.Register]
+	// plus the runtime-owned ones (e.g. cache_response), registered once
+	// during NewLocalRuntime, so they're available to every agent without
 	// touching any process-wide state.
 	hooksRegistry *hooks.Registry
 
 	// autoInjectors run on every per-agent hook config during
-	// [buildHooksExecutors] so embedders can plug in builtins (today
+	// [LocalRuntime.buildHooksExecutors] so embedders can plug in builtins (today
 	// snapshot via [builtins.SnapshotController]) without the runtime
 	// hard-coding their wiring. Set via [WithAutoInjector].
 	autoInjectors []builtins.AutoInjector
 
 	// hooksExecByAgent holds the per-agent [hooks.Executor], keyed by
-	// agent name. Built once in [NewLocalRuntime.buildHooksExecutors]
-	// after team and runtime config are finalized; agents with no hooks
-	// have no entry, so [hooksExec] returns nil for them. Read-only after
+	// agent name. Built once in [LocalRuntime.buildHooksExecutors]
+	// after team and runtime config are finalized; every agent has an entry
+	// (the tool-result limiter is always on), so [LocalRuntime.hooksExec]
+	// returns nil only for a nil or unknown agent. Read-only after
 	// construction, so no locking is needed.
 	hooksExecByAgent map[string]*hooks.Executor
 
 	// transforms is the runtime's [MessageTransform] chain, applied to
 	// every LLM call in registration order. Populated by
-	// [NewLocalRuntime] (for the runtime-shipped strip transform) and by
+	// [NewLocalRuntime] (for the runtime-shipped strip_generated_media and
+	// strip_unsupported_modalities transforms) and by
 	// [WithMessageTransform] (for embedder-supplied transforms).
 	// Read-only after construction.
 	transforms []registeredTransform
 
+	// fallback owns the model-fallback chain (primary + configured
+	// fallbacks), per-attempt retry/backoff for transient errors, and
+	// the per-agent "sticky" cooldown after a fallback succeeds. It
+	// holds the cooldownManager and rate-limit retry flag so that state
+	// stays out of LocalRuntime. See [fallbackExecutor].
 	fallback *fallbackExecutor
 
 	// observers receive every event the runtime produces, in
@@ -292,13 +325,7 @@ type LocalRuntime struct {
 	// construction; read-only afterwards. Always contains at least one
 	// entry: the auto-registered [PersistenceObserver] for the
 	// configured session store. See [EventObserver] for the contract.
-	observers []EventObserver
-
-	// fallback owns the model-fallback chain (primary + configured
-	// fallbacks), per-attempt retry/backoff for transient errors, and
-	// the per-agent "sticky" cooldown after a fallback succeeds. It
-	// holds the cooldownManager and rate-limit retry flag so that state
-	// stays out of LocalRuntime. See [fallbackExecutor].
+	observers []func() EventObserver
 
 	// steerQueue stores urgent mid-turn messages. The agent loop drains
 	// ALL pending messages after tool execution, before the stop check.
@@ -316,11 +343,9 @@ type LocalRuntime struct {
 	budgetsCfg   map[string]latest.BudgetConfig
 	agentBudgets map[string][]string
 
-	// budgetMu guards budget and budgetStarted. The first root stream
-	// installs the trackers and every later one reuses them, so a budget
-	// spans the session rather than resetting on each message; sub-sessions
-	// read the same set, so delegated work spends against the root run's
-	// wallets rather than getting a fresh allowance each.
+	// budgetMu guards budget and budgetStarted. The first root stream or
+	// manual compaction installs the trackers; subsequent runs reuse them.
+	// Delegated and compaction work share the same wallets.
 	budgetMu sync.Mutex
 	budget   *budgetSet
 	// budgetStarted distinguishes "not built yet" from "built, and there
@@ -340,6 +365,8 @@ type LocalRuntime struct {
 	liveSessionsMu sync.Mutex
 	liveSessions   map[string]*liveSessionEntry
 
+	activeCompactions sync.Map // session ID -> struct{}
+
 	// recallHandler wakes embedders (TUI/App) when a tool recall arrives after
 	// the active RunStream has gone idle. Protected by recallMu because tool
 	// callbacks can fire from background goroutines.
@@ -349,30 +376,36 @@ type LocalRuntime struct {
 	// onToolsChanged is called when an MCP toolset reports a tool list
 	// change. Protected by toolsChangedMu because MCP change-notification
 	// goroutines call emitToolsChanged concurrently, mirroring
-	// onBackgroundEvent/backgroundEventMu below.
-	toolsChangedMu sync.RWMutex
-	onToolsChanged func(Event)
+	// onBackgroundEvent/backgroundEventMu below. toolsChangedUnsubs holds
+	// this runtime's subscriptions on ChangeSubscriber toolsets, released
+	// on re-registration and at Close.
+	toolsChangedMu     sync.RWMutex
+	onToolsChanged     func(Event)
+	toolsChangedUnsubs []func()
 
 	// onBackgroundEvent is called for events surfaced from detached
 	// background work (e.g. background agent tasks). Protected by
 	// backgroundEventMu because background tasks read it from their own
 	// goroutines.
-	backgroundEventMu sync.RWMutex
-	onBackgroundEvent func(Event)
+	backgroundEventMu   sync.RWMutex
+	onBackgroundEvent   func(Event)
+	onBackgroundContext func(context.Context, Event)
 
 	bgAgents *agenttool.Handler
 
+	extraToolsetRuns extraToolsetRuns
+
 	// dmrModelLister lists the models pulled locally in Docker Model Runner,
 	// used to populate DMR entries in the model picker. Defaults to
-	// dmrmodels.ListModels in NewLocalRuntime; left nil by runtimes built directly
+	// dmrmodels.ListModelsWithMetadata in NewLocalRuntime; left nil by runtimes built directly
 	// (e.g. tests) so DMR discovery stays opt-in. Tests inject a stub here.
-	dmrModelLister func(ctx context.Context) ([]string, error)
+	dmrModelLister func(ctx context.Context) ([]dmrmodels.Model, error)
 
 	// now is the runtime's clock. Defaults to time.Now and can be replaced
 	// in tests via WithClock to make timestamps and cooldown windows
-	// deterministic. Every time-dependent call inside the runtime (message
-	// CreatedAt, fallback cooldown windows, tool-call latency) goes through
-	// this hook so a single fake clock controls them all.
+	// deterministic. Runtime-recorded timestamps (assistant message
+	// CreatedAt, fallback cooldown windows, budget turn timing) go through
+	// this hook; the toolexec dispatcher and hook timing use time.Now.
 	now func() time.Time
 
 	// telemetry receives the runtime's observability events (session
@@ -399,6 +432,14 @@ type LocalRuntime struct {
 	// toolset to start before skipping it for the startup sidebar pass.
 	// Defaults to defaultToolStartTimeout; overridden via WithToolStartTimeout.
 	toolStartTimeout time.Duration
+
+	// streamStoppedDeliveryTimeout bounds how long finalizeEventChannel
+	// blocks trying to deliver StreamStopped when the event buffer is full.
+	// Defaults to defaultStreamStoppedDeliveryTimeout; tests shrink it to
+	// exercise the drop-when-abandoned path without a real-time wait. Zero
+	// falls back to the default (see streamStoppedTimeout), so runtimes built
+	// directly via a struct literal in tests still get bounded delivery.
+	streamStoppedDeliveryTimeout time.Duration
 
 	// pauseMu guards pauseCh.
 	pauseMu sync.Mutex
@@ -433,6 +474,12 @@ func WithUnmanagedOAuthRedirectURI(uri string) Opt {
 	return func(r *LocalRuntime) {
 		r.unmanagedOAuthRedirectURI = uri
 	}
+}
+
+// WithElicitationHandler handles requests synchronously instead of emitting elicitation events.
+// Non-interactive runtimes still decline; the handler must honor the request context.
+func WithElicitationHandler(handler tools.ElicitationHandler) Opt {
+	return func(r *LocalRuntime) { r.directElicitation = handler }
 }
 
 // WithNonInteractive marks the runtime as headless (e.g., MCP serve mode).
@@ -487,6 +534,12 @@ func WithProviderRegistry(registry *provider.Registry) Opt {
 	}
 }
 
+// WithModelsDevFallback supplies data for the default lazy catalog only.
+// Explicit stores, including the model-switcher store, retain precedence.
+func WithModelsDevFallback(load func() *modelsdev.Database) Opt {
+	return func(r *LocalRuntime) { r.modelsDevFallback = load }
+}
+
 func WithModelStore(store ModelStore) Opt {
 	return func(r *LocalRuntime) {
 		r.modelsStore = store
@@ -515,7 +568,7 @@ func WithEnv(env []string) Opt {
 
 // WithClock replaces the runtime's clock. Defaults to time.Now. Tests that
 // need deterministic timestamps (assistant message CreatedAt, fallback
-// cooldown windows, tool-call latency) can pass a fake clock so assertions
+// cooldown windows, budget turn timing) can pass a fake clock so assertions
 // don't depend on wall-clock advancement.
 func WithClock(now func() time.Time) Opt {
 	return func(r *LocalRuntime) {
@@ -667,8 +720,8 @@ func New(ctx context.Context, agents *team.Team, opts ...Opt) (Runtime, error) {
 	return NewLocalRuntime(ctx, agents, opts...)
 }
 
-// NewLocalRuntime creates a new LocalRuntime without the persistence wrapper.
-// This is useful for testing or when persistence is handled externally.
+// NewLocalRuntime creates a LocalRuntime and auto-registers a
+// PersistenceObserver for the configured (default in-memory) session store.
 func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	defaultAgent, err := agents.DefaultAgent()
 	if err != nil {
@@ -676,41 +729,65 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	}
 
 	r := &LocalRuntime{
-		ctx:                    func() context.Context { return context.WithoutCancel(ctx) },
-		toolMap:                make(map[string]ToolHandlerFunc),
-		liveSessions:           make(map[string]*liveSessionEntry),
-		team:                   agents,
-		agents:                 newAgentRouter(agents, defaultAgent.Name()),
-		resumeChan:             make(chan ResumeRequest),
-		steerQueue:             NewInMemoryMessageQueue(defaultSteerQueueCapacity),
-		followUpQueue:          NewInMemoryMessageQueue(defaultFollowUpQueueCapacity),
-		sessionCompaction:      true,
-		managedOAuth:           true,
-		sessionStore:           session.NewInMemorySessionStore(),
-		fallback:               newFallbackExecutor(),
-		now:                    time.Now,
-		telemetry:              defaultTelemetry{},
-		providerRegistry:       provider.DefaultRegistry(),
-		maxOverflowCompactions: defaultMaxOverflowCompactions,
-		toolListTimeout:        defaultToolListTimeout,
-		toolStartTimeout:       defaultToolStartTimeout,
-		dmrModelLister:         dmrmodels.ListModels,
+		ctx:                          func() context.Context { return context.WithoutCancel(ctx) },
+		toolMap:                      make(map[string]ToolHandlerFunc),
+		liveSessions:                 make(map[string]*liveSessionEntry),
+		team:                         agents,
+		agents:                       newAgentRouter(agents, defaultAgent.Name()),
+		resumeChan:                   make(chan ResumeRequest, 1),
+		steerQueue:                   NewInMemoryMessageQueue(defaultSteerQueueCapacity),
+		followUpQueue:                NewInMemoryMessageQueue(defaultFollowUpQueueCapacity),
+		sessionCompaction:            true,
+		managedOAuth:                 true,
+		sessionStore:                 session.NewInMemorySessionStore(),
+		fallback:                     newFallbackExecutor(),
+		now:                          time.Now,
+		telemetry:                    defaultTelemetry{},
+		providerRegistry:             provider.EmptyRegistry(),
+		maxOverflowCompactions:       defaultMaxOverflowCompactions,
+		toolListTimeout:              defaultToolListTimeout,
+		toolStartTimeout:             defaultToolStartTimeout,
+		streamStoppedDeliveryTimeout: defaultStreamStoppedDeliveryTimeout,
+		dmrModelLister:               dmrmodels.ListModelsWithMetadata,
 	}
 	r.bgAgents = agenttool.NewHandler(r)
+	r.fallback.prepareMessages = r.prepareMessagesForModel
 
-	// stripUnsupportedModalitiesTransform captures the runtime closure to
-	// resolve the agent from Input.AgentName, so it lives here rather
-	// than as a stateless builtin in pkg/hooks/builtins. It drops image
-	// content for text-only models on every model call.
+	// stripUnsupportedModalitiesTransform drops image, audio and video
+	// parts the resolved model's capabilities (Input.ModelCapabilities)
+	// don't accept, on every model call. Runtime-generated artifact parts
+	// are always kept; strip_generated_media handles them.
 	//
 	// redact_secrets used to live here as a sibling [MessageTransform];
 	// it now ships entirely as a [hooks.BuiltinFunc] in
 	// pkg/hooks/builtins/redact_secrets.go and is wired into all three
-	// of pre_tool_use, before_llm_call, and tool_response_transform via
+	// of tool_input_transform, before_llm_call, and tool_response_transform via
 	// [builtins.ApplyAgentDefaults] (or a user's hooks YAML directly),
 	// so the rewrite path is the same for every leak vector and there
 	// is no flag-only code path to keep in sync.
+	//
+	// Ordering matters: strip_generated_media MUST run before
+	// strip_unsupported_modalities. The latter strips any image/audio/
+	// video-kind document part the resolved model can't accept,
+	// regardless of whether that part is a runtime-materialized generated
+	// artifact or a user attachment — it has no placeholder logic. If it
+	// ran first, a capability-less or unknown model would have a
+	// media-only generated-media assistant message stripped down to
+	// nothing right there, and strip_generated_media would then see no
+	// generated-media part left to react to: its placeholder would never
+	// fire, and the turn would silently vanish from outgoing history.
+	// Running strip_generated_media first guarantees its placeholder text
+	// is already in place — as ordinary text, not a media part — by the
+	// time strip_unsupported_modalities runs, so there is nothing left for
+	// it to strip from that message.
 	r.transforms = append(r.transforms,
+		// strip_generated_media has no runtime state to capture (the policy
+		// is unconditional), so it registers the free function directly
+		// rather than a method value like the transform below.
+		registeredTransform{
+			name: BuiltinStripGeneratedMedia,
+			fn:   stripGeneratedMediaTransform,
+		},
 		registeredTransform{
 			name: BuiltinStripUnsupportedModalities,
 			fn:   r.stripUnsupportedModalitiesTransform,
@@ -732,7 +809,24 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	if err := builtins.Register(r.hooksRegistry); err != nil {
 		return nil, fmt.Errorf("register builtin hooks: %w", err)
 	}
-	registerModelHook(r.hooksRegistry, r.providerRegistry)
+	RegisterModelHook(r.hooksRegistry, r.providerRegistry)
+	r.hooksRegistry.Register(hooks.HookTypeEvaluator, hooks.NewEvaluatorFactory(func(agentName, name string) (evaluator.Evaluator, bool) {
+		a, err := r.team.Agent(agentName)
+		if err != nil {
+			return nil, false
+		}
+		var client evaluator.Evaluator
+		var ok bool
+		if a.HasEvaluatorScope() {
+			client, ok = a.Evaluator(name)
+		} else {
+			client, ok = r.team.Evaluator(name)
+		}
+		if !ok || client == nil {
+			return nil, false
+		}
+		return &accountedEvaluator{client: client, name: name}, true
+	}, hooks.WithRoutingDefaults(r.routingDefaultAgent)))
 
 	// cache_response is registered here (not in pkg/hooks/builtins)
 	// because it needs to capture the runtime to resolve the agent
@@ -743,11 +837,8 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		return nil, fmt.Errorf("register %q builtin: %w", BuiltinCacheResponse, err)
 	}
 
-	// Build the cooldown manager and wire the fallback executor's
-	// runtime-bound dependencies after opts so they pick up the final
-	// clock and telemetry sink ([WithClock] / [WithTelemetry]).
+	// Build cooldowns after opts so they pick up [WithClock].
 	r.fallback.cooldowns = newCooldownManager(r.now)
-	r.fallback.telemetry = r.telemetry
 
 	// Default the runtime's working directory to the process CWD when no
 	// caller supplied one. This matches the session's default and ensures
@@ -761,13 +852,13 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 
 	if r.modelsStore == nil {
 		// Precedence: an explicit WithModelStore (already set above) wins; then a
-		// store carried on the ModelSwitcherConfig (the team loader shares the
+		// store carried on the modelcatalog.Config (the team loader shares the
 		// one it warmed so the first /model open skips the cold catalog parse);
 		// otherwise a lazy store constructed on first use.
 		if r.modelSwitcherCfg != nil && r.modelSwitcherCfg.ModelsStore != nil {
 			r.modelsStore = r.modelSwitcherCfg.ModelsStore
 		} else {
-			r.modelsStore = &lazyModelStore{}
+			r.modelsStore = &lazyModelStore{fallback: r.modelsDevFallback}
 		}
 	}
 
@@ -795,8 +886,9 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	// (possibly user-supplied) session store. It runs first in the
 	// observer chain so any user-supplied observers see the same view
 	// of the session that future RunStream calls and store reads will.
-	if obs := newPersistenceObserver(r.sessionStore); obs != nil {
-		r.observers = append([]EventObserver{obs}, r.observers...)
+	if r.sessionStore != nil {
+		factory := func() EventObserver { return newPersistenceObserver(r.sessionStore) }
+		r.observers = append([]func() EventObserver{factory}, r.observers...)
 	}
 
 	slog.DebugContext(ctx, "Creating new runtime", "agent", r.agents.Name(), "available_agents", agents.Size())
@@ -840,254 +932,24 @@ func (r *LocalRuntime) CurrentAgentCommands(context.Context) types.Commands {
 }
 
 // CurrentAgentTools returns the tools available to the current agent.
-// This starts the toolsets if needed and returns all available tools.
+// This starts toolsets if needed; returned handlers enforce this agent's skill
+// policy without permitting embedded commands outside a tool call.
 func (r *LocalRuntime) CurrentAgentTools(ctx context.Context) ([]tools.Tool, error) {
 	a := r.CurrentAgent()
-	return a.Tools(ctx)
-}
-
-// ToolsetState is the coarse lifecycle bucket the agent inspector renders as a
-// status glyph. It collapses the full lifecycle.State machine into the three
-// distinctions a reader cares about: serving (started), not running (stopped),
-// or broken (error).
-type ToolsetState string
-
-const (
-	ToolsetStarted ToolsetState = "started"
-	ToolsetStopped ToolsetState = "stopped"
-	ToolsetError   ToolsetState = "error"
-)
-
-// ToolsetDetail describes one configured toolset for the agent inspector: its
-// display name, kind, lifecycle bucket and the tools it exposes. Tools holds
-// the live tool names when the toolset is started, otherwise the declared
-// `tools:` allow-list from the retained config, and is empty when neither is
-// available (a not-yet-started toolset with no explicit allow-list).
-type ToolsetDetail struct {
-	Name  string
-	Kind  string
-	State ToolsetState
-	Tools []string
-}
-
-// AgentConfigInfo is the static-plus-live dataset behind the read-only agent
-// inspector modal. The static parts (sub-agents, handoffs, fallbacks, skills,
-// limits, option flags, declared toolset allow-lists) are derived from the
-// resolved *agent.Agent and the retained config without starting any toolset;
-// the live parts (per-toolset lifecycle state, started tool names, IsCurrent)
-// reflect the running team. Remote runtimes (which hold no local team) return
-// the zero value, so the modal omits every config-derived section.
-type AgentConfigInfo struct {
-	SubAgents []string // sub-agent names, sorted
-	Handoffs  []string // handoff target names, sorted
-	Fallbacks []string // fallback model ids ("provider/model"), in priority order
-	Skills    []string // configured skill names (inline + included + used), sorted
-
-	MaxIterations           int // 0 when unset
-	NumHistoryItems         int // 0 when unset
-	MaxConsecutiveToolCalls int // 0 when unset
-
-	Options  []string        // enabled option flags (add-date, redact-secrets, ...)
-	Toolsets []ToolsetDetail // per-toolset live state + tools, in declaration order
-
-	IsCurrent bool // true when this is the live current agent
-}
-
-// AgentConfigInfo returns the named agent's inspector dataset. It inspects the
-// resolved agent and the retained config, reading live tool names only from
-// already-started toolsets (never starting one), so it is safe to call for any
-// agent whether or not it has run. Unknown agents yield the zero value, so the
-// modal omits the corresponding sections.
-func (r *LocalRuntime) AgentConfigInfo(ctx context.Context, agentName string) AgentConfigInfo {
-	a, err := r.team.Agent(agentName)
-	if err != nil || a == nil {
-		return AgentConfigInfo{}
-	}
-
-	cfg, hasCfg := r.team.AgentConfig(agentName)
-
-	var subAgents []string
-	for _, sub := range a.SubAgents() {
-		if sub != nil {
-			subAgents = append(subAgents, sub.Name())
-		}
-	}
-
-	var handoffs []string
-	for _, h := range a.Handoffs() {
-		if h != nil {
-			handoffs = append(handoffs, h.Name())
-		}
-	}
-
-	var fallbacks []string
-	for _, p := range a.FallbackModels() {
-		if p != nil {
-			fallbacks = append(fallbacks, p.ID().String())
-		}
-	}
-
-	info := AgentConfigInfo{
-		SubAgents:               uniqueNames(subAgents, true),
-		Handoffs:                uniqueNames(handoffs, true),
-		Fallbacks:               uniqueNames(fallbacks, false),
-		MaxIterations:           a.MaxIterations(),
-		NumHistoryItems:         a.NumHistoryItems(),
-		MaxConsecutiveToolCalls: a.MaxConsecutiveToolCalls(),
-		Options:                 agentOptionFlags(a, cfg, hasCfg),
-		Toolsets:                toolsetDetails(ctx, a, cfg, hasCfg),
-		IsCurrent:               r.agents != nil && r.agents.Name() == agentName,
-	}
-	if hasCfg {
-		info.Skills = configSkillNames(cfg)
-	}
-	return info
-}
-
-// agentOptionFlags lists the agent's enabled boolean options as stable,
-// hyphenated display names. AddDate/AddEnvironmentInfo/RedactSecrets read the
-// agent's effective (resolved) values; CodeModeTools is only knowable from the
-// retained config because the runtime folds it into a single wrapper toolset.
-func agentOptionFlags(a *agent.Agent, cfg latest.AgentConfig, hasCfg bool) []string {
-	var opts []string
-	if a.AddDate() {
-		opts = append(opts, "add-date")
-	}
-	if a.AddEnvironmentInfo() {
-		opts = append(opts, "add-environment-info")
-	}
-	if a.RedactSecrets() {
-		opts = append(opts, "redact-secrets")
-	}
-	if hasCfg && cfg.CodeModeTools {
-		opts = append(opts, "code-mode-tools")
-	}
-	return opts
-}
-
-// configSkillNames lists the cleanly-resolvable skill names from the agent
-// config: inline skill names, the Include allow-list, and referenced skill
-// groups (UseSkills). Skills auto-discovered from Sources (e.g. a local
-// directory) are not enumerated here because doing so would require loading
-// them from disk; the inspector notes this rather than starting that work.
-func configSkillNames(cfg latest.AgentConfig) []string {
-	var names []string
-	for _, s := range cfg.Skills.Inline {
-		names = append(names, s.Name)
-	}
-	names = append(names, cfg.Skills.Include...)
-	names = append(names, cfg.UseSkills...)
-	return uniqueNames(names, true)
-}
-
-// toolsetDetails builds one ToolsetDetail per live toolset of the agent,
-// combining the side-effect-free lifecycle status with tool names: live names
-// for started toolsets, otherwise the declared `tools:` allow-list keyed by the
-// same name the registry assigns (cmp.Or(name, type)).
-func toolsetDetails(ctx context.Context, a *agent.Agent, cfg latest.AgentConfig, hasCfg bool) []ToolsetDetail {
-	toolSets := a.ToolSets()
-	if len(toolSets) == 0 {
-		return nil
-	}
-	var declared map[string][]string
-	if hasCfg {
-		declared = declaredToolNames(cfg)
-	}
-	infos := make([]ToolsetDetail, 0, len(toolSets))
-	for _, ts := range toolSets {
-		status := toolsetStatusFor(ts)
-		info := ToolsetDetail{
-			Name:  status.Name,
-			Kind:  status.Kind,
-			State: toolsetStateBucket(status.State),
-		}
-		if live, ok := startedToolNames(ctx, ts); ok {
-			info.Tools = live
-		} else if names, ok := declared[status.Name]; ok {
-			info.Tools = names
-		}
-		infos = append(infos, info)
-	}
-	return infos
-}
-
-// toolsetStateBucket collapses the lifecycle state machine into the inspector's
-// three buckets. Failed is the only error state; Stopped (including a
-// not-yet-started toolset) is stopped; everything else (Ready, Degraded,
-// Starting, Restarting) reads as started/serving.
-func toolsetStateBucket(s lifecycle.State) ToolsetState {
-	switch s {
-	case lifecycle.StateFailed:
-		return ToolsetError
-	case lifecycle.StateStopped:
-		return ToolsetStopped
-	default:
-		return ToolsetStarted
-	}
-}
-
-// startedToolNames returns the live tool names of ts, but only when it is a
-// started toolset; the boolean is false for not-yet-started toolsets so the
-// caller can fall back to the declared allow-list. context.TODO is safe here:
-// the toolset is already started, so listing returns its cached tools without
-// a cancellable round-trip.
-func startedToolNames(ctx context.Context, ts tools.ToolSet) ([]string, bool) {
-	s, ok := tools.As[*tools.StartableToolSet](ts)
-	if !ok || !s.IsStarted() {
-		return nil, false
-	}
-	tl, err := s.Tools(ctx)
+	agentTools, err := a.Tools(ctx)
 	if err != nil {
-		return nil, false
+		return agentTools, err
 	}
-	names := make([]string, 0, len(tl))
-	for i := range tl {
-		if tl[i].Name != "" {
-			names = append(names, tl[i].Name)
-		}
-	}
-	return names, true
+	return bindSkillRuntime(agentTools, skillRuntime{runtime: r, agent: a}), nil
 }
 
-// declaredToolNames maps each configured toolset's display name to its declared
-// `tools:` allow-list. The key matches the registry's naming
-// (cmp.Or(name, type)) so it lines up with the live toolset's Name. Toolsets
-// with no explicit allow-list (serve all tools) are omitted.
-func declaredToolNames(cfg latest.AgentConfig) map[string][]string {
-	m := make(map[string][]string, len(cfg.Toolsets))
-	for i := range cfg.Toolsets {
-		t := cfg.Toolsets[i]
-		key := cmp.Or(t.Name, t.Type)
-		if key == "" || len(t.Tools) == 0 {
-			continue
-		}
-		m[key] = slices.Clone(t.Tools)
+// AgentConfigInfo inspects an agent without starting tools or drivers.
+func (r *LocalRuntime) AgentConfigInfo(ctx context.Context, name string) inspection.AgentConfigInfo {
+	current := ""
+	if r.agents != nil {
+		current = r.agents.Name()
 	}
-	return m
-}
-
-// uniqueNames drops empty entries and de-duplicates names. By default it keeps
-// the first-seen order (meaningful for declaration/priority order); when sorted
-// is true it orders the result case-insensitively instead.
-func uniqueNames(names []string, sorted bool) []string {
-	seen := make(map[string]struct{}, len(names))
-	out := make([]string, 0, len(names))
-	for _, name := range names {
-		if name == "" {
-			continue
-		}
-		if _, dup := seen[name]; dup {
-			continue
-		}
-		seen[name] = struct{}{}
-		out = append(out, name)
-	}
-	if sorted {
-		slices.SortFunc(out, func(a, b string) int {
-			return strings.Compare(strings.ToLower(a), strings.ToLower(b))
-		})
-	}
-	return out
+	return (inspection.Service{Team: r.team, CurrentAgent: current}).AgentConfigInfo(ctx, name)
 }
 
 // CurrentAgentToolsetStatuses returns one ToolsetStatus per toolset of the
@@ -1102,7 +964,7 @@ func (r *LocalRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus {
 	toolSets := a.ToolSets()
 	statuses := make([]tools.ToolsetStatus, 0, len(toolSets))
 	for _, ts := range toolSets {
-		statuses = append(statuses, toolsetStatusFor(ts))
+		statuses = append(statuses, inspection.ToolsetStatus(ts))
 	}
 	return statuses
 }
@@ -1120,22 +982,21 @@ func (r *LocalRuntime) AgentToolsetStatuses(name string) []tools.ToolsetStatus {
 	toolSets := a.ToolSets()
 	statuses := make([]tools.ToolsetStatus, 0, len(toolSets))
 	for _, ts := range toolSets {
-		statuses = append(statuses, toolsetStatusFor(ts))
+		statuses = append(statuses, inspection.ToolsetStatus(ts))
 	}
 	return statuses
 }
 
 // RestartToolset locates the named toolset on the active agent and
-// asks it to restart in place. The supervisor closes the current
-// session and reconnects; this method blocks until the new session
-// is Ready, ctx is cancelled, or the underlying supervisor's
-// timeout elapses.
+// asks its canonical lifecycle wrapper to restart it in place. The wrapper
+// serializes the operation with start/stop and keeps its lifecycle state in
+// sync with the underlying supervisor.
 //
 // Returns an error when:
 //   - no toolset matches name (matching uses the same logic as the
 //     /tools dialog: the toolset's Name() if any, otherwise its
 //     description),
-//   - no matching toolset is supervisor-backed (no Restartable capability),
+//   - no matching toolset supports restart,
 //   - the supervisor itself returned an error (timeout, classified
 //     transport failure, etc.).
 //
@@ -1149,63 +1010,19 @@ func (r *LocalRuntime) RestartToolset(ctx context.Context, name string) error {
 	}
 	found := false
 	for _, ts := range a.ToolSets() {
-		if nameFor(ts, tools.DescribeToolSet(ts)) != name {
+		if inspection.ToolsetName(ts, tools.DescribeToolSet(ts)) != name {
 			continue
 		}
 		found = true
-		if restartable, ok := tools.As[tools.Restartable](ts); ok {
-			return restartable.Restart(ctx)
+		startable, ok := ts.(*tools.StartableToolSet)
+		if ok && startable.CanRestart() {
+			return startable.RestartIfSupported(ctx)
 		}
 	}
 	if found {
 		return fmt.Errorf("toolset %q does not support restart", name)
 	}
 	return fmt.Errorf("toolset %q not found", name)
-}
-
-// toolsetStatusFor builds a ToolsetStatus for ts. tools.As walks the
-// wrapper chain so Statable/Describer can live anywhere in the stack.
-func toolsetStatusFor(ts tools.ToolSet) tools.ToolsetStatus {
-	status := tools.ToolsetStatus{
-		Description: tools.DescribeToolSet(ts),
-	}
-	if kinder, ok := tools.As[tools.Kinder](ts); ok {
-		status.Kind = kinder.Kind()
-	}
-	if statable, ok := tools.As[tools.Statable](ts); ok {
-		info := statable.State()
-		status.State = info.State
-		status.LastError = info.LastError
-		status.RestartCount = info.RestartCount
-	} else {
-		// Toolsets without a supervisor are considered ready by default;
-		// the StartableToolSet wrapper would have surfaced an error
-		// earlier if Start failed.
-		status.State = lifecycleStateForUnsupervised(ts)
-	}
-	_, status.Restartable = tools.As[tools.Restartable](ts)
-	status.Name = nameFor(ts, status.Description)
-	return status
-}
-
-func lifecycleStateForUnsupervised(ts tools.ToolSet) lifecycle.State {
-	if s, ok := ts.(*tools.StartableToolSet); ok && !s.IsStarted() {
-		return lifecycle.StateStopped
-	}
-	return lifecycle.StateReady
-}
-
-// nameFor picks a stable, user-visible name for a toolset. We look for
-// any inner toolset that implements tools.Named (walked via tools.As so
-// wrappers like StartableToolSet are transparent). The registry adds a
-// WithName wrapper for every built-in toolset so this is reachable for
-// almost every toolset; fallback uses the description ("mcp(stdio cmd=...)"),
-// which is still better than the Go type name.
-func nameFor(ts tools.ToolSet, fallback string) string {
-	if name := tools.GetName(ts); name != "" {
-		return name
-	}
-	return fallback
 }
 
 // mcpPromptToolset is the subset of the MCP toolset's API the runtime needs
@@ -1232,16 +1049,14 @@ func (r *LocalRuntime) CurrentMCPPrompts(ctx context.Context) map[string]tools.P
 
 	// Iterate through all toolsets of the current agent
 	for _, toolset := range currentAgent.ToolSets() {
-		if mcpToolset, ok := tools.As[mcpPromptToolset](toolset); ok {
+		mcpToolsets := tools.FindAll[mcpPromptToolset](toolset)
+		if len(mcpToolsets) == 0 {
+			slog.DebugContext(ctx, "Toolset contains no MCP prompt provider", "type", fmt.Sprintf("%T", toolset))
+			continue
+		}
+		for _, mcpToolset := range mcpToolsets {
 			slog.DebugContext(ctx, "Found MCP toolset", "toolset", mcpToolset)
-			// Discover prompts from this MCP toolset
-			mcpPrompts := r.discoverMCPPrompts(ctx, mcpToolset)
-
-			// Merge prompts into the result map
-			// If there are name conflicts, the later toolset's prompt will override
-			maps.Copy(prompts, mcpPrompts)
-		} else {
-			slog.DebugContext(ctx, "Toolset is not an MCP toolset", "type", fmt.Sprintf("%T", toolset))
+			maps.Copy(prompts, r.discoverMCPPrompts(ctx, mcpToolset))
 		}
 	}
 
@@ -1308,7 +1123,7 @@ func agentSkillsToolset(a *agent.Agent) *skills.ToolSet {
 		return nil
 	}
 	for _, ts := range a.ToolSets() {
-		if st, ok := tools.As[*skills.ToolSet](ts); ok {
+		if st, ok := tools.Find[*skills.ToolSet](ts); ok {
 			return st
 		}
 	}
@@ -1323,53 +1138,52 @@ func (r *LocalRuntime) ExecuteMCPPrompt(ctx context.Context, promptName string, 
 	}
 
 	for _, toolset := range currentAgent.ToolSets() {
-		mcpToolset, ok := tools.As[mcpPromptToolset](toolset)
-		if !ok {
-			continue
-		}
-
-		result, err := mcpToolset.GetPrompt(ctx, promptName, arguments)
-		if err != nil {
-			// If error is "prompt not found", continue to next toolset
-			if err.Error() == "prompt not found" {
-				continue
+		for _, mcpToolset := range tools.FindAll[mcpPromptToolset](toolset) {
+			result, err := mcpToolset.GetPrompt(ctx, promptName, arguments)
+			if err != nil {
+				// If error is "prompt not found", continue to next toolset
+				if err.Error() == "prompt not found" {
+					continue
+				}
+				return "", fmt.Errorf("error executing prompt '%s': %w", promptName, err)
 			}
-			return "", fmt.Errorf("error executing prompt '%s': %w", promptName, err)
-		}
 
-		// Convert the MCP result to a string format
-		if len(result.Messages) == 0 {
-			return "No content returned from MCP prompt", nil
-		}
+			// Convert the MCP result to a string format
+			if len(result.Messages) == 0 {
+				return "No content returned from MCP prompt", nil
+			}
 
-		var content strings.Builder
-		for i, message := range result.Messages {
-			if i > 0 {
-				content.WriteString("\n\n")
+			var content strings.Builder
+			for i, message := range result.Messages {
+				if i > 0 {
+					content.WriteString("\n\n")
+				}
+				if textContent, ok := message.Content.(*mcp.TextContent); ok {
+					content.WriteString(textContent.Text)
+				} else {
+					fmt.Fprintf(&content, "[Non-text content: %T]", message.Content)
+				}
 			}
-			if textContent, ok := message.Content.(*mcp.TextContent); ok {
-				content.WriteString(textContent.Text)
-			} else {
-				fmt.Fprintf(&content, "[Non-text content: %T]", message.Content)
-			}
+			return content.String(), nil
 		}
-		return content.String(), nil
 	}
 
 	return "", fmt.Errorf("MCP prompt '%s' not found in any active toolset", promptName)
 }
 
-// TitleGenerator returns a title generator for automatic session title generation.
+// TitleGenerator returns a title generator for automatic session title
+// generation, or nil when no configured model is a usable title candidate
+// (see [sessiontitle.New]). A harness agent has no models: its driver titles
+// the session when it implements [harness.Completer].
 func (r *LocalRuntime) TitleGenerator(ctx context.Context) *sessiontitle.Generator {
 	a := r.CurrentAgent()
 	if a == nil {
 		return nil
 	}
-	models := a.TitleModels(ctx)
-	if len(models) == 0 {
-		return nil
+	if a.HasHarness() {
+		return r.harnessTitleGenerator(a)
 	}
-	return sessiontitle.New(models[0], models[1:]...)
+	return sessiontitle.New(a.TitleModels(ctx)...)
 }
 
 // getAgentModelID returns the model ID for an agent. The zero ID is
@@ -1408,9 +1222,11 @@ func (r *LocalRuntime) agentDetailsFromTeam(ctx context.Context) []AgentDetails 
 		providerName := info.Provider
 		modelName := info.Model
 		var thinking string
+		var capabilities *inspection.ExecutionCapabilities
 
 		// Get the agent to access fallbacks and the effective thinking level.
 		if a, err := r.team.Agent(info.Name); err == nil && a != nil {
+			capabilities = inspection.Capabilities(a)
 			// Check if this agent has an active fallback cooldown
 			cooldownState := r.fallback.cooldowns.Get(info.Name)
 			if cooldownState != nil {
@@ -1425,12 +1241,13 @@ func (r *LocalRuntime) agentDetailsFromTeam(ctx context.Context) []AgentDetails 
 		}
 
 		details[i] = AgentDetails{
-			Name:        info.Name,
-			Description: info.Description,
-			Provider:    providerName,
-			Model:       modelName,
-			Thinking:    thinking,
-			Commands:    info.Commands,
+			Name:                  info.Name,
+			Description:           info.Description,
+			Provider:              providerName,
+			Model:                 modelName,
+			Thinking:              thinking,
+			Commands:              info.Commands,
+			ExecutionCapabilities: capabilities,
 		}
 	}
 	return details
@@ -1441,8 +1258,11 @@ func (r *LocalRuntime) agentDetailsFromTeam(ctx context.Context) []AgentDetails 
 // "high"), "adaptive" for adaptive budgets, the decimal token count for
 // token-based budgets, "off" when thinking is disabled on a reasoning-capable
 // model, or "" when the model has no selectable thinking configuration to
-// display.
+// display. A harness agent shows its effort, "adaptive" while its CLI picks it.
 func (r *LocalRuntime) agentThinkingLabel(ctx context.Context, a *agent.Agent) string {
+	if a.HasHarness() {
+		return harnessThinkingLabel(a.Harness())
+	}
 	models := a.EffectiveModels()
 	if len(models) == 0 {
 		return ""
@@ -1479,7 +1299,8 @@ func (r *LocalRuntime) SessionStore() session.Store {
 // when their process is shutting down.
 func (r *LocalRuntime) Close() error {
 	r.bgAgents.StopAll()
-	return nil
+	r.OnToolsChanged(nil)
+	return r.extraToolsetRuns.close(context.WithoutCancel(r.ctx()))
 }
 
 // UpdateSessionTitle persists the session title via the session store.
@@ -1514,22 +1335,22 @@ func (r *LocalRuntime) ResetStartupInfo() {
 
 // OnToolsChanged registers a handler that is called when an MCP toolset
 // reports a tool list change outside of a RunStream. This allows the UI
-// to update the tool count immediately.
+// to update the tool count immediately. The runtime subscribes to the
+// team's toolsets on behalf of the handler, replacing only its own previous
+// subscriptions so runtimes sharing a toolset do not displace each other;
+// a nil handler unsubscribes.
 func (r *LocalRuntime) OnToolsChanged(handler func(Event)) {
 	r.toolsChangedMu.Lock()
 	r.onToolsChanged = handler
+	previous := r.toolsChangedUnsubs
+	r.toolsChangedUnsubs = nil
+	if handler != nil {
+		r.toolsChangedUnsubs = r.subscribeToolsChanged()
+	}
 	r.toolsChangedMu.Unlock()
 
-	for _, name := range r.team.AgentNames() {
-		a, err := r.team.Agent(name)
-		if err != nil {
-			continue
-		}
-		for _, ts := range a.ToolSets() {
-			if n, ok := tools.As[tools.ChangeNotifier](ts); ok {
-				n.SetToolsChangedHandler(r.emitToolsChanged)
-			}
-		}
+	for _, unsub := range previous {
+		unsub()
 	}
 }
 
@@ -1552,395 +1373,43 @@ func (r *LocalRuntime) emitToolsChanged() {
 	handler(ToolsetInfo(len(agentTools), false, r.currentAgentName()))
 }
 
-// OnBackgroundEvent registers a handler that receives events surfaced from
-// detached background work — today the TokenUsageEvents of background agent
-// tasks (run_background_agent), whose sub-sessions run on their own goroutine
-// with no live event channel. This lets the UI keep per-agent context
-// accounting for background agents.
+// OnBackgroundEvent receives lifecycle and usage events from detached agent tasks.
 func (r *LocalRuntime) OnBackgroundEvent(handler func(Event)) {
 	r.backgroundEventMu.Lock()
 	defer r.backgroundEventMu.Unlock()
 	r.onBackgroundEvent = handler
+	r.onBackgroundContext = nil
+}
+
+// OnBackgroundEventWithContext preserves detached producer ownership.
+func (r *LocalRuntime) OnBackgroundEventWithContext(handler func(context.Context, Event)) {
+	r.backgroundEventMu.Lock()
+	defer r.backgroundEventMu.Unlock()
+	r.onBackgroundContext = handler
+	r.onBackgroundEvent = nil
 }
 
 // emitBackgroundEvent forwards an event from detached background work to the
 // registered handler, if any.
-func (r *LocalRuntime) emitBackgroundEvent(event Event) {
+func (r *LocalRuntime) emitBackgroundEvent(ctx context.Context, event Event) {
 	r.backgroundEventMu.RLock()
 	handler := r.onBackgroundEvent
+	contextual := r.onBackgroundContext
 	r.backgroundEventMu.RUnlock()
+	if contextual != nil {
+		contextual(ctx, event)
+		return
+	}
 	if handler != nil {
 		handler(event)
 	}
 }
 
-// emitAgentAndTeamInfo sends the AgentInfo and TeamInfo events that drive the
-// sidebar's agent/model/thinking display. It returns false when sending was
-// aborted (e.g. the context was cancelled). Shared by EmitStartupInfo and
-// EmitAgentInfo so both render identical model labels.
-func (r *LocalRuntime) emitAgentAndTeamInfo(ctx context.Context, a *agent.Agent, send func(Event) bool) bool {
-	modelID := r.getEffectiveModelID(ctx, a)
-	modelLabel := modelID.String()
-	contextLimit := r.contextLimitForAgentModel(ctx, a, modelID)
-	var compactionModel string
-	var primaryLimit int64
-	if a.CompactionModel() != nil {
-		var compactionLimit int64
-		compactionModel, primaryLimit, compactionLimit = r.compactionCapAttribution(ctx, a, modelID)
-		if !compactionCaps(primaryLimit, compactionLimit) {
-			compactionModel, primaryLimit = "", 0
-		}
-	}
-	if a.HasHarness() {
-		modelLabel = agentModelLabel(ctx, a)
-		contextLimit = 0
-		compactionModel, primaryLimit = "", 0
-	}
-	info := AgentInfo(a.Name(), modelLabel, a.Description(), a.WelcomeMessage(), contextLimit).(*AgentInfoEvent)
-	info.CompactionModel = compactionModel
-	info.PrimaryContextLimit = primaryLimit
-	if !send(info) {
-		return false
-	}
-	return send(TeamInfo(r.agentDetailsFromTeam(ctx), r.currentAgentName()))
-}
-
-func (r *LocalRuntime) contextLimitForAgentModel(ctx context.Context, a *agent.Agent, modelID modelsdev.ID) int64 {
-	if a == nil || modelID.IsZero() {
-		return 0
-	}
-	return r.effectiveContextLimit(ctx, a, r.resolveContextLimit(ctx, a.Model(ctx), modelID))
-}
-
-// EmitAgentInfo implements [Runtime.EmitAgentInfo]: it refreshes the agent and
-// team display without touching toolset discovery.
-func (r *LocalRuntime) EmitAgentInfo(ctx context.Context, events EventSink) {
-	a := r.CurrentAgent()
-	if a == nil {
-		return
-	}
-	r.emitAgentAndTeamInfo(ctx, a, func(event Event) bool {
-		if ctx.Err() != nil {
-			return false
-		}
-		events.Emit(event)
-		return true
-	})
-}
-
-// EmitStartupInfo emits initial agent, team, and toolset information for immediate sidebar display.
-// When sess is non-nil and contains token data, a TokenUsageEvent is also emitted so that the
-// sidebar can display context usage percentage on session restore.
-func (r *LocalRuntime) EmitStartupInfo(ctx context.Context, sess *session.Session, events EventSink) {
-	// CompareAndSwap makes the check-and-set atomic: App.Start emits from a
-	// spawned goroutine while reEmitStartupInfo (e.g. on /new session) resets
-	// and re-emits from another, and a plain bool check-then-set race would
-	// let both goroutines through or miss an emission.
-	if !r.startupInfoEmitted.CompareAndSwap(false, true) {
-		return
-	}
-
-	a := r.CurrentAgent()
-
-	// Helper to send events with context check
-	send := func(event Event) bool {
-		if ctx.Err() != nil {
-			return false
-		}
-		events.Emit(event)
-		return true
-	}
-
-	// Emit agent and team information immediately for fast sidebar display.
-	// Use getEffectiveModelID to account for active fallback cooldowns.
-	modelID := r.getEffectiveModelID(ctx, a)
-	if !r.emitAgentAndTeamInfo(ctx, a, send) {
-		return
-	}
-
-	// When restoring a session that already has token data, emit a
-	// TokenUsageEvent so the sidebar can show the context usage percentage.
-	// The context limit comes from the model definition (models.dev), which
-	// is a model property — not persisted in the session.
-	//
-	// SessionUsage folds embedded sub-session costs into the parent's cost,
-	// which is what a restore/branch context needs: those sub-sessions
-	// won't emit their own events.
-	var restoredInput, restoredOutput int64
-	if sess != nil {
-		restoredInput, restoredOutput = sess.Usage()
-	}
-	if restoredInput > 0 || restoredOutput > 0 {
-		contextLimit := r.contextLimitForAgentModel(ctx, a, modelID)
-		usage := SessionUsage(sess, contextLimit, a.CompactionThreshold())
-
-		// Reconstruct LastMessage from the parent session's last assistant
-		// message so that FinishReason (and other per-message fields) are
-		// available on session restore.  We intentionally iterate
-		// sess.Messages (not GetAllMessages) so the result reflects the
-		// parent agent's state: this event carries the parent session_id,
-		// and sub-agents emit their own token_usage events with their own
-		// session_id during live streaming.
-		//
-		// MessagesSnapshot takes sess.mu so this cannot race a concurrent
-		// AddMessage/ApplyCompaction (e.g. a live HTTP AddMessage arriving
-		// while startup info is being emitted for a restored session).
-		items := sess.MessagesSnapshot()
-		for i := range slices.Backward(items) {
-			item := &items[i]
-			if !item.IsMessage() || item.Message.Message.Role != chat.MessageRoleAssistant {
-				continue
-			}
-			msg := &item.Message.Message
-			lm := &MessageUsage{
-				Model:        msg.Model,
-				Cost:         msg.Cost,
-				FinishReason: msg.FinishReason,
-			}
-			if msg.Usage != nil {
-				lm.Usage = *msg.Usage
-			}
-			usage.LastMessage = lm
-			break
-		}
-
-		send(NewTokenUsageEvent(sess.ID, r.currentAgentName(), usage))
-	}
-
-	// Tool loading can be slow (MCP servers need to start). Mark the
-	// context as non-interactive so toolsets that require user-driven
-	// flows (e.g. an OAuth elicitation for a remote MCP server) fail
-	// fast with a recognisable error rather than blocking on a dialog
-	// the TUI is not yet ready to render. The actual prompt happens on
-	// the first RunStream when the user is interacting with the agent.
-	nonInteractiveCtx := tools.WithoutInteractivePrompts(ctx)
-	r.emitToolsProgressively(nonInteractiveCtx, a, send)
-
-	// Flush any agent warnings: load-time warnings recorded at agent
-	// construction (WithLoadTimeWarnings) and per-toolset warnings recorded
-	// during startup above (e.g. a remote MCP server returning 4xx during
-	// initialize). Surfacing them as WarningEvents lets the TUI show a
-	// persistent notice with the actual server-side explanation — otherwise
-	// the user only sees the toolset disappear from the sidebar with no clue
-	// as to why.
-	r.emitAgentWarnings(a, events)
-}
-
-// emitToolsProgressively loads tools from each toolset and emits progress updates.
-// This allows the UI to show the tool count incrementally as each toolset loads,
-// with a spinner indicating that more tools may be coming.
-func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agent, send func(Event) bool) {
-	toolsets := a.ToolSets()
-	totalToolsets := len(toolsets)
-
-	// If no toolsets, emit final state immediately
-	if totalToolsets == 0 {
-		send(ToolsetInfo(0, false, r.currentAgentName()))
-		return
-	}
-
-	// Emit initial loading state
-	if !send(ToolsetInfo(0, true, r.currentAgentName())) {
-		return
-	}
-
-	// Start every toolset concurrently so one slow start (e.g. an MCP server
-	// pulling an image) doesn't delay the others; the context is already
-	// non-interactive here so no start can block on a user-driven flow. Each
-	// start keeps its own bounded timeout, and outcomes are consumed in
-	// configuration order below so an early fast toolset is listed (and
-	// counted) without waiting for a slow later one. Peer-dependent toolsets
-	// (e.g. the deferred aggregator, whose Start lists its source toolsets'
-	// tools) start in a second wave, after the others have settled.
-	starts := make([]chan error, totalToolsets)
-	var independents sync.WaitGroup
-	var dependents []int
-	for i, toolset := range toolsets {
-		startable, ok := toolset.(*tools.StartableToolSet)
-		if !ok {
-			continue
-		}
-		starts[i] = make(chan error, 1)
-		if _, ok := tools.As[tools.PeerDependent](startable); ok {
-			dependents = append(dependents, i)
-			continue
-		}
-		independents.Go(func() {
-			starts[i] <- startToolsetWithTimeout(ctx, startable, r.toolStartTimeout)
-		})
-	}
-	for _, i := range dependents {
-		startable := toolsets[i].(*tools.StartableToolSet)
-		go func() {
-			independents.Wait()
-			starts[i] <- startToolsetWithTimeout(ctx, startable, r.toolStartTimeout)
-		}()
-	}
-
-	// Load tools from each toolset and emit progress
-	var totalTools int
-	for i, toolset := range toolsets {
-		// Check context before potentially slow operations
-		if ctx.Err() != nil {
-			return
-		}
-
-		isLast := i == totalToolsets-1
-
-		// Handle the start outcome, including recovery: a previously-started
-		// toolset whose inner connection died (e.g. background invalid_token)
-		// had its recovery Start() called above so ShouldReportRecoveryFailure
-		// can fire the targeted re-auth notice. Start() is a no-op when the
-		// toolset is already healthy, so calling it unconditionally is safe.
-		if startable, ok := toolset.(*tools.StartableToolSet); ok {
-			if err := <-starts[i]; err != nil {
-				desc := tools.DescribeToolSet(startable.ToolSet)
-				// A start that outlived its deadline (e.g. an MCP container
-				// stuck behind a wedged Docker daemon) is reported directly:
-				// the abandoned Start goroutine has not returned, so the
-				// once-per-streak guard below has recorded nothing and would
-				// silently swallow the warning.
-				if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-					slog.WarnContext(ctx, "Toolset start timed out; skipping",
-						"agent", a.Name(), "toolset", desc, "timeout", r.toolStartTimeout)
-					a.AddToolWarning(fmt.Sprintf("%s is taking too long to start (>%s) — it keeps starting in the background and its tools appear once it is ready", desc, r.toolStartTimeout))
-					continue
-				}
-				// IsAuthorizationRequired must be checked BEFORE
-				// ShouldReportFailure: this is the first — expected —
-				// failure of a deferred-OAuth toolset, and consuming the
-				// failure-reported flag here would suppress the *real*
-				// failure (e.g. server 4xx on the eventual interactive
-				// retry) that the user actually needs to see.
-				if tools.IsAuthorizationRequired(err) {
-					// Two cases:
-					// 1. Initial startup deferral (toolset never ran): the
-					//    OAuth dialog will appear naturally on the first user
-					//    message — no need to pre-announce it.
-					// 2. Recovery: the toolset was previously working but the
-					//    background watcher detected a server-side invalid_token
-					//    (fixes #3198). Surface a deduped re-auth notice so the
-					//    user knows what is about to prompt on their next message.
-					if startable.ShouldReportRecoveryFailure() {
-						slog.WarnContext(ctx, "Toolset needs re-authentication after background token rejection",
-							"agent", a.Name(), "toolset", desc)
-						a.AddToolWarning(desc + " needs re-authentication — it will prompt on your next message, or use /toolset-restart")
-					} else {
-						slog.DebugContext(ctx, "Toolset deferred until first message", "agent", a.Name(), "toolset", desc, "reason", err)
-					}
-					continue
-				}
-				// Route real failures through the agent's warning
-				// channel so the TUI surfaces a persistent,
-				// user-visible notice that includes the actual
-				// server-side cause (threaded through by
-				// remoteMCPClient.Initialize). Use the same
-				// once-per-streak guard as ensureToolSetsAreStarted
-				// so a failing toolset doesn't flood the UI with a
-				// new warning every time the agent is restarted.
-				if !startable.ShouldReportFailure() {
-					slog.DebugContext(ctx, "Toolset still unavailable; skipping", "agent", a.Name(), "toolset", desc, "error", err)
-					continue
-				}
-				slog.WarnContext(ctx, "Toolset start failed; skipping", "agent", a.Name(), "toolset", desc, "error", err)
-				a.AddToolWarning(fmt.Sprintf("%s start failed: %v", desc, err))
-				continue
-			}
-		}
-
-		// Get tools from this toolset under a bounded deadline. A toolset
-		// whose Tools() blocks indefinitely would otherwise stall the whole
-		// loop: the terminal ToolsetInfo{Loading:false} below is never sent,
-		// so the sidebar stays on "Loading tools…" forever and /quit appears
-		// to hang. Time it out, skip it, and move on. The skip is only for
-		// this startup sidebar pass — the toolset is not torn down, so a
-		// slow-but-responsive one is listed (and counted) again on the next
-		// turn or tool-change refresh.
-		ts, err := listToolsWithTimeout(ctx, toolset, r.toolListTimeout)
-		if err != nil {
-			slog.WarnContext(ctx, "Failed to list tools from toolset; skipping",
-				"agent", a.Name(), "toolset", tools.DescribeToolSet(toolset), "error", err)
-			continue
-		}
-
-		totalTools += len(ts)
-
-		// Emit progress update - still loading unless this is the last toolset
-		if !send(ToolsetInfo(totalTools, !isLast, r.currentAgentName())) {
-			return
-		}
-	}
-
-	// Emit final state (not loading)
-	send(ToolsetInfo(totalTools, false, r.currentAgentName()))
-}
-
-// listToolsWithTimeout enumerates a toolset's tools under a bounded deadline.
-// The (potentially blocking) Tools call runs in a goroutine and we select on
-// either its completion or the timeout, so a toolset whose Tools() ignores
-// context cancellation — e.g. a wedged MCP stdio subprocess — cannot block
-// startup. On timeout it returns the context error; the orphaned goroutine
-// sends into a buffered channel and exits if the call ever returns, so it does
-// not leak past the eventual (or never) return of Tools().
-func listToolsWithTimeout(ctx context.Context, toolset tools.ToolSet, timeout time.Duration) ([]tools.Tool, error) {
-	// Defend against a zero/negative timeout (e.g. a directly-constructed
-	// LocalRuntime that bypassed NewLocalRuntime) so we never collapse to an
-	// already-expired context that skips every toolset.
-	if timeout <= 0 {
-		timeout = defaultToolListTimeout
-	}
-	toolCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	type listResult struct {
-		tools []tools.Tool
-		err   error
-	}
-	done := make(chan listResult, 1) // buffered so a late send never blocks
-	go func() {
-		ts, err := toolset.Tools(toolCtx)
-		done <- listResult{tools: ts, err: err}
-	}()
-
+// armResume discards an earlier decision before publishing a new prompt.
+func (r *LocalRuntime) armResume() {
 	select {
-	case <-toolCtx.Done():
-		return nil, toolCtx.Err()
-	case res := <-done:
-		return res.tools, res.err
-	}
-}
-
-// startToolsetWithTimeout starts a toolset under a bounded deadline, mirroring
-// listToolsWithTimeout. The deadline must be enforced by racing the call
-// against the timeout (not only via the context): the MCP connector detaches
-// the context it is handed with context.WithoutCancel, so a wedged initialize
-// handshake (e.g. Docker failing to start the server container) would ignore a
-// ctx deadline and block startup forever. On timeout it returns the context
-// error; the orphaned goroutine sends into a buffered channel and exits if the
-// call ever returns.
-//
-// The abandoned goroutine keeps holding the StartableToolSet's single-flight
-// lock, so later Start/Stop calls on the same toolset wait for the original
-// attempt rather than racing it — if it eventually completes, the toolset
-// becomes usable on the next turn; if it never does, the TUI shutdown safety
-// net still bounds the exit path.
-func startToolsetWithTimeout(ctx context.Context, toolset *tools.StartableToolSet, timeout time.Duration) error {
-	if timeout <= 0 {
-		timeout = defaultToolStartTimeout
-	}
-	startCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	done := make(chan error, 1) // buffered so a late send never blocks
-	go func() {
-		done <- toolset.Start(startCtx)
-	}()
-
-	select {
-	case <-startCtx.Done():
-		return startCtx.Err()
-	case err := <-done:
-		return err
+	case <-r.resumeChan:
+	default:
 	}
 }
 
@@ -1983,12 +1452,19 @@ func (r *LocalRuntime) Resume(_ context.Context, req ResumeRequest) {
 	}
 }
 
+var (
+	// ErrSteerQueueFull indicates that no more steering messages can be queued.
+	ErrSteerQueueFull = errors.New("steer queue full")
+	// ErrFollowUpQueueFull indicates that no more follow-up messages can be queued.
+	ErrFollowUpQueueFull = errors.New("follow-up queue full")
+)
+
 // Steer enqueues a user message for urgent mid-turn injection into the
 // running agent loop. The message will be picked up after the current batch
 // of tool calls finishes but before the loop checks whether to stop.
 func (r *LocalRuntime) Steer(ctx context.Context, msg QueuedMessage) error {
 	if !r.steerQueue.Enqueue(ctx, msg) {
-		return errors.New("steer queue full")
+		return ErrSteerQueueFull
 	}
 	return nil
 }
@@ -1998,9 +1474,19 @@ func (r *LocalRuntime) Steer(ctx context.Context, msg QueuedMessage) error {
 // a full undivided agent turn.
 func (r *LocalRuntime) FollowUp(ctx context.Context, msg QueuedMessage) error {
 	if !r.followUpQueue.Enqueue(ctx, msg) {
-		return errors.New("follow-up queue full")
+		return ErrFollowUpQueueFull
 	}
 	return nil
+}
+
+func (r *LocalRuntime) CancelSteer(_ context.Context, id string) bool {
+	q, ok := r.steerQueue.(cancelableMessageQueue)
+	return ok && q.Cancel(id)
+}
+
+func (r *LocalRuntime) CancelFollowUp(_ context.Context, id string) bool {
+	q, ok := r.followUpQueue.(cancelableMessageQueue)
+	return ok && q.Cancel(id)
 }
 
 // SetRecallHandler registers an embedder-owned wake-up path for tool recalls.
@@ -2032,17 +1518,13 @@ func (r *LocalRuntime) recall(ctx context.Context, msg QueuedMessage) error {
 func (r *LocalRuntime) QueueStatus() QueueStatus {
 	status := QueueStatus{}
 	if steerQ, ok := r.steerQueue.(*inMemoryMessageQueue); ok {
-		status.SteerDepth = len(steerQ.ch)
-		status.SteerCapacity = cap(steerQ.ch)
+		status.SteerDepth, status.SteerCapacity = steerQ.status()
 	}
 	if followupQ, ok := r.followUpQueue.(*inMemoryMessageQueue); ok {
-		status.FollowupDepth = len(followupQ.ch)
-		status.FollowupCapacity = cap(followupQ.ch)
+		status.FollowupDepth, status.FollowupCapacity = followupQ.status()
 	}
 	return status
 }
-
-// Run starts the agent's interaction loop
 
 func (r *LocalRuntime) startSpan(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	if r.tracer == nil {
@@ -2061,7 +1543,18 @@ func (r *LocalRuntime) startSpan(ctx context.Context, name string, opts ...trace
 // Internal callers (proactive threshold, overflow recovery) use
 // [LocalRuntime.compactWithReason] directly to forward a more specific reason.
 func (r *LocalRuntime) Summarize(ctx context.Context, sess *session.Session, additionalPrompt string, events EventSink) {
-	r.compactWithReason(ctx, sess, additionalPrompt, compactionReasonManual, events)
+	// Manual compaction bypasses RunStream, but native compaction may start tools.
+	ctx = genai.WithConversationID(ctx, sess.ID)
+	ctx = tools.WithHandlerScope(ctx, tools.HandlerScope{
+		Elicitation: r.elicitationHandler,
+		OAuthSuccess: func() {
+			events.Emit(Authorization(tools.ElicitationActionAccept, r.resolveSessionAgent(sess).Name()))
+		},
+	})
+	r.configureToolsetHandlers(r.resolveSessionAgent(sess))
+	if err := r.compactWithReason(ctx, sess, additionalPrompt, compactionReasonManual, events); err != nil {
+		events.Emit(ErrorForSession(sess.ID, err.Error()))
+	}
 }
 
 // compactWithReason runs a session compaction with the supplied reason and
@@ -2079,7 +1572,11 @@ func (r *LocalRuntime) Summarize(ctx context.Context, sess *session.Session, add
 // compaction or contribute additional steering text. BeforeCompaction
 // hooks then fire inside [LocalRuntime.doCompact] with [Input.CompactionReason]
 // set to the canonical reason; they may veto or supply a custom summary.
-func (r *LocalRuntime) compactWithReason(ctx context.Context, sess *session.Session, additionalPrompt, reason string, events EventSink) {
+func (r *LocalRuntime) compactWithReason(ctx context.Context, sess *session.Session, additionalPrompt, reason string, events EventSink) error {
+	if !r.acquireCompaction(sess.ID) {
+		return ErrCompactionInProgress
+	}
+	defer r.activeCompactions.Delete(sess.ID)
 	// Stamp the session ID on ctx so the compaction LLM call carries
 	// `X-Cagent-Session-Id` to the gateway. Manual compaction
 	// (via `Summarize` from the App) bypasses `runStreamLoop`'s seed;
@@ -2096,7 +1593,7 @@ func (r *LocalRuntime) compactWithReason(ctx context.Context, sess *session.Sess
 		if msg != "" {
 			events.Emit(Warning(msg, a.Name()))
 		}
-		return
+		return nil
 	}
 	additionalPrompt = joinPrompts(additionalPrompt, extraPrompt)
 
@@ -2108,6 +1605,7 @@ func (r *LocalRuntime) compactWithReason(ctx context.Context, sess *session.Sess
 	modelID := r.getEffectiveModelID(ctx, a)
 	contextLimit := r.effectiveContextLimit(ctx, a, r.resolveContextLimit(ctx, a.Model(ctx), modelID))
 	events.Emit(NewTokenUsageEvent(sess.ID, a.Name(), SessionUsage(sess, contextLimit, a.CompactionThreshold())))
+	return nil
 }
 
 // preCompactSourceFor maps the canonical compaction reason

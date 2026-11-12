@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -29,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/fsx"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 )
 
 // annotateFilesystemSpan stamps the operation kind and target path
@@ -67,15 +67,15 @@ func cappedPaths(paths []string) []string {
 }
 
 const (
-	ToolNameReadFile           = "read_file"
-	ToolNameReadMultipleFiles  = "read_multiple_files"
-	ToolNameEditFile           = "edit_file"
-	ToolNameWriteFile          = "write_file"
-	ToolNameDirectoryTree      = "directory_tree"
-	ToolNameListDirectory      = "list_directory"
-	ToolNameSearchFilesContent = "search_files_content"
-	ToolNameMkdir              = "create_directory"
-	ToolNameRmdir              = "remove_directory"
+	ToolNameReadFile           = types.ToolNameReadFile
+	ToolNameReadMultipleFiles  = types.ToolNameReadMultipleFiles
+	ToolNameEditFile           = types.ToolNameEditFile
+	ToolNameWriteFile          = types.ToolNameWriteFile
+	ToolNameDirectoryTree      = types.ToolNameDirectoryTree
+	ToolNameListDirectory      = types.ToolNameListDirectory
+	ToolNameSearchFilesContent = types.ToolNameSearchFilesContent
+	ToolNameMkdir              = types.ToolNameMkdir
+	ToolNameRmdir              = types.ToolNameRmdir
 )
 
 // PostEditConfig represents a post-edit command configuration
@@ -178,6 +178,15 @@ func WithDenyList(roots []string) Opt {
 
 // CreateToolSet is used by the tools registry.
 func CreateToolSet(toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	ts, err := NewFromConfig(toolset, runConfig)
+	if err != nil {
+		return nil, err
+	}
+	return ts, nil
+}
+
+// NewFromConfig builds a filesystem toolset with its configured policies and hooks.
+func NewFromConfig(toolset latest.Toolset, runConfig *config.RuntimeConfig) (*ToolSet, error) {
 	wd := runConfig.WorkingDir
 	if wd == "" {
 		var err error
@@ -250,12 +259,9 @@ func (t *ToolSet) Close() error {
 
 func (t *ToolSet) Instructions() string {
 	var b strings.Builder
-	b.WriteString("## Filesystem Tools\n")
-	if t.workingDir != "" {
-		fmt.Fprintf(&b, "\n- The working directory is %q; relative paths resolve from it", t.workingDir)
-	}
-	b.WriteString(`
-- Absolute paths must match the host OS (e.g. C:\... on Windows, /... on Unix)
+	b.WriteString(`## Filesystem Tools
+
+- Relative paths resolve from the working directory; absolute paths and ".." work as expected
 - Prefer read_multiple_files over sequential read_file calls
 - Use search_files_content to locate code or text across files
 - Use exclude patterns in searches and max_depth in directory_tree to limit output`)
@@ -268,39 +274,19 @@ func (t *ToolSet) Instructions() string {
 	return b.String()
 }
 
-type DirectoryTreeArgs struct {
-	Path string `json:"path" jsonschema:"Directory to traverse"`
-}
+type DirectoryTreeArgs = types.DirectoryTreeArgs
 
-type WriteFileArgs struct {
-	Path    string `json:"path" jsonschema:"File to write"`
-	Content string `json:"content" jsonschema:"File content"`
-}
+type WriteFileArgs = types.WriteFileArgs
 
-type ReadMultipleFilesArgs struct {
-	Paths []string `json:"paths" jsonschema:"Files to read"`
-	JSON  bool     `json:"json,omitempty" jsonschema:"Return result as JSON"`
-}
+type ReadMultipleFilesArgs = types.ReadMultipleFilesArgs
 
-type ReadMultipleFilesMeta struct {
-	Files []ReadFileMeta `json:"files"`
-}
+type ReadMultipleFilesMeta = types.ReadMultipleFilesMeta
 
-type SearchFilesContentArgs struct {
-	Path            string   `json:"path" jsonschema:"Starting directory"`
-	Query           string   `json:"query" jsonschema:"Text or regex to search"`
-	IsRegex         bool     `json:"is_regex,omitempty" jsonschema:"Treat query as regex"`
-	ExcludePatterns []string `json:"excludePatterns,omitempty" jsonschema:"Patterns to exclude"`
-}
+type SearchFilesContentArgs = types.SearchFilesContentArgs
 
-type SearchFilesContentMeta struct {
-	MatchCount int `json:"matchCount"`
-	FileCount  int `json:"fileCount"`
-}
+type SearchFilesContentMeta = types.SearchFilesContentMeta
 
-type ListDirectoryArgs struct {
-	Path string `json:"path" jsonschema:"Directory to list"`
-}
+type ListDirectoryArgs = types.ListDirectoryArgs
 
 type CreateDirectoryArgs struct {
 	Paths []string `json:"paths" jsonschema:"Directories to create"`
@@ -310,184 +296,21 @@ type RemoveDirectoryArgs struct {
 	Paths []string `json:"paths" jsonschema:"Directories to remove"`
 }
 
-type ListDirectoryMeta struct {
-	Files     []string `json:"files"`
-	Dirs      []string `json:"dirs"`
-	Truncated bool     `json:"truncated"`
-}
+type ListDirectoryMeta = types.ListDirectoryMeta
 
-type DirectoryTreeMeta struct {
-	FileCount int  `json:"fileCount"`
-	DirCount  int  `json:"dirCount"`
-	Truncated bool `json:"truncated"`
-}
+type DirectoryTreeMeta = types.DirectoryTreeMeta
 
-type ReadFileArgs struct {
-	Path string `json:"path" jsonschema:"File to read"`
-	// Line and Limit are pointers so an omitted value is distinguishable
-	// from an explicit (invalid) zero.
-	Line  *int `json:"line,omitempty" jsonschema:"1-based line number to start reading from (text files only; defaults to the first line)"`
-	Limit *int `json:"limit,omitempty" jsonschema:"Maximum number of lines to read (text files only; defaults to reading through the end of the file)"`
-}
+type ReadFileArgs = types.ReadFileArgs
 
-type ReadFileMeta struct {
-	Path      string `json:"path"`
-	LineCount int    `json:"lineCount"`
-	Error     string `json:"error,omitempty"`
-}
+type ReadFileMeta = types.ReadFileMeta
 
-type Edit struct {
-	OldText string `json:"oldText" jsonschema:"Exact text to replace"`
-	NewText string `json:"newText" jsonschema:"Replacement text"`
-}
+type Edit = types.Edit
 
-type EditFileArgs struct {
-	Path  string `json:"path" jsonschema:"File to edit"`
-	Edits []Edit `json:"edits" jsonschema:"Edits to apply"`
-}
+type EditFileArgs = types.EditFileArgs
 
-// ParseEditFileArgs parses LLM-generated edit_file arguments, handling two
-// common failure modes:
-//  1. The outer JSON itself is malformed — typically extra closing braces/brackets
-//     or stray escape sequences caused by the model losing track of nesting depth
-//     when the text payload contains structural characters (e.g. YAML, Dockerfiles).
-//  2. The "edits" field is double-serialized (a JSON string instead of an array).
+// ParseEditFileArgs parses edit_file arguments, including common LLM JSON malformations.
 func ParseEditFileArgs(data []byte) (EditFileArgs, error) {
-	var raw struct {
-		Path  string          `json:"path"`
-		Edits json.RawMessage `json:"edits"`
-	}
-
-	didRepair := false
-	if err := json.Unmarshal(data, &raw); err != nil {
-		repaired, ok := tryRepairEditFileJSON(data)
-		if !ok {
-			return EditFileArgs{}, fmt.Errorf("failed to parse edit_file arguments: %w", err)
-		}
-		if err := json.Unmarshal(repaired, &raw); err != nil {
-			return EditFileArgs{}, fmt.Errorf("failed to parse edit_file arguments after repair: %w", err)
-		}
-		slog.Debug("Repaired malformed edit_file JSON arguments")
-		didRepair = true
-	}
-
-	args := EditFileArgs{Path: raw.Path}
-
-	// When edits is missing or null (e.g. during argument streaming in
-	// the TUI, or partial tool calls), accept the partial result.
-	if len(raw.Edits) == 0 || string(raw.Edits) == "null" {
-		return args, nil
-	}
-
-	// Try parsing edits as an array first (normal case).
-	if err := json.Unmarshal(raw.Edits, &args.Edits); err != nil {
-		// Try unwrapping a double-serialized JSON string.
-		var editsStr string
-		if err := json.Unmarshal(raw.Edits, &editsStr); err != nil {
-			return EditFileArgs{}, fmt.Errorf("edits field is neither an array nor a JSON string: %w", err)
-		}
-		if err := json.Unmarshal([]byte(editsStr), &args.Edits); err != nil {
-			// The inner payload can carry the same brace/bracket-counting
-			// mistakes as the outer JSON, so give it the same repair pass.
-			repaired, ok := tryRepairEditFileJSON([]byte(editsStr))
-			if !ok {
-				return EditFileArgs{}, fmt.Errorf("failed to parse double-serialized edits string: %w", err)
-			}
-			if err := json.Unmarshal(repaired, &args.Edits); err != nil {
-				return EditFileArgs{}, fmt.Errorf("failed to parse double-serialized edits string after repair: %w", err)
-			}
-			slog.Debug("Repaired malformed double-serialized edits payload")
-			didRepair = true
-		}
-	}
-
-	// Validated once, for either repair path: a repair is only trustworthy if it
-	// removed a spurious character rather than a load-bearing one. Well-formed
-	// payloads are deliberately not second-guessed here — the TUI parses
-	// partially-streamed arguments with this function, where a not-yet-filled
-	// oldText is normal; handleEditFile is what refuses to apply it.
-	if didRepair {
-		if err := validateRepairedEdits(args.Edits); err != nil {
-			return EditFileArgs{}, err
-		}
-	}
-
-	return args, nil
-}
-
-// validateRepairedEdits guards against repair output that is structurally
-// valid but semantically corrupted: an empty oldText after a repair means the
-// repair removed a load-bearing character (a quote closing the string) rather
-// than a spurious one, so the whole repaired payload is untrustworthy.
-//
-// This is about distrusting the repair, not about protecting the edit loop —
-// handleEditFile refuses an empty oldText on its own. Rejecting here just
-// reports the real problem at the parse boundary, where the message can say
-// the payload was mis-repaired.
-func validateRepairedEdits(edits []Edit) error {
-	for i, edit := range edits {
-		if edit.OldText == "" {
-			return fmt.Errorf("repaired edits payload is invalid: edit %d has empty oldText", i+1)
-		}
-	}
-	return nil
-}
-
-// tryRepairEditFileJSON attempts to fix common LLM JSON malformations by
-// iteratively removing the offending character(s) at each json.SyntaxError
-// offset. Observed failure modes from production sessions:
-//
-//   - Extra '}' — model loses brace count (e.g. "}}]}" instead of "}]}")
-//   - Extra ']' — model adds a spurious array wrapper
-//   - Stray '\' — model emits an escape sequence outside of a string value
-//     (e.g. literal \n between tokens, or \" where " is expected)
-func tryRepairEditFileJSON(data []byte) ([]byte, bool) {
-	current := append([]byte(nil), data...) // defensive copy
-	for range 3 {
-		var synErr *json.SyntaxError
-		if err := json.Unmarshal(current, &json.RawMessage{}); err == nil {
-			return current, true
-		} else if !errors.As(err, &synErr) {
-			return nil, false
-		}
-
-		// json.SyntaxError.Offset is 1-based.
-		offset := int(synErr.Offset) - 1
-		if offset < 0 || offset >= len(current) {
-			return nil, false
-		}
-
-		ch := current[offset]
-		removeCount := 1
-
-		switch ch {
-		case '}', ']':
-			// Extra closing delimiter — just remove it.
-		case '\\':
-			// Stray escape sequence outside a string value. For \n, \t, \r
-			// both characters are garbage so remove them. For \" the quote
-			// is a valid structural character (string delimiter), so only
-			// strip the backslash.
-			if offset+1 < len(current) {
-				switch current[offset+1] {
-				case 'n', 't', 'r':
-					removeCount = 2
-				}
-			}
-		default:
-			return nil, false
-		}
-
-		repaired := make([]byte, 0, len(current)-removeCount)
-		repaired = append(repaired, current[:offset]...)
-		repaired = append(repaired, current[offset+removeCount:]...)
-		current = repaired
-	}
-
-	if json.Valid(current) {
-		return current, true
-	}
-	return nil, false
+	return types.ParseEditFileArgs(data)
 }
 
 func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
@@ -627,6 +450,23 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	}, nil
 }
 
+// HasPostEditCommands reports whether writes may be changed by configured commands.
+func (t *ToolSet) HasPostEditCommands() bool {
+	return len(t.postEditCommands) > 0
+}
+
+// ExecutePostEditCommands runs hooks after a transport writes a checked, canonical path.
+func (t *ToolSet) ExecutePostEditCommands(ctx context.Context, path string) error {
+	if len(t.postEditCommands) == 0 {
+		return nil
+	}
+	workingDir, err := filepath.EvalSymlinks(t.workingDir)
+	if err != nil {
+		return fmt.Errorf("resolving post-edit working directory: %w", err)
+	}
+	return runPostEditCommands(ctx, workingDir, t.postEditCommands, path)
+}
+
 // executePostEditCommands executes any matching post-edit commands for the given file path
 func (t *ToolSet) executePostEditCommands(ctx context.Context, filePath string) error {
 	if len(t.postEditCommands) == 0 {
@@ -638,9 +478,9 @@ func (t *ToolSet) executePostEditCommands(ctx context.Context, filePath string) 
 // resolvePath resolves a path relative to the working directory.
 // A leading "~" or "~/" is expanded to the user's home directory so that
 // LLM-supplied paths like "~/file.txt" work without the agent having to
-// know the user's home directory upfront. Absolute paths are used as-is;
-// everything else (including "." and "..") is joined with the working
-// directory.
+// know the user's home directory upfront. Relative paths (including ".")
+// are joined with the working directory. Absolute paths and paths
+// starting with ".." are used as-is.
 //
 // resolvePath does NOT enforce the allow- or deny-lists; callers should use
 // [resolveAndCheckPath] when those checks are required (i.e. for any path
@@ -656,41 +496,10 @@ func (t *ToolSet) resolvePath(path string) string {
 	return filepath.Clean(filepath.Join(t.workingDir, path))
 }
 
-// checkForeignPath rejects paths that are absolute in another OS's syntax
-// (e.g. "/mnt/c/..." on Windows, "C:\..." on Unix). filepath.IsAbs does not
-// recognize them, so resolvePath would silently join them onto the working
-// directory and the caller would get a baffling not-found for a mangled
-// path. An explicit "./" prefix bypasses the check for the rare legitimate
-// file whose name matches one of these shapes.
-func checkForeignPath(path, goos string) error {
-	if goos == "windows" {
-		switch {
-		// "//server/share" and "\\server\share" are valid UNC paths.
-		case strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "//"):
-			return fmt.Errorf("path %q looks like a POSIX absolute path, but this host runs Windows; use a Windows path (e.g. C:\\...) or a path relative to the working directory", path)
-		case strings.HasPrefix(path, `\`) && !strings.HasPrefix(path, `\\`):
-			return fmt.Errorf("path %q is rooted but has no drive letter; use a full Windows path (e.g. C:\\...) or a path relative to the working directory", path)
-		case isDriveRelative(path):
-			return fmt.Errorf("path %q is drive-relative; use a full Windows path (e.g. C:\\...) or a path relative to the working directory", path)
-		}
-		return nil
-	}
-	if hasDrivePrefix(path) && len(path) > 2 && (path[2] == '/' || path[2] == '\\') {
-		return fmt.Errorf("path %q looks like a Windows absolute path, but this host runs %s; use a POSIX path (e.g. /home/...) or a path relative to the working directory", path, goos)
-	}
-	return nil
-}
-
-// hasDrivePrefix reports whether path starts with a drive letter and colon.
-func hasDrivePrefix(path string) bool {
-	return len(path) >= 2 && path[1] == ':' &&
-		('a' <= path[0] && path[0] <= 'z' || 'A' <= path[0] && path[0] <= 'Z')
-}
-
-// isDriveRelative reports whether path is like "C:" or "C:foo" — relative
-// to the current directory of drive C:, which filepath.Join cannot represent.
-func isDriveRelative(path string) bool {
-	return hasDrivePrefix(path) && (len(path) == 2 || path[2] != '/' && path[2] != '\\')
+// ResolveAndCheckPath applies filesystem policy without reading or writing file contents.
+// Transport adapters must also enforce containment when they access the path.
+func (t *ToolSet) ResolveAndCheckPath(path string) (string, error) {
+	return t.resolveAndCheckPath(path)
 }
 
 // resolveAndCheckPath is the canonical entry point used by every filesystem
@@ -736,9 +545,6 @@ func (t *ToolSet) resolveAndCheckPath(path string) (string, error) {
 	if t.sandboxBroken {
 		return "", errors.New("filesystem toolset is disabled due to invalid allow/deny list configuration")
 	}
-	if err := checkForeignPath(path, runtime.GOOS); err != nil {
-		return "", err
-	}
 
 	resolved := t.resolvePath(path)
 	if t.agentsIgnore.Match(resolved) {
@@ -758,12 +564,6 @@ func (t *ToolSet) resolveAndCheckPath(path string) (string, error) {
 		return "", fmt.Errorf("path %q is outside the allowed directories (%s)", path, t.allowList.describe())
 	}
 	return resolved, nil
-}
-
-// resolutionHint tells the model where a failed path actually pointed, so
-// it can correct a wrong base instead of retrying the same path.
-func (t *ToolSet) resolutionHint(resolved string) string {
-	return fmt.Sprintf(" (resolved to %q; relative paths resolve from the working directory %q)", resolved, t.workingDir)
 }
 
 // rootedAccess returns the [*os.Root] handle and rooted (slash-separated)
@@ -1019,9 +819,6 @@ func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools
 
 	content, err := t.readFile(resolvedPath)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return tools.ResultError("not found" + t.resolutionHint(resolvedPath)), nil
-		}
 		return tools.ResultError(fmt.Sprintf("Error reading file: %s", err)), nil
 	}
 
@@ -1066,9 +863,6 @@ func (t *ToolSet) handleListDirectory(ctx context.Context, args ListDirectoryArg
 
 	entries, err := t.readDir(resolvedPath)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return tools.ResultError("not found" + t.resolutionHint(resolvedPath)), nil
-		}
 		return tools.ResultError(fmt.Sprintf("Error reading directory: %s", err)), nil
 	}
 
@@ -1138,7 +932,7 @@ func (t *ToolSet) handleReadFile(ctx context.Context, args ReadFileArgs) (*tools
 	if err != nil {
 		var errMsg string
 		if errors.Is(err, fs.ErrNotExist) {
-			errMsg = "not found" + t.resolutionHint(resolvedPath)
+			errMsg = "not found"
 		} else {
 			errMsg = err.Error()
 		}
@@ -1147,7 +941,6 @@ func (t *ToolSet) handleReadFile(ctx context.Context, args ReadFileArgs) (*tools
 			Output:  errMsg,
 			IsError: true,
 			Meta: ReadFileMeta{
-				Path:  args.Path,
 				Error: errMsg,
 			},
 		}, nil
@@ -1375,7 +1168,7 @@ func (t *ToolSet) handleReadMultipleFiles(ctx context.Context, args ReadMultiple
 		if err != nil {
 			errMsg := err.Error()
 			if errors.Is(err, fs.ErrNotExist) {
-				errMsg = "not found" + t.resolutionHint(resolvedPath)
+				errMsg = "not found"
 			}
 			contents = append(contents, PathContent{
 				Path:    path,
@@ -1497,8 +1290,9 @@ func (t *ToolSet) handleSearchFilesContent(ctx context.Context, args SearchFiles
 			return nil
 		}
 
-		lines := strings.Split(string(content), "\n")
-		for lineNum, line := range lines {
+		lineNum := 0
+		for line := range strings.SplitSeq(string(content), "\n") {
+			lineNum++
 			var matched bool
 			var matchStart, matchEnd int
 
@@ -1538,7 +1332,7 @@ func (t *ToolSet) handleSearchFilesContent(ctx context.Context, args SearchFiles
 				if matchCount > 0 {
 					out.WriteByte('\n')
 				}
-				fmt.Fprintf(&out, "%s:%d:%d: %s", path, lineNum+1, matchStart+1, preview)
+				fmt.Fprintf(&out, "%s:%d:%d: %s", path, lineNum, matchStart+1, preview)
 				matchCount++
 				if out.Len() >= maxSearchOutputBytes {
 					truncated = true

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -135,7 +137,7 @@ func TestCycleAgentThinkingLevel_Errors(t *testing.T) {
 		root := agent.New("root", "test")
 		r := &LocalRuntime{
 			team:             team.New(team.WithAgents(root)),
-			modelSwitcherCfg: &ModelSwitcherConfig{},
+			modelSwitcherCfg: &modelcatalog.Config{},
 		}
 
 		_, err := r.CycleAgentThinkingLevel(t.Context(), "missing")
@@ -149,7 +151,7 @@ func TestCycleAgentThinkingLevel_Errors(t *testing.T) {
 		root := agent.New("root", "test", agent.WithModel(model))
 		r := &LocalRuntime{
 			team:             team.New(team.WithAgents(root)),
-			modelSwitcherCfg: &ModelSwitcherConfig{},
+			modelSwitcherCfg: &modelcatalog.Config{},
 		}
 
 		_, err := r.CycleAgentThinkingLevel(t.Context(), "root")
@@ -192,7 +194,7 @@ func TestCycleAgentThinkingLevel_AdvancesAndOverrides(t *testing.T) {
 	root := agent.New("root", "test", agent.WithModel(model))
 	r := &LocalRuntime{
 		team: team.New(team.WithAgents(root)),
-		modelSwitcherCfg: &ModelSwitcherConfig{
+		modelSwitcherCfg: &modelcatalog.Config{
 			ProviderRegistry: testProviderRegistry(),
 			EnvProvider:      environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
 		},
@@ -224,7 +226,7 @@ func TestSetAgentThinkingLevel(t *testing.T) {
 		root := agent.New("root", "test", agent.WithModel(newConfigProvider(cfg)))
 		r := &LocalRuntime{
 			team: team.New(team.WithAgents(root)),
-			modelSwitcherCfg: &ModelSwitcherConfig{
+			modelSwitcherCfg: &modelcatalog.Config{
 				ProviderRegistry: testProviderRegistry(),
 				EnvProvider:      environment.NewMapEnvProvider(env),
 			},
@@ -323,7 +325,7 @@ func TestSetAgentThinkingLevel_ConcurrentOverrideBetweenResolutionAndApply(t *te
 		root := agent.New("root", "test", agent.WithModel(modelA))
 		r := &LocalRuntime{
 			team: team.New(team.WithAgents(root)),
-			modelSwitcherCfg: &ModelSwitcherConfig{
+			modelSwitcherCfg: &modelcatalog.Config{
 				ProviderRegistry: testProviderRegistry(),
 				EnvProvider: environment.NewMapEnvProvider(map[string]string{
 					"OPENAI_API_KEY":    "sk-test",
@@ -364,7 +366,7 @@ func TestSetAgentThinkingLevel_ConcurrentOverrideBetweenResolutionAndApply(t *te
 
 		r := &LocalRuntime{
 			team: team.New(team.WithAgents(root)),
-			modelSwitcherCfg: &ModelSwitcherConfig{
+			modelSwitcherCfg: &modelcatalog.Config{
 				ProviderRegistry: testProviderRegistry(),
 				EnvProvider:      environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
 			},
@@ -394,7 +396,7 @@ func TestCurrentAgentThinkingLevels(t *testing.T) {
 		return &LocalRuntime{
 			team:   tm,
 			agents: newAgentRouter(tm, "root"),
-			modelSwitcherCfg: &ModelSwitcherConfig{
+			modelSwitcherCfg: &modelcatalog.Config{
 				ProviderRegistry: testProviderRegistry(),
 				EnvProvider:      environment.NewMapEnvProvider(env),
 			},
@@ -453,6 +455,71 @@ func TestCurrentAgentThinkingLevels(t *testing.T) {
 	})
 }
 
+func newHarnessThinkingRuntime(cfg *latest.HarnessConfig) (*LocalRuntime, *agent.Agent) {
+	root := agent.New("root", "test", agent.WithHarness(cfg))
+	tm := team.New(team.WithAgents(root))
+	return &LocalRuntime{team: tm, agents: newAgentRouter(tm, "root"), modelSwitcherCfg: &modelcatalog.Config{}}, root
+}
+
+// A Claude Code harness agent has no models, but its effort reaches the CLI's
+// --effort flag: /effort and Shift+Tab switch it like a model's level.
+func TestHarnessAgentThinkingLevels(t *testing.T) {
+	t.Parallel()
+
+	allEfforts := []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max}
+
+	t.Run("unset effort shows adaptive and cycling starts at low", func(t *testing.T) {
+		t.Parallel()
+		r, root := newHarnessThinkingRuntime(&latest.HarnessConfig{Type: "claude-code"})
+
+		assert.Equal(t, allEfforts, r.CurrentAgentThinkingLevels(t.Context()))
+		assert.Equal(t, "adaptive", r.agentThinkingLabel(t.Context(), root))
+
+		level, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+		require.NoError(t, err)
+		assert.Equal(t, effort.Low, level)
+		level, err = r.CycleAgentThinkingLevel(t.Context(), "root")
+		require.NoError(t, err)
+		assert.Equal(t, effort.Medium, level)
+		assert.Equal(t, "medium", root.Harness().Effort)
+		assert.Equal(t, "medium", r.agentThinkingLabel(t.Context(), root))
+	})
+
+	t.Run("configured effort cycles from its level and wraps", func(t *testing.T) {
+		t.Parallel()
+		r, root := newHarnessThinkingRuntime(&latest.HarnessConfig{Type: "command-code", Effort: "max"})
+		assert.Equal(t, "max", r.agentThinkingLabel(t.Context(), root))
+
+		level, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+		require.NoError(t, err)
+		assert.Equal(t, effort.Low, level)
+	})
+
+	t.Run("set accepts the CLI efforts only", func(t *testing.T) {
+		t.Parallel()
+		r, root := newHarnessThinkingRuntime(&latest.HarnessConfig{Type: "claude-code", Model: "opus", Effort: "low"})
+
+		level, err := r.SetAgentThinkingLevel(t.Context(), "root", effort.XHigh)
+		require.NoError(t, err)
+		assert.Equal(t, effort.XHigh, level)
+		assert.Equal(t, latest.HarnessConfig{Type: "claude-code", Model: "opus", Effort: "xhigh"}, *root.Harness())
+
+		_, err = r.SetAgentThinkingLevel(t.Context(), "root", effort.None)
+		require.ErrorContains(t, err, "not supported")
+		assert.Equal(t, "xhigh", root.Harness().Effort)
+	})
+
+	t.Run("harness without an effort flag is unsupported", func(t *testing.T) {
+		t.Parallel()
+		r, root := newHarnessThinkingRuntime(&latest.HarnessConfig{Type: "codex"})
+
+		_, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+		require.ErrorIs(t, err, ErrUnsupported)
+		assert.Nil(t, r.CurrentAgentThinkingLevels(t.Context()))
+		assert.Empty(t, r.agentThinkingLabel(t.Context(), root))
+	})
+}
+
 // TestSetAgentThinkingLevel_NoneSurvivesOnGPT56 is the regression test for
 // the gpt-5.6+ "none" gating: cycling an agent's model to None on a model
 // with a real API-level none effort must produce a provider whose config
@@ -469,7 +536,7 @@ func TestSetAgentThinkingLevel_NoneSurvivesOnGPT56(t *testing.T) {
 		root := agent.New("root", "test", agent.WithModel(model))
 		r := &LocalRuntime{
 			team: team.New(team.WithAgents(root)),
-			modelSwitcherCfg: &ModelSwitcherConfig{
+			modelSwitcherCfg: &modelcatalog.Config{
 				ProviderRegistry: testProviderRegistry(),
 				EnvProvider:      environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
 			},
@@ -492,7 +559,7 @@ func TestSetAgentThinkingLevel_NoneSurvivesOnGPT56(t *testing.T) {
 		root := agent.New("root", "test", agent.WithModel(model))
 		r := &LocalRuntime{
 			team: team.New(team.WithAgents(root)),
-			modelSwitcherCfg: &ModelSwitcherConfig{
+			modelSwitcherCfg: &modelcatalog.Config{
 				ProviderRegistry: testProviderRegistry(),
 				EnvProvider:      environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
 			},
@@ -573,7 +640,7 @@ func TestCycleAgentThinkingLevel_PerModelTopTier(t *testing.T) {
 			root := agent.New("root", "test", agent.WithModel(model))
 			r := &LocalRuntime{
 				team: team.New(team.WithAgents(root)),
-				modelSwitcherCfg: &ModelSwitcherConfig{
+				modelSwitcherCfg: &modelcatalog.Config{
 					ProviderRegistry: testProviderRegistry(),
 					EnvProvider:      environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "sk-test"}),
 				},
@@ -604,7 +671,7 @@ func TestCycleAgentThinkingLevel_VercelQualifiedGPT56(t *testing.T) {
 	root := agent.New("root", "test", agent.WithModel(model))
 	r := &LocalRuntime{
 		team: team.New(team.WithAgents(root)),
-		modelSwitcherCfg: &ModelSwitcherConfig{
+		modelSwitcherCfg: &modelcatalog.Config{
 			ProviderRegistry: testProviderRegistry(),
 			EnvProvider:      environment.NewMapEnvProvider(map[string]string{"AI_GATEWAY_API_KEY": "vck-test"}),
 		},
@@ -631,7 +698,7 @@ func TestSetAgentThinkingLevel_VercelQualifiedGPT56Max(t *testing.T) {
 	root := agent.New("root", "test", agent.WithModel(model))
 	r := &LocalRuntime{
 		team: team.New(team.WithAgents(root)),
-		modelSwitcherCfg: &ModelSwitcherConfig{
+		modelSwitcherCfg: &modelcatalog.Config{
 			ProviderRegistry: testProviderRegistry(),
 			EnvProvider:      environment.NewMapEnvProvider(map[string]string{"AI_GATEWAY_API_KEY": "vck-test"}),
 		},
@@ -714,460 +781,11 @@ func TestIsInlineAlloySpec(t *testing.T) {
 	}
 }
 
-func TestIsEmbeddingModel(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		family string
-		model  string
-		want   bool
-	}{
-		// Family-based detection
-		{"family text-embedding", "text-embedding", "Text Embedding 3 Large", true},
-		{"family cohere-embed", "cohere-embed", "Embed v4.0", true},
-		{"family mistral-embed", "mistral-embed", "Mistral Embed", true},
-		{"family gemini-embedding", "gemini-embedding", "Gemini Embedding", true},
-		// Name-based fallback (empty family)
-		{"name fallback embed", "", "Text Embedding 3 Large", true},
-		{"name fallback mistral", "", "Mistral Embed", true},
-		// Non-embedding models
-		{"gpt family", "gpt", "GPT-4o", false},
-		{"claude family", "claude-sonnet", "Claude Sonnet 4", false},
-		{"llama family", "llama", "Llama 3.1 70B", false},
-		{"empty both", "", "GPT-4o", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := isEmbeddingModel(tt.family, tt.model)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestMapModelsDevProvider(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		providerID   string
-		wantProvider string
-		wantSupport  bool
-	}{
-		{"openai", "openai", true},
-		{"anthropic", "anthropic", true},
-		{"google", "google", true},
-		{"mistral", "mistral", true},
-		{"xai", "xai", true},
-		{"amazon-bedrock", "amazon-bedrock", true},
-		{"unsupported-provider", "", false},
-		{"cohere", "", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.providerID, func(t *testing.T) {
-			t.Parallel()
-			gotProvider, gotSupport := mapModelsDevProvider(tt.providerID)
-			assert.Equal(t, tt.wantProvider, gotProvider)
-			assert.Equal(t, tt.wantSupport, gotSupport)
-		})
-	}
-}
-
-func TestGetAvailableProviders(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		envVars       map[string]string
-		modelsGateway string
-		wantProviders []string
-	}{
-		{
-			name: "only openai key",
-			envVars: map[string]string{
-				"OPENAI_API_KEY": "sk-test",
-			},
-			wantProviders: []string{"openai", "dmr", "ollama"},
-		},
-		{
-			name: "openai and anthropic keys",
-			envVars: map[string]string{
-				"OPENAI_API_KEY":    "sk-test",
-				"ANTHROPIC_API_KEY": "sk-ant-test",
-			},
-			wantProviders: []string{"openai", "anthropic", "dmr", "ollama"},
-		},
-		{
-			// A gateway no longer replaces availability with a hardcoded
-			// provider list: direct credentials keep counting.
-			name: "with gateway - direct credentials still count",
-			envVars: map[string]string{
-				"DOCKER_TOKEN":   "test-token",
-				"OPENAI_API_KEY": "sk-test",
-			},
-			modelsGateway: "https://gateway.example.com",
-			wantProviders: []string{"openai", "dmr", "ollama"},
-		},
-		{
-			// A generic gateway must not require the Docker token for the
-			// credential-based fallback either.
-			name: "with gateway but no token",
-			envVars: map[string]string{
-				"OPENAI_API_KEY": "sk-test",
-			},
-			modelsGateway: "https://gateway.example.com",
-			wantProviders: []string{"openai", "dmr", "ollama"},
-		},
-		{
-			name: "aws access key for bedrock",
-			envVars: map[string]string{
-				"AWS_ACCESS_KEY_ID": "AKIA...",
-			},
-			wantProviders: []string{"amazon-bedrock", "dmr", "ollama"},
-		},
-		{
-			name: "aws profile for bedrock",
-			envVars: map[string]string{
-				"AWS_PROFILE": "my-profile",
-			},
-			wantProviders: []string{"amazon-bedrock", "dmr", "ollama"},
-		},
-		{
-			name: "aws web identity for bedrock (EKS/IRSA)",
-			envVars: map[string]string{
-				"AWS_WEB_IDENTITY_TOKEN_FILE": "/var/run/secrets/token",
-			},
-			wantProviders: []string{"amazon-bedrock", "dmr", "ollama"},
-		},
-		{
-			name: "aws container credentials for bedrock (ECS)",
-			envVars: map[string]string{
-				"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": "/v2/credentials/...",
-			},
-			wantProviders: []string{"amazon-bedrock", "dmr", "ollama"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			r := &LocalRuntime{
-				modelSwitcherCfg: &ModelSwitcherConfig{
-					ProviderRegistry: testProviderRegistry(),
-					EnvProvider:      environment.NewMapEnvProvider(tt.envVars),
-					ModelsGateway:    tt.modelsGateway,
-				},
-			}
-
-			got := r.getAvailableProviders(t.Context())
-
-			for _, want := range tt.wantProviders {
-				assert.True(t, got[want], "expected provider %s to be available", want)
-			}
-		})
-	}
-}
-
-// TestGetAvailableProviders_GatewayDoesNotHardcodeProviders pins the removal
-// of the old gateway special case: a Docker token alone must not surface a
-// hardcoded provider list, since the fallback taken when gateway discovery
-// fails is purely credential-based.
-func TestGetAvailableProviders_GatewayDoesNotHardcodeProviders(t *testing.T) {
-	t.Parallel()
-
-	r := &LocalRuntime{
-		modelSwitcherCfg: &ModelSwitcherConfig{
-			ProviderRegistry: testProviderRegistry(),
-			EnvProvider: environment.NewMapEnvProvider(map[string]string{
-				"DOCKER_TOKEN": "test-token",
-			}),
-			ModelsGateway: "https://gateway.example.com",
-		},
-	}
-
-	got := r.getAvailableProviders(t.Context())
-
-	for _, name := range []string{"openai", "anthropic", "google", "mistral", "xai"} {
-		assert.False(t, got[name], "provider %s must not be available from the Docker token alone", name)
-	}
-	assert.True(t, got["dmr"], "local providers stay available")
-	assert.True(t, got["ollama"], "local providers stay available")
-}
-
-// TestGetAvailableProviders_TemplatedAlias verifies that an alias with a
-// templated base URL (Cloudflare's account/gateway-scoped endpoints) is only
-// advertised once every env var its URL references is set, not on the token
-// alone. Otherwise the picker would surface catalog models that cannot be
-// selected (they fail at build time on the missing account/gateway id).
-func TestGetAvailableProviders_TemplatedAlias(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		envVars     map[string]string
-		wantPresent []string
-		wantAbsent  []string
-	}{
-		{
-			name:       "token alone does not advertise Cloudflare",
-			envVars:    map[string]string{"CLOUDFLARE_API_TOKEN": "cf-test"},
-			wantAbsent: []string{"cloudflare-workers-ai", "cloudflare-ai-gateway"},
-		},
-		{
-			name: "token and account id advertise workers-ai but not the gateway",
-			envVars: map[string]string{
-				"CLOUDFLARE_API_TOKEN":  "cf-test",
-				"CLOUDFLARE_ACCOUNT_ID": "acc-123",
-			},
-			wantPresent: []string{"cloudflare-workers-ai"},
-			wantAbsent:  []string{"cloudflare-ai-gateway"},
-		},
-		{
-			name: "token, account and gateway ids advertise both",
-			envVars: map[string]string{
-				"CLOUDFLARE_API_TOKEN":  "cf-test",
-				"CLOUDFLARE_ACCOUNT_ID": "acc-123",
-				"CLOUDFLARE_GATEWAY_ID": "gw-9",
-			},
-			wantPresent: []string{"cloudflare-workers-ai", "cloudflare-ai-gateway"},
-		},
-		{
-			name:        "static-URL alias is still advertised on its token alone",
-			envVars:     map[string]string{"AI_GATEWAY_API_KEY": "vck-test"},
-			wantPresent: []string{"vercel"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			r := &LocalRuntime{
-				modelSwitcherCfg: &ModelSwitcherConfig{
-					ProviderRegistry: testProviderRegistry(),
-					EnvProvider:      environment.NewMapEnvProvider(tt.envVars),
-				},
-			}
-
-			got := r.getAvailableProviders(t.Context())
-
-			for _, want := range tt.wantPresent {
-				assert.True(t, got[want], "expected provider %s to be available", want)
-			}
-			for _, absent := range tt.wantAbsent {
-				assert.False(t, got[absent], "expected provider %s to NOT be available", absent)
-			}
-		})
-	}
-}
-
-// TestGetAvailableProviders_AnthropicWIF verifies that a workspace configured
-// with Workload Identity Federation surfaces the anthropic provider in the
-// model picker even without ANTHROPIC_API_KEY in the env.
-func TestGetAvailableProviders_AnthropicWIF(t *testing.T) {
-	t.Parallel()
-
-	wifAuth := &latest.AuthConfig{
-		Type: latest.AuthTypeWorkloadIdentityFederation,
-		Federation: &latest.FederationAuthConfig{
-			FederationRuleID: "fdrl_x",
-			OrganizationID:   "org",
-			IdentityToken:    &latest.IdentityTokenSourceConfig{File: "/t"},
-		},
-	}
-
-	t.Run("model-level auth", func(t *testing.T) {
-		t.Parallel()
-		r := &LocalRuntime{
-			modelSwitcherCfg: &ModelSwitcherConfig{
-				ProviderRegistry: testProviderRegistry(),
-				EnvProvider:      environment.NewMapEnvProvider(nil),
-				Models: map[string]latest.ModelConfig{
-					"claude": {Provider: "anthropic", Model: "claude-x", Auth: wifAuth},
-				},
-			},
-		}
-		got := r.getAvailableProviders(t.Context())
-		assert.True(t, got["anthropic"], "WIF should surface anthropic in available providers")
-	})
-
-	t.Run("provider-level auth", func(t *testing.T) {
-		t.Parallel()
-		r := &LocalRuntime{
-			modelSwitcherCfg: &ModelSwitcherConfig{
-				ProviderRegistry: testProviderRegistry(),
-				EnvProvider:      environment.NewMapEnvProvider(nil),
-				Providers: map[string]latest.ProviderConfig{
-					"claude": {Provider: "anthropic", Auth: wifAuth},
-				},
-				Models: map[string]latest.ModelConfig{
-					"claude": {Provider: "claude", Model: "claude-x"},
-				},
-			},
-		}
-		got := r.getAvailableProviders(t.Context())
-		assert.True(t, got["anthropic"], "WIF on provider should surface anthropic")
-	})
-
-	t.Run("no auth and no api key", func(t *testing.T) {
-		t.Parallel()
-		r := &LocalRuntime{
-			modelSwitcherCfg: &ModelSwitcherConfig{
-				ProviderRegistry: testProviderRegistry(),
-				EnvProvider:      environment.NewMapEnvProvider(nil),
-				Models: map[string]latest.ModelConfig{
-					"claude": {Provider: "anthropic", Model: "claude-x"},
-				},
-			},
-		}
-		got := r.getAvailableProviders(t.Context())
-		assert.False(t, got["anthropic"], "plain anthropic config without API key must not be available")
-	})
-}
-
-func TestBuildCatalogChoices(t *testing.T) {
-	t.Parallel()
-
-	// Create a mock database with some models
-	db := &modelsdev.Database{
-		Providers: map[string]modelsdev.Provider{
-			"openai": {
-				Models: map[string]modelsdev.Model{
-					"gpt-4o": {
-						Name: "GPT-4o",
-						Modalities: modelsdev.Modalities{
-							Output: []string{"text"},
-						},
-					},
-					"dall-e-3": {
-						Name: "DALL-E 3",
-						Modalities: modelsdev.Modalities{
-							Output: []string{"image"}, // Not a text model
-						},
-					},
-					"text-embedding-3-large": {
-						Name:   "Text Embedding 3 Large",
-						Family: "text-embedding",
-						Modalities: modelsdev.Modalities{
-							Output: []string{"text"}, // Embedding model - identified by family field
-						},
-					},
-				},
-			},
-			"anthropic": {
-				Models: map[string]modelsdev.Model{
-					"claude-sonnet-4-0": {
-						Name: "Claude Sonnet 4",
-						Modalities: modelsdev.Modalities{
-							Output: []string{"text"},
-						},
-					},
-				},
-			},
-			"unsupported": {
-				Models: map[string]modelsdev.Model{
-					"some-model": {
-						Name: "Some Model",
-						Modalities: modelsdev.Modalities{
-							Output: []string{"text"},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	r := &LocalRuntime{
-		modelsStore: &mockCatalogStore{db: db},
-		modelSwitcherCfg: &ModelSwitcherConfig{
-			ProviderRegistry: testProviderRegistry(),
-			EnvProvider: environment.NewMapEnvProvider(map[string]string{
-				"OPENAI_API_KEY":    "sk-test",
-				"ANTHROPIC_API_KEY": "sk-ant-test",
-			}),
-			Models: map[string]latest.ModelConfig{
-				"my_model": {Provider: "openai", Model: "gpt-4o"}, // This should be excluded from catalog (duplicate)
-			},
-		},
-	}
-
-	choices := r.buildCatalogChoices(t.Context())
-
-	// Should include Claude Sonnet (not a duplicate)
-	var foundClaude bool
-	for _, c := range choices {
-		if c.Ref == "anthropic/claude-sonnet-4-0" {
-			foundClaude = true
-			assert.True(t, c.IsCatalog)
-			assert.Equal(t, "Claude Sonnet 4", c.Name)
-		}
-	}
-	require.True(t, foundClaude, "should include Claude Sonnet from catalog")
-
-	// Should NOT include DALL-E 3 (not a text model)
-	for _, c := range choices {
-		assert.NotEqual(t, "openai/dall-e-3", c.Ref, "should not include non-text models")
-	}
-
-	// Should NOT include embedding models
-	for _, c := range choices {
-		assert.NotEqual(t, "openai/text-embedding-3-large", c.Ref, "should not include embedding models")
-	}
-
-	// Should NOT include unsupported provider
-	for _, c := range choices {
-		assert.NotEqual(t, "unsupported", c.Provider, "should not include unsupported providers")
-	}
-}
-
-func TestBuildCatalogChoicesWithDuplicates(t *testing.T) {
-	t.Parallel()
-
-	db := &modelsdev.Database{
-		Providers: map[string]modelsdev.Provider{
-			"openai": {
-				Models: map[string]modelsdev.Model{
-					"gpt-4o": {
-						Name: "GPT-4o",
-						Modalities: modelsdev.Modalities{
-							Output: []string{"text"},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	r := &LocalRuntime{
-		modelsStore: &mockCatalogStore{db: db},
-		modelSwitcherCfg: &ModelSwitcherConfig{
-			ProviderRegistry: testProviderRegistry(),
-			EnvProvider: environment.NewMapEnvProvider(map[string]string{
-				"OPENAI_API_KEY": "sk-test",
-			}),
-			Models: map[string]latest.ModelConfig{
-				// This model has the same provider/model as the catalog entry
-				"my_gpt4o": {Provider: "openai", Model: "gpt-4o"},
-			},
-		},
-	}
-
-	choices := r.buildCatalogChoices(t.Context())
-
-	// Should NOT include gpt-4o since it's already in config
-	for _, c := range choices {
-		assert.NotEqual(t, "openai/gpt-4o", c.Ref, "should not include duplicates from config")
-	}
-}
-
 func TestResolveModelRef_RejectsAlloyConfig(t *testing.T) {
 	t.Parallel()
 
 	r := &LocalRuntime{
-		modelSwitcherCfg: &ModelSwitcherConfig{
+		modelSwitcherCfg: &modelcatalog.Config{
 			ProviderRegistry: testProviderRegistry(),
 			Models: map[string]latest.ModelConfig{
 				// Alloy config: no provider, comma-separated models
@@ -1195,7 +813,7 @@ func TestResolveModelRef_InvalidFormat(t *testing.T) {
 	t.Parallel()
 
 	r := &LocalRuntime{
-		modelSwitcherCfg: &ModelSwitcherConfig{
+		modelSwitcherCfg: &modelcatalog.Config{
 			ProviderRegistry: testProviderRegistry(),
 			Models:           map[string]latest.ModelConfig{},
 		},
@@ -1225,8 +843,8 @@ func TestDecorateModelChoices(t *testing.T) {
 
 	t.Run("default marked current when no override is set", func(t *testing.T) {
 		t.Parallel()
-		got := DecorateModelChoices(
-			[]ModelChoice{
+		got := modelcatalog.DecorateModelChoices(
+			[]modelcatalog.ModelChoice{
 				{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true},
 				{Name: "other", Ref: "openai/gpt-4o"},
 			},
@@ -1240,8 +858,8 @@ func TestDecorateModelChoices(t *testing.T) {
 
 	t.Run("override matching a known choice marks it current", func(t *testing.T) {
 		t.Parallel()
-		got := DecorateModelChoices(
-			[]ModelChoice{
+		got := modelcatalog.DecorateModelChoices(
+			[]modelcatalog.ModelChoice{
 				{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true},
 				{Name: "other", Ref: "openai/gpt-4o"},
 			},
@@ -1255,8 +873,8 @@ func TestDecorateModelChoices(t *testing.T) {
 
 	t.Run("synthesizes choice for inline override not in list", func(t *testing.T) {
 		t.Parallel()
-		got := DecorateModelChoices(
-			[]ModelChoice{{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true}},
+		got := modelcatalog.DecorateModelChoices(
+			[]modelcatalog.ModelChoice{{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true}},
 			"anthropic/claude-sonnet-4-0",
 			nil,
 		)
@@ -1270,8 +888,8 @@ func TestDecorateModelChoices(t *testing.T) {
 
 	t.Run("appends custom refs from session history", func(t *testing.T) {
 		t.Parallel()
-		got := DecorateModelChoices(
-			[]ModelChoice{{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true}},
+		got := modelcatalog.DecorateModelChoices(
+			[]modelcatalog.ModelChoice{{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true}},
 			"",
 			[]string{"openai/gpt-4o", "anthropic/claude-sonnet-4-0"},
 		)
@@ -1285,8 +903,8 @@ func TestDecorateModelChoices(t *testing.T) {
 
 	t.Run("does not duplicate custom ref already in list", func(t *testing.T) {
 		t.Parallel()
-		got := DecorateModelChoices(
-			[]ModelChoice{{Name: "default", Ref: "openai/gpt-4o", IsDefault: true}},
+		got := modelcatalog.DecorateModelChoices(
+			[]modelcatalog.ModelChoice{{Name: "default", Ref: "openai/gpt-4o", IsDefault: true}},
 			"",
 			[]string{"openai/gpt-4o"},
 		)
@@ -1299,8 +917,8 @@ func TestDecorateModelChoices(t *testing.T) {
 		// "my_model" is a config key (no slash); when not in the runtime's
 		// list we should NOT fabricate a choice for it because we have no
 		// provider/model breakdown to display.
-		got := DecorateModelChoices(
-			[]ModelChoice{{Name: "default", Ref: "default", IsDefault: true}},
+		got := modelcatalog.DecorateModelChoices(
+			[]modelcatalog.ModelChoice{{Name: "default", Ref: "default", IsDefault: true}},
 			"my_model",
 			nil,
 		)
@@ -1310,8 +928,8 @@ func TestDecorateModelChoices(t *testing.T) {
 
 	t.Run("custom ref matching the active override is marked current", func(t *testing.T) {
 		t.Parallel()
-		got := DecorateModelChoices(
-			[]ModelChoice{{Name: "default", Ref: "default", IsDefault: true}},
+		got := modelcatalog.DecorateModelChoices(
+			[]modelcatalog.ModelChoice{{Name: "default", Ref: "default", IsDefault: true}},
 			"openai/gpt-4o",
 			[]string{"openai/gpt-4o"},
 		)
@@ -1328,15 +946,47 @@ func TestDecorateModelChoices(t *testing.T) {
 	// the input slice or its underlying array.
 	t.Run("does not mutate the input slice", func(t *testing.T) {
 		t.Parallel()
-		input := []ModelChoice{
+		input := []modelcatalog.ModelChoice{
 			{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true},
 			{Name: "other", Ref: "openai/gpt-4o"},
 		}
-		orig := make([]ModelChoice, len(input))
-		copy(orig, input)
+		orig := slices.Clone(input)
 
-		_ = DecorateModelChoices(input, "openai/gpt-4o", []string{"anthropic/claude-sonnet-4-0"})
+		_ = modelcatalog.DecorateModelChoices(input, "openai/gpt-4o", []string{"anthropic/claude-sonnet-4-0"})
 
 		assert.Equal(t, orig, input, "DecorateModelChoices must not modify the input slice")
 	})
+}
+
+func TestAgentThinkingConfigurationIsLocalAndConservative(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		cfg      latest.ModelConfig
+		multiple bool
+		want     bool
+	}{
+		{name: "explicit", cfg: latest.ModelConfig{Provider: "openai", Model: "gpt-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "high"}}, want: true},
+		{name: "unknown", cfg: latest.ModelConfig{Provider: "custom", Model: "unknown"}},
+		{name: "budget-only recognition", cfg: latest.ModelConfig{Provider: "openai", Model: "custom-reasoner", ThinkingBudget: &latest.ThinkingBudget{Effort: "high"}}},
+		{name: "router", cfg: latest.ModelConfig{Provider: "openai", Model: "gpt-5", Routing: []latest.RoutingRule{{}}}},
+		{name: "alloy", cfg: latest.ModelConfig{Provider: "openai", Model: "gpt-5"}, multiple: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			models := []provider.Provider{newConfigProvider(tc.cfg)}
+			if tc.multiple {
+				models = append(models, newConfigProvider(tc.cfg))
+			}
+			a := agent.New("root", "test")
+			for _, model := range models {
+				agent.WithModel(model)(a)
+			}
+			r := &LocalRuntime{team: team.New(team.WithAgents(a)), modelSwitcherCfg: &modelcatalog.Config{}}
+			levels, current := r.AgentThinkingConfiguration("root")
+			assert.Equal(t, tc.want, len(levels) > 0)
+			if tc.want {
+				assert.Equal(t, effort.High, current)
+			}
+		})
+	}
 }

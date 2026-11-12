@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/mcp"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -17,7 +17,7 @@ func TestMCP_SingleAgent(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	agentSource, err := config.Resolve("testdata/basic.yaml", nil)
+	agentSource, err := sources.Resolve("testdata/basic.yaml", nil)
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)
@@ -27,7 +27,7 @@ func TestMCP_SingleAgent(t *testing.T) {
 		require.NoError(t, team.StopToolSets(ctx))
 	})
 
-	handler := mcp.CreateToolHandler(team, "root", session.SafetyPolicyAutonomous)
+	handler := mcp.CreateToolHandler(team, "root", session.SafetyPolicyAutonomous, t.TempDir())
 	_, output, err := handler(ctx, nil, mcp.ToolInput{
 		Message: "What is 2+2? Answer in one sentence.",
 	})
@@ -40,7 +40,7 @@ func TestMCP_MultiAgent(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	agentSource, err := config.Resolve("testdata/multi.yaml", nil)
+	agentSource, err := sources.Resolve("testdata/multi.yaml", nil)
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)
@@ -50,7 +50,7 @@ func TestMCP_MultiAgent(t *testing.T) {
 		require.NoError(t, team.StopToolSets(ctx))
 	})
 
-	handler := mcp.CreateToolHandler(team, "web", session.SafetyPolicyAutonomous)
+	handler := mcp.CreateToolHandler(team, "web", session.SafetyPolicyAutonomous, t.TempDir())
 	_, output, err := handler(ctx, nil, mcp.ToolInput{
 		Message: "Say hello in one sentence.",
 	})

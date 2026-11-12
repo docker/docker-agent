@@ -122,7 +122,14 @@ func (b *Base) View() string {
 		b.lastRendered = rendered     //rubocop:disable Lint/TUIViewPurity // render-stability cache for temporarily unparseable streamed arguments
 		b.lastRenderedHeight = height //rubocop:disable Lint/TUIViewPurity // paired height for the render-stability cache above
 	}
-	return rendered
+	return b.withRunningTime(rendered)
+}
+
+func (b *Base) withRunningTime(content string) string {
+	if b.message.HideToolProgress {
+		return content
+	}
+	return WithRunningTime(content, b.message, b.width)
 }
 
 // ExpandedView returns the regular, full tool renderer.
@@ -143,7 +150,7 @@ func (b *Base) CollapsedView() string {
 			b.lastCollapsed = rendered
 			b.lastCollapsedHeight = height
 		}
-		return rendered
+		return b.withRunningTime(rendered)
 	}
 	return b.View()
 }
@@ -183,8 +190,8 @@ func (b *Base) StopAnimation() {
 }
 
 func (b *Base) isSpinnerActive() bool {
-	return b.message.ToolStatus == types.ToolStatusPending ||
-		b.message.ToolStatus == types.ToolStatusRunning
+	return !b.message.HideToolProgress && (b.message.ToolStatus == types.ToolStatusPending ||
+		b.message.ToolStatus == types.ToolStatusRunning)
 }
 
 // NoArgsRenderer is a Renderer that displays only the tool name and status,

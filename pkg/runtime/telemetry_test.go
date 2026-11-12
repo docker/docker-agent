@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 )
@@ -91,11 +94,11 @@ func (r *recordingTelemetry) snapshot() recordingTelemetry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return recordingTelemetry{
-		sessionStarts: append([]sessionStart(nil), r.sessionStarts...),
+		sessionStarts: slices.Clone(r.sessionStarts),
 		sessionEnds:   r.sessionEnds,
-		errors:        append([]string(nil), r.errors...),
-		toolCalls:     append([]toolCallRecord(nil), r.toolCalls...),
-		tokenUsages:   append([]tokenUsageRecord(nil), r.tokenUsages...),
+		errors:        slices.Clone(r.errors),
+		toolCalls:     slices.Clone(r.toolCalls),
+		tokenUsages:   slices.Clone(r.tokenUsages),
 	}
 }
 
@@ -131,6 +134,80 @@ func TestWithTelemetry_NilLeavesDefault(t *testing.T) {
 
 	_, ok := rt.telemetry.(defaultTelemetry)
 	assert.True(t, ok, "WithTelemetry(nil) should leave defaultTelemetry, got %T", rt.telemetry)
+}
+
+func TestRuntime_RecordsPerCallTelemetryCost(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		finish   chat.FinishReason
+		noUsage  bool
+		unpriced bool
+		free     bool
+		empty    bool
+	}{
+		{name: "stop", finish: chat.FinishReasonStop},
+		{name: "bare EOF"},
+		{name: "reasoning only", finish: chat.FinishReasonLength, empty: true},
+		{name: "unpriced", finish: chat.FinishReasonStop, unpriced: true},
+		{name: "free", finish: chat.FinishReasonStop, free: true},
+		{name: "no usage", finish: chat.FinishReasonStop, noUsage: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rates := &modelsdev.Cost{Input: 2, Output: 4, CacheRead: 0.2, CacheWrite: 2.5}
+			wantCost := 0.00107 // 100 fresh + 200 cache-read + 300 cache-write + 20 output.
+			if tc.unpriced {
+				rates = nil
+			}
+			if tc.free {
+				rates = &modelsdev.Cost{}
+			}
+			if tc.unpriced || tc.free || tc.noUsage {
+				wantCost = 0
+			}
+			store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+				"test": {Models: map[string]modelsdev.Model{"model": {Name: "Test Model", Cost: rates}}},
+			}})
+			prov := &mockProvider{id: "test/model"}
+			root := agent.New("root", "test", agent.WithModel(prov))
+			rec := &recordingTelemetry{}
+			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+				WithTelemetry(rec), WithSessionCompaction(false), WithModelStore(store))
+			require.NoError(t, err)
+
+			sess := session.New(session.WithTitle("Telemetry test"), session.WithMessages([]session.Item{
+				session.NewMessageItem(&session.Message{AgentName: "root", Message: chat.Message{
+					Role: chat.MessageRoleAssistant, Content: "Earlier reply", Cost: 7,
+				}}),
+			}))
+			var want []tokenUsageRecord
+			for range 4 {
+				builder := newStreamBuilder()
+				if tc.empty {
+					builder.AddReasoning("Thinking")
+				} else {
+					builder.AddContent("hello")
+				}
+				response := chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{FinishReason: tc.finish}}}
+				if !tc.noUsage {
+					response.Usage = &chat.Usage{InputTokens: 100, OutputTokens: 20, CachedInputTokens: 200, CacheWriteTokens: 300, ReasoningTokens: 10}
+					want = append(want, tokenUsageRecord{Model: "Test Model", InputTokens: 600, OutputTokens: 20, Cost: wantCost})
+				}
+				builder.responses = append(builder.responses, response)
+				prov.stream = builder.Build()
+				sess.AddMessage(session.UserMessage("hi"))
+				for ev := range rt.RunStream(t.Context(), sess) {
+					if ev, ok := ev.(*ErrorEvent); ok {
+						t.Errorf("unexpected runtime error: %s", ev.Error)
+					}
+				}
+				assert.Equal(t, want, rec.snapshot().tokenUsages)
+			}
+		})
+	}
 }
 
 func TestRuntime_RecordsSessionStartAndEnd(t *testing.T) {

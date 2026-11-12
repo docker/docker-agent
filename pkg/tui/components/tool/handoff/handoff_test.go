@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/docker-agent/pkg/tools"
-	handofftool "github.com/docker/docker-agent/pkg/tools/builtin/handoff"
+	handofftool "github.com/docker/docker-agent/pkg/tools/builtin/handoff/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"

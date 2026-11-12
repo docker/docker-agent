@@ -80,6 +80,14 @@ Examples that wire up one of the toolsets shipped with docker-agent
 | [`sandbox_agent.yaml`](sandbox_agent.yaml) | Same shell-based agent run with `--sandbox` to confine commands to a Docker container. |
 | [`deferred.yaml`](deferred.yaml) | Wraps the agent in a deferred-execution container (`runtime: deferred`). |
 
+### Calculator, random choices, and date/time
+
+| File | What it shows |
+|------|---------------|
+| [`calculator.yaml`](calculator.yaml) | Exact arithmetic with decimals, fractions, and integer powers, without code execution. |
+| [`random.yaml`](random.yaml) | Random integers with agent-chosen inclusive bounds for dice rolls and random choices. |
+| [`datetime.yaml`](datetime.yaml) | Current date and time in a chosen Go layout and timezone. |
+
 ### Memory, todo, think, cache
 
 | File | What it shows |
@@ -112,6 +120,7 @@ Examples that wire up one of the toolsets shipped with docker-agent
 | [`rag/hybrid.yaml`](rag/hybrid.yaml) | Hybrid BM25 + embeddings retrieval. |
 | [`rag/reranking.yaml`](rag/reranking.yaml) | Hybrid retrieval with a re-ranking model on top. |
 | [`rag/custom_provider.yaml`](rag/custom_provider.yaml) | Pointing the embeddings model at a custom OpenAI-compatible provider. |
+| [`rag/gemini_embeddings.yaml`](rag/gemini_embeddings.yaml) | Google Gemini embedding model with `output_dimensionality`. |
 
 ---
 
@@ -192,23 +201,34 @@ remote MCP endpoints.
 | File | What it shows |
 |------|---------------|
 | [`custom_provider.yaml`](custom_provider.yaml) | Talking to any OpenAI-compatible endpoint via a custom provider. |
+| [`opencode-zen.yaml`](opencode-zen.yaml) | OpenCode Zen gateway (`opencode`). |
 | [`compose-secrets.yaml`](compose-secrets.yaml) | Reading API keys from Docker Compose / Swarm secrets. |
 | [`env_placeholders.yaml`](env_placeholders.yaml) | `${env.VAR}` substitution inside the YAML. |
 | [`model_env_substitution.yaml`](model_env_substitution.yaml) | `${env.VAR}` substitution in a model's `model` / `base_url`. |
-| [`nebius.yaml`](nebius.yaml) | Nebius cloud provider. |
+| [`api-route.yaml`](api-route.yaml) | API Route multi-model gateway provider. |
+| [`atlascloud.yaml`](atlascloud.yaml) | Atlas Cloud open-model host (`atlascloud`). |
 | [`baseten.yaml`](baseten.yaml) | Baseten cloud provider. |
+| [`daoxe.yaml`](daoxe.yaml) | DaoXE multi-model gateway provider. |
+| [`opper.yaml`](opper.yaml) | Opper multi-model gateway provider. |
+| [`lunaroute.yaml`](lunaroute.yaml) | Lunaroute OpenAI-compatible provider. |
+| [`orcarouter.yaml`](orcarouter.yaml) | OrcaRouter multi-model gateway provider. |
 | [`ovhcloud.yaml`](ovhcloud.yaml) | OVHcloud AI Endpoints provider. |
+| [`runcrate.yaml`](runcrate.yaml) | Runcrate open-model host (`runcrate`). |
 | [`groq.yaml`](groq.yaml) | Groq fast-inference provider. |
-| [`fireworks.yaml`](fireworks.yaml) | Fireworks AI open-model inference provider. |
+| [`fireworks.yaml`](fireworks.yaml) | Fireworks AI open-model inference (`fireworks-ai`). |
 | [`deepseek.yaml`](deepseek.yaml) | DeepSeek chat and reasoning provider. |
 | [`cerebras.yaml`](cerebras.yaml) | Cerebras fast-inference provider. |
-| [`together.yaml`](together.yaml) | Together AI open-model inference provider. |
+| [`together.yaml`](together.yaml) | Together AI open-model inference (`togetherai`). |
 | [`huggingface.yaml`](huggingface.yaml) | Hugging Face Inference Providers open-model router. |
-| [`moonshot.yaml`](moonshot.yaml) | Moonshot AI (Kimi K2) provider. |
+| [`moonshot.yaml`](moonshot.yaml) | Moonshot AI Kimi provider (`moonshotai`). |
+| [`nebius.yaml`](nebius.yaml) | Nebius Token Factory open-model inference (`nebius`). |
 | [`vercel.yaml`](vercel.yaml) | Vercel AI Gateway multi-provider router. |
+| [`cloudgpu.yaml`](cloudgpu.yaml) | CloudGPU OpenAI-compatible provider (`cloudgpu`). |
+| [`obscurify.yaml`](obscurify.yaml) | Obscurify.ai multi-model provider (`obscurify`). |
 | [`cloudflare-workers-ai.yaml`](cloudflare-workers-ai.yaml) | Cloudflare Workers AI edge-hosted open models. |
 | [`cloudflare-ai-gateway.yaml`](cloudflare-ai-gateway.yaml) | Cloudflare AI Gateway multi-provider router. |
 | [`grok.yaml`](grok.yaml) | xAI Grok model. |
+| [`chatgpt-images.yaml`](chatgpt-images.yaml) + [`chatgpt-images.png`](chatgpt-images.png) | ChatGPT image input with an attached sample image and automatic capability detection. |
 | [`github-copilot.yaml`](github-copilot.yaml) | GitHub Copilot models via OAuth device-flow. |
 | [`fallback_models.yaml`](fallback_models.yaml) | Automatic fallback to a secondary model when the primary fails. |
 | [`model_picker.yaml`](model_picker.yaml) | Lets the agent itself swap to a stronger model mid-conversation. |
@@ -216,9 +236,18 @@ remote MCP endpoints.
 | [`rule_based_routing.yaml`](rule_based_routing.yaml) | Cheap router model dispatches the user message to fast or capable models. |
 | [`structured-output.yaml`](structured-output.yaml) | Forces the model to return JSON matching a schema. |
 | [`google_search_grounding.yaml`](google_search_grounding.yaml) | Enables Google Search grounding on Gemini models. |
+| [`gemini_url_context.yaml`](gemini_url_context.yaml) | Gemini reads public documentation URLs with its built-in URL Context tool. |
+| [`openai-service-tier.yaml`](openai-service-tier.yaml) | OpenAI Fast mode and service tier selection with `provider_opts.service_tier`. |
+| [`gemini_service_tier.yaml`](gemini_service_tier.yaml) | Gemini Flex/standard/priority service tier selection with `provider_opts.service_tier`. |
+| [`gemini_image_output.yaml`](gemini_image_output.yaml) | Gemini image-output model: generated images are saved into the workspace, stored portably with the session, and rendered inline in the TUI. |
 | [`sampling-opts.yaml`](sampling-opts.yaml) | Provider-specific sampling parameters (`top_k`, `repetition_penalty`, …). |
 | [`thinking_budget.yaml`](thinking_budget.yaml) | Reasoning/thinking budgets across OpenAI, Anthropic and Google. |
 | [`task_budget.yaml`](task_budget.yaml) | Anthropic `task_budget`: cap total tokens spent across a multi-step agentic task. |
+| [`anthropic-fast-mode.yaml`](anthropic-fast-mode.yaml) | Anthropic fast mode with `provider_opts.speed`. |
+
+Provider examples use the canonical IDs `fireworks-ai`, `togetherai`,
+`moonshotai`, and `opencode`. The old IDs `fireworks`, `together`, `moonshot`,
+and `opencode-zen` remain accepted for existing configurations.
 
 ---
 
@@ -227,6 +256,9 @@ remote MCP endpoints.
 | File | What it shows |
 |------|---------------|
 | [`permissions.yaml`](permissions.yaml) | Top-level `permissions` block with `allow`/`deny` patterns for tool calls. |
+| [`evaluators-openai.yaml`](evaluators-openai.yaml) | Native OpenAI Decisions tool guard, routed through the configured models gateway. |
+| [`evaluators.yaml`](evaluators.yaml) | TypeSafe Jev assessments with a separate, fail-closed tool-guard policy. |
+| [`evaluators-laya.yaml`](evaluators-laya.yaml) | Laya on Baseten using an exact evaluator endpoint and the same tool-guard policy. |
 | [`llm_judge.yaml`](llm_judge.yaml) | Layered defense: deterministic permissions + an LLM-as-judge `pre_tool_use` hook + user prompts. |
 | [`redact_secrets.yaml`](redact_secrets.yaml) | Single-flag (`redact_secrets: true`) scrubbing of detected secrets in args, chat content, and tool output. |
 | [`redact_secrets_hooks.yaml`](redact_secrets_hooks.yaml) | The same scrubbing wired manually as three hooks. |

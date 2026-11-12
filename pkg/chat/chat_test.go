@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -208,4 +209,29 @@ func TestDetectMimeType_ContentSniffing(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestUsagePromptTokens(t *testing.T) {
+	t.Parallel()
+
+	u := &Usage{InputTokens: 10, CachedInputTokens: 20, CacheWriteTokens: 5, OutputTokens: 99, ReasoningTokens: 7}
+	assert.Equal(t, int64(35), u.PromptTokens(), "prompt is the sum of the three input buckets, excluding output")
+	assert.Zero(t, (&Usage{}).PromptTokens())
+}
+
+func TestUsageServiceTier(t *testing.T) {
+	t.Parallel()
+
+	usage := &Usage{InputTokens: 10, ServiceTier: "ultrafast"}
+	wire, err := json.Marshal(usage)
+	require.NoError(t, err)
+	var decoded Usage
+	require.NoError(t, json.Unmarshal(wire, &decoded))
+	assert.Equal(t, *usage, decoded)
+
+	var total Usage
+	total.Add(usage)
+	total.Add(&Usage{InputTokens: 20, ServiceTier: "default"})
+	assert.Equal(t, int64(30), total.InputTokens)
+	assert.Empty(t, total.ServiceTier, "aggregate usage has no single processing tier")
 }

@@ -54,8 +54,8 @@ func installGoPackage(ctx context.Context, pkg *Package, version string) (string
 
 	// Strip multi-module tag prefix: "gopls/v0.21.1" → "v0.21.1".
 	installVersion := version
-	if idx := strings.LastIndex(version, "/"); idx >= 0 {
-		installVersion = version[idx+1:]
+	if _, after, ok := strings.CutLast(version, "/"); ok {
+		installVersion = after
 	}
 	if !strings.HasPrefix(installVersion, "v") && installVersion != "latest" {
 		installVersion = "v" + installVersion
@@ -144,19 +144,35 @@ func (r *Registry) installGitHubRelease(ctx context.Context, pkg *Package, versi
 		return "", fmt.Errorf("creating package directory: %w", err)
 	}
 
+	root, err := os.OpenRoot(pkgDir)
+	if err != nil {
+		return "", fmt.Errorf("opening package directory: %w", err)
+	}
+	defer root.Close()
+
 	switch pc.Format {
 	case "raw", "":
 		// Single-binary download — write the asset directly to binaryPath.
-		if err := r.extractor().writeRawBinary(asset, binaryPath); err != nil {
+		if err := r.extractor().writeRawBinary(asset, root, binaryName); err != nil {
 			return "", err
 		}
 	default:
-		if err := r.extractor().extractRelease(asset, pkgDir, pc.Format, pc.Files, pc.TemplateData); err != nil {
+		if err := r.extractor().extractRelease(asset, root, pc.Format, pc.Files, pc.TemplateData); err != nil {
 			return "", err
 		}
 	}
 
-	if err := os.Chmod(binaryPath, 0o755); err != nil { //nolint:gosec // installed binary must be executable
+	// Chmod the opened file so a concurrent symlink replacement cannot redirect it.
+	relativeBinary, err := safePath(root.Name(), binaryName)
+	if err != nil {
+		return "", err
+	}
+	binary, err := root.Open(relativeBinary)
+	if err != nil {
+		return "", fmt.Errorf("opening installed binary: %w", err)
+	}
+	defer binary.Close()
+	if err := binary.Chmod(0o755); err != nil {
 		return "", fmt.Errorf("setting executable permissions: %w", err)
 	}
 

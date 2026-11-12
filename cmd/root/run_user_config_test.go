@@ -50,7 +50,7 @@ func TestRunOrExec_InvalidAliasSafetyFailsClearly(t *testing.T) {
 	require.ErrorContains(t, err, "aliases.turbo.safety")
 }
 
-// aliasOptions mirrors config.ResolveAlias against an already-loaded
+// aliasOptions mirrors sources.ResolveAlias against an already-loaded
 // config: the empty reference maps to the "default" alias, and aliases
 // without options are skipped.
 func TestAliasOptions(t *testing.T) {

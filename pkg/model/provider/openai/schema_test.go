@@ -2,8 +2,10 @@ package openai
 
 import (
 	"encoding/json"
+	"maps"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/openai/openai-go/v3/shared"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -401,8 +403,15 @@ func TestMakeAllRequired_TypeArrayWithObject(t *testing.T) {
 	// Top-level should have additionalProperties: false
 	assert.Equal(t, false, updated["additionalProperties"])
 
-	// The schema property should also have additionalProperties: false
-	schemaProps := updated["properties"].(map[string]any)["schema"].(map[string]any)
+	// The nullable object is expressed as anyOf [object, null]
+	nullable := updated["properties"].(map[string]any)["schema"].(map[string]any)
+	variants := nullable["anyOf"].([]any)
+	require.Len(t, variants, 2)
+	assert.Equal(t, map[string]any{"type": "null"}, variants[1])
+
+	// The object variant should also have additionalProperties: false
+	schemaProps := variants[0].(map[string]any)
+	assert.Equal(t, "object", schemaProps["type"])
 	assert.Equal(t, false, schemaProps["additionalProperties"])
 
 	// All properties in schema should be required
@@ -504,6 +513,282 @@ func TestIsStrictCompatible(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			// T1: the exact schema from issue #4106.
+			name: "issue 4106 - oneOf property",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"value": map[string]any{
+						"oneOf": []any{
+							map[string]any{"type": "integer"},
+							map[string]any{"type": "string"},
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			// T2: allOf at property level.
+			name: "allOf at property level",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"value": map[string]any{
+						"allOf": []any{
+							map[string]any{"type": "string"},
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		// T3: each disqualifying composition keyword, at root and nested.
+		{
+			name:   "root not",
+			schema: map[string]any{"type": "object", "not": map[string]any{"type": "string"}},
+			want:   false,
+		},
+		{
+			name: "nested if/then/else",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"value": map[string]any{
+						"if":   map[string]any{"type": "string"},
+						"then": map[string]any{"type": "string"},
+						"else": map[string]any{"type": "number"},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name:   "root dependentRequired",
+			schema: map[string]any{"type": "object", "dependentRequired": map[string]any{"a": []any{"b"}}},
+			want:   false,
+		},
+		{
+			name:   "root dependentSchemas",
+			schema: map[string]any{"type": "object", "dependentSchemas": map[string]any{"a": map[string]any{"type": "object"}}},
+			want:   false,
+		},
+		{
+			// T4: oneOf nested inside anyOf variant, items, and $defs - proves recursion reaches it.
+			name: "oneOf nested inside anyOf variant",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"value": map[string]any{
+						"anyOf": []any{
+							map[string]any{"type": "string"},
+							map[string]any{"oneOf": []any{map[string]any{"type": "integer"}}},
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "oneOf nested inside items",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"list": map[string]any{
+						"type":  "array",
+						"items": map[string]any{"oneOf": []any{map[string]any{"type": "integer"}}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "oneOf nested inside $defs",
+			schema: map[string]any{
+				"type": "object",
+				"$defs": map[string]any{
+					"thing": map[string]any{"oneOf": []any{map[string]any{"type": "integer"}}},
+				},
+			},
+			want: false,
+		},
+		{
+			// T5: existing anyOf fixture (chrome-devtools) must still be compatible - don't over-gate.
+			name: "anyOf with clean variants stays compatible",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"viewport": map[string]any{
+						"anyOf": []any{
+							map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"width":  map[string]any{"type": "number"},
+									"height": map[string]any{"type": "number"},
+								},
+								"required":             []any{"width", "height"},
+								"additionalProperties": false,
+							},
+							map[string]any{"type": "null"},
+						},
+					},
+				},
+				"required":             []any{"viewport"},
+				"additionalProperties": false,
+			},
+			want: true,
+		},
+		{
+			// T6: $defs / definitions with a schema-form or true additionalProperties.
+			name: "$defs additionalProperties true is incompatible",
+			schema: map[string]any{
+				"type": "object",
+				"$defs": map[string]any{
+					"thing": map[string]any{"type": "object", "additionalProperties": true},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "definitions additionalProperties schema-form is incompatible",
+			schema: map[string]any{
+				"type": "object",
+				"definitions": map[string]any{
+					"thing": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+				},
+			},
+			want: false,
+		},
+		// T7: $ref variants.
+		{
+			name: "$ref to missing $defs entry is incompatible",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": "#/$defs/missing"},
+				},
+				"$defs": map[string]any{"thing": map[string]any{"type": "string"}},
+			},
+			want: false,
+		},
+		{
+			name: "$ref to external file is incompatible",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": "other.json#/x"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "$ref to absolute URL is incompatible",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": "https://example.com/schema.json"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "non-string $ref is incompatible",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": 42},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "escaped pointer that resolves is compatible",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": "#/$defs/a~1b~0c"},
+				},
+				"$defs":    map[string]any{"a/b~c": map[string]any{"type": "string"}},
+				"required": []any{"p"},
+			},
+			want: true,
+		},
+		{
+			// T8: $ref with sibling description is incompatible (conservative rule; see design doc §3.3).
+			name: "$ref with sibling description is incompatible",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": "#/$defs/thing", "description": "a thing"},
+				},
+				"$defs":    map[string]any{"thing": map[string]any{"type": "string"}},
+				"required": []any{"p"},
+			},
+			want: false,
+		},
+		{
+			// T9: recursive schemas via $ref must not cause infinite recursion.
+			name: "root self-reference via items",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"children": map[string]any{
+						"type":  "array",
+						"items": map[string]any{"$ref": "#"},
+					},
+				},
+				"required": []any{"children"},
+			},
+			want: true,
+		},
+		{
+			name: "linked-list self-reference via $defs",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"head": map[string]any{"$ref": "#/$defs/node"},
+				},
+				"required": []any{"head"},
+				"$defs": map[string]any{
+					"node": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"value": map[string]any{"type": "number"},
+							"next": map[string]any{
+								"anyOf": []any{
+									map[string]any{"$ref": "#/$defs/node"},
+									map[string]any{"type": "null"},
+								},
+							},
+						},
+						"required": []any{"value", "next"},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			// T13: patternProperties value schemas must not be gated.
+			name: "patternProperties is not gated",
+			schema: map[string]any{
+				"type": "object",
+				"patternProperties": map[string]any{
+					"^S_": map[string]any{"type": "string"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "oneOf nested inside patternProperties is still gated",
+			schema: map[string]any{
+				"type": "object",
+				"patternProperties": map[string]any{
+					"^S_": map[string]any{"oneOf": []any{map[string]any{"type": "string"}}},
+				},
+			},
+			want: false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -511,6 +796,311 @@ func TestIsStrictCompatible(t *testing.T) {
 			assert.Equal(t, tc.want, isStrictCompatible(tc.schema))
 		})
 	}
+}
+
+// TestIsStrictCompatible_Invariant is T10: normalization must never turn a
+// strict-compatible schema into an incompatible one. This is what would have
+// caught the $ref-pollution defect (issue #4106 finding 3), where the shared
+// ensurePropertyTypes helper injected "type": "object" onto $ref nodes,
+// which downstream normalization then widened with additionalProperties.
+func TestIsStrictCompatible_Invariant(t *testing.T) {
+	t.Parallel()
+
+	fixtures := []struct {
+		name   string
+		schema map[string]any
+	}{
+		{
+			name:   "empty schema",
+			schema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			name: "anyOf with clean variants (chrome-devtools)",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"viewport": map[string]any{
+						"anyOf": []any{
+							map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"width":  map[string]any{"type": "number"},
+									"height": map[string]any{"type": "number"},
+								},
+								"required": []any{"width", "height"},
+							},
+							map[string]any{"type": "null"},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "required $ref property",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": "#/$defs/thing"},
+				},
+				"required": []any{"p"},
+				"$defs":    map[string]any{"thing": map[string]any{"type": "string"}},
+			},
+		},
+		{
+			name: "optional $ref property",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": "#/$defs/thing"},
+				},
+				"$defs": map[string]any{"thing": map[string]any{"type": "string"}},
+			},
+		},
+		{
+			name: "clean $defs referenced by required property",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"thing": map[string]any{"$ref": "#/$defs/thing"},
+				},
+				"required": []any{"thing"},
+				"$defs": map[string]any{
+					"thing": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"name": map[string]any{"type": "string"},
+						},
+						"required": []any{"name"},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			require.True(t, isStrictCompatible(tc.schema), "fixture must be strict-compatible before normalization")
+
+			output, strict, err := ConvertParametersToSchema(tc.schema)
+			require.NoError(t, err)
+			assert.True(t, strict)
+			assert.True(t, isStrictCompatible(output), "normalization must not introduce a strict incompatibility")
+		})
+	}
+}
+
+// TestConvertParametersToSchema_Issue4106 is T1's pipeline-level assertion:
+// the exact schema from the issue must round-trip as strict: false, without
+// error, rather than being sent to OpenAI as strict: true and rejected.
+func TestConvertParametersToSchema_Issue4106(t *testing.T) {
+	t.Parallel()
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"value": map[string]any{
+				"oneOf": []any{
+					map[string]any{"type": "integer"},
+					map[string]any{"type": "string"},
+				},
+			},
+		},
+	}
+
+	_, strict, err := ConvertParametersToSchema(schema)
+	require.NoError(t, err)
+	assert.False(t, strict)
+}
+
+// TestMakeAllRequired_DefsNormalization is T11: $defs entries must be
+// normalized the same as any other object node (all properties required,
+// newly-required ones nullable, additionalProperties: false, format removed).
+func TestMakeAllRequired_DefsNormalization(t *testing.T) {
+	t.Parallel()
+	schema := shared.FunctionParameters{
+		"type": "object",
+		"properties": map[string]any{
+			"thing": map[string]any{"$ref": "#/$defs/thing"},
+		},
+		"required": []any{"thing"},
+		"$defs": map[string]any{
+			"thing": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+					"url":  map[string]any{"type": "string", "format": "uri"},
+				},
+				"required": []any{"name"},
+			},
+		},
+	}
+
+	updated := removeFormatFields(makeAllRequired(schema))
+
+	thing := updated["$defs"].(map[string]any)["thing"].(map[string]any)
+	assert.Equal(t, false, thing["additionalProperties"])
+
+	required := thing["required"].([]any)
+	assert.Len(t, required, 2)
+	assert.Contains(t, required, "name")
+	assert.Contains(t, required, "url")
+
+	url := thing["properties"].(map[string]any)["url"].(map[string]any)
+	assert.Equal(t, []string{"string", "null"}, url["type"])
+	assert.NotContains(t, url, "format")
+
+	name := thing["properties"].(map[string]any)["name"].(map[string]any)
+	assert.Equal(t, "string", name["type"])
+}
+
+// TestMakeAllRequired_RefLeaf is T12: a required $ref property is left as a
+// bare $ref node (no type/additionalProperties siblings injected), while a
+// newly-required (optional) $ref property is wrapped as
+// {"anyOf": [<$ref>, {"type": "null"}]} so the model isn't forced to always
+// emit it.
+func TestMakeAllRequired_RefLeaf(t *testing.T) {
+	t.Parallel()
+	schema := shared.FunctionParameters{
+		"type": "object",
+		"properties": map[string]any{
+			"required_ref": map[string]any{"$ref": "#/$defs/thing"},
+			"optional_ref": map[string]any{"$ref": "#/$defs/thing"},
+		},
+		"required": []any{"required_ref"},
+		"$defs": map[string]any{
+			"thing": map[string]any{"type": "string"},
+		},
+	}
+
+	updated := makeAllRequired(schema)
+
+	required := updated["required"].([]any)
+	assert.Len(t, required, 2)
+	assert.Contains(t, required, "required_ref")
+	assert.Contains(t, required, "optional_ref")
+
+	properties := updated["properties"].(map[string]any)
+
+	requiredRef := properties["required_ref"].(map[string]any)
+	assert.Equal(t, map[string]any{"$ref": "#/$defs/thing"}, requiredRef)
+
+	optionalRef := properties["optional_ref"].(map[string]any)
+	anyOf, ok := optionalRef["anyOf"].([]any)
+	require.True(t, ok, "optional $ref property must be wrapped in anyOf")
+	require.Len(t, anyOf, 2)
+	assert.Equal(t, map[string]any{"$ref": "#/$defs/thing"}, anyOf[0])
+	assert.Equal(t, map[string]any{"type": "null"}, anyOf[1])
+}
+
+// TestEnsureTypeFields_RefLeaf ensures ensureTypeFields never injects a
+// "type" key into a $ref node.
+func TestEnsureTypeFields_RefLeaf(t *testing.T) {
+	t.Parallel()
+	schema := shared.FunctionParameters{
+		"type": "object",
+		"properties": map[string]any{
+			"p": map[string]any{"$ref": "#/$defs/thing"},
+		},
+		"$defs": map[string]any{"thing": map[string]any{"type": "string"}},
+	}
+
+	updated := ensureTypeFields(schema)
+
+	p := updated["properties"].(map[string]any)["p"].(map[string]any)
+	assert.NotContains(t, p, "type")
+	assert.Equal(t, "#/$defs/thing", p["$ref"])
+}
+
+// TestEnsureTypeFields_EnumConstTakeValueType ensures a typeless enum/const
+// node gets the type of its values rather than "object", which would reject
+// every value. pydantic emits such a node for Literal["auto", 0, 1].
+func TestEnsureTypeFields_EnumConstTakeValueType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		node map[string]any
+		want any
+	}{
+		{"string enum", map[string]any{"enum": []any{"a", "b"}}, "string"},
+		{"integer enum", map[string]any{"enum": []any{float64(1), float64(2)}}, "integer"},
+		{"number enum", map[string]any{"enum": []any{float64(1), 1.5}}, "number"},
+		{"boolean enum", map[string]any{"enum": []any{true}}, "boolean"},
+		{"mixed enum", map[string]any{"enum": []any{"auto", float64(0), nil}}, []any{"string", "integer", "null"}},
+		{"string const", map[string]any{"const": "x"}, "string"},
+		{"no values", map[string]any{"description": "d"}, "object"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			schema := shared.FunctionParameters{
+				"type":       "object",
+				"properties": map[string]any{"p": tt.node},
+			}
+
+			updated := ensureTypeFields(schema)
+
+			p := updated["properties"].(map[string]any)["p"].(map[string]any)
+			assert.Equal(t, tt.want, p["type"])
+		})
+	}
+}
+
+// TestEnsureTypeFields_CompositionNodesLeftAsLeaves ensures ensureTypeFields
+// never injects a "type" onto an anyOf/oneOf/allOf node. A "type" sibling
+// combines with these keywords via AND, so injecting one can make the
+// schema unsatisfiable unless every variant already shares it — exactly
+// what happened to the anyOf+null wrapper makeAllRequired creates for a
+// newly-required $ref property (see TestConvertParametersToSchema_OptionalRefIsActuallyNullable).
+func TestEnsureTypeFields_CompositionNodesLeftAsLeaves(t *testing.T) {
+	t.Parallel()
+	schema := shared.FunctionParameters{
+		"type": "object",
+		"properties": map[string]any{
+			"withAnyOf": map[string]any{
+				"anyOf": []any{
+					map[string]any{"$ref": "#/$defs/thing"},
+					map[string]any{"type": "null"},
+				},
+			},
+		},
+		"$defs": map[string]any{"thing": map[string]any{"type": "string"}},
+	}
+
+	updated := ensureTypeFields(schema)
+
+	withAnyOf := updated["properties"].(map[string]any)["withAnyOf"].(map[string]any)
+	assert.NotContains(t, withAnyOf, "type")
+}
+
+// TestConvertParametersToSchema_OptionalRefIsActuallyNullable is a
+// regression test for the anyOf+null wrapper makeAllRequired creates for a
+// newly-required $ref property. The wrapper must not gain a "type" sibling
+// from ensureTypeFields: "type": "object" alongside
+// "anyOf": [<$ref>, {"type": "null"}]" requires the value to be both an
+// object and (the ref target or null), which is unsatisfiable whenever the
+// ref target isn't itself an object — and even when it is, it silently
+// excludes the null branch, defeating the whole point of the wrap.
+func TestConvertParametersToSchema_OptionalRefIsActuallyNullable(t *testing.T) {
+	t.Parallel()
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"p": map[string]any{"$ref": "#/$defs/thing"},
+		},
+		"$defs": map[string]any{"thing": map[string]any{"type": "string"}},
+	}
+
+	result, strict, err := ConvertParametersToSchema(schema)
+	require.NoError(t, err)
+	assert.True(t, strict)
+
+	p := result["properties"].(map[string]any)["p"].(map[string]any)
+	assert.NotContains(t, p, "type", "the anyOf wrapper must not gain a conflicting type sibling")
+
+	anyOf, ok := p["anyOf"].([]any)
+	require.True(t, ok)
+	require.Len(t, anyOf, 2)
+	assert.Equal(t, map[string]any{"$ref": "#/$defs/thing"}, anyOf[0])
+	assert.Equal(t, map[string]any{"type": "null"}, anyOf[1])
 }
 
 func TestConvertParametersToSchema_NotionStylePreservesShape(t *testing.T) {
@@ -643,4 +1233,200 @@ func TestFixSchemaArrayItems(t *testing.T) {
   ],
   "type": "object"
 }`, string(buf))
+}
+
+func TestConvertParametersToSchema_NullableContainers(t *testing.T) {
+	t.Parallel()
+
+	stringArray := func() map[string]any {
+		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+	}
+	nullVariant := map[string]any{"type": "null"}
+	rootWith := func(prop map[string]any, required ...any) map[string]any {
+		return map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             required,
+			"properties":           map[string]any{"p": prop},
+		}
+	}
+	nestedBehindDefs := func(prop map[string]any) map[string]any {
+		return map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []any{"f"},
+			"properties":           map[string]any{"f": map[string]any{"$ref": "#/$defs/N"}},
+			"$defs": map[string]any{
+				"N": map[string]any{"$ref": "#/$defs/S"},
+				"S": rootWith(prop, "p"),
+			},
+		}
+	}
+	propertyOf := func(object map[string]any) map[string]any {
+		return object["properties"].(map[string]any)["p"].(map[string]any)
+	}
+
+	tests := []struct {
+		name       string
+		schema     map[string]any
+		property   func(out map[string]any) map[string]any
+		want       map[string]any
+		wantStrict bool
+	}{
+		{
+			name:   "required nullable array behind $defs and $ref",
+			schema: nestedBehindDefs(map[string]any{"type": []any{"array", "null"}, "items": map[string]any{"type": "string"}}),
+			property: func(out map[string]any) map[string]any {
+				return propertyOf(out["$defs"].(map[string]any)["S"].(map[string]any))
+			},
+			want:       map[string]any{"anyOf": []any{stringArray(), nullVariant}},
+			wantStrict: true,
+		},
+		{
+			name:   "required nullable array with null first, as emitted by schema generators",
+			schema: nestedBehindDefs(map[string]any{"type": []any{"null", "array"}, "items": map[string]any{"type": "string"}}),
+			property: func(out map[string]any) map[string]any {
+				return propertyOf(out["$defs"].(map[string]any)["S"].(map[string]any))
+			},
+			want:       map[string]any{"anyOf": []any{stringArray(), nullVariant}},
+			wantStrict: true,
+		},
+		{
+			name:       "optional top-level array",
+			schema:     rootWith(stringArray()),
+			property:   propertyOf,
+			want:       map[string]any{"anyOf": []any{stringArray(), nullVariant}},
+			wantStrict: true,
+		},
+		{
+			name:     "optional top-level array without items gets default items",
+			schema:   rootWith(map[string]any{"type": "array"}),
+			property: propertyOf,
+			want: map[string]any{"anyOf": []any{
+				map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				nullVariant,
+			}},
+			wantStrict: true,
+		},
+		{
+			name: "optional top-level object",
+			schema: rootWith(map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"a": map[string]any{"type": "string"}},
+			}),
+			property: propertyOf,
+			want: map[string]any{"anyOf": []any{
+				map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []any{"a"},
+					"properties":           map[string]any{"a": map[string]any{"type": []string{"string", "null"}}},
+				},
+				nullVariant,
+			}},
+			wantStrict: true,
+		},
+		{
+			name:       "optional scalar keeps the type pair",
+			schema:     rootWith(map[string]any{"type": "string"}),
+			property:   propertyOf,
+			want:       map[string]any{"type": []string{"string", "null"}},
+			wantStrict: true,
+		},
+		{
+			name:       "optional $ref keeps the anyOf wrapper",
+			schema:     rootWith(map[string]any{"$ref": "#/$defs/thing"}),
+			property:   propertyOf,
+			want:       map[string]any{"anyOf": []any{map[string]any{"$ref": "#/$defs/thing"}, nullVariant}},
+			wantStrict: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			out, strict, err := ConvertParametersToSchema(tt.schema)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, tt.property(out))
+			if tt.wantStrict {
+				assert.True(t, strict)
+				assert.True(t, isStrictCompatible(out))
+			}
+			assertNoNullableContainerTypePairs(t, out)
+		})
+	}
+}
+
+func assertNoNullableContainerTypePairs(t *testing.T, schema map[string]any) {
+	t.Helper()
+
+	walkSchema(schema, func(node map[string]any) {
+		container, isNullablePair := nullableContainerType(node)
+		assert.False(t, isNullablePair, "found nullable %s type pair: %v", container, node)
+	})
+}
+
+// TestConvertParametersToSchema_EnumConstNullability checks typeless and
+// nullable enum/const properties through the full conversion by validating
+// instances against the result: optional ones must still accept null once
+// made required, and a required enum that lists null must keep accepting it.
+func TestConvertParametersToSchema_EnumConstNullability(t *testing.T) {
+	t.Parallel()
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode":  map[string]any{"enum": []any{"auto", 0, 1}},
+			"only":  map[string]any{"const": "x"},
+			"level": map[string]any{"type": "string", "enum": []any{"low", "high"}},
+			"pick":  map[string]any{"enum": []any{"auto", 0, nil}},
+		},
+		"required": []any{"pick"},
+	}
+
+	out, strict, err := ConvertParametersToSchema(params)
+	require.NoError(t, err)
+	assert.True(t, strict)
+
+	data, err := json.Marshal(out)
+	require.NoError(t, err)
+	var parsed jsonschema.Schema
+	require.NoError(t, json.Unmarshal(data, &parsed))
+	resolved, err := parsed.Resolve(nil)
+	require.NoError(t, err)
+
+	valid := map[string]any{"mode": "auto", "only": "x", "level": "low", "pick": "auto"}
+	tests := []struct {
+		name  string
+		field string
+		value any
+		ok    bool
+	}{
+		{"mixed enum string", "mode", "auto", true},
+		{"mixed enum integer", "mode", 0, true},
+		{"mixed enum omitted as null", "mode", nil, true},
+		{"mixed enum other", "mode", "bad", false},
+		{"const value", "only", "x", true},
+		{"const omitted as null", "only", nil, true},
+		{"const other", "only", "y", false},
+		{"typed enum omitted as null", "level", nil, true},
+		{"typed enum other", "level", "mid", false},
+		{"required enum allows null", "pick", nil, true},
+		{"required enum integer", "pick", 0, true},
+		{"required enum other", "pick", "bad", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			instance := maps.Clone(valid)
+			instance[tt.field] = tt.value
+			err := resolved.Validate(instance)
+			if tt.ok {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+			}
+		})
+	}
 }

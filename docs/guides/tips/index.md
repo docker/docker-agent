@@ -20,8 +20,9 @@ Don't have a config file? Docker Agent can automatically detect your available A
 # Automatically uses the best available provider
 $ docker agent run
 
-# Provider priority: Anthropic → OpenAI → Google → Mistral → Amazon Bedrock → DMR
 ```
+
+Use `docker agent doctor` to see which provider `auto` selects from your available credentials and local models.
 
 The special `auto` model value also works in configs:
 
@@ -56,23 +57,28 @@ agents:
 
 ### Model Aliases Are Auto-Pinned
 
-Docker Agent automatically resolves model aliases to their latest pinned versions. This ensures reproducible behavior:
+Docker Agent resolves named-model aliases to dated IDs when a matching pinned model exists in its model catalog. Inline `provider/model` references and models with a custom `base_url` are left unchanged:
 
 ```yaml
-# You write:
-model: anthropic/claude-sonnet-4-5
+models:
+  claude:
+    provider: anthropic
+    model: claude-sonnet-4-5 # resolves to a matching dated ID from the catalog
 
-# docker-agent resolves to:
-# anthropic/claude-sonnet-4-5-20250929 (or latest available)
+agents:
+  root:
+    model: claude
 ```
 
-To use a specific version, specify it explicitly in your config.
+To guarantee the same version across catalog updates, specify a dated model ID explicitly in your config.
 
 ## Performance Tips
 
-### Defer Tools for Faster Startup
+<a id="defer-tools-for-faster-startup"></a>
 
-Large MCP toolsets can slow down agent startup. Use `defer` to load tools on-demand:
+### Defer Tools to Reduce Prompt Size
+
+Large MCP toolsets add tool definitions to the model's context. Use `defer` to expose those definitions on demand and reduce prompt size. The MCP servers still start normally:
 
 ```yaml
 agents:
@@ -428,7 +434,42 @@ settings:
 
 If a sound is enough, set `settings: { sound: true }` instead — Docker Agent plays a failure sound when a task errors, and a success sound when a task that ran longer than `sound_threshold` seconds (default 10) completes.
 
+### Keep the machine awake
+
+Enable **Keep machine awake** in `/settings` in either TUI to prevent idle system sleep while an agent is running. It is disabled by default, and changes apply to the next agent run. The display can still turn off; the inhibitor is released when the run finishes, errors, or is canceled.
+
+You can also enable it in your user configuration:
+
+```yaml
+settings:
+  keep_awake: true
+```
+
+This uses native macOS and Windows power APIs, or systemd-logind over D-Bus on Linux, with no helper executables required. Linux requires a running system bus and logind with permission to inhibit sleep. If acquisition fails, the hook reports the error without stopping the agent. It does not guarantee protection against deliberate sleep, lid closure, or administrator policy.
+
 See the [Hooks documentation](../../configuration/hooks/index.md) for the full list of events, their payloads, and per-hook options (`env`, `working_dir`, `timeout`).
+
+### Inject the Current Session ID with Hooks
+
+Use the `add_context` [builtin hook](../../configuration/hooks/index.md#template-context-with-add_context) on `session_start` to make the current session ID available to the model. It renders a Go template against the hook input and adds the result to the model's context, without a shell, `jq`, or other external dependencies:
+
+```yaml
+agents:
+  root:
+    model: openai/gpt-4o
+    description: Session-aware assistant
+    instruction: You are a helpful assistant.
+    hooks:
+      session_start:
+        - type: builtin
+          command: add_context
+          args:
+            - "Current session ID: {{ .SessionID }}"
+```
+
+Templates use Go field names such as `.SessionID`, `.AgentName`, and `.Cwd`, rather than the JSON names used by command hooks.
+
+The model receives context such as `Current session ID: 550e8400-e29b-41d4-a716-446655440000`; this is not a visible chat message. Use `turn_start` instead of `session_start` to refresh the context before every model call.
 
 ### GitHub PR Reviewer Example
 
@@ -452,7 +493,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Install docker-agent
-          curl -fsSL https://get.docker-agent.dev | sh
+          curl -fL "https://github.com/docker/docker-agent/releases/latest/download/docker-agent-linux-amd64" -o docker-agent
+          chmod +x docker-agent
+          mkdir -p ~/.docker/cli-plugins
+          mv docker-agent ~/.docker/cli-plugins/
 
           # Run the review
           docker agent run --exec reviewer.yaml --yolo \

@@ -1,0 +1,28 @@
+#!/usr/bin/env docker agent run
+
+agents:
+  root:
+    model: anthropic/claude-sonnet-4-5
+    description: Coordinates isolated coding tasks and integrates their changes
+    instruction: |
+      Split independent coding changes into tasks for coder. Start all tasks
+      with run_background_agent(worktree: true). Use repository-relative paths.
+      Ask each child to test and commit its changes, respecting signing rules.
+      Wait for every task, check statuses, then review the reported branches.
+      Merge them one at a time in your checkout, resolve conflicts, and test
+      the combined result. Never merge or remove a checkout still in use.
+    sub_agents: [coder]
+    toolsets:
+      - type: background_agents
+      - type: shell
+      - type: filesystem
+  coder:
+    model: anthropic/claude-sonnet-4-5
+    description: Implements one task in its own checkout
+    instruction: |
+      Work only in your assigned checkout. Implement and test the requested
+      change, commit it according to project signing rules, and report the
+      branch, commit IDs, and test results. Do not merge into the parent.
+    toolsets:
+      - type: shell
+      - type: filesystem

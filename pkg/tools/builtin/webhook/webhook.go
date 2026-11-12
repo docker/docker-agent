@@ -26,6 +26,11 @@ import (
 	"github.com/docker/docker-agent/pkg/useragent"
 )
 
+type templateExpander interface {
+	Expand(ctx context.Context, text string, values map[string]string) string
+	ExpandMap(ctx context.Context, values map[string]string) map[string]string
+}
+
 const (
 	ToolNameSendWebhook = "send_webhook"
 	category            = "webhook"
@@ -106,7 +111,7 @@ const (
 
 type ToolSet struct {
 	cfg      latest.WebhookToolConfig
-	expander *js.Expander
+	expander templateExpander
 	client   httpDoer
 
 	maxAttempts  int
@@ -132,7 +137,10 @@ var (
 	_ tools.Instructable = (*ToolSet)(nil)
 )
 
-func New(cfg latest.WebhookToolConfig, expander *js.Expander, timeout time.Duration) *ToolSet {
+func New(cfg latest.WebhookToolConfig, expander templateExpander, timeout time.Duration) *ToolSet {
+	if expander == nil {
+		expander = (*js.Expander)(nil)
+	}
 	return &ToolSet{
 		cfg:          cfg,
 		expander:     expander,
@@ -184,7 +192,8 @@ func (t *ToolSet) send(ctx context.Context, args SendArgs, rt tools.Runtime) (*t
 	}
 	if wait, limited := t.rateLimited(now); limited {
 		return tools.ResultError(fmt.Sprintf(
-			"Error: rate limited; wait %s before sending another notification.", wait.Round(time.Millisecond))), nil
+			"Error: rate limited; wait %s before sending another notification.", wait.Round(time.Millisecond),
+		)), nil
 	}
 	t.markSent(args, now)
 
@@ -200,7 +209,8 @@ func (t *ToolSet) send(ctx context.Context, args SendArgs, rt tools.Runtime) (*t
 			})
 			return tools.ResultSuccess(fmt.Sprintf(
 				"Queued delivery to the %s webhook. You will only be notified if it ultimately fails.",
-				normalizeProvider(t.cfg.Provider))), nil
+				normalizeProvider(t.cfg.Provider),
+			)), nil
 		}
 		cancel()
 	}
@@ -268,8 +278,7 @@ func (t *ToolSet) attempt(ctx context.Context, args SendArgs) (verdict, time.Dur
 	if err != nil {
 		// http.NewRequestWithContext may return a *url.Error; its Error() string embeds
 		// the full request URL which may contain secrets.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
+		if urlErr, ok := errors.AsType[*url.Error](err); ok {
 			return permanent, 0, urlErr.Err.Error()
 		}
 		return permanent, 0, err.Error()
@@ -285,8 +294,7 @@ func (t *ToolSet) attempt(ctx context.Context, args SendArgs) (verdict, time.Dur
 		// http.Client.Do returns *url.Error on network failures; its Error() string
 		// embeds the full request URL which may carry embedded secrets (e.g. Slack/Discord tokens).
 		// Unwrap to expose only the underlying cause and never the URL.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
+		if urlErr, ok := errors.AsType[*url.Error](err); ok {
 			return transient, 0, "request failed: " + urlErr.Err.Error()
 		}
 		return transient, 0, "request failed: " + err.Error()

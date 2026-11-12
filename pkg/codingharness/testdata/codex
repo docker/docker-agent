@@ -1,0 +1,10 @@
+#!/bin/sh
+dir=${0%/*}
+if [ -f "$dir/wait" ]; then
+  printf '%s\n' '{"type":"thread.started","thread_id":"canceled-thread"}'
+  exec sleep 30
+fi
+printf '%s\n' "$@" > "$dir/args"
+cat "$dir/events.jsonl"
+read -r status < "$dir/exit-code"
+exit "$status"

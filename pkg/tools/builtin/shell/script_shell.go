@@ -3,7 +3,6 @@ package shell
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -21,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/workingdir"
 )
 
 // CreateScriptToolSet is used by the tools registry.
@@ -37,10 +37,16 @@ func CreateScriptToolSet(ctx context.Context, toolset latest.Toolset, runConfig 
 	// while the configured toolset env still wins on key collisions
 	// (exec.Cmd dedupes with last-wins).
 	env = append(os.Environ(), env...)
-	return NewScript(toolset.Shell, env)
+	ts, err := NewScript(toolset.Shell, env)
+	if err != nil {
+		return nil, err
+	}
+	ts.workingDir = runConfig.WorkingDir
+	return ts, nil
 }
 
 type ScriptToolSet struct {
+	workingDir string
 	shellTools map[string]latest.ScriptShellToolConfig
 	env        []string
 }
@@ -215,14 +221,14 @@ func (t *ScriptToolSet) Tools(context.Context) ([]tools.Tool, error) {
 func (t *ScriptToolSet) execute(ctx context.Context, rt tools.Runtime, toolConfig *latest.ScriptShellToolConfig, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
 	var params map[string]any
 	if toolCall.Function.Arguments != "" {
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+		if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
 	}
 
 	// working_dir accepts ~, $VAR, ${VAR} and ${env.VAR} like every other
 	// working_dir field (issue #2615).
-	workingDir := path.ExpandWorkingDir("script shell working_dir", toolConfig.WorkingDir)
+	workingDir := workingdir.Resolve(path.ExpandWorkingDir("script shell working_dir", toolConfig.WorkingDir), t.workingDir)
 
 	// Stamp the script_shell call shape onto the active span. Cmd
 	// ships unconditionally for the same reason as shell.RunShell —

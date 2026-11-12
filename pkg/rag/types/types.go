@@ -67,6 +67,16 @@ type EventCallback func(event Event)
 type EventForwarder interface {
 	// Name returns the toolset's user-facing name.
 	Name() string
-	// SetEventCallback registers the callback; must be called before Start.
+	// SetEventCallback registers a single callback, replacing any previous
+	// one. Hosts that may share the toolset should use EventSubscriber.
 	SetEventCallback(callback EventCallback)
+}
+
+// EventSubscriber is implemented by RAG toolsets that fan lifecycle events
+// out to any number of hosts (one per runtime stream sharing the toolset).
+// Subscriptions may be added before or after Start; every subscriber
+// receives every event emitted while it is registered.
+type EventSubscriber interface {
+	Name() string
+	SubscribeEvents(callback EventCallback) (unsubscribe func())
 }

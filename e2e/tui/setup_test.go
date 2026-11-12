@@ -12,10 +12,15 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/fake"
+	"github.com/docker/docker-agent/pkg/history"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -28,9 +33,8 @@ import (
 // replaying VCR proxy so the agent's responses are deterministic and offline.
 // It returns a started tuitest.Driver sized to the given terminal dimensions.
 //
-// State directories (data/config) are redirected to a temp dir so the test
-// never touches the developer's ~/.cagent, and the SQLite session store lives
-// under t.TempDir() too.
+// Home and state directories are redirected to a temp dir, and the SQLite
+// session store lives under t.TempDir() too.
 //
 // agentFile is a deliberate seam: new scenarios point the harness at other
 // agent configs without touching the helper.
@@ -50,9 +54,11 @@ func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, p
 	isolateState(t)
 
 	runConfig := startReplayProxy(t, proxyOpts)
+	modelsStore := modelsdev.NewDatabaseStore(embedded.Snapshot())
+	runConfig.ModelsDevStoreOverride = modelsStore
 
 	ctx := t.Context()
-	agentSource, err := config.Resolve(agentFile, runConfig.EnvProvider())
+	agentSource, err := sources.Resolve(agentFile, runConfig.EnvProvider())
 	require.NoError(t, err)
 
 	loadResult, err := teamloader.LoadWithConfig(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
@@ -69,13 +75,14 @@ func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, p
 	rt, err := runtime.New(ctx, team,
 		runtime.WithSessionStore(store),
 		runtime.WithCurrentAgent(agent.Name()),
-		runtime.WithModelSwitcherConfig(&runtime.ModelSwitcherConfig{
+		runtime.WithModelSwitcherConfig(&modelcatalog.Config{
 			Models:             loadResult.Models,
 			Providers:          loadResult.Providers,
 			ModelsGateway:      runConfig.ModelsGateway,
 			EnvProvider:        runConfig.EnvProvider(),
 			ProviderRegistry:   loadResult.ProviderRegistry,
 			AgentDefaultModels: loadResult.AgentDefaultModels,
+			ModelsStore:        modelsStore,
 		}),
 	)
 	require.NoError(t, err)
@@ -93,18 +100,50 @@ func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, p
 	return tuitest.New(t, model, width, height)
 }
 
-// isolateState redirects docker-agent's data and config directories to a temp
-// dir for the duration of the test so the TUI's persistent state (tab store,
-// user settings) never touches the real home directory.
+// isolateState keeps prompt history and other persistent TUI state in a temp dir.
 func isolateState(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	paths.SetDataDir(filepath.Join(dir, "data"))
 	paths.SetConfigDir(filepath.Join(dir, "config"))
 	t.Cleanup(func() {
 		paths.SetDataDir("")
 		paths.SetConfigDir("")
 	})
+}
+
+func TestIsolateState_PromptHistory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	hostHistory, err := history.New("")
+	require.NoError(t, err)
+	require.NoError(t, hostHistory.Add("developer prompt"))
+
+	t.Run("isolated", func(t *testing.T) {
+		isolateState(t)
+		isolatedHistory, err := history.New("")
+		require.NoError(t, err)
+		require.NoError(t, isolatedHistory.Load())
+		require.Empty(t, isolatedHistory.Messages)
+		require.NoError(t, isolatedHistory.Add("test prompt"))
+
+		reloaded, err := history.New("")
+		require.NoError(t, err)
+		require.NoError(t, reloaded.Load())
+		require.Equal(t, []string{"test prompt"}, reloaded.Messages)
+		require.FileExists(t, filepath.Join(paths.GetDataDir(), "history"))
+		require.NoDirExists(t, filepath.Join(paths.GetHomeDir(), ".cagent"))
+	})
+
+	require.Equal(t, home, paths.GetHomeDir())
+	hostHistory, err = history.New("")
+	require.NoError(t, err)
+	require.NoError(t, hostHistory.Load())
+	require.Equal(t, []string{"developer prompt"}, hostHistory.Messages)
 }
 
 // startReplayProxy starts a VCR proxy in replay-only mode against the cassette

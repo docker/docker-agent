@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -337,36 +336,48 @@ func TestWalkFiles_ContextCancellation(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
-
-	// Create many files
-	for i := range 100 {
-		f := filepath.Join(tmpDir, "file"+string(rune(i%26+'a'))+string(rune(i/26+'0'))+".txt")
-		require.NoError(t, os.WriteFile(f, []byte("content"), 0o644))
+	for _, name := range []string{"a.txt", "b.txt"} {
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, name), nil, 0o644))
 	}
 
-	t.Run("respects context cancellation", func(t *testing.T) {
+	t.Run("already cancelled", func(t *testing.T) {
 		t.Parallel()
 
 		ctx, cancel := context.WithCancel(t.Context())
-		cancel() // Cancel immediately
+		cancel()
 
 		got, err := WalkFiles(ctx, tmpDir, WalkFilesOptions{})
-		// Should either return an error or return partial results
-		// The important thing is it doesn't hang
-		_ = got
-		_ = err
+		require.NoError(t, err)
+		assert.Empty(t, got)
 	})
 
-	t.Run("returns partial results on timeout", func(t *testing.T) {
+	t.Run("expired deadline", func(t *testing.T) {
 		t.Parallel()
 
-		ctx, cancel := context.WithTimeout(t.Context(), 1*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 0)
 		defer cancel()
 
-		// This should return quickly due to timeout
-		_, err := WalkFiles(ctx, tmpDir, WalkFilesOptions{})
-		// May or may not error depending on timing
-		_ = err
+		got, err := WalkFiles(ctx, tmpDir, WalkFilesOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+
+	t.Run("partial results", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		got, err := WalkFiles(ctx, tmpDir, WalkFilesOptions{
+			ShouldIgnore: func(path string) bool {
+				if filepath.Base(path) == "a.txt" {
+					cancel()
+				}
+				return false
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a.txt"}, got)
 	})
 }
 

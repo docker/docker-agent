@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/docs-a11y-urls.sh — map changed docs Markdown files to rendered
 # URLs for Tier 2 of the docs-a11y gate (see docs-a11y-smart-gate plan and
-# .github/workflows/docs-a11y.yml). Reads changed repo-root-relative paths
+# .github/workflows/docs.yml, a11y job). Reads changed repo-root-relative paths
 # on stdin (one per line, e.g. from `git diff --name-only`), applies the
 # mapping rules below, de-dupes against the static archetype list already
 # in docs/.pa11yci.json, optionally live-probes the mapped pages, caps the

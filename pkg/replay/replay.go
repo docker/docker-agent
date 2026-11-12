@@ -297,10 +297,6 @@ func truncateArgs(args string) string {
 // scrubs the same characters before rendering markdown, for the same reason.
 func sanitizeForTerminal(s string) string {
 	return strings.Map(func(r rune) rune {
-		switch r {
-		case '\n', '\r', '\b', '\f', '\v':
-			return ' '
-		}
 		// C0 controls (including ESC) and DEL.
 		if r < 0x20 || r == 0x7f {
 			return ' '

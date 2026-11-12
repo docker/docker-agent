@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 
@@ -42,8 +43,10 @@ func (rb *recordingBuiltin) hook(_ context.Context, in *hooks.Input, _ []string)
 func (rb *recordingBuiltin) snapshot() []*hooks.Input {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	out := make([]*hooks.Input, len(rb.inputs))
-	copy(out, rb.inputs)
+	out := slices.Clone(rb.inputs)
+	if out == nil {
+		out = []*hooks.Input{}
+	}
 	return out
 }
 

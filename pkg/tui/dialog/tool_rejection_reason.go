@@ -1,54 +1,13 @@
 package dialog
 
-import (
-	"github.com/docker/docker-agent/pkg/tui/components/toolconfirm"
-)
+import "github.com/docker/docker-agent/pkg/tui/dialog/toolconfirmation"
 
-// ToolRejectionDialogID is the unique identifier for the tool rejection reason dialog.
-const ToolRejectionDialogID = "tool-rejection-reason"
+const ToolRejectionDialogID = toolconfirmation.ToolRejectionDialogID
 
-// toolRejectionOptions adapts the shared preset rejection reasons to the
-// multi-choice dialog options.
-func toolRejectionOptions() []MultiChoiceOption {
-	reasons := toolconfirm.RejectionReasons()
-	options := make([]MultiChoiceOption, 0, len(reasons))
-	for _, r := range reasons {
-		options = append(options, MultiChoiceOption{ID: r.ID, Label: r.Label, Value: r.Value})
-	}
-	return options
-}
-
-// NewToolRejectionReasonDialog creates a multi-choice dialog for selecting
-// the reason for rejecting a tool call.
 func NewToolRejectionReasonDialog() Dialog {
-	return NewMultiChoiceDialog(MultiChoiceConfig{
-		DialogID:          ToolRejectionDialogID,
-		Title:             "Why reject this tool call?",
-		Options:           toolRejectionOptions(),
-		AllowCustom:       true,
-		AllowSecondary:    true,
-		SecondaryLabel:    "Skip",
-		PrimaryLabel:      "Reject",
-		CustomPlaceholder: "Other reason...",
-	})
+	return toolconfirmation.NewToolRejectionReasonDialog()
 }
 
-// HandleToolRejectionResult processes the result from the tool rejection dialog
-// and returns the appropriate RuntimeResumeMsg.
-// Returns nil if the result was cancelled (user should stay in confirmation dialog).
 func HandleToolRejectionResult(result MultiChoiceResult) *RuntimeResumeMsg {
-	if result.IsCancelled {
-		// User pressed Esc - don't send resume, let them stay in confirmation dialog
-		return nil
-	}
-
-	// Build the reason string
-	reason := result.Value
-	if result.IsSkipped {
-		reason = "" // No reason provided
-	}
-
-	return &RuntimeResumeMsg{
-		Request: toolconfirm.Reject.Resume("", reason),
-	}
+	return toolconfirmation.HandleToolRejectionResult(result)
 }

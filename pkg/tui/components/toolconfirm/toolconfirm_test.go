@@ -52,9 +52,34 @@ func TestBuildPermissionPattern(t *testing.T) {
 			want: "shell",
 		},
 		{
+			name: "shell with whitespace-only command falls back to tool name",
+			call: shellCall(`\t\n\u2003`),
+			want: "shell",
+		},
+		{
+			name: "shell with Unicode whitespace",
+			call: shellCall(`\u2003git\u00a0status`),
+			want: "shell:cmd=git*",
+		},
+		{
 			name: "shell with invalid arguments falls back to tool name",
 			call: tools.ToolCall{Function: tools.FunctionCall{Name: "shell", Arguments: "not json"}},
 			want: "shell",
+		},
+		{
+			name: "background job extracts the command",
+			call: tools.ToolCall{Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"cmd":"npm run dev"}`}},
+			want: "run_background_job:cmd=npm*",
+		},
+		{
+			name: "command alias is honoured",
+			call: tools.ToolCall{Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"command":"npm run dev"}`}},
+			want: "run_background_job:cmd=npm*",
+		},
+		{
+			name: "blank cmd falls back to command like the handler",
+			call: tools.ToolCall{Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"  ","command":"rm -rf /tmp/x"}`}},
+			want: "shell:cmd=rm*",
 		},
 		{
 			name: "other tools use the tool name",

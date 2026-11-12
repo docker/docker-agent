@@ -116,7 +116,7 @@ func New(currentVersion string) *Updater {
 		DownloadBaseURL: defaultDownloadBaseURL,
 		GOOS:            runtime.GOOS,
 		GOARCH:          runtime.GOARCH,
-		HTTPClient: &http.Client{
+		HTTPClient: &http.Client{ //rubocop:disable Lint/HTTPClientTransport // selfupdate GitHub client; redirect policy set; OTel not needed for binary download
 			Timeout: downloadTimeout,
 			// GitHub serves release assets through a redirect to its object
 			// storage: follow only HTTPS hops (no downgrade) and bound the chain.

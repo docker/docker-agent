@@ -3,13 +3,14 @@ package teamloader
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,12 +22,16 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/js"
-	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	providerdefaults "github.com/docker/docker-agent/pkg/model/provider/providers"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
+	"github.com/docker/docker-agent/pkg/tools/codemode"
+	"github.com/docker/docker-agent/pkg/tools/toon"
 )
 
 // skipExamples contains example files that require cloud-specific configurations
@@ -40,6 +45,10 @@ func withTestProviderRegistry(opts ...Opt) []Opt {
 	return append([]Opt{
 		WithProviderRegistry(providerdefaults.NewDefaultRegistry()),
 		WithToolsetRegistry(testToolsetRegistry()),
+		WithExpander(js.NewJsExpander),
+		WithCodeMode(codemode.Wrap),
+		WithToon(toon.Wrap),
+		WithDeferredTools(deferred.New),
 	}, opts...)
 }
 
@@ -85,7 +94,8 @@ func TestGetToolsForAgent_ContinuesOnCreateToolError(t *testing.T) {
 
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
-	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, &toolsetRegistry{}, "test-config", expander)
+	got, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "test-config", &loadOptions{toolsetRegistry: &toolsetRegistry{}}, expander)
+	require.NoError(t, err)
 
 	require.Empty(t, got)
 	require.NotEmpty(t, warnings)
@@ -100,6 +110,18 @@ func TestLoadExamples(t *testing.T) {
 	for env := range gatherExampleEnvVars(t, examples) {
 		t.Setenv(env, "dummy")
 	}
+
+	// Examples validate loading, not tool installation.
+	t.Setenv("DOCKER_AGENT_AUTO_INSTALL", "false")
+
+	// Load real DMR clients without local discovery or model downloads.
+	dmrServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/engines/_configure", r.URL.Path)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(dmrServer.Close)
+	t.Setenv("MODEL_RUNNER_HOST", dmrServer.URL)
 
 	for _, agentFilename := range examples {
 		t.Run(agentFilename, func(t *testing.T) {
@@ -126,9 +148,6 @@ func TestLoadExamples(t *testing.T) {
 			runConfig.WorkingDir = t.TempDir()
 
 			teams, err := Load(catalogContext(t), agentSource, runConfig, withTestProviderRegistry()...)
-			if errors.Is(err, dmr.ErrNotInstalled) {
-				t.Skipf("Skipping %s: Docker Model Runner not installed", agentFilename)
-			}
 			require.NoError(t, err)
 			assert.NotEmpty(t, teams)
 		})
@@ -146,13 +165,16 @@ func gatherExampleEnvVars(t *testing.T, examples []string) map[string]bool {
 	ctx := catalogContext(t)
 	envs := make(map[string]bool)
 	for _, agentFilename := range examples {
-		agentSource, err := config.Resolve(agentFilename, nil)
+		agentSource, err := sources.Resolve(agentFilename, nil)
 		require.NoError(t, err)
 
 		cfg, err := config.Load(ctx, agentSource)
 		require.NoError(t, err)
 
 		for _, env := range config.GatherEnvVarsForModels(ctx, cfg, environment.NewOsEnvProvider()) {
+			envs[env] = true
+		}
+		for _, env := range config.RequiredEvaluatorEnvVars(cfg) {
 			envs[env] = true
 		}
 		toolEnvs, _ := config.GatherEnvVarsForTools(ctx, cfg)
@@ -168,7 +190,7 @@ func TestLoadDefaultAgent(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	agentSource, err := config.Resolve("default", nil)
+	agentSource, err := sources.Resolve("default", nil)
 	require.NoError(t, err)
 
 	runConfig := &config.RuntimeConfig{
@@ -209,10 +231,10 @@ func TestOverrideModel(t *testing.T) {
 		t.Run(test.expected, func(t *testing.T) {
 			t.Parallel()
 
-			agentSource, err := config.Resolve("testdata/basic.yaml", nil)
+			agentSource, err := sources.Resolve("testdata/basic.yaml", nil)
 			require.NoError(t, err)
 
-			team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry(WithModelOverrides(test.overrides))...)
+			team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry(WithConfigVersions(legacy.Register), WithModelOverrides(test.overrides))...)
 			if test.expectedErr != "" {
 				require.Contains(t, err.Error(), test.expectedErr)
 			} else {
@@ -695,10 +717,10 @@ func TestLoadHarnessAgentWithoutModel(t *testing.T) {
 func TestToolsetInstructions(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "dummy")
 
-	agentSource, err := config.Resolve("testdata/tool-instruction.yaml", nil)
+	agentSource, err := sources.Resolve("testdata/tool-instruction.yaml", nil)
 	require.NoError(t, err)
 
-	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry()...)
+	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry(WithConfigVersions(legacy.Register))...)
 	require.NoError(t, err)
 
 	agent, err := team.Agent("root")
@@ -719,7 +741,7 @@ func TestInstructionExpansion(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "dummy")
 	t.Setenv("USER", "alice")
 
-	agentSource, err := config.Resolve("testdata/instruction-expansion.yaml", nil)
+	agentSource, err := sources.Resolve("testdata/instruction-expansion.yaml", nil)
 	require.NoError(t, err)
 
 	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry()...)
@@ -752,7 +774,7 @@ func TestAutoModelFallbackError(t *testing.T) {
 	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MODEL_RUNNER_HOST", "")
 
-	agentSource, err := config.Resolve("testdata/auto-model.yaml", nil)
+	agentSource, err := sources.Resolve("testdata/auto-model.yaml", nil)
 	require.NoError(t, err)
 
 	// Use noEnvProvider to ensure no API keys are available,
@@ -823,10 +845,10 @@ func TestWithPromptFiles(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			agentSource, err := config.Resolve("testdata/basic.yaml", nil)
+			agentSource, err := sources.Resolve("testdata/basic.yaml", nil)
 			require.NoError(t, err)
 
-			var opts []Opt
+			opts := []Opt{WithConfigVersions(legacy.Register)}
 			if len(tt.cliPromptFiles) > 0 {
 				opts = append(opts, WithPromptFiles(tt.cliPromptFiles))
 			}
@@ -858,12 +880,12 @@ agents:
 `
 	require.NoError(t, os.WriteFile(agentFile, []byte(agentYAML), 0o644))
 
-	agentSource, err := config.Resolve(agentFile, nil)
+	agentSource, err := sources.Resolve(agentFile, nil)
 	require.NoError(t, err)
 
 	// Load with CLI prompt files - should merge with config
 	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{},
-		withTestProviderRegistry(WithPromptFiles([]string{"cli-file.md"}))...)
+		withTestProviderRegistry(WithConfigVersions(legacy.Register), WithPromptFiles([]string{"cli-file.md"}))...)
 	require.NoError(t, err)
 
 	rootAgent, err := team.Agent("root")
@@ -891,12 +913,12 @@ agents:
 `
 	require.NoError(t, os.WriteFile(agentFile, []byte(agentYAML), 0o644))
 
-	agentSource, err := config.Resolve(agentFile, nil)
+	agentSource, err := sources.Resolve(agentFile, nil)
 	require.NoError(t, err)
 
 	// CLI specifies a file that's already in config - should deduplicate
 	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{},
-		withTestProviderRegistry(WithPromptFiles([]string{"AGENTS.md", "extra.md"}))...)
+		withTestProviderRegistry(WithConfigVersions(legacy.Register), WithPromptFiles([]string{"AGENTS.md", "extra.md"}))...)
 	require.NoError(t, err)
 
 	rootAgent, err := team.Agent("root")
@@ -916,13 +938,13 @@ func TestGetToolsForAgent_MultipleLSPToolsetsAreCombined(t *testing.T) {
 			{
 				Type:      "lsp",
 				Command:   "gopls",
-				Version:   "golang/tools@v0.21.0",
+				Version:   "false", // no auto-install: these tests never start gopls
 				FileTypes: []string{".go"},
 			},
 			{
 				Type:      "lsp",
 				Command:   "gopls",
-				Version:   "golang/tools@v0.21.0",
+				Version:   "false", // no auto-install: these tests never start gopls
 				FileTypes: []string{".mod"},
 			},
 		},
@@ -934,7 +956,8 @@ func TestGetToolsForAgent_MultipleLSPToolsetsAreCombined(t *testing.T) {
 
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
-	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, testToolsetRegistry(), "test-config", expander)
+	got, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "test-config", &loadOptions{toolsetRegistry: testToolsetRegistry()}, expander)
+	require.NoError(t, err)
 	require.Empty(t, warnings)
 
 	// Should have exactly one toolset (the multiplexer)
@@ -964,7 +987,7 @@ func TestGetToolsForAgent_SingleLSPToolsetNotWrapped(t *testing.T) {
 			{
 				Type:      "lsp",
 				Command:   "gopls",
-				Version:   "golang/tools@v0.21.0",
+				Version:   "false", // no auto-install: these tests never start gopls
 				FileTypes: []string{".go"},
 			},
 		},
@@ -976,7 +999,8 @@ func TestGetToolsForAgent_SingleLSPToolsetNotWrapped(t *testing.T) {
 
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
-	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, testToolsetRegistry(), "test-config", expander)
+	got, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "test-config", &loadOptions{toolsetRegistry: testToolsetRegistry()}, expander)
+	require.NoError(t, err)
 	require.Empty(t, warnings)
 
 	// Should have exactly one toolset that provides LSP tools.
@@ -1079,6 +1103,95 @@ func TestLoadWithConfig_WithWorkingDirDoesNotLeak(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, callerDir, runConfig.WorkingDir)
+}
+
+func TestLoadWithConfigModelOverridePolicyMatrix(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	data := []byte(`models:
+  serial:
+    provider: openai
+    model: original-serial
+    parallel_tool_calls: false
+  parallel:
+    provider: openai
+    model: original-parallel
+    parallel_tool_calls: true
+  unset:
+    provider: openai
+    model: original-unset
+  named_nil:
+    provider: openai
+    model: named
+agents:
+  serial:
+    model: serial
+    instruction: test
+  parallel:
+    model: parallel
+    instruction: test
+  unset:
+    model: unset
+    instruction: test
+  named:
+    model: serial
+    instruction: test
+`)
+
+	result, err := LoadWithConfig(
+		t.Context(),
+		config.NewBytesSource("overrides.yaml", data),
+		&config.RuntimeConfig{},
+		withTestProviderRegistry(WithModelOverrides([]string{
+			"serial=openai/replacement",
+			"parallel=openai/replacement",
+			"unset=openai/replacement",
+			"named=named_nil",
+		}))...,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]string{
+		"serial": "openai/replacement", "parallel": "openai/replacement",
+		"unset": "openai/replacement", "named": "named_nil",
+	}, result.AgentDefaultModels)
+	assert.ElementsMatch(t, []string{"serial", "parallel", "unset", "named_nil", "openai/replacement"}, slices.Collect(maps.Keys(result.Models)))
+	for name := range result.Models {
+		assert.NotContains(t, name, "__cli_model_")
+	}
+
+	wantPolicy := map[string]*bool{
+		"serial": new(false), "parallel": new(true), "unset": nil, "named": nil,
+	}
+	wantRef := map[string]string{
+		"serial": "openai/replacement", "parallel": "openai/replacement",
+		"unset": "openai/replacement", "named": "named_nil",
+	}
+	for agentName, modelRef := range wantRef {
+		teamCfg, ok := result.Team.AgentConfig(agentName)
+		require.True(t, ok)
+		assert.Equal(t, modelRef, teamCfg.Model)
+
+		a, err := result.Team.Agent(agentName)
+		require.NoError(t, err)
+		providers := a.ConfiguredModels()
+		require.Len(t, providers, 1)
+		assert.Equal(t, modelRef, providers[0].BaseConfig().ModelConfig.Name)
+		assert.Equal(t, map[string]string{
+			"serial": "openai/replacement", "parallel": "openai/replacement",
+			"unset": "openai/replacement", "named": "openai/named",
+		}[agentName], providers[0].ID().String())
+
+		got := providers[0].BaseConfig().ModelConfig.ParallelToolCalls
+		want := wantPolicy[agentName]
+		if want == nil {
+			assert.Nil(t, got)
+		} else if assert.NotNil(t, got) {
+			assert.Equal(t, *want, *got)
+		}
+	}
+	assert.Nil(t, result.Models["openai/replacement"].ParallelToolCalls)
+	assert.Nil(t, result.Models["named_nil"].ParallelToolCalls)
 }
 
 // TestLoadRetainsAgentConfig verifies the loader retains the raw resolved
@@ -1187,6 +1300,76 @@ func TestLoadRejectsUncompilableToolModeSchema(t *testing.T) {
 
 	_, err := Load(t.Context(), config.NewBytesSource("bad-schema.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
 	require.ErrorContains(t, err, "agent root: structured_output")
+}
+
+func TestLoadPreservesModelPolicyDefaults(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	tests := []struct {
+		name string
+		yaml string
+		want *bool
+	}{
+		{
+			name: "omitted",
+			yaml: `models:
+  configured:
+    provider: openai
+    model: gpt-4o
+agents:
+  root:
+    model: configured
+    instruction: test
+`,
+			want: nil,
+		},
+		{
+			name: "explicit true",
+			yaml: `models:
+  configured:
+    provider: openai
+    model: gpt-4o
+    parallel_tool_calls: true
+agents:
+  root:
+    model: configured
+    instruction: test
+`,
+			want: new(true),
+		},
+		{
+			name: "explicit false",
+			yaml: `models:
+  configured:
+    provider: openai
+    model: gpt-4o
+    parallel_tool_calls: false
+agents:
+  root:
+    model: configured
+    instruction: test
+`,
+			want: new(false),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loaded, err := Load(t.Context(), config.NewBytesSource("model.yaml", []byte(tt.yaml)),
+				&config.RuntimeConfig{}, withTestProviderRegistry()...)
+			require.NoError(t, err)
+			root, err := loaded.Agent("root")
+			require.NoError(t, err)
+			models := root.ConfiguredModels()
+			require.Len(t, models, 1)
+			got := models[0].BaseConfig().ModelConfig.ParallelToolCalls
+			if tt.want == nil {
+				assert.Nil(t, got)
+			} else if assert.NotNil(t, got) {
+				assert.Equal(t, *tt.want, *got)
+			}
+		})
+	}
 }
 
 // TestLoadPropagatesSafetyDefaults verifies the author-declared safety
@@ -1656,4 +1839,95 @@ func TestLoadWithConfig_WithWorkingDirIsConcurrencySafe(t *testing.T) {
 	}
 	assert.Equal(t, callerDir, runConfig.WorkingDir,
 		"the shared RuntimeConfig must never be mutated")
+}
+
+func TestLoadWithConfig_SharedRuntimeConfigIsConcurrencySafe(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	data := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+	runConfig := &config.RuntimeConfig{}
+
+	const loads = 8
+	var wg sync.WaitGroup
+	errs := make([]error, loads)
+	for i := range loads {
+		wg.Go(func() {
+			_, errs[i] = LoadWithConfig(
+				t.Context(),
+				config.NewBytesSource("t.yaml", data),
+				runConfig,
+				withTestProviderRegistry()...,
+			)
+		})
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoErrorf(t, err, "load %d", i)
+	}
+	assert.Nil(t, runConfig.Models)
+	assert.Nil(t, runConfig.Providers)
+	assert.Nil(t, runConfig.ProviderRegistry)
+}
+
+// encConfigSource is a config.Source that also implements
+// config.EncryptedConfigSource, standing in for a trusted Docker URL that
+// returned the X-Cagent-Encrypted-Config response header.
+type encConfigSource struct {
+	name string
+	data []byte
+	enc  string
+}
+
+func (s encConfigSource) Name() string                         { return s.name }
+func (s encConfigSource) ParentDir() string                    { return "" }
+func (s encConfigSource) Read(context.Context) ([]byte, error) { return s.data, nil }
+func (s encConfigSource) EncryptedConfig() string              { return s.enc }
+
+// TestLoadCapturesEncryptedConfigFromSource verifies the loader adopts the
+// encrypted config discovered by the source (e.g. a Docker URL response header)
+// into the load result, so it can be forwarded to the Docker models gateway.
+func TestLoadCapturesEncryptedConfigFromSource(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	data := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+	src := encConfigSource{name: "agent.yaml", data: data, enc: "ENCRYPTED-FROM-HEADER"}
+
+	rc := &config.RuntimeConfig{}
+	result, err := LoadWithConfig(t.Context(), src, rc, withTestProviderRegistry()...)
+	require.NoError(t, err)
+	assert.Equal(t, "ENCRYPTED-FROM-HEADER", result.EncryptedConfig)
+	assert.Empty(t, rc.EncryptedConfig)
+	assert.Nil(t, rc.Models)
+	assert.Nil(t, rc.Providers)
+	assert.Nil(t, rc.ProviderRegistry)
+}
+
+// TestLoadExplicitEncryptedConfigWins verifies an explicit
+// --encrypted-config / env value takes precedence over a value the source
+// discovered.
+func TestLoadExplicitEncryptedConfigWins(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	data := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+	src := encConfigSource{name: "agent.yaml", data: data, enc: "FROM-HEADER"}
+
+	rc := &config.RuntimeConfig{}
+	rc.EncryptedConfig = "FROM-FLAG"
+
+	result, err := LoadWithConfig(t.Context(), src, rc, withTestProviderRegistry()...)
+	require.NoError(t, err)
+	assert.Equal(t, "FROM-FLAG", result.EncryptedConfig)
 }

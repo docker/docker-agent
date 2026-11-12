@@ -120,27 +120,22 @@ func TestCooldownManager_ConcurrentSafety(t *testing.T) {
 	m := newCooldownManager(time.Now)
 
 	var wg sync.WaitGroup
-	for i := range 8 {
-		wg.Add(3)
-		go func(id int) {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			for j := range 100 {
 				m.Set("agent", j%5, time.Hour)
-				_ = id
 			}
-		}(i)
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			for range 100 {
 				_ = m.Get("agent")
 			}
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			for range 100 {
 				m.Clear("agent")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

@@ -39,7 +39,7 @@ func TestLoginKit_DockerGateway(t *testing.T) {
 	paths.SetCacheDir(cacheDir)
 	t.Cleanup(func() { paths.SetCacheDir("") })
 
-	dir, err := sandbox.LoginKit("https://api.docker.com/v1/gateway?x=1")
+	dir, err := sandbox.LoginKit("https://api.docker.com/v1/gateway?x=1", false)
 	require.NoError(t, err)
 	require.NotEmpty(t, dir)
 	assert.Equal(t, filepath.Join(cacheDir, "sandbox-login-kit", "api.docker.com"), dir)
@@ -68,7 +68,7 @@ func TestLoginKit_HostIsLowercasedAndPortStripped(t *testing.T) {
 	paths.SetCacheDir(cacheDir)
 	t.Cleanup(func() { paths.SetCacheDir("") })
 
-	dir, err := sandbox.LoginKit("https://Gateway.Docker.com:443/proxy")
+	dir, err := sandbox.LoginKit("https://Gateway.Docker.com:443/proxy", false)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(cacheDir, "sandbox-login-kit", "gateway.docker.com"), dir)
 }
@@ -95,8 +95,35 @@ func TestLoginKit_RejectedGateways(t *testing.T) {
 		"https://*x.docker.com",
 		"https://-x.docker.com",
 	} {
-		dir, err := sandbox.LoginKit(gateway)
+		dir, err := sandbox.LoginKit(gateway, false)
 		require.NoError(t, err, "gateway %q", gateway)
 		assert.Empty(t, dir, "gateway %q must not produce a login kit", gateway)
 	}
+}
+
+func TestLoginKitV3(t *testing.T) {
+	paths.SetCacheDir(t.TempDir())
+	t.Cleanup(func() { paths.SetCacheDir("") })
+	dir, err := sandbox.LoginKit("https://api.docker.com", true)
+	require.NoError(t, err)
+	data, err := os.ReadFile(filepath.Join(dir, "gateway.yaml"))
+	require.NoError(t, err)
+	var spec struct {
+		Version      string `yaml:"schemaVersion"`
+		Kind         string `yaml:"kind"`
+		Capabilities []struct {
+			Type   string         `yaml:"type"`
+			Config map[string]any `yaml:"config"`
+		} `yaml:"capabilities"`
+	}
+	require.NoError(t, yaml.Unmarshal(data, &spec))
+	assert.Equal(t, "3", spec.Version)
+	assert.Equal(t, "mixin", spec.Kind)
+	require.Len(t, spec.Capabilities, 2)
+	assert.Equal(t, "com.docker.sandbox/network-policy@1", spec.Capabilities[0].Type)
+	assert.Equal(t, "com.docker.sandbox/credential@1", spec.Capabilities[1].Type)
+	assert.Equal(t, "runtime", spec.Capabilities[1].Config["phase"])
+	assert.Equal(t, "sbx-login", spec.Capabilities[1].Config["service"])
+	_, err = os.Stat(filepath.Join(dir, "spec.yaml"))
+	assert.True(t, os.IsNotExist(err), "a legacy descriptor would mask v3 source detection")
 }

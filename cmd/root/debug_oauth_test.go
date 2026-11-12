@@ -37,7 +37,7 @@ func TestFindMCPRemote_MatchesTopLevelMCPByName(t *testing.T) {
 // TestFindMCPRemote_ForwardsCallbackPortAndRedirectURL proves the full
 // RemoteOAuthConfig — including CallbackPort and CallbackRedirectURL —
 // survives findMCPRemote's lookup verbatim, so PerformOAuthLogin's
-// runtime-aligned callback wiring (NewCallbackServerOnPort/
+// runtime-aligned callback wiring (RequestAuthorizationCode/
 // ResolveRedirectURI) sees the exact same per-toolset config the runtime
 // would use for the same remote MCP server.
 func TestFindMCPRemote_ForwardsCallbackPortAndRedirectURL(t *testing.T) {

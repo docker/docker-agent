@@ -18,9 +18,9 @@ import (
 )
 
 // New creates a new SQLite session store backed by a file at path. If
-// migrations fail (other than a version mismatch or a filesystem open
-// failure) the existing database is moved aside to <path>.bak and a fresh
-// one is created.
+// migrations fail (other than a version mismatch, a filesystem open failure,
+// or a transient error) the existing database is moved aside to <path>.bak
+// (or <path>.bak.<unix-ts> if one exists) and a fresh one is created.
 func New(ctx context.Context, path string) (session.Store, error) {
 	store, err := open(ctx, path)
 	if err != nil {

@@ -1,21 +1,25 @@
 package root
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tui"
+	"github.com/docker/docker-agent/pkg/worktree"
 )
 
 // workdirRecordingBackend records the working directory the flags carry at the
@@ -25,6 +29,7 @@ import (
 type workdirRecordingBackend struct {
 	flags          *runExecFlags
 	workingDirSeen string
+	includedSeen   string
 }
 
 func (b *workdirRecordingBackend) LoadTeamRequest() runtime.LoadTeamRequest {
@@ -33,6 +38,8 @@ func (b *workdirRecordingBackend) LoadTeamRequest() runtime.LoadTeamRequest {
 
 func (b *workdirRecordingBackend) LoadTeam(context.Context, runtime.LoadTeamRequest) (*teamloader.LoadResult, error) {
 	b.workingDirSeen = b.flags.runConfig.WorkingDir
+	included, _ := os.ReadFile(filepath.Join(b.workingDirSeen, "local.env"))
+	b.includedSeen = string(included)
 	return nil, nil
 }
 
@@ -57,6 +64,13 @@ func (b *workdirRecordingBackend) ResumeWorkingDir(context.Context) (string, boo
 // up rooted in the user's checkout instead of the worktree.
 func TestLoadTeamInWorktreeSetsWorkingDirBeforeLoad(t *testing.T) {
 	repo := initTestRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644))
+	for _, args := range [][]string{{"add", ".gitignore"}, {"commit", "-m", "ignore env files"}} {
+		out, err := exec.CommandContext(t.Context(), "git", append([]string{"-C", repo}, args...)...).CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".worktreeinclude"), []byte("*.env\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "local.env"), []byte("copied"), 0o600))
 
 	paths.SetDataDir(t.TempDir())
 	t.Cleanup(func() { paths.SetDataDir("") })
@@ -77,6 +91,7 @@ func TestLoadTeamInWorktreeSetsWorkingDirBeforeLoad(t *testing.T) {
 	// The crux: LoadTeam saw the worktree directory, so toolsets are rooted
 	// there.
 	assert.Equal(t, wt.Dir, b.workingDirSeen)
+	assert.Equal(t, "copied", b.includedSeen)
 	assert.Equal(t, wt.Dir, f.runConfig.WorkingDir)
 }
 
@@ -104,6 +119,48 @@ func TestLoadTeamInWorktreeBranchesFromBaseDir(t *testing.T) {
 
 	baseHead := gitHead(t, baseRepo)
 	assert.Equal(t, baseHead, gitHead(t, wt.Dir))
+}
+
+func TestLoadTeamInWorktreeDestinationIgnore(t *testing.T) {
+	for _, kind := range []string{"base", "pr"} {
+		t.Run(kind, func(t *testing.T) {
+			if kind == "pr" && goruntime.GOOS == "windows" {
+				t.Skip("shell script")
+			}
+			repo := initTestRepo(t)
+			runGit := func(args ...string) string {
+				t.Helper()
+				out, err := exec.CommandContext(t.Context(), "git", append([]string{"-C", repo}, args...)...).CombinedOutput()
+				require.NoError(t, err, string(out))
+				return string(out)
+			}
+			runGit("branch", "destination")
+			require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(repo, ".worktreeinclude"), []byte("*.env\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(repo, "local.env"), []byte("secret"), 0o600))
+			paths.SetDataDir(t.TempDir())
+			t.Cleanup(func() { paths.SetDataDir("") })
+			f := &runExecFlags{worktree: true, worktreeBase: "destination"}
+			if kind == "pr" {
+				bin := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\ngit checkout destination\n"), 0o755))
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				f = &runExecFlags{worktreePR: "123"}
+			}
+			b := &workdirRecordingBackend{flags: f}
+			_, wt, _, err := f.loadTeamInWorktree(t.Context(), b, repo)
+			require.NoError(t, err)
+			require.NotNil(t, wt)
+			t.Cleanup(func() { _ = wt.Remove(context.WithoutCancel(t.Context())) })
+			assert.Empty(t, b.includedSeen)
+			assert.NoFileExists(t, filepath.Join(wt.Dir, "local.env"))
+			require.Len(t, wt.Warnings, 1)
+			assert.Contains(t, wt.Warnings[0], "not ignored in destination")
+			out, err := exec.CommandContext(t.Context(), "git", "-C", wt.Dir, "status", "--porcelain").CombinedOutput()
+			require.NoError(t, err, string(out))
+			assert.Empty(t, string(out))
+		})
+	}
 }
 
 // gitHead returns the commit HEAD points at in dir.
@@ -141,4 +198,10 @@ func initTestRepo(t *testing.T) string {
 		require.NoError(t, err, string(out))
 	}
 	return dir
+}
+
+func TestPrintWorktreeStatusWarnings(t *testing.T) {
+	var out bytes.Buffer
+	printWorktreeStatus(cli.NewPrinter(&out), &worktree.Worktree{Dir: "checkout", Branch: "branch", Warnings: []string{"one", "two"}})
+	assert.Equal(t, "Using git worktree: checkout (branch branch)\nWarning: one\nWarning: two\n", out.String())
 }

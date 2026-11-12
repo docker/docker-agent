@@ -2,11 +2,15 @@ package skills
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/paths"
 )
 
@@ -53,9 +57,19 @@ func (s Skill) IsFork() bool {
 	return s.Context == "fork"
 }
 
+// ExpandsCommands reports whether !`command` patterns in the skill body may be
+// executed. Local files and the agent config are part of what the user chose to
+// run, and the config already dictates instructions, toolsets and permissions,
+// so a command embedded in it grants nothing it could not already do. A remote
+// body is data fetched from a third-party server at runtime and never earns
+// that authority.
+func (s Skill) ExpandsCommands() bool {
+	return s.Local || s.IsInline()
+}
+
 // Load discovers and loads skills from the given sources.
 // Each source is either "local" (for filesystem-based skills) or an HTTP/HTTPS
-// URL (for remote skills per the well-known skills discovery spec).
+// URL (a public GitHub repository or a well-known skills discovery endpoint).
 //
 // Local skills are loaded from (in order, later overrides earlier):
 //
@@ -73,18 +87,50 @@ func (s Skill) IsFork() bool {
 //
 // The returned slice is sorted by skill name for deterministic ordering.
 func Load(ctx context.Context, sources []string) []Skill {
+	loaded, warnings := LoadWithWarnings(ctx, sources, environment.NewOsEnvProvider())
+	for _, warning := range warnings {
+		slog.WarnContext(ctx, warning)
+	}
+	return loaded
+}
+
+// LoadWithWarnings loads skills and reports GitHub source failures to the caller.
+// The environment provider supplies the optional GITHUB_TOKEN credential.
+func LoadWithWarnings(ctx context.Context, sources []string, env environment.Provider) ([]Skill, []string) {
+	cwd, _ := os.Getwd()
+	return LoadWithWarningsFromDir(ctx, sources, env, cwd)
+}
+
+// LoadWithWarningsFromDir discovers project-local skills in dir rather than the process cwd.
+func LoadWithWarningsFromDir(ctx context.Context, sources []string, env environment.Provider, dir string) ([]Skill, []string) {
 	skillMap := make(map[string]Skill)
+	var warnings []string
 
 	var remoteCache *diskCache
 	for _, source := range sources {
 		switch {
 		case source == "local":
-			loadLocalSkillsInto(skillMap)
+			loadLocalSkillsFromDirInto(skillMap, dir)
 		case isHTTPSource(source):
 			if remoteCache == nil {
 				remoteCache = newDiskCache(filepath.Join(paths.GetCacheDir(), "skills"))
 			}
-			for _, skill := range loadRemoteSkills(ctx, source, remoteCache) {
+			github, recognized, err := parseGitHubSource(source)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("GitHub skill source %s: %v", source, err))
+				continue
+			}
+			var loaded []Skill
+			if recognized {
+				loaded, err = loadGitHubSkills(ctx, github, remoteCache, env)
+				if err != nil {
+					warnings = append(warnings, fmt.Sprintf("GitHub skill source %s: %v", source, err))
+					continue
+				}
+			} else {
+				loaded = loadRemoteSkills(ctx, source, remoteCache)
+			}
+			for _, skill := range loaded {
 				skillMap[source+"/"+skill.Name] = skill
 			}
 		}
@@ -98,7 +144,7 @@ func Load(ctx context.Context, sources []string) []Skill {
 		// deterministic ordering even when a local and a remote source
 		// expose a skill with the same name.
 		return strings.Compare(a.FilePath, b.FilePath)
-	})
+	}), warnings
 }
 
 // isHTTPSource reports whether s is an HTTP(S) URL source.

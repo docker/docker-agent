@@ -117,7 +117,7 @@ func newClient(ctx context.Context, logger *slog.Logger, enabled, debugMode bool
 	if len(customHTTPClient) > 0 && customHTTPClient[0] != nil {
 		httpClient = customHTTPClient[0]
 	} else {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{Timeout: 30 * time.Second} //rubocop:disable Lint/HTTPClientTransport // telemetry client sends to a controlled endpoint; OTel transport would create trace loops
 	}
 
 	client := &Client{

@@ -12,7 +12,7 @@ import (
 // This guards against the common mistake of bumping the directory name
 // without bumping the constant (or vice versa) when freezing the
 // work-in-progress config and creating a new "latest". A mismatch would
-// silently break the parser dispatch in pkg/config/versions.go, which
+// silently break the parser dispatch in pkg/config/legacy/register.go, which
 // registers parsers keyed by `Version`.
 //
 // Files under pkg/config/latest/ are intentionally exempt: their `Version`

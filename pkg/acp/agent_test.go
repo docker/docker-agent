@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	acpsdk "github.com/coder/acp-go-sdk"
@@ -13,11 +14,15 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -50,7 +55,11 @@ func (m *mockProvider) CreateChatCompletionStream(context.Context, []chat.Messag
 	return m.stream, nil
 }
 
-func (m *mockProvider) BaseConfig() base.Config { return base.Config{} }
+func (m *mockProvider) BaseConfig() base.Config {
+	cfg := base.Config{}
+	cfg.RebuildProvider = func(context.Context, *latest.ModelConfig, ...options.Opt) (provider.Provider, error) { return m, nil }
+	return cfg
+}
 
 func (m *mockProvider) MaxTokens() int { return 0 }
 
@@ -60,14 +69,28 @@ func TestBuildUserContent_ResourceLinkFallbackDoesNotExposeAbsoluteURI(t *testin
 	acpAgent := &Agent{sessions: make(map[string]*Session)}
 	uri := "file:///var/folders/40/w2lqxd4564132ydf4v_7s5wh0000gn/T/TemporaryItems/Screenshot%202026-06-15.png"
 
-	content := acpAgent.buildUserContent(t.Context(), "missing-session", []acpsdk.ContentBlock{
+	msg := acpAgent.buildUserMessage(t.Context(), "missing-session", []acpsdk.ContentBlock{
 		acpsdk.ResourceLinkBlock("Screenshot 2026-06-15.png", uri),
 	})
+	content := msg.Message.Content
 
 	assert.Contains(t, content, "Screenshot 2026-06-15.png")
 	assert.Contains(t, content, "content unavailable")
 	assert.NotContains(t, content, uri)
 	assert.NotContains(t, content, "/var/folders")
+}
+
+func TestResourceLinkNameIsSafeAndBounded(t *testing.T) {
+	t.Parallel()
+
+	longName := strings.Repeat("é", 100) + "\nforged"
+	assert.Equal(t, chat.SanitizeDisplayName(longName), resourceLinkName(&acpsdk.ContentBlockResourceLink{Name: longName}))
+
+	got := resourceLinkName(&acpsdk.ContentBlockResourceLink{Uri: "file:///tmp/unsafe%0Aname.png"})
+	assert.Equal(t, "unsafe_name.png", got)
+	assert.LessOrEqual(t, len(got), chat.MaxSanitizedFieldBytes)
+
+	assert.Equal(t, "resource", resourceLinkName(&acpsdk.ContentBlockResourceLink{Uri: "https://example.com/private.png"}))
 }
 
 func TestBuildUserMessage_ImageContent(t *testing.T) {
@@ -76,7 +99,7 @@ func TestBuildUserMessage_ImageContent(t *testing.T) {
 	acpAgent := &Agent{sessions: make(map[string]*Session)}
 	msg := acpAgent.buildUserMessage(t.Context(), "session-id", []acpsdk.ContentBlock{
 		acpsdk.TextBlock("look at this"),
-		acpsdk.ImageBlock("AAAA", "image/png"),
+		acpsdk.ImageBlock(testPNGBase64(t, 1), "image/png"),
 	})
 
 	require.NotNil(t, msg)
@@ -84,9 +107,9 @@ func TestBuildUserMessage_ImageContent(t *testing.T) {
 	require.Len(t, msg.Message.MultiContent, 2)
 	assert.Equal(t, chat.MessagePartTypeText, msg.Message.MultiContent[0].Type)
 	assert.Equal(t, "look at this", msg.Message.MultiContent[0].Text)
-	assert.Equal(t, chat.MessagePartTypeImageURL, msg.Message.MultiContent[1].Type)
-	require.NotNil(t, msg.Message.MultiContent[1].ImageURL)
-	assert.Equal(t, "data:image/png;base64,AAAA", msg.Message.MultiContent[1].ImageURL.URL)
+	assert.Equal(t, chat.MessagePartTypeDocument, msg.Message.MultiContent[1].Type)
+	require.NotNil(t, msg.Message.MultiContent[1].Document)
+	assert.Equal(t, "image/png", msg.Message.MultiContent[1].Document.MimeType)
 }
 
 func TestResolveSessionPathUsesSessionRoots(t *testing.T) {
@@ -164,15 +187,12 @@ func TestACPSessionPersistence(t *testing.T) {
 	root := agent.New("root", "You are a test agent", agent.WithModel(prov))
 	tm := team.New(team.WithAgents(root))
 
-	// Create the ACP agent with the session store
-	// Note: we set team directly to avoid Initialize requiring full config loading
-	acpAgent := &Agent{
-		agentSource:  nil, // Not needed since team is pre-set
-		runConfig:    &config.RuntimeConfig{},
-		sessionStore: sessStore,
-		sessions:     make(map[string]*Session),
-		team:         tm,
+	acpAgent := NewAgent(nil, &config.RuntimeConfig{}, sessStore)
+	acpAgent.team = team.New()
+	acpAgent.loadTeam = func(context.Context, string) (*teamloader.LoadResult, error) {
+		return &teamloader.LoadResult{Team: tm}, nil
 	}
+	defer func() { require.NoError(t, acpAgent.Stop(ctx)) }()
 
 	// Create a new session via ACP with a real temp directory
 	workingDir := t.TempDir()

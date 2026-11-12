@@ -56,7 +56,7 @@ func TestCleanExtras_PreservesOrder(t *testing.T) {
 
 func mustAbs(t *testing.T, p string) string {
 	t.Helper()
-	abs, err := filepath.Abs(p)
+	abs, err := CanonicalPath(p)
 	require.NoError(t, err)
 	return filepath.Clean(abs)
 }

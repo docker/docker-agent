@@ -8,7 +8,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -20,10 +22,14 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelerrors"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -96,6 +102,31 @@ func (b *blockingStartToolSet) Start(context.Context) error {
 }
 func (b *blockingStartToolSet) Stop(context.Context) error                  { return nil }
 func (b *blockingStartToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+// inFlightStartToolSet is a blockingStartToolSet variant that signals when a
+// Start attempt is in flight (entered closes on the first call) and counts
+// underlying Start calls, so tests can wedge an attempt before exercising
+// the code under test.
+type inFlightStartToolSet struct {
+	entered   chan struct{}
+	release   <-chan struct{}
+	enterOnce sync.Once
+	starts    atomic.Int32
+}
+
+var (
+	_ tools.ToolSet   = (*inFlightStartToolSet)(nil)
+	_ tools.Startable = (*inFlightStartToolSet)(nil)
+)
+
+func (b *inFlightStartToolSet) Start(context.Context) error {
+	b.starts.Add(1)
+	b.enterOnce.Do(func() { close(b.entered) })
+	<-b.release
+	return nil
+}
+func (b *inFlightStartToolSet) Stop(context.Context) error                  { return nil }
+func (b *inFlightStartToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
 
 type mockStream struct {
 	responses []chat.MessageStreamResponse
@@ -179,6 +210,17 @@ func (b *streamBuilder) AddStopWithUsage(input, output int64) *streamBuilder {
 	return b
 }
 
+func (b *streamBuilder) AddLengthWithUsage(input, output int64) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index:        0,
+			FinishReason: chat.FinishReasonLength,
+		}},
+		Usage: &chat.Usage{InputTokens: input, OutputTokens: output},
+	})
+	return b
+}
+
 func (b *streamBuilder) AddToolCallStopWithUsage(input, output int64) *streamBuilder {
 	b.responses = append(b.responses, chat.MessageStreamResponse{
 		Choices: []chat.MessageStreamChoice{{
@@ -203,7 +245,11 @@ func (m *mockProvider) CreateChatCompletionStream(context.Context, []chat.Messag
 	return m.stream, nil
 }
 
-func (m *mockProvider) BaseConfig() base.Config { return base.Config{} }
+func (m *mockProvider) BaseConfig() base.Config {
+	cfg := base.Config{}
+	cfg.RebuildProvider = func(context.Context, *latest.ModelConfig, ...options.Opt) (provider.Provider, error) { return m, nil }
+	return cfg
+}
 
 func (m *mockProvider) MaxTokens() int { return 0 }
 
@@ -269,6 +315,52 @@ func runSession(t *testing.T, sess *session.Session, stream *mockStream) []Event
 	return events
 }
 
+func TestImageGenerationTextOnlyWarning(t *testing.T) {
+	t.Parallel()
+
+	warningFor := func(t *testing.T, prompt string, stream *mockStream) *WarningEvent {
+		t.Helper()
+		events := runSession(t, session.New(session.WithUserMessage(prompt)), stream)
+		for _, event := range events {
+			if warning, ok := event.(*WarningEvent); ok && warning.Message == missingGeneratedImageWarning {
+				return warning
+			}
+		}
+		return nil
+	}
+
+	t.Run("text-only image request", func(t *testing.T) {
+		t.Parallel()
+		sess := session.New(session.WithUserMessage("draw an image of Docker and friends"))
+		events := runSession(t, sess, newStreamBuilder().AddContent("Here's an image of Docker and its friends.").AddStopWithUsage(10, 8).Build())
+
+		var warning *WarningEvent
+		for _, event := range events {
+			if candidate, ok := event.(*WarningEvent); ok && candidate.Message == missingGeneratedImageWarning {
+				warning = candidate
+			}
+		}
+		require.NotNil(t, warning)
+		assert.Equal(t, "root", warning.AgentName)
+		assert.Equal(t, "Here's an image of Docker and its friends.", sess.GetLastAssistantMessageContent())
+	})
+
+	t.Run("ordinary text", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, warningFor(t, "Explain how image generation works", newStreamBuilder().AddContent("Image generation works by...").AddStopWithUsage(6, 8).Build()))
+	})
+
+	t.Run("text and media", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, warningFor(t, "create an image of a whale", newStreamBuilder().AddContent("Done").AddMedia([]byte("image"), "image/png", "whale.png").AddStopWithUsage(6, 8).Build()))
+	})
+
+	t.Run("media only", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, warningFor(t, "create an image of a whale", newStreamBuilder().AddMedia([]byte("image"), "image/png", "whale.png").AddStopWithUsage(6, 8).Build()))
+	})
+}
+
 func hasEventType(t *testing.T, events []Event, target Event) bool {
 	t.Helper()
 
@@ -297,6 +389,19 @@ func assertEventsEqual(t *testing.T, expected, actual []Event) {
 		clearTimestamps(expected[i])
 		clearTimestamps(actual[i])
 
+		// IDs are random; compare chunk content while requiring identified streams.
+		switch e := actual[i].(type) {
+		case *AgentChoiceEvent:
+			require.NotEmpty(t, e.MessageID)
+			eventCopy := *e
+			eventCopy.MessageID = ""
+			actual[i] = &eventCopy
+		case *AgentChoiceReasoningEvent:
+			require.NotEmpty(t, e.MessageID)
+			eventCopy := *e
+			eventCopy.MessageID = ""
+			actual[i] = &eventCopy
+		}
 		assert.Equal(t, expected[i], actual[i], "event content mismatch at index %d", i)
 	}
 }
@@ -348,7 +453,7 @@ func TestSimple(t *testing.T) {
 	require.Equal(t, chat.MessageRoleAssistant, msgAdded.Message.Message.Role)
 
 	expectedEvents := []Event{
-		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model"}}, "root"),
+		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model", ExecutionCapabilities: nativeExecutionProfile()}}, "root"),
 		ToolsetInfo(0, false, "root"),
 		UserMessage("Hi", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
@@ -361,7 +466,7 @@ func TestSimple(t *testing.T) {
 			Model:        "test/mock-model",
 			FinishReason: chat.FinishReasonStop,
 		}}),
-		StreamStopped(sess.ID, "root", "normal"),
+		&StreamStoppedEvent{Type: "stream_stopped", SessionID: sess.ID, AgentContext: newAgentContext("root"), Reason: "normal", FinishReason: chat.FinishReasonStop},
 	}
 
 	assertEventsEqual(t, expectedEvents, events)
@@ -390,7 +495,7 @@ func TestMultipleContentChunks(t *testing.T) {
 	require.NotNil(t, msgAdded.Message)
 
 	expectedEvents := []Event{
-		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model"}}, "root"),
+		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model", ExecutionCapabilities: nativeExecutionProfile()}}, "root"),
 		ToolsetInfo(0, false, "root"),
 		UserMessage("Please greet me", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
@@ -407,7 +512,7 @@ func TestMultipleContentChunks(t *testing.T) {
 			Model:        "test/mock-model",
 			FinishReason: chat.FinishReasonStop,
 		}}),
-		StreamStopped(sess.ID, "root", "normal"),
+		&StreamStoppedEvent{Type: "stream_stopped", SessionID: sess.ID, AgentContext: newAgentContext("root"), Reason: "normal", FinishReason: chat.FinishReasonStop},
 	}
 
 	assertEventsEqual(t, expectedEvents, events)
@@ -434,7 +539,7 @@ func TestWithReasoning(t *testing.T) {
 	require.NotNil(t, msgAdded.Message)
 
 	expectedEvents := []Event{
-		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model"}}, "root"),
+		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model", ExecutionCapabilities: nativeExecutionProfile()}}, "root"),
 		ToolsetInfo(0, false, "root"),
 		UserMessage("Hi", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
@@ -449,7 +554,7 @@ func TestWithReasoning(t *testing.T) {
 			Model:        "test/mock-model",
 			FinishReason: chat.FinishReasonStop,
 		}}),
-		StreamStopped(sess.ID, "root", "normal"),
+		&StreamStoppedEvent{Type: "stream_stopped", SessionID: sess.ID, AgentContext: newAgentContext("root"), Reason: "normal", FinishReason: chat.FinishReasonStop},
 	}
 
 	assertEventsEqual(t, expectedEvents, events)
@@ -477,7 +582,7 @@ func TestMixedContentAndReasoning(t *testing.T) {
 	require.NotNil(t, msgAdded.Message)
 
 	expectedEvents := []Event{
-		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model"}}, "root"),
+		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model", ExecutionCapabilities: nativeExecutionProfile()}}, "root"),
 		ToolsetInfo(0, false, "root"),
 		UserMessage("Hi there", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
@@ -493,7 +598,7 @@ func TestMixedContentAndReasoning(t *testing.T) {
 			Model:        "test/mock-model",
 			FinishReason: chat.FinishReasonStop,
 		}}),
-		StreamStopped(sess.ID, "root", "normal"),
+		&StreamStoppedEvent{Type: "stream_stopped", SessionID: sess.ID, AgentContext: newAgentContext("root"), Reason: "normal", FinishReason: chat.FinishReasonStop},
 	}
 
 	assertEventsEqual(t, expectedEvents, events)
@@ -582,7 +687,7 @@ func TestProcessToolCallsRecallEnqueuesSteeringMessage(t *testing.T) {
 
 	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
 	events := make(chan Event, 16)
-	stopRun, stopMsg := rt.processToolCalls(t.Context(), sess, []tools.ToolCall{{
+	stopRun, stopMsg := rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), []tools.ToolCall{{
 		ID:       "call_1",
 		Type:     "function",
 		Function: tools.FunctionCall{Name: "recall_tool", Arguments: "{}"},
@@ -819,7 +924,11 @@ func (p *queueProvider) CreateChatCompletionStream(context.Context, []chat.Messa
 	return s, nil
 }
 
-func (p *queueProvider) BaseConfig() base.Config { return base.Config{} }
+func (p *queueProvider) BaseConfig() base.Config {
+	cfg := base.Config{}
+	cfg.RebuildProvider = func(context.Context, *latest.ModelConfig, ...options.Opt) (provider.Provider, error) { return p, nil }
+	return cfg
+}
 
 func (p *queueProvider) MaxTokens() int { return 0 }
 
@@ -833,10 +942,23 @@ func (m mockModelStoreWithLimit) GetModel(_ context.Context, _ modelsdev.ID) (*m
 	return &modelsdev.Model{Limit: modelsdev.Limit{Context: m.limit}, Cost: &modelsdev.Cost{}}, nil
 }
 
+func TestJoinPrompts(t *testing.T) {
+	t.Parallel()
+
+	assert.Empty(t, joinPrompts("", ""))
+	assert.Equal(t, "note", joinPrompts("note", ""))
+	assert.Equal(t, "result", joinPrompts("", "result"))
+	assert.Equal(t, "note\n\nresult", joinPrompts("note", "result"))
+	assert.Equal(t, " \t\n", joinPrompts(" \t\n", ""))
+	assert.Equal(t, "\n\t ", joinPrompts("", "\n\t "))
+	assert.Equal(t, " note \n\n\n\tresult\n", joinPrompts(" note \n", "\tresult\n"))
+	assert.Equal(t, "second\n\nfirst\n\nresult", joinPrompts("second", joinPrompts("first", "result")))
+}
+
 func TestCompaction(t *testing.T) {
 	t.Parallel()
 
-	// First stream: assistant issues a tool call and usage exceeds 90% threshold
+	// First stream: plain content whose usage (101) exceeds the 100-token limit
 	mainStream := newStreamBuilder().
 		AddContent("Hello there").
 		AddStopWithUsage(101, 0). // Context limit will be 100
@@ -950,7 +1072,7 @@ func TestSessionWithoutUserMessage(t *testing.T) {
 
 // --- Tool setup failure handling tests ---
 
-func collectEvents(ch chan Event) []Event {
+func collectEvents(ch <-chan Event) []Event {
 	n := len(ch)
 	evs := make([]Event, 0, n)
 	for range n {
@@ -1048,7 +1170,7 @@ func TestNewRuntime_InvalidCurrentAgentError(t *testing.T) {
 
 // TestNewRuntime_ModelStorePrecedence pins the resolution order for the
 // runtime's models.dev store: an explicit WithModelStore wins; otherwise a
-// store carried on the ModelSwitcherConfig is adopted (this is how the team
+// store carried on the modelcatalog.Config is adopted (this is how the team
 // loader shares the catalog it already warmed); otherwise the runtime builds
 // its own lazy store. Sharing the warmed store is what keeps the first /model
 // open from re-paying the multi-MB catalog parse.
@@ -1066,7 +1188,7 @@ func TestNewRuntime_ModelStorePrecedence(t *testing.T) {
 		cfgStore := &mockCatalogStore{}
 		rt, err := NewLocalRuntime(t.Context(), newTeam(),
 			WithModelStore(explicit),
-			WithModelSwitcherConfig(&ModelSwitcherConfig{ModelsStore: cfgStore}),
+			WithModelSwitcherConfig(&modelcatalog.Config{ModelsStore: cfgStore}),
 		)
 		require.NoError(t, err)
 		assert.Same(t, explicit, rt.modelsStore)
@@ -1076,7 +1198,7 @@ func TestNewRuntime_ModelStorePrecedence(t *testing.T) {
 		t.Parallel()
 		cfgStore := &mockCatalogStore{}
 		rt, err := NewLocalRuntime(t.Context(), newTeam(),
-			WithModelSwitcherConfig(&ModelSwitcherConfig{ModelsStore: cfgStore}),
+			WithModelSwitcherConfig(&modelcatalog.Config{ModelsStore: cfgStore}),
 		)
 		require.NoError(t, err)
 		assert.Same(t, cfgStore, rt.modelsStore)
@@ -1085,7 +1207,7 @@ func TestNewRuntime_ModelStorePrecedence(t *testing.T) {
 	t.Run("falls back to lazy store when neither is set", func(t *testing.T) {
 		t.Parallel()
 		rt, err := NewLocalRuntime(t.Context(), newTeam(),
-			WithModelSwitcherConfig(&ModelSwitcherConfig{}),
+			WithModelSwitcherConfig(&modelcatalog.Config{}),
 		)
 		require.NoError(t, err)
 		assert.IsType(t, &lazyModelStore{}, rt.modelsStore)
@@ -1111,7 +1233,7 @@ func TestProcessToolCalls_UnknownTool_ReturnsErrorResponse(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, nil, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, nil, NewChannelSink(events))
 	close(events)
 	for range events {
 	}
@@ -1205,48 +1327,50 @@ func (s *oauthAwareToolSet) SetUnmanagedOAuthRedirectURI(string) {}
 func TestEmitStartupInfo_DoesNotBlockOnInteractiveOAuth(t *testing.T) {
 	t.Parallel()
 
-	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+	synctest.Test(t, func(t *testing.T) {
+		prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
 
-	oauthTS := &oauthAwareToolSet{}
+		oauthTS := &oauthAwareToolSet{}
 
-	root := agent.New("root", "agent",
-		agent.WithModel(prov),
-		agent.WithToolSets(oauthTS),
-	)
-	tm := team.New(team.WithAgents(root))
+		root := agent.New("root", "agent",
+			agent.WithModel(prov),
+			agent.WithToolSets(oauthTS),
+		)
+		tm := team.New(team.WithAgents(root))
 
-	rt, err := NewLocalRuntime(t.Context(), tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
-	require.NoError(t, err)
+		rt, err := NewLocalRuntime(t.Context(), tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+		require.NoError(t, err)
 
-	events := make(chan Event, 20)
+		events := make(chan Event, 20)
 
-	done := make(chan struct{})
-	go func() {
-		rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+			close(done)
+		}()
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("EmitStartupInfo blocked: it must complete promptly even for toolsets that need OAuth")
-	}
-	close(events)
-	for range events {
-	}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("EmitStartupInfo blocked: it must complete promptly even for toolsets that need OAuth")
+		}
+		close(events)
+		for range events {
+		}
 
-	oauthTS.mu.Lock()
-	defer oauthTS.mu.Unlock()
+		oauthTS.mu.Lock()
+		defer oauthTS.mu.Unlock()
 
-	require.True(t, oauthTS.started, "toolset should still be started during EmitStartupInfo (just not interactively)")
+		require.True(t, oauthTS.started, "toolset should still be started during EmitStartupInfo (just not interactively)")
 
-	// During startup, no interactive plumbing should be wired up. OAuth and
-	// elicitation are deferred to the first RunStream call where the user
-	// is actively interacting with the agent.
-	require.Nil(t, oauthTS.startHandlerCaptured,
-		"elicitation handler must NOT be set during startup; OAuth is deferred until the user sends a message")
-	require.False(t, oauthTS.startManagedWasSet,
-		"managed-OAuth flag must NOT be set during startup")
+		// During startup, no interactive plumbing should be wired up. OAuth and
+		// elicitation are deferred to the first RunStream call where the user
+		// is actively interacting with the agent.
+		require.Nil(t, oauthTS.startHandlerCaptured,
+			"elicitation handler must NOT be set during startup; OAuth is deferred until the user sends a message")
+		require.False(t, oauthTS.startManagedWasSet,
+			"managed-OAuth flag must NOT be set during startup")
+	})
 }
 
 // TestEmitStartupInfo_SurfacesToolsetStartFailureAsWarning verifies that
@@ -1306,55 +1430,57 @@ func TestEmitStartupInfo_SurfacesToolsetStartFailureAsWarning(t *testing.T) {
 func TestEmitStartupInfo_SkipsToolsetWhoseListingHangs(t *testing.T) {
 	t.Parallel()
 
-	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+	synctest.Test(t, func(t *testing.T) {
+		prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
 
-	// release is closed on cleanup so the orphaned listing goroutine (whose
-	// Tools() ignores context cancellation) exits instead of leaking.
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
+		// release is closed on cleanup so the orphaned listing goroutine (whose
+		// Tools() ignores context cancellation) exits instead of leaking.
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
 
-	hanging := &blockingToolSet{release: release}
-	fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
+		hanging := &blockingToolSet{release: release}
+		fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
 
-	root := agent.New("root", "agent",
-		agent.WithModel(prov),
-		agent.WithToolSets(hanging, fast),
-	)
-	tm := team.New(team.WithAgents(root))
+		root := agent.New("root", "agent",
+			agent.WithModel(prov),
+			agent.WithToolSets(hanging, fast),
+		)
+		tm := team.New(team.WithAgents(root))
 
-	rt, err := NewLocalRuntime(t.Context(), tm,
-		WithCurrentAgent("root"),
-		WithModelStore(mockModelStore{}),
-		WithToolListTimeout(50*time.Millisecond),
-	)
-	require.NoError(t, err)
+		rt, err := NewLocalRuntime(t.Context(), tm,
+			WithCurrentAgent("root"),
+			WithModelStore(mockModelStore{}),
+			WithToolListTimeout(50*time.Millisecond),
+		)
+		require.NoError(t, err)
 
-	events := make(chan Event, 32)
-	done := make(chan struct{})
-	go func() {
-		rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
-		close(events)
-		close(done)
-	}()
+		events := make(chan Event, 32)
+		done := make(chan struct{})
+		go func() {
+			rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+			close(events)
+			close(done)
+		}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("EmitStartupInfo did not return: a hung toolset blocked startup tool loading")
-	}
-
-	var toolsetInfos []*ToolsetInfoEvent
-	for e := range events {
-		if ti, ok := e.(*ToolsetInfoEvent); ok {
-			toolsetInfos = append(toolsetInfos, ti)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("EmitStartupInfo did not return: a hung toolset blocked startup tool loading")
 		}
-	}
 
-	require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
-	last := toolsetInfos[len(toolsetInfos)-1]
-	assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false so the sidebar resolves")
-	assert.Equal(t, 1, last.AvailableTools,
-		"the hung toolset is skipped; the fast toolset's single tool is still counted")
+		var toolsetInfos []*ToolsetInfoEvent
+		for e := range events {
+			if ti, ok := e.(*ToolsetInfoEvent); ok {
+				toolsetInfos = append(toolsetInfos, ti)
+			}
+		}
+
+		require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+		last := toolsetInfos[len(toolsetInfos)-1]
+		assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false so the sidebar resolves")
+		assert.Equal(t, 1, last.AvailableTools,
+			"the hung toolset is skipped; the fast toolset's single tool is still counted")
+	})
 }
 
 // TestEmitStartupInfo_SkipsToolsetWhoseStartHangs is the companion of the
@@ -1366,62 +1492,217 @@ func TestEmitStartupInfo_SkipsToolsetWhoseListingHangs(t *testing.T) {
 func TestEmitStartupInfo_SkipsToolsetWhoseStartHangs(t *testing.T) {
 	t.Parallel()
 
-	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+	synctest.Test(t, func(t *testing.T) {
+		prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
 
-	// release is closed on cleanup so the orphaned start goroutine (whose
-	// Start() ignores context cancellation) exits instead of leaking.
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
+		// release is closed on cleanup so the orphaned start goroutine (whose
+		// Start() ignores context cancellation) exits instead of leaking.
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
 
-	hanging := &blockingStartToolSet{release: release}
-	fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
+		hanging := &blockingStartToolSet{release: release}
+		fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
 
-	root := agent.New("root", "agent",
-		agent.WithModel(prov),
-		agent.WithToolSets(hanging, fast),
-	)
-	tm := team.New(team.WithAgents(root))
+		root := agent.New("root", "agent",
+			agent.WithModel(prov),
+			agent.WithToolSets(hanging, fast),
+		)
+		tm := team.New(team.WithAgents(root))
 
-	rt, err := NewLocalRuntime(t.Context(), tm,
-		WithCurrentAgent("root"),
-		WithModelStore(mockModelStore{}),
-		WithToolStartTimeout(50*time.Millisecond),
-	)
-	require.NoError(t, err)
+		rt, err := NewLocalRuntime(t.Context(), tm,
+			WithCurrentAgent("root"),
+			WithModelStore(mockModelStore{}),
+			WithToolStartTimeout(50*time.Millisecond),
+		)
+		require.NoError(t, err)
 
-	events := make(chan Event, 32)
-	done := make(chan struct{})
-	go func() {
-		rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
-		close(events)
-		close(done)
-	}()
+		events := make(chan Event, 32)
+		done := make(chan struct{})
+		go func() {
+			rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+			close(events)
+			close(done)
+		}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("EmitStartupInfo did not return: a toolset with a hung Start blocked startup tool loading")
-	}
-
-	var toolsetInfos []*ToolsetInfoEvent
-	var warning *WarningEvent
-	for e := range events {
-		switch ev := e.(type) {
-		case *ToolsetInfoEvent:
-			toolsetInfos = append(toolsetInfos, ev)
-		case *WarningEvent:
-			warning = ev
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("EmitStartupInfo did not return: a toolset with a hung Start blocked startup tool loading")
 		}
-	}
 
-	require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
-	last := toolsetInfos[len(toolsetInfos)-1]
-	assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false so the sidebar spinner stops")
-	assert.Equal(t, 1, last.AvailableTools,
-		"the hung toolset is skipped; the fast toolset's single tool is still counted")
+		var toolsetInfos []*ToolsetInfoEvent
+		var warning *WarningEvent
+		for e := range events {
+			switch ev := e.(type) {
+			case *ToolsetInfoEvent:
+				toolsetInfos = append(toolsetInfos, ev)
+			case *WarningEvent:
+				warning = ev
+			}
+		}
 
-	require.NotNil(t, warning, "a start timeout must surface a user-visible warning")
-	assert.Contains(t, warning.Message, "taking too long to start")
+		require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+		last := toolsetInfos[len(toolsetInfos)-1]
+		assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false so the sidebar spinner stops")
+		assert.Equal(t, 1, last.AvailableTools,
+			"the hung toolset is skipped; the fast toolset's single tool is still counted")
+
+		require.NotNil(t, warning, "a start timeout must surface a user-visible warning")
+		assert.Contains(t, warning.Message, "taking too long to start")
+	})
+}
+
+// TestEmitStartupInfo_SkipsToolsetWhoseStartIsAlreadyInFlight pins the
+// skip-in-flight half of the bounded-start contract (tools.TryStartWithTimeout):
+// a toolset whose Start is already running — e.g. abandoned by an earlier
+// bounded attempt and still holding the single-flight lock — is skipped
+// immediately instead of joined, so startup neither burns the start budget
+// again nor emits a duplicate "taking too long" warning, and the fast
+// toolset is still counted.
+func TestEmitStartupInfo_SkipsToolsetWhoseStartIsAlreadyInFlight(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+		release := make(chan struct{})
+		releaseWedged := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(releaseWedged)
+
+		inFlight := &inFlightStartToolSet{entered: make(chan struct{}), release: release}
+		fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
+
+		root := agent.New("root", "agent",
+			agent.WithModel(prov),
+			agent.WithToolSets(inFlight, fast),
+		)
+		tm := team.New(team.WithAgents(root))
+
+		rt, err := NewLocalRuntime(t.Context(), tm,
+			WithCurrentAgent("root"),
+			WithModelStore(mockModelStore{}),
+			// Long enough that a regression to joining the in-flight attempt
+			// trips the prompt-return guard below instead of passing slowly.
+			WithToolStartTimeout(30*time.Second),
+		)
+		require.NoError(t, err)
+
+		// Wedge the toolset's Start before startup runs, as an earlier abandoned
+		// bounded attempt would: it keeps holding the single-flight lock.
+		startable, ok := root.ToolSets()[0].(*tools.StartableToolSet)
+		require.True(t, ok)
+		wedgedDone := make(chan error, 1)
+		go func() { wedgedDone <- startable.Start(t.Context()) }()
+		<-inFlight.entered
+
+		events := make(chan Event, 32)
+		done := make(chan struct{})
+		go func() {
+			rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+			close(events)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("EmitStartupInfo did not return promptly: an in-flight toolset start was joined instead of skipped")
+		}
+
+		var toolsetInfos []*ToolsetInfoEvent
+		var warnings []*WarningEvent
+		for e := range events {
+			switch ev := e.(type) {
+			case *ToolsetInfoEvent:
+				toolsetInfos = append(toolsetInfos, ev)
+			case *WarningEvent:
+				warnings = append(warnings, ev)
+			}
+		}
+
+		require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+		last := toolsetInfos[len(toolsetInfos)-1]
+		assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false so the sidebar resolves")
+		assert.Equal(t, 1, last.AvailableTools,
+			"the in-flight toolset is skipped; the fast toolset's single tool is still counted")
+		assert.Empty(t, warnings, "a skipped in-flight start must not surface a warning")
+		assert.EqualValues(t, 1, inFlight.starts.Load(), "the skip must not run a second underlying Start")
+
+		// Unblock the wedged attempt so its goroutine exits before the test ends.
+		releaseWedged()
+		require.NoError(t, <-wedgedDone)
+	})
+}
+
+// TestEmitStartupInfo_ReturnsOnCancelWhileStartIsWedged is the regression
+// test for the cancellation half of the bounded-start contract: when the
+// EmitStartupInfo context is canceled while TryStartWithTimeout has abandoned
+// a wedged Start that still holds the toolset's single-flight lock, the
+// startup pass must return instead of consulting the failure reporters,
+// which share that lock and would block on it forever. The bubble makes the
+// race deterministic: synctest.Wait parks the emit loop on the start outcome
+// — past its top-of-loop ctx check — before the cancel fires, and a
+// regression to the blocking reporters deadlocks the bubble.
+func TestEmitStartupInfo_ReturnsOnCancelWhileStartIsWedged(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+		// release is closed on cleanup so the wedged start goroutine (whose
+		// Start() ignores context cancellation) exits before the bubble is
+		// checked for leaked goroutines.
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+
+		wedged := &inFlightStartToolSet{entered: make(chan struct{}), release: release}
+
+		root := agent.New("root", "agent",
+			agent.WithModel(prov),
+			agent.WithToolSets(wedged),
+		)
+		tm := team.New(team.WithAgents(root))
+
+		rt, err := NewLocalRuntime(t.Context(), tm,
+			WithCurrentAgent("root"),
+			WithModelStore(mockModelStore{}),
+			// Long enough (in the bubble's fake time) that the per-toolset
+			// deadline cannot fire; only the cancel unblocks the attempt.
+			WithToolStartTimeout(time.Hour),
+		)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		events := make(chan Event, 32)
+		done := make(chan struct{})
+		go func() {
+			rt.EmitStartupInfo(ctx, nil, NewChannelSink(events))
+			close(done)
+		}()
+
+		// The startup pass's own bounded attempt has entered the wedged
+		// Start — it now holds the single-flight lock. Park every other
+		// goroutine (the emit loop is blocked on the start outcome, past its
+		// top-of-loop ctx check) before canceling, so the cancellation
+		// deterministically loses that check's race.
+		<-wedged.entered
+		synctest.Wait()
+		cancel()
+
+		// EmitStartupInfo must return while the underlying Start is still
+		// wedged: release is closed only by the cleanup above, after this
+		// receive. Before the fix, the emit loop hung on the failure
+		// reporters' lock here and the bubble deadlocked.
+		<-done
+
+		close(events)
+		for e := range events {
+			if w, ok := e.(*WarningEvent); ok {
+				t.Fatalf("cancellation during a wedged start must not surface a warning; got %q", w.Message)
+			}
+		}
+		assert.EqualValues(t, 1, wedged.starts.Load(), "exactly one underlying Start ran and stayed wedged")
+	})
 }
 
 // TestEmitStartupInfo_EmitsProgressWhileSlowToolsetStarts guards the
@@ -1431,58 +1712,60 @@ func TestEmitStartupInfo_SkipsToolsetWhoseStartHangs(t *testing.T) {
 func TestEmitStartupInfo_EmitsProgressWhileSlowToolsetStarts(t *testing.T) {
 	t.Parallel()
 
-	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+	synctest.Test(t, func(t *testing.T) {
+		prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
 
-	release := make(chan struct{})
-	t.Cleanup(func() {
-		select {
-		case <-release:
-		default:
-			close(release)
+		release := make(chan struct{})
+		t.Cleanup(func() {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+		})
+
+		fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
+		slow := &blockingStartToolSet{release: release}
+
+		root := agent.New("root", "agent",
+			agent.WithModel(prov),
+			agent.WithToolSets(fast, slow),
+		)
+		tm := team.New(team.WithAgents(root))
+
+		rt, err := NewLocalRuntime(t.Context(), tm,
+			WithCurrentAgent("root"),
+			WithModelStore(mockModelStore{}),
+		)
+		require.NoError(t, err)
+
+		events := make(chan Event, 32)
+		go func() {
+			rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+			close(events)
+		}()
+
+		// The fast toolset's count must arrive while the slow start is still
+		// blocked (release is not closed yet).
+		timeout := time.After(5 * time.Second)
+		for {
+			select {
+			case e := <-events:
+				ti, ok := e.(*ToolsetInfoEvent)
+				if !ok {
+					continue
+				}
+				if ti.AvailableTools == 1 && ti.Loading {
+					close(release)
+					for range events { // drain so EmitStartupInfo finishes
+					}
+					return
+				}
+			case <-timeout:
+				t.Fatal("no progress event for the fast toolset arrived while the slow toolset was starting")
+			}
 		}
 	})
-
-	fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
-	slow := &blockingStartToolSet{release: release}
-
-	root := agent.New("root", "agent",
-		agent.WithModel(prov),
-		agent.WithToolSets(fast, slow),
-	)
-	tm := team.New(team.WithAgents(root))
-
-	rt, err := NewLocalRuntime(t.Context(), tm,
-		WithCurrentAgent("root"),
-		WithModelStore(mockModelStore{}),
-	)
-	require.NoError(t, err)
-
-	events := make(chan Event, 32)
-	go func() {
-		rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
-		close(events)
-	}()
-
-	// The fast toolset's count must arrive while the slow start is still
-	// blocked (release is not closed yet).
-	timeout := time.After(5 * time.Second)
-	for {
-		select {
-		case e := <-events:
-			ti, ok := e.(*ToolsetInfoEvent)
-			if !ok {
-				continue
-			}
-			if ti.AvailableTools == 1 && ti.Loading {
-				close(release)
-				for range events { // drain so EmitStartupInfo finishes
-				}
-				return
-			}
-		case <-timeout:
-			t.Fatal("no progress event for the fast toolset arrived while the slow toolset was starting")
-		}
-	}
 }
 
 // TestEmitStartupInfo_AuthRequiredIsSilent verifies that when a toolset's
@@ -1588,9 +1871,10 @@ type recoveryAuthToolSet struct {
 
 func (r *recoveryAuthToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
 func (r *recoveryAuthToolSet) Start(context.Context) error                 { r.started = true; return nil }
-func (r *recoveryAuthToolSet) Stop(context.Context) error                  { r.started = false; return nil }
-func (r *recoveryAuthToolSet) IsStarted() bool                             { return r.started }
-func (r *recoveryAuthToolSet) Restart(context.Context) error               { return r.restartErr }
+
+func (r *recoveryAuthToolSet) Stop(context.Context) error    { r.started = false; return nil }
+func (r *recoveryAuthToolSet) IsStarted() bool               { return r.started }
+func (r *recoveryAuthToolSet) Restart(context.Context) error { return r.restartErr }
 
 // TestEmitStartupInfo_RecoveryAuthNoticeEmittedOnce is the regression test for
 // blocking issue 3: when a toolset was previously started and working but the
@@ -1671,6 +1955,55 @@ func TestEmitStartupInfo_RecoveryAuthNoticeEmittedOnce(t *testing.T) {
 	require.Len(t, noticesPhase4, 1, "fresh failure after streak reset must emit a new notice")
 }
 
+// TestEmitStartupInfo_PartialStartStillCountsCodeModeTools is the runtime
+// regression test for #3978 degraded startup: when the codemode composite
+// starts partially (one inner MCP-like toolset fails), the composite is
+// latched as started and emitToolsProgressively must keep listing it — the
+// run_tools_with_javascript wrapper is counted in the sidebar's ToolsetInfo
+// — while the inner failure still surfaces as a warning.
+func TestEmitStartupInfo_PartialStartStillCountsCodeModeTools(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	healthy := newStubToolSet(nil, []tools.Tool{{Name: "fetch_url", Parameters: map[string]any{}}}, nil)
+	failing := newStubToolSet(errors.New("connection refused"), nil, nil)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(codemode.Wrap(healthy, failing)),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(t.Context(), tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := make(chan Event, 32)
+	rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+	close(events)
+
+	var toolsetInfos []*ToolsetInfoEvent
+	var warning *WarningEvent
+	for e := range events {
+		switch ev := e.(type) {
+		case *ToolsetInfoEvent:
+			toolsetInfos = append(toolsetInfos, ev)
+		case *WarningEvent:
+			warning = ev
+		}
+	}
+
+	require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+	last := toolsetInfos[len(toolsetInfos)-1]
+	assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false")
+	assert.Equal(t, 1, last.AvailableTools,
+		"the degraded codemode wrapper must still be listed and counted (run_tools_with_javascript)")
+
+	require.NotNil(t, warning, "the failed inner toolset must still surface a warning")
+	assert.Contains(t, warning.Message, "start failed")
+	assert.Contains(t, warning.Message, "connection refused")
+}
+
 // TestConfigureToolsetHandlers_ReachesThroughCodeModeWrapper is the
 // regression test for the sigma MCP OAuth bug: an agent with
 // code_mode_tools:true wraps all its toolsets in a single codemode
@@ -1696,7 +2029,7 @@ func TestConfigureToolsetHandlers_ReachesThroughCodeModeWrapper(t *testing.T) {
 	require.NoError(t, err)
 
 	events := make(chan Event, 8)
-	rt.configureToolsetHandlers(root, NewChannelSink(events))
+	rt.configureToolsetHandlers(root)
 	close(events)
 	for range events {
 	}
@@ -1794,11 +2127,13 @@ func TestEmitStartupInfo(t *testing.T) {
 	}
 
 	// Verify expected events are emitted
+	info := AgentInfo("startup-test-agent", "test/startup-model", "This is a startup test agent", "Welcome!").(*AgentInfoEvent)
+	info.ExecutionCapabilities = nativeExecutionProfile()
 	expectedEvents := []Event{
-		AgentInfo("startup-test-agent", "test/startup-model", "This is a startup test agent", "Welcome!"),
+		info,
 		TeamInfo([]AgentDetails{
-			{Name: "startup-test-agent", Description: "This is a startup test agent", Provider: "test", Model: "startup-model"},
-			{Name: "other-agent", Description: "This is another agent", Provider: "test", Model: "startup-model"},
+			{Name: "startup-test-agent", Description: "This is a startup test agent", Provider: "test", Model: "startup-model", ExecutionCapabilities: nativeExecutionProfile()},
+			{Name: "other-agent", Description: "This is another agent", Provider: "test", Model: "startup-model", ExecutionCapabilities: nativeExecutionProfile()},
 		}, "startup-test-agent"),
 		ToolsetInfo(0, false, "startup-test-agent"), // No tools configured
 	}
@@ -2072,7 +2407,7 @@ func TestPermissions_DenyBlocksToolExecution(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 
 	// The tool should be denied, look for a ToolCallResponseEvent with error
@@ -2130,7 +2465,7 @@ func TestPermissions_AllowAutoApprovesTool(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 
 	// The tool should have been executed due to allow pattern
@@ -2173,7 +2508,7 @@ func TestPermissions_DenyTakesPriorityOverAllow(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 
 	// The tool should be denied despite wildcard allow
@@ -2223,7 +2558,7 @@ func TestSessionPermissions_DenyBlocksToolExecution(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 
 	var toolResponse *ToolCallResponseEvent
@@ -2278,7 +2613,7 @@ func TestSessionPermissions_AllowAutoApprovesTool(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 
 	require.True(t, executed, "expected tool to be auto-approved by session permissions")
@@ -2326,7 +2661,7 @@ func TestSessionPermissions_TakePriorityOverTeamPermissions(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 
 	// Session deny should take priority over team allow
@@ -2378,7 +2713,7 @@ func TestToolRejectionWithReason(t *testing.T) {
 
 	// Run in goroutine since it will block waiting for confirmation
 	go func() {
-		rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+		rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 		close(events)
 	}()
 
@@ -2436,7 +2771,7 @@ func TestToolRejectionWithoutReason(t *testing.T) {
 
 	// Run in goroutine since it will block waiting for confirmation
 	go func() {
-		rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+		rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 		close(events)
 	}()
 
@@ -2488,7 +2823,7 @@ func TestTransferTaskRejectsNonSubAgent(t *testing.T) {
 		},
 	}
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), rt.resolveSessionAgent(sess))
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.IsError, "transfer to non-sub-agent should return an error result")
@@ -2528,7 +2863,7 @@ func TestTransferTaskAllowsSubAgent(t *testing.T) {
 		},
 	}
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), rt.resolveSessionAgent(sess))
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.IsError, "transfer to valid sub-agent should succeed")
@@ -2576,7 +2911,7 @@ func TestTransferTaskPersistsSubSessionOnError(t *testing.T) {
 
 	// runForwarding returns an error because the child emitted an ErrorEvent,
 	// but only *after* persisting the sub-session.
-	_, err = rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	_, err = rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), rt.resolveSessionAgent(sess))
 	require.Error(t, err, "transfer should surface the sub-session error to the caller")
 
 	// The parent session must now hold a sub-session item — without the fix
@@ -2658,7 +2993,7 @@ func TestDenyOverridesYoloMode(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 
 	// With --yolo and Deny/ForceAsk precedence, the tool should NOT execute.
@@ -2708,7 +3043,7 @@ func TestYoloMode_OverridesForceAsk(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 
 	// YOLO overrides ForceAsk: the checker's ForceAsk verdict is bypassed
@@ -2757,18 +3092,19 @@ func TestSessionDenyOverridesYoloMode(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 	close(events)
 
 	// With --yolo and Deny/ForceAsk precedence, the tool should NOT execute.
 	require.False(t, executed, "expected tool to NOT be executed in --yolo mode because session Deny wins")
 }
 
-func TestStripImageContent(t *testing.T) {
+func TestStripUnsupportedMediaContent(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
+		caps     modelinfo.ModelCapabilities // zero value = text-only
 		messages []chat.Message
 		want     []chat.Message
 	}{
@@ -2952,12 +3288,58 @@ func TestStripImageContent(t *testing.T) {
 				{Role: chat.MessageRoleAssistant, Content: "got it"},
 			},
 		},
+		{
+			name: "strips audio and video documents, preserves supported image",
+			caps: modelinfo.CapsWith(true, false, false, false),
+			messages: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeText, Text: "listen and watch"},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.wav", MimeType: "audio/wav", Source: chat.DocumentSource{InlineData: []byte{0x52}}}},
+						{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp4", MimeType: "video/mp4", Source: chat.DocumentSource{InlineData: []byte{0x00}}}},
+					},
+				},
+			},
+			want: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeText, Text: "listen and watch"},
+						{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+					},
+				},
+			},
+		},
+		{
+			name: "retains audio and video when supported",
+			caps: modelinfo.CapsWith(false, false, true, true),
+			messages: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp3", MimeType: "audio/mpeg", Source: chat.DocumentSource{InlineData: []byte{0x49}}}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.webm", MimeType: "video/webm", Source: chat.DocumentSource{InlineData: []byte{0x1a}}}},
+					},
+				},
+			},
+			want: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp3", MimeType: "audio/mpeg", Source: chat.DocumentSource{InlineData: []byte{0x49}}}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.webm", MimeType: "video/webm", Source: chat.DocumentSource{InlineData: []byte{0x1a}}}},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := stripImageContent(tt.messages)
+			got := stripUnsupportedMediaContent(t.Context(), tt.messages, tt.caps)
 			require.Equal(t, tt.want, got)
 		})
 	}
@@ -3064,7 +3446,7 @@ func TestProcessToolCalls_UsesPinnedAgent(t *testing.T) {
 	}}
 
 	events := make(chan Event, 32)
-	rt.processToolCalls(t.Context(), sess, calls, []tools.Tool{workerTool}, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, []tools.Tool{workerTool}, NewChannelSink(events))
 	close(events)
 
 	assert.True(t, executed, "worker_tool handler should have been called")
@@ -3178,7 +3560,7 @@ func TestSkillSubSessionTools_ScopesAndInjects(t *testing.T) {
 		session.WithExtraToolSets([]tools.ToolSet{newStubToolSet(nil, []tools.Tool{extraTool}, nil)}),
 	)
 
-	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited, NewChannelSink(make(chan Event, 8)))
+	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited)
 
 	names := toolNames(result)
 	// read_file kept (allow-listed), shell/write_file filtered out, fetch injected.
@@ -3199,7 +3581,7 @@ func TestSkillSubSessionTools_NoOpForOrdinarySession(t *testing.T) {
 	inherited := []tools.Tool{{Name: "read_file"}, {Name: "shell"}}
 	sess := session.New()
 
-	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited, NewChannelSink(make(chan Event, 8)))
+	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited)
 	assert.Equal(t, inherited, result)
 }
 
@@ -3479,6 +3861,88 @@ func TestReprobe_NewToolsAvailableAfterToolCall(t *testing.T) {
 	assert.Contains(t, toolsetInfoCounts, 2, "ToolsetInfo with count=2 expected after reprobe")
 }
 
+// TestReprobe_DeferredToolsSkipErrorLoadPoint covers docker-agent#4671: when a
+// parallel batch ends with an error result, newly deferred tools must anchor
+// at a successful result. Anthropic rejects tool_reference content in an
+// is_error tool_result, and the load point is resent on every later request.
+func TestReprobe_DeferredToolsSkipErrorLoadPoint(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New(session.WithUserMessage("Install MCP and update todos"))
+	sess.Title = "deferral load point test"
+	sess.ToolsApproved = true
+
+	installTool := tools.Tool{
+		Name:       "install_mcp",
+		Parameters: map[string]any{},
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("installed"), nil
+		},
+	}
+	failingTool := tools.Tool{
+		Name:       "update_todos",
+		Parameters: map[string]any{},
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			// Batch calls run in parallel and record results as they finish:
+			// wait for install_mcp so the error result lands last.
+			assert.Eventually(t, func() bool {
+				return slices.ContainsFunc(sess.GetAllMessages(), func(m session.Message) bool {
+					return m.Message.Role == chat.MessageRoleTool && m.Message.ToolCallID == "call_1"
+				})
+			}, 5*time.Second, time.Millisecond)
+			return tools.ResultError("todo not found"), nil
+		},
+	}
+
+	turn1 := newStreamBuilder().
+		AddToolCallName("call_1", "install_mcp").
+		AddToolCallArguments("call_1", `{}`).
+		AddToolCallName("call_2", "update_todos").
+		AddToolCallArguments("call_2", `{}`).
+		AddToolCallStopWithUsage(5, 5).
+		Build()
+	turn2 := newStreamBuilder().
+		AddContent("done").
+		AddStopWithUsage(3, 3).
+		Build()
+
+	prov := &recordingProvider{
+		id:      "test/mock-model",
+		streams: []*mockStream{turn1, turn2},
+	}
+	root := agent.New("root", "test",
+		agent.WithModel(prov),
+		agent.WithToolSets(
+			newStubToolSet(nil, []tools.Tool{installTool, failingTool}, nil),
+			&flappyRuntimeToolSet{newTool: tools.Tool{Name: "mcp_hello", Parameters: map[string]any{}}, failUntil: 2},
+		),
+	)
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	rt.registerDefaultTools()
+
+	for range rt.RunStream(t.Context(), sess) {
+	}
+
+	var toolResults []chat.Message
+	for _, msg := range sess.GetAllMessages() {
+		if msg.Message.Role == chat.MessageRoleTool {
+			toolResults = append(toolResults, msg.Message)
+		}
+	}
+	require.Len(t, toolResults, 2)
+	require.Equal(t, "call_2", toolResults[1].ToolCallID, "the error result must be last to exercise the bug")
+	require.True(t, toolResults[1].IsError)
+
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	require.GreaterOrEqual(t, len(prov.recordedCalls), 2, "expected at least 2 model calls")
+	idx := slices.IndexFunc(prov.recordedCalls[1], func(tool tools.Tool) bool { return tool.Name == "mcp_hello" })
+	require.NotEqual(t, -1, idx, "turn 2 must include mcp_hello after reprobe")
+	assert.True(t, prov.recordedCalls[1][idx].Deferred)
+	assert.Equal(t, "call_1", prov.recordedCalls[1][idx].DeferredAtToolCallID)
+}
+
 // TestReprobe_NoChangeMeansNoExtraEvents verifies that reprobe is a no-op
 // (no extra ToolsetInfo events, no panics) when no new tools appear after
 // a tool call.
@@ -3560,8 +4024,10 @@ func (p *messageRecordingProvider) CreateChatCompletionStream(_ context.Context,
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	snapshot := make([]chat.Message, len(msgs))
-	copy(snapshot, msgs)
+	snapshot := slices.Clone(msgs)
+	if snapshot == nil {
+		snapshot = []chat.Message{}
+	}
 	p.recordedMessages = append(p.recordedMessages, snapshot)
 
 	if p.callIdx >= len(p.streams) {
@@ -4160,7 +4626,7 @@ func TestPostToolHookReceivesToolResult(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 
 	require.NotNil(t, got)
 	assert.Equal(t, hooks.EventPostToolUse, got.HookEventName)
@@ -4214,12 +4680,12 @@ func TestPostToolHookEmitsLifecycleEvents(t *testing.T) {
 	}}
 
 	events := make(chan Event, 10)
-	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
 
 	var started *HookStartedEvent
 	var finished *HookFinishedEvent
-	for len(events) > 0 {
-		switch ev := (<-events).(type) {
+	for _, event := range drainEvents(events) {
+		switch ev := event.(type) {
 		case *HookStartedEvent:
 			started = ev
 		case *HookFinishedEvent:
@@ -4268,41 +4734,44 @@ func TestElicitationHandler_NonInteractive(t *testing.T) {
 func TestElicitationHandler_Interactive_NoChannel(t *testing.T) {
 	t.Parallel()
 
-	prov := &mockProvider{id: "test/mock-model", stream: newStreamBuilder().AddContent("ok").AddStopWithUsage(1, 1).Build()}
-	root := agent.New("root", "test", agent.WithModel(prov))
-	tm := team.New(team.WithAgents(root))
+	synctest.Test(t, func(t *testing.T) {
+		prov := &mockProvider{id: "test/mock-model", stream: newStreamBuilder().AddContent("ok").AddStopWithUsage(1, 1).Build()}
+		root := agent.New("root", "test", agent.WithModel(prov))
+		tm := team.New(team.WithAgents(root))
 
-	// Default runtime (interactive mode) with no events channel set on the bridge.
-	rt, err := NewLocalRuntime(t.Context(), tm)
-	require.NoError(t, err)
+		// Default runtime (interactive mode) with no events channel set on the bridge.
+		rt, err := NewLocalRuntime(t.Context(), tm)
+		require.NoError(t, err)
 
-	params := &mcp.ElicitParams{
-		Message: "Authorize OAuth?",
-	}
+		params := &mcp.ElicitParams{
+			Message: "Authorize OAuth?",
+		}
 
-	type handlerResult struct {
-		result tools.ElicitationResult
-		err    error
-	}
-	done := make(chan handlerResult, 1)
-	go func() {
-		result, err := rt.elicitationHandler(t.Context(), params)
-		done <- handlerResult{result: result, err: err}
-	}()
+		type handlerResult struct {
+			result tools.ElicitationResult
+			err    error
+		}
+		done := make(chan handlerResult, 1)
+		go func() {
+			result, err := rt.elicitationHandler(t.Context(), params)
+			done <- handlerResult{result: result, err: err}
+		}()
 
-	require.Eventually(t, func() bool { return rt.elicitationWaiters.count() == 1 }, time.Second, time.Millisecond,
-		"elicitationHandler must register a waiter even though the bridge has no channel")
+		synctest.Wait()
+		require.Equal(t, 1, rt.elicitationWaiters.count(),
+			"elicitationHandler must register a waiter even though the bridge has no channel")
 
-	require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, map[string]any{"ok": true}, ""))
+		require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, map[string]any{"ok": true}, ""))
 
-	select {
-	case got := <-done:
-		require.NoError(t, got.err)
-		assert.Equal(t, tools.ElicitationActionAccept, got.result.Action)
-		assert.Equal(t, map[string]any{"ok": true}, got.result.Content)
-	case <-time.After(2 * time.Second):
-		t.Fatal("elicitationHandler did not return after ResumeElicitation")
-	}
+		select {
+		case got := <-done:
+			require.NoError(t, got.err)
+			assert.Equal(t, tools.ElicitationActionAccept, got.result.Action)
+			assert.Equal(t, map[string]any{"ok": true}, got.result.Content)
+		case <-time.After(2 * time.Second):
+			t.Fatal("elicitationHandler did not return after ResumeElicitation")
+		}
+	})
 }
 
 // TestRunAgentPersistsSubSessionToStore is the regression test for the
@@ -4411,6 +4880,22 @@ func TestRunAgentPersistsSubSessionOnError(t *testing.T) {
 		"parent session must record the sub-session even when the background agent errored")
 }
 
+func TestImageGenerationProviderErrorDoesNotEmitWarning(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProviderWithError{id: "test/mock-model"}
+	a := agent.New("root", "test agent", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(a)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := runAndCollect(t, rt, session.New(session.WithUserMessage("generate an image")))
+	for _, event := range events {
+		if warning, ok := event.(*WarningEvent); ok {
+			assert.NotEqual(t, missingGeneratedImageWarning, warning.Message)
+		}
+	}
+}
+
 // TestRunAgentImmediateFailureEmitsNoZeroUsageEvent guards runCollecting's
 // final authoritative snapshot: a background child that fails before
 // recording any usage or cost (here the provider errors on stream creation)
@@ -4445,8 +4930,12 @@ func TestRunAgentImmediateFailureEmitsNoZeroUsageEvent(t *testing.T) {
 	})
 	require.NotEmpty(t, result.ErrMsg, "RunAgent should surface the sub-session error")
 
-	assert.Empty(t, forwarded,
-		"a child that failed before any billed work must not emit a zero-usage snapshot")
+	require.Len(t, forwarded, 2, "a failed child emits only its lifecycle events")
+	started := forwarded[0].(*BackgroundAgentStatusEvent)
+	stopped := forwarded[1].(*BackgroundAgentStatusEvent)
+	assert.True(t, started.Running)
+	assert.False(t, stopped.Running)
+	assert.Equal(t, started.SessionID, stopped.SessionID)
 }
 
 // mockModelStoreWithCostAndLimit prices tokens so usage snapshots carry a
@@ -4477,9 +4966,8 @@ func lastAttachedSubSession(sess *session.Session) *session.Session {
 // background sub-session's TokenUsageEvents through OnBackgroundEvent — the
 // out-of-band path that lets the TUI keep per-agent context accounting for
 // background agents — tagged with the sub-session id and the worker's name,
-// and forwards nothing else. The last event is the authoritative final
-// snapshot runCollecting emits before attaching the child, and must match
-// the child's final recorded state.
+// alongside its lifecycle events. The final usage snapshot emitted before
+// attaching the child must match the child's final recorded state.
 func TestRunAgentForwardsTokenUsageOutOfBand(t *testing.T) {
 	t.Parallel()
 
@@ -4507,8 +4995,15 @@ func TestRunAgentForwardsTokenUsageOutOfBand(t *testing.T) {
 	})
 	require.Empty(t, result.ErrMsg, "RunAgent should succeed")
 
-	require.NotEmpty(t, forwarded, "the background task's token usage must be forwarded out-of-band")
-	for _, event := range forwarded {
+	require.GreaterOrEqual(t, len(forwarded), 3)
+	started := forwarded[0].(*BackgroundAgentStatusEvent)
+	stopped := forwarded[len(forwarded)-1].(*BackgroundAgentStatusEvent)
+	assert.True(t, started.Running)
+	assert.False(t, stopped.Running)
+	assert.Equal(t, started.SessionID, stopped.SessionID)
+	assert.Equal(t, "worker", started.AgentName)
+	assert.Equal(t, "worker", stopped.AgentName)
+	for _, event := range forwarded[1 : len(forwarded)-1] {
 		usage, ok := event.(*TokenUsageEvent)
 		require.Truef(t, ok, "only TokenUsageEvents may be forwarded, got %T", event)
 		assert.Equal(t, "worker", usage.AgentName, "usage is attributed to the background agent")
@@ -4522,7 +5017,7 @@ func TestRunAgentForwardsTokenUsageOutOfBand(t *testing.T) {
 	// 50×$20 per 1M tokens), and the resolved context limit.
 	sub := lastAttachedSubSession(sess)
 	require.NotNil(t, sub)
-	last := forwarded[len(forwarded)-1].(*TokenUsageEvent)
+	last := forwarded[len(forwarded)-2].(*TokenUsageEvent)
 	require.NotNil(t, last.Usage)
 	assert.Equal(t, sub.ID, last.SessionID)
 	assert.Equal(t, int64(150), last.Usage.ContextLength, "final snapshot carries the worker's cumulative usage")
@@ -4623,10 +5118,8 @@ func TestRunAgentEmitsFinalUsageOnCancellation(t *testing.T) {
 // TestReasoningOnlyTurnEmitsWarning is a regression test for
 // https://github.com/docker/docker-agent/issues/3145. A thinking-mode model
 // (e.g. Qwen3 via an openai_chatcompletions provider) can stream only reasoning
-// tokens and then stop with no content and no tool calls. recordAssistantMessage
-// skips that empty turn, which previously left the user staring at silence. The
-// runtime must instead surface a Warning explaining that the model produced only
-// reasoning, and must still not persist an assistant message.
+// tokens and then stop with no content and no tool calls. The warning must
+// remain visible even though the empty response is retained for accounting.
 func TestReasoningOnlyTurnEmitsWarning(t *testing.T) {
 	stream := newStreamBuilder().
 		AddReasoning("The user wants the file list. ").
@@ -4652,8 +5145,8 @@ func TestReasoningOnlyTurnEmitsWarning(t *testing.T) {
 
 	require.NotNil(t, warn, "expected a Warning event for a reasoning-only turn")
 	assert.Contains(t, warn.Message, "only reasoning")
-	assert.False(t, assistantPersisted,
-		"a reasoning-only turn must not persist an assistant message")
+	assert.True(t, assistantPersisted,
+		"a reasoning-only turn must retain its usage for accounting")
 }
 
 // TestEmptyTurnEmitsWarning verifies that a wholly empty turn (no content, no
@@ -4679,13 +5172,8 @@ func TestEmptyTurnEmitsWarning(t *testing.T) {
 	assert.Contains(t, warn.Message, "empty response")
 }
 
-// TestEmptyTrailingTurnAfterToolCallsIsSilent verifies that a natural empty
-// stop immediately following a tool-call turn does NOT emit the empty-response
-// warning. This is the common fork-skill tail (the last action is a tool call
-// such as commit/open-pr, then the model stops with nothing left to say); the
-// scary rate-limit / token-cap warning there is pure noise. Turns that stop
-// empty WITHOUT preceding tool work still warn (covered by TestEmptyTurnEmitsWarning).
-func TestEmptyTrailingTurnAfterToolCallsIsSilent(t *testing.T) {
+// Tool results do not prove completion; a missing final reply must be visible.
+func TestEmptyTrailingTurnAfterToolCallsWarns(t *testing.T) {
 	t.Parallel()
 
 	doneTool := tools.Tool{
@@ -4697,7 +5185,7 @@ func TestEmptyTrailingTurnAfterToolCallsIsSilent(t *testing.T) {
 	}
 
 	// Turn 1: model calls the tool and keeps going.
-	// Turn 2: model stops with no content and no tool calls (benign tail).
+	// Turn 2: model stops with no content and no tool calls.
 	turn1 := newStreamBuilder().
 		AddToolCallName("c1", "do_thing").
 		AddToolCallArguments("c1", `{}`).
@@ -4730,12 +5218,14 @@ func TestEmptyTrailingTurnAfterToolCallsIsSilent(t *testing.T) {
 		events = append(events, ev)
 	}
 
+	var warnings []string
 	for _, ev := range events {
 		if w, ok := ev.(*WarningEvent); ok {
-			assert.NotContains(t, w.Message, "empty response",
-				"a benign empty stop right after tool calls must not emit the empty-response warning")
+			warnings = append(warnings, w.Message)
 		}
 	}
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "stopped without a final reply after using tools")
 }
 
 // TestEmptyTurnWarning exercises the pure classification helper directly,
@@ -4743,10 +5233,10 @@ func TestEmptyTrailingTurnAfterToolCallsIsSilent(t *testing.T) {
 func TestEmptyTurnWarning(t *testing.T) {
 	t.Parallel()
 
-	t.Run("benign stop after tool calls is silent", func(t *testing.T) {
+	t.Run("empty stop after tool calls warns", func(t *testing.T) {
 		res := streamResult{Stopped: true}
 		got := emptyTurnWarning(res, true, "test/model", chat.FinishReasonStop)
-		assert.Empty(t, got)
+		assert.Contains(t, got, "stopped without a final reply after using tools")
 	})
 
 	t.Run("reasoning-only turn warns about reasoning", func(t *testing.T) {
@@ -4755,12 +5245,10 @@ func TestEmptyTurnWarning(t *testing.T) {
 		assert.Contains(t, got, "only reasoning")
 	})
 
-	t.Run("benign check takes precedence over reasoning-only", func(t *testing.T) {
-		// A reasoning-only turn that naturally stops right after tool work is
-		// still benign: the tool calls were the turn's real output.
+	t.Run("reasoning-only turn after tool calls warns about reasoning", func(t *testing.T) {
 		res := streamResult{Stopped: true, ReasoningContent: "thinking..."}
 		got := emptyTurnWarning(res, true, "test/model", chat.FinishReasonStop)
-		assert.Empty(t, got)
+		assert.Contains(t, got, "only reasoning")
 	})
 
 	t.Run("empty turn without prior tool calls warns", func(t *testing.T) {
@@ -4769,10 +5257,7 @@ func TestEmptyTurnWarning(t *testing.T) {
 		assert.Contains(t, got, "empty response")
 	})
 
-	t.Run("length finish after tool calls still warns (truncated, not benign)", func(t *testing.T) {
-		// A "length" stop means the reply was cut off by the output token
-		// limit; even after tool calls this is a real truncation the user
-		// should see, so it must NOT be silenced by the benign case.
+	t.Run("length finish after tool calls warns about an empty response", func(t *testing.T) {
 		res := streamResult{Stopped: true}
 		got := emptyTurnWarning(res, true, "test/model", chat.FinishReasonLength)
 		assert.Contains(t, got, "empty response")

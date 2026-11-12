@@ -3,8 +3,10 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
+	"uuid"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
@@ -57,7 +59,7 @@ func (r *LocalRuntime) tryReplayCachedResponse(
 	events EventSink,
 ) bool {
 	c := a.Cache()
-	if c == nil {
+	if c == nil || promptHasAttachments(sess) {
 		return false
 	}
 	question := sess.GetLastUserMessageContent()
@@ -73,7 +75,8 @@ func (r *LocalRuntime) tryReplayCachedResponse(
 	// file was hand-edited or downgraded from a future version. Replaying
 	// nothing would leave the user staring at a blank assistant message,
 	// so we fall through to the model instead.
-	if !ok || cached == "" {
+	// Older entries may contain XML tool payloads suppressed by the live stream.
+	if !ok || cached == "" || strings.Contains(cached, "<tool_call>") {
 		return false
 	}
 
@@ -106,7 +109,10 @@ func (r *LocalRuntime) tryReplayCachedResponse(
 		"agent", a.Name(), "session_id", sess.ID)
 	modelID := a.Model(ctx).ID().String()
 	events.Emit(AgentInfo(a.Name(), modelID, a.Description(), a.WelcomeMessage()))
+	messageID := uuid.NewV4().String()
+	events.Emit(AgentChoice(a.Name(), sess.ID, cached, messageID))
 	addAgentMessage(sess, a, &chat.Message{
+		MessageID: messageID,
 		Role:      chat.MessageRoleAssistant,
 		Content:   cached,
 		CreatedAt: time.Now().Format(time.RFC3339),
@@ -129,7 +135,7 @@ func (r *LocalRuntime) tryReplayCachedResponse(
 // where [LocalRuntime.tryReplayCachedResponse] fires stop hooks for the
 // cached answer — free of redundant disk writes.
 func (r *LocalRuntime) cacheResponseBuiltin(ctx context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
-	if in == nil || in.AgentName == "" || in.LastUserMessage == "" ||
+	if ctx.Value(responseCacheBypassKey{}) == true || in == nil || in.AgentName == "" || in.LastUserMessage == "" ||
 		strings.TrimSpace(in.StopResponse) == "" {
 		return nil, nil
 	}
@@ -152,4 +158,19 @@ func (r *LocalRuntime) cacheResponseBuiltin(ctx context.Context, in *hooks.Input
 		storeSpan.End()
 	}
 	return nil, nil
+}
+
+type responseCacheBypassKey struct{}
+
+// The response cache keys only on text, not the payloads in MultiContent.
+func promptHasAttachments(sess *session.Session) bool {
+	for _, msg := range slices.Backward(sess.GetAllMessages()) {
+		if msg.Message.Role != chat.MessageRoleUser {
+			continue
+		}
+		return slices.ContainsFunc(msg.Message.MultiContent, func(part chat.MessagePart) bool {
+			return part.Type != chat.MessagePartTypeText
+		})
+	}
+	return false
 }

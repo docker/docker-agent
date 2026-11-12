@@ -3,6 +3,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -28,9 +29,19 @@ func (c *Client) convertBetaMessages(ctx context.Context, messages []chat.Messag
 func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages []chat.Message, requestTools []tools.Tool) ([]anthropic.BetaMessageParam, error) {
 	var betaMessages []anthropic.BetaMessageParam
 	deferredByCallID := deferredToolNamesByCallID(requestTools)
+	loopStart := chat.ActiveToolLoopStart(messages)
 
 	for i := 0; i < len(messages); i++ {
 		msg := &messages[i]
+		if compact, ok, err := c.compactionMessage(msg); err != nil {
+			return nil, err
+		} else if ok {
+			if len(betaMessages) != 0 {
+				return nil, errors.New("anthropic: signed compaction must precede conversation messages")
+			}
+			betaMessages = append(betaMessages, compact)
+			continue
+		}
 		if msg.Role == chat.MessageRoleSystem {
 			// System messages handled separately
 			continue
@@ -59,17 +70,25 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 			continue
 		}
 		if msg.Role == chat.MessageRoleAssistant {
+			if blocks, ok, err := betaReplayContent(msg); err != nil {
+				return nil, err
+			} else if ok {
+				betaMessages = append(betaMessages, anthropic.BetaMessageParam{Role: anthropic.BetaMessageParamRoleAssistant, Content: blocks})
+				continue
+			}
+			if blocks, ok := betaRecoveredParams(msg); ok {
+				betaMessages = append(betaMessages, anthropic.BetaMessageParam{Role: anthropic.BetaMessageParamRoleAssistant, Content: blocks})
+				continue
+			}
 			contentBlocks := make([]anthropic.BetaContentBlockParamUnion, 0)
 
 			// With interleaved thinking, we can include thinking blocks anywhere
 			// If we have thinking content, include it first (conventional order)
-			if msg.ReasoningContent != "" && msg.ThinkingSignature != "" {
+			if include, err := c.flattenedThinking(i, loopStart, msg); err != nil {
+				return nil, err
+			} else if include {
 				contentBlocks = append(contentBlocks,
 					anthropic.NewBetaThinkingBlock(msg.ThinkingSignature, msg.ReasoningContent))
-			} else if msg.ThinkingSignature != "" {
-				// Include redacted thinking placeholder using the original signature
-				contentBlocks = append(contentBlocks,
-					anthropic.NewBetaRedactedThinkingBlock(msg.ThinkingSignature))
 			}
 
 			// Add text content if present
@@ -340,6 +359,8 @@ func convertBetaTools(t []tools.Tool) ([]anthropic.BetaToolUnionParam, error) {
 			return nil, err
 		}
 
+		betaInputSchema.Properties = inputSchema.Properties
+		betaInputSchema.ExtraFields = inputSchema.ExtraFields
 		// Create BetaToolParam and wrap it in BetaToolUnionParam
 		betaTool := &anthropic.BetaToolParam{
 			Name:        tool.Name,

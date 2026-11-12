@@ -20,9 +20,10 @@ type DockerHubInfo struct {
 type Source string
 
 const (
-	SourceNone    Source = "none"
-	SourceDesktop Source = "docker desktop"
-	SourceMinted  Source = "minted from the stored access token"
+	SourceNone          Source = "none"
+	SourceSecretsEngine Source = "docker desktop secrets engine"
+	SourceDesktop       Source = "docker desktop"
+	SourceMinted        Source = "minted from the stored access token"
 )
 
 // mintToken exchanges the stored access token for a fresh one. A var so tests
@@ -35,9 +36,11 @@ var mintToken = hubauth.Token
 var cache struct {
 	sync.Mutex
 
-	token   string
-	source  Source
-	staleAt time.Time // time from which the token must be looked up again
+	token     string
+	source    Source
+	account   DockerHubInfo
+	expiresAt time.Time // the secrets engine session's expiry, zero for tokens from other sources
+	staleAt   time.Time // time from which the token must be looked up again
 
 	// rejected holds the tokens Docker refused, until they expire. Docker
 	// Desktop keeps serving one — it has no idea it was refused, and can't be
@@ -59,15 +62,20 @@ func GetToken(ctx context.Context) string {
 }
 
 // GetTokenWithSource returns the user's Docker access token and where it came
-// from. Docker Desktop's newer auth stack (auth v2) serves whatever its
-// in-memory token source holds and never refreshes on GET, so a stuck
-// background refresher makes it return the same expired JWT forever — or
+// from. The secrets engine's session comes first; without a usable one we ask
+// Docker Desktop's backend. Docker Desktop's newer auth stack (auth v2) serves
+// whatever its in-memory token source holds and never refreshes on GET, so a
+// stuck background refresher makes it return the same expired JWT forever — or
 // nothing at all when its read-time refresh failed. When that happens we mint
 // a token ourselves from the access token `docker login` stored, and only then
 // fall back to nudging Desktop.
 func GetTokenWithSource(ctx context.Context) (string, Source) {
 	if token, source, ok := cached(); ok {
 		return token, source
+	}
+
+	if token, _, ok := secretsEngineToken(ctx); ok {
+		return token, SourceSecretsEngine
 	}
 
 	token, err := fetchToken(ctx)
@@ -117,7 +125,7 @@ func InvalidateToken(token string) {
 
 	cache.Lock()
 	if cache.token == token {
-		cache.token, cache.source = "", SourceNone
+		cache.token, cache.source, cache.account, cache.expiresAt = "", SourceNone, DockerHubInfo{}, time.Time{}
 	}
 	if cache.rejected == nil {
 		cache.rejected = make(map[string]struct{})
@@ -136,16 +144,29 @@ func InvalidateToken(token string) {
 }
 
 func cached() (string, Source, bool) {
+	token, source, _, ok := cachedWithAccount()
+	return token, source, ok
+}
+
+func cachedWithAccount() (string, Source, DockerHubInfo, bool) {
 	cache.Lock()
 	defer cache.Unlock()
 
 	if cache.token == "" || isRejected(cache.token) {
-		return "", SourceNone, false
+		return "", SourceNone, DockerHubInfo{}, false
 	}
-	if !time.Now().Before(cache.staleAt) || hubauth.Expiring(cache.token) {
-		return "", SourceNone, false
+	if !time.Now().Before(cache.staleAt) || cachedExpiring() {
+		return "", SourceNone, DockerHubInfo{}, false
 	}
-	return cache.token, cache.source, true
+	return cache.token, cache.source, cache.account, true
+}
+
+// cachedExpiring must be called with the cache lock held.
+func cachedExpiring() bool {
+	if cache.expiresAt.IsZero() {
+		return hubauth.Expiring(cache.token)
+	}
+	return hubauth.ExpiringAt(cache.expiresAt)
 }
 
 // usable reports whether a token is worth handing to callers: one that dies
@@ -171,13 +192,19 @@ func isRejected(token string) bool {
 // check and the write are a single operation, so a token invalidated while it
 // was being looked up is never handed out.
 func remember(token string, source Source) bool {
+	return rememberSession(token, source, DockerHubInfo{}, time.Time{})
+}
+
+// rememberSession is [remember] for a token whose account and expiry its source vouches for.
+func rememberSession(token string, source Source, account DockerHubInfo, expiresAt time.Time) bool {
 	cache.Lock()
 	defer cache.Unlock()
 
 	if token == "" || isRejected(token) {
 		return false
 	}
-	cache.token, cache.source, cache.staleAt = token, source, time.Now().Add(cacheTTL)
+	cache.token, cache.source, cache.account = token, source, account
+	cache.expiresAt, cache.staleAt = expiresAt, time.Now().Add(cacheTTL)
 	return true
 }
 
@@ -217,9 +244,12 @@ func expiresIn(token string) string {
 	return time.Until(exp).Round(time.Second).String()
 }
 
-// GetUserInfo returns the signed-in account. Docker Desktop knows it best, but
-// it is not always around: the token itself carries the same information.
+// GetUserInfo returns the secrets engine's account, else Docker Desktop's, else the token's.
 func GetUserInfo(ctx context.Context) DockerHubInfo {
+	if account, ok := secretsEngineAccount(ctx); ok {
+		return account
+	}
+
 	var info DockerHubInfo
 	_ = ClientBackend.Get(ctx, "/registry/info", &info)
 	if info.Username != "" {
@@ -231,6 +261,14 @@ func GetUserInfo(ctx context.Context) DockerHubInfo {
 		return info
 	}
 	return DockerHubInfo{Username: identity.Username, Email: identity.Email}
+}
+
+func secretsEngineAccount(ctx context.Context) (DockerHubInfo, bool) {
+	if _, source, account, ok := cachedWithAccount(); ok {
+		return account, source == SourceSecretsEngine
+	}
+	_, account, ok := secretsEngineToken(ctx)
+	return account, ok
 }
 
 func fetchToken(ctx context.Context) (string, error) {

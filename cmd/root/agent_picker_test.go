@@ -61,7 +61,7 @@ func TestParseAgentPickerRefsDefaults(t *testing.T) {
 
 	// Without ~/.agents, only the built-in agents are offered.
 	for _, raw := range []string{"", "   ", ",,,"} {
-		assert.Equal(t, []string{"default", "coder"}, parseAgentPickerRefs(raw))
+		assert.Equal(t, []string{"default", "minimal"}, parseAgentPickerRefs(raw))
 	}
 
 	// Config files in ~/.agents are appended to the built-ins; directories
@@ -74,7 +74,7 @@ func TestParseAgentPickerRefsDefaults(t *testing.T) {
 
 	want := []string{
 		"default",
-		"coder",
+		"minimal",
 		filepath.Join(agentsDir, "assistant.yaml"),
 		filepath.Join(agentsDir, "gopher.yml"),
 	}
@@ -85,6 +85,21 @@ func TestParseAgentPickerRefsDefaults(t *testing.T) {
 
 	// An explicit list bypasses the defaults entirely.
 	assert.Equal(t, []string{"coder"}, parseAgentPickerRefs("coder"))
+}
+
+func TestLoadBuiltinAgentChoices(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	choices := loadAgentChoices(t.Context(), defaultAgentPickerRefs(), nil, nil)
+	require.Len(t, choices, 2)
+	for i, name := range []string{"default", "minimal"} {
+		assert.Equal(t, name, choices[i].ref)
+		require.NoError(t, choices[i].err)
+		assert.NotEmpty(t, choices[i].description)
+		assert.NotEmpty(t, choices[i].yaml)
+	}
 }
 
 func TestPrependAgentRef(t *testing.T) {
@@ -337,7 +352,7 @@ func TestAgentPickerWindowing(t *testing.T) {
 	assert.NotContains(t, out, "agent-0")
 
 	// Hit-testing maps points to absolute indices within the window.
-	x, y := firstCardPoint(t, m, 4)
+	x, y := renderedCardRefPoint(t, m, 4)
 	i, ok := m.cardAt(x, y)
 	assert.True(t, ok)
 	assert.Equal(t, 4, i)
@@ -433,7 +448,7 @@ func TestAgentPickerMouseHoverSelects(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	x, y := firstCardPoint(t, m, 1)
+	x, y := renderedCardRefPoint(t, m, 1)
 	_, _ = m.Update(tea.MouseMotionMsg{X: x, Y: y})
 	assert.Equal(t, 1, m.cursor, "hover should move the cursor to the hovered card")
 }
@@ -448,7 +463,7 @@ func TestAgentPickerDoubleClickSelects(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	x, y := firstCardPoint(t, m, 1)
+	x, y := renderedCardRefPoint(t, m, 1)
 	click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 
 	// First click selects (moves cursor) but does not quit.
@@ -469,7 +484,7 @@ func TestAgentPickerDoubleClickResetsAfterTimeout(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	x, y := firstCardPoint(t, m, 0)
+	x, y := renderedCardRefPoint(t, m, 0)
 	click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 
 	_, cmd := m.Update(click)
@@ -577,7 +592,7 @@ func TestAgentPickerDetailsResetsClickTracking(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	x, y := firstCardPoint(t, m, 0)
+	x, y := renderedCardRefPoint(t, m, 0)
 	click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 
 	// First click primes double-click tracking.
@@ -811,16 +826,25 @@ func TestAgentPickerPanelSizeMatchesRenderNarrow(t *testing.T) {
 	}
 }
 
-// firstCardPoint scans the grid for a coordinate that maps to card index want.
-func firstCardPoint(t *testing.T, m *agentPickerModel, want int) (int, int) {
+// renderedCardRefPoint locates fixture text on the rendered screen, independently of hit testing.
+func renderedCardRefPoint(t *testing.T, m *agentPickerModel, want int) (int, int) {
 	t.Helper()
-	for y := range m.height {
-		for x := range m.width {
-			if i, ok := m.cardAt(x, y); ok && i == want {
-				return x, y
-			}
+	require.GreaterOrEqual(t, want, 0)
+	require.Less(t, want, len(m.choices))
+	ref := displayRef(m.choices[want].ref)
+	require.NotEmpty(t, ref)
+	screen := ansi.Strip(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.render()))
+	for y, line := range strings.Split(screen, "\n") {
+		offset := strings.Index(line, ref)
+		if offset < 0 {
+			continue
 		}
+		x := lipgloss.Width(line[:offset])
+		index, ok := m.cardAt(x, y)
+		require.True(t, ok, "rendered card %d must be clickable", want)
+		require.Equal(t, want, index)
+		return x, y
 	}
-	t.Fatalf("no coordinate maps to card %d", want)
+	t.Fatalf("card %d (%q) is not visible", want, ref)
 	return 0, 0
 }

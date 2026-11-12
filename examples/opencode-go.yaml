@@ -1,6 +1,6 @@
 agents:
   root:
-    model: opencode-go/deepseek-v4-flash
+    model: opencode-go/deepseek-v4.1-flash
     description: A helpful AI assistant powered by OpenCode Go
     instruction: |
       You are a helpful AI assistant powered by OpenCode Go.

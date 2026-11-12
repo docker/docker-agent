@@ -193,7 +193,7 @@ func TestValidateStringField(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := validateStringField(tt.value, tt.field)
+			result := validateStringFieldWithMessage(tt.value, tt.field) == ""
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -315,7 +315,7 @@ func TestValidateNumberField(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := validateNumberField(tt.value, tt.field)
+			result := validateNumberFieldWithMessage(tt.value, tt.field) == ""
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -345,7 +345,7 @@ func TestValidateFormat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := validateFormat(tt.value, tt.format)
+			result := validateFormatWithMessage(tt.value, tt.format) == ""
 			assert.Equal(t, tt.expected, result)
 		})
 	}

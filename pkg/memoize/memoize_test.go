@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -106,33 +107,30 @@ func TestMemoizeRetriesAfterErrorThenCaches(t *testing.T) {
 
 func TestMemoizeExpires(t *testing.T) {
 	t.Parallel()
-	m := New[int](10 * time.Millisecond)
 
-	var calls atomic.Int32
-	compute := func() (int, error) {
-		calls.Add(1)
-		return int(calls.Load()), nil
-	}
+	synctest.Test(t, func(t *testing.T) {
+		const ttl = 10 * time.Millisecond
+		m := New[int](ttl)
 
-	v, err := m.Memoize("key", compute)
-	require.NoError(t, err)
-	assert.Equal(t, 1, v)
+		var calls atomic.Int32
+		compute := func() (int, error) {
+			return int(calls.Add(1)), nil
+		}
 
-	expireEntry(m, "key")
+		v, err := m.Memoize("key", compute)
+		require.NoError(t, err)
+		assert.Equal(t, 1, v)
 
-	v, err = m.Memoize("key", compute)
-	require.NoError(t, err)
-	assert.Equal(t, 2, v)
-}
+		synctest.Sleep(ttl - time.Nanosecond)
+		v, err = m.Memoize("key", compute)
+		require.NoError(t, err)
+		assert.Equal(t, 1, v, "the entry must remain cached until its deadline")
 
-// expireEntry backdates the cached entry for key so it is already expired,
-// which lets TTL tests run without sleeping.
-func expireEntry[T any](m *Memoizer[T], key string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	e := m.entries[key]
-	e.expires = time.Now().Add(-time.Nanosecond)
-	m.entries[key] = e
+		synctest.Sleep(time.Nanosecond)
+		v, err = m.Memoize("key", compute)
+		require.NoError(t, err)
+		assert.Equal(t, 2, v, "the entry must expire at its deadline")
+	})
 }
 
 // TestMemoizeZeroTTLNeverExpires verifies the go-cache compatible behavior that
@@ -163,17 +161,22 @@ func TestMemoizeZeroTTLNeverExpires(t *testing.T) {
 // so memory does not grow without bound for keys that stop being requested.
 func TestMemoizeEvictsExpiredEntry(t *testing.T) {
 	t.Parallel()
-	m := New[int](5 * time.Millisecond)
 
-	_, err := m.Memoize("key", func() (int, error) { return 1, nil })
-	require.NoError(t, err)
-	assert.Len(t, m.entries, 1)
+	synctest.Test(t, func(t *testing.T) {
+		const ttl = 5 * time.Millisecond
+		m := New[int](ttl)
 
-	expireEntry(m, "key")
+		_, err := m.Memoize("key", func() (int, error) { return 1, nil })
+		require.NoError(t, err)
+		assert.Len(t, m.entries, 1)
 
-	_, ok := m.load("key")
-	assert.False(t, ok)
-	assert.Empty(t, m.entries, "expired entry must be evicted on access")
+		synctest.Sleep(ttl)
+		assert.Len(t, m.entries, 1, "expiry alone must not eagerly evict entries")
+
+		_, ok := m.load("key")
+		assert.False(t, ok)
+		assert.Empty(t, m.entries, "expired entry must be evicted on access")
+	})
 }
 
 func TestMemoizePanicPropagates(t *testing.T) {

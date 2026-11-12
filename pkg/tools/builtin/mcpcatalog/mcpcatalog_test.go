@@ -118,7 +118,7 @@ func TestEnableDisableLifecycle(t *testing.T) {
 	// Track tools-changed callbacks. Use atomic.Int32 to satisfy -race even
 	// though every call site here happens to be on the same goroutine.
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// Before enabling: only the always-on meta-tools. Disable and reset are
 	// hidden until at least one server is enabled.
@@ -253,7 +253,7 @@ func TestToolsUsesStableIterationOrder(t *testing.T) {
 	}
 
 	// Build the expected sorted-by-id order independently.
-	want := append([]string(nil), ids...)
+	want := slices.Clone(ids)
 	sort.Strings(want)
 
 	ts.mu.RLock()
@@ -378,7 +378,7 @@ func TestEnableSyncStartOAuthDeclined(t *testing.T) {
 	ts := New()
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	id := firstOAuthServerID(t, ts)
 	stubStartErr(ts, &mcptools.OAuthDeclinedError{URL: ts.byID[id].URL})
@@ -511,7 +511,7 @@ func TestEnableRetriesStartOnExistingUnstartedEntry(t *testing.T) {
 	}
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// First enable: defensive AuthorizationRequired fallback. Entry stays
 	// in t.enabled, message tells the model to call enable again.
@@ -575,7 +575,7 @@ func TestEnableSyncStartCancelledRollsBack(t *testing.T) {
 	}
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// First enable: Start returns context.Canceled. The handler must
 	// surface a tool error AND drop the entry so Tools() on the next
@@ -765,21 +765,18 @@ func TestConcurrentEnableDisable(t *testing.T) {
 	var wg sync.WaitGroup
 	enableErrs := make(chan error, 2)
 
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, err := ts.handleEnable(ctx, EnableArgs{ID: id1})
 		if err != nil {
 			enableErrs <- err
 		}
-	}()
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		_, err := ts.handleEnable(ctx, EnableArgs{ID: id2})
 		if err != nil {
 			enableErrs <- err
 		}
-	}()
+	})
 	wg.Wait()
 	close(enableErrs)
 	for err := range enableErrs {
@@ -794,21 +791,18 @@ func TestConcurrentEnableDisable(t *testing.T) {
 	assert.True(t, exists2)
 
 	disableErrs := make(chan error, 2)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, err := ts.handleDisable(ctx, DisableArgs{ID: id1})
 		if err != nil {
 			disableErrs <- err
 		}
-	}()
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		_, err := ts.handleDisable(ctx, DisableArgs{ID: id2})
 		if err != nil {
 			disableErrs <- err
 		}
-	}()
+	})
 	wg.Wait()
 	close(disableErrs)
 	for err := range disableErrs {
@@ -856,11 +850,12 @@ func TestToolsExposesEnabledServerTools(t *testing.T) {
 	// Inject a synthetic catalog entry that points at the test server.
 	const id = "test-server"
 	server := Server{
-		ID:        id,
-		Title:     "Test",
-		URL:       srv.URL,
-		Transport: "streamable-http",
-		Auth:      Auth{Type: "none"},
+		ID:              id,
+		Title:           "Test",
+		URL:             srv.URL,
+		Transport:       "streamable-http",
+		Auth:            Auth{Type: "none"},
+		allowPrivateIPs: true,
 	}
 	ts.catalog.Servers = append(ts.catalog.Servers, server)
 	ts.byID[id] = server
@@ -929,11 +924,12 @@ func TestHandleEnable_OAuthDCR_ChallengePRMScopeFallback(t *testing.T) {
 
 	const id = "test-oauth-dcr-server"
 	server := Server{
-		ID:        id,
-		Title:     "OAuth DCR Test Server",
-		URL:       srv.URL,
-		Transport: "streamable-http",
-		Auth:      Auth{Type: "oauth"},
+		ID:              id,
+		Title:           "OAuth DCR Test Server",
+		URL:             srv.URL,
+		Transport:       "streamable-http",
+		Auth:            Auth{Type: "oauth"},
+		allowPrivateIPs: true,
 	}
 	ts.catalog.Servers = append(ts.catalog.Servers, server)
 	ts.byID[id] = server
@@ -1171,7 +1167,7 @@ func TestResetAuthDisablesEnabledServer(t *testing.T) {
 	ts.removeOAuthToken = func(string) error { return nil }
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	oauthID := firstOAuthServerID(t, ts)
 
@@ -1233,7 +1229,7 @@ func TestResetAuthNotifiesEvenWhenKeyringFails(t *testing.T) {
 	ts.removeOAuthToken = func(string) error { return errors.New("keyring on fire") }
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	oauthID := firstOAuthServerID(t, ts)
 
@@ -1363,7 +1359,7 @@ func TestToolsOAuthDeclineRemovesServer(t *testing.T) {
 	wrapped := tools.NewStartable(fake)
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// Inject directly — handleEnable would build a real *mcp.Toolset
 	// that we cannot easily steer into a decline without a full OAuth
@@ -1469,7 +1465,7 @@ func TestToolsCancelledStartRemovesServer(t *testing.T) {
 	wrapped := tools.NewStartable(fake)
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	ts.mu.Lock()
 	ts.enabled[id] = wrapped
@@ -1534,7 +1530,7 @@ func TestToolsOAuthDeclineNoNotifyWhenAlreadyDisabled(t *testing.T) {
 	wrapped := tools.NewStartable(fake)
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// Simulate "fresh enable replaced our entry": Tools() captures the
 	// snapshot under RLock, releases it, then we mutate t.enabled. When
@@ -1623,6 +1619,12 @@ func TestToolsAuthRequiredIsDeferred(t *testing.T) {
 // Server-Sent Events. We only need to respond to two methods (initialize
 // and tools/list) for a successful handshake, then immediately close the
 // stream so the client moves on.
+//
+// The fake is intentionally a *legacy* stateful fixture: it answers the
+// SDK v1.7 client's server/discover probe with an empty result (the
+// default branch below), which makes the client fall back to the legacy
+// initialize handshake, and it assigns an Mcp-Session-Id so the
+// pre-2026-07-28 stateful behavior keeps being exercised.
 
 func newFakeMCPServer(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -1673,7 +1675,9 @@ func mcpHandler(t *testing.T, _ bool) http.HandlerFunc {
 		switch body.Method {
 		case "initialize":
 			writeJSONRPC(t, w, body.ID, map[string]any{
-				"protocolVersion": "2025-03-26",
+				// The latest revision that still supports initialize
+				// (2026-07-28 removed it in favor of server/discover).
+				"protocolVersion": "2025-11-25",
 				"capabilities":    map[string]any{},
 				"serverInfo": map[string]any{
 					"name":    "fake",
@@ -1769,7 +1773,9 @@ func TestCatalogOAuthDiscoveryLive(t *testing.T) {
 	cat, err := Load()
 	require.NoError(t, err)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
 	type result struct {
 		id, url, authServer string

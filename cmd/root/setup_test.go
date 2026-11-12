@@ -96,7 +96,7 @@ func TestSetupWizard_CloudPathStoresKey(t *testing.T) {
 	assert.Equal(t, "sk-cloud-key", store.stored["ANTHROPIC_API_KEY"])
 	assert.Equal(t, "ANTHROPIC_API_KEY", result.EnvVar)
 	assert.Equal(t, "sk-cloud-key", result.Value)
-	assert.Equal(t, "anthropic/claude-sonnet-4-6", result.Model)
+	assert.Equal(t, "anthropic/claude-sonnet-5", result.Model)
 
 	output := out.String()
 	assert.NotContains(t, output, "Where should", "a single store must not prompt for a location")
@@ -104,7 +104,7 @@ func TestSetupWizard_CloudPathStoresKey(t *testing.T) {
 	assert.NotContains(t, output, "anthropic API key", "not every built-in credential is an API key (docker/docker-agent#3805)")
 	assert.Contains(t, output, "Stored ANTHROPIC_API_KEY in the config-env-file (fake).")
 	assert.Contains(t, output, "docker agent run")
-	assert.Contains(t, output, "--model anthropic/claude-sonnet-4-6")
+	assert.Contains(t, output, "--model anthropic/claude-sonnet-5")
 	assert.Contains(t, output, "docker agent doctor")
 	assert.NotContains(t, output, "sk-cloud-key", "secret values must never be printed")
 }
@@ -780,7 +780,7 @@ func TestCompleteOfferedSetup_ModelPathsRetry(t *testing.T) {
 	}{
 		{
 			name:   "cloud key is exported for the retry",
-			result: &setupResult{EnvVar: "SETUP_RETRY_TEST_KEY", Value: "sk-retry", Model: "anthropic/claude-sonnet-4-6"},
+			result: &setupResult{EnvVar: "SETUP_RETRY_TEST_KEY", Value: "sk-retry", Model: "anthropic/claude-sonnet-5"},
 			check: func(t *testing.T, _ *runExecFlags) {
 				t.Helper()
 				assert.Equal(t, "sk-retry", os.Getenv("SETUP_RETRY_TEST_KEY"))

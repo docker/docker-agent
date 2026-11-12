@@ -19,8 +19,169 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/providers"
 	"github.com/docker/docker-agent/pkg/session"
 )
+
+func TestEvaluatePreflightsAgentConfig(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		agent      string
+		wantErr    string
+		createFile bool
+	}{
+		{
+			name:    "missing config",
+			wantErr: "loading agent: reading config file agent.yaml",
+		},
+		{
+			name:       "invalid readable config",
+			agent:      "agents: {}\n",
+			wantErr:    "loading agent: at least one agent must be configured",
+			createFile: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			agentPath := filepath.Join(tmpDir, "agent.yaml")
+			if tt.createFile {
+				require.NoError(t, os.WriteFile(agentPath, []byte(tt.agent), 0o600))
+			}
+			evalsDir := filepath.Join(tmpDir, "evals")
+			require.NoError(t, os.Mkdir(evalsDir, 0o755))
+
+			runConfig := &config.RuntimeConfig{
+				EnvProviderForTests: environment.NewNoEnvProvider(),
+				ProviderRegistry:    providers.NewDefaultRegistry(),
+			}
+			run, err := Evaluate(t.Context(), &bytes.Buffer{}, &bytes.Buffer{}, false, "test", runConfig, Config{
+				AgentFilename: agentPath,
+				EvalsDir:      evalsDir,
+				JudgeModel:    "anthropic/claude-opus-5",
+				Concurrency:   1,
+			})
+
+			require.Error(t, err)
+			assert.Nil(t, run)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.NotContains(t, err.Error(), "ANTHROPIC_API_KEY")
+		})
+	}
+}
+
+func TestEvaluateSkipsUnusedJudge(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake container runtime executable is a POSIX shell script")
+	}
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name            string
+		evalSession     string
+		expectedResults int
+	}{
+		{name: "empty evaluation directory"},
+		{
+			name:            "assertion-only session",
+			expectedResults: 1,
+			evalSession: `{
+				"evals": {
+					"relevance": [],
+					"assertions": [{"name": "response", "type": "contains", "value": "ok"}]
+				}
+			}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			agentPath := filepath.Join(tmpDir, "agent.yaml")
+			require.NoError(t, os.WriteFile(agentPath, []byte(`agents:
+  root:
+    model: openai/gpt-5
+`), 0o600))
+
+			evalsDir := filepath.Join(tmpDir, "evals")
+			require.NoError(t, os.Mkdir(evalsDir, 0o755))
+			if tt.evalSession != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(evalsDir, "session.json"), []byte(tt.evalSession), 0o600))
+			}
+
+			fakeRuntime := filepath.Join(tmpDir, "fake-runtime")
+			writeFakeContainerRuntime(t, fakeRuntime, `{"type":"agent_choice","content":"ok"}`)
+
+			runConfig := &config.RuntimeConfig{
+				EnvProviderForTests: environment.NewNoEnvProvider(),
+				ProviderRegistry:    providers.NewDefaultRegistry(),
+			}
+			run, err := Evaluate(t.Context(), &bytes.Buffer{}, &bytes.Buffer{}, false, "test", runConfig, Config{
+				AgentFilename:    agentPath,
+				EvalsDir:         evalsDir,
+				JudgeModel:       "anthropic/claude-opus-5",
+				Concurrency:      1,
+				ContainerRuntime: fakeRuntime,
+			})
+
+			require.NoError(t, err)
+			require.NotNil(t, run)
+			assert.Len(t, run.Results, tt.expectedResults)
+		})
+	}
+}
+
+func TestRunnerRequiresJudgeForRelevance(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	evalsDir := filepath.Join(tmpDir, "evals")
+	require.NoError(t, os.Mkdir(evalsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(evalsDir, "session.json"), []byte(`{
+		"evals": {"relevance": ["response is relevant"]}
+	}`), 0o600))
+
+	runner := newRunner(
+		config.NewFileSource(filepath.Join(tmpDir, "agent.yaml")),
+		&config.RuntimeConfig{EnvProviderForTests: environment.NewNoEnvProvider()},
+		Config{EvalsDir: evalsDir, Concurrency: 1},
+	)
+	_, err := runner.Run(t.Context(), &bytes.Buffer{}, &bytes.Buffer{}, false)
+
+	require.EqualError(t, err, "some evaluations have relevance criteria but no judge model is configured (use --judge-model)")
+}
+
+func TestRunnerConfiguredJudgeCreationFailure(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	evalsDir := filepath.Join(tmpDir, "evals")
+	require.NoError(t, os.Mkdir(evalsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(evalsDir, "session.json"), []byte(`{
+		"evals": {"relevance": ["response is relevant"]}
+	}`), 0o600))
+
+	runner := newRunner(
+		config.NewFileSource(filepath.Join(tmpDir, "agent.yaml")),
+		&config.RuntimeConfig{
+			EnvProviderForTests: environment.NewNoEnvProvider(),
+			ProviderRegistry:    providers.NewDefaultRegistry(),
+		},
+		Config{
+			EvalsDir:    evalsDir,
+			JudgeModel:  "anthropic/claude-opus-5",
+			Concurrency: 1,
+		},
+	)
+	_, err := runner.Run(t.Context(), &bytes.Buffer{}, &bytes.Buffer{}, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creating judge model")
+	assert.Contains(t, err.Error(), "ANTHROPIC_API_KEY environment variable is required")
+}
 
 func TestToolCallF1Score(t *testing.T) {
 	t.Parallel()
@@ -816,7 +977,7 @@ func TestBuildTranscript(t *testing.T) {
 			},
 		},
 		{
-			name: "long tool response truncated",
+			name: "long tool response preserved",
 			events: []map[string]any{
 				{
 					"type":         "tool_call_response",
@@ -828,7 +989,7 @@ func TestBuildTranscript(t *testing.T) {
 				},
 			},
 			wantContains: []string{
-				"...(truncated)",
+				`[Tool "shell" returns: ` + strings.Repeat("x", 600) + "]",
 			},
 		},
 		{
@@ -874,6 +1035,40 @@ func TestBuildTranscript(t *testing.T) {
 					lastIdx = idx
 				}
 			}
+		})
+	}
+}
+
+func TestBuildTranscriptPreservesToolEvidence(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		response string
+	}{
+		{name: "empty"},
+		{name: "below former limit", response: strings.Repeat("x", 499)},
+		{name: "at former limit", response: strings.Repeat("x", 500)},
+		{name: "above former limit", response: strings.Repeat("x", 501)},
+		{name: "verification at end", response: strings.Repeat("build output\n", 100) + "verification: PASS\n"},
+		{name: "evidence in middle", response: strings.Repeat("x", 600) + "\nERROR: tests failed\n" + strings.Repeat("y", 600)},
+		{name: "UTF-8 across former boundary", response: strings.Repeat("x", 499) + "世界\n"},
+		{name: "large result", response: strings.Repeat("log output\n", 10000) + "verification: PASS\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			events := []map[string]any{
+				{
+					"type":            "tool_call_response",
+					"response":        tt.response,
+					"tool_definition": map[string]any{"name": "shell"},
+				},
+				{"type": "agent_choice", "agent_name": "root", "content": "Reported the command result."},
+			}
+			transcript := buildTranscript(events)
+			assert.Equal(t, "[Tool \"shell\" returns: "+tt.response+"]\n\n[Agent root says]:\nReported the command result.\n\n", transcript)
+			assert.True(t, utf8.ValidString(transcript))
 		})
 	}
 }
@@ -983,7 +1178,7 @@ func TestRunDockerAgentInContainerCancelInterruptsDocker(t *testing.T) {
 	binDir := filepath.Join(tmpDir, "bin")
 	require.NoError(t, os.Mkdir(binDir, 0o755))
 	script := "#!/bin/sh\nexec \"" + testBin + "\" -test.run='^TestRunDockerAgentInContainerHelperProcess$'\n"
-	require.NoError(t, os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755))
+	writeMockCLI(t, filepath.Join(binDir, "docker"), script)
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
@@ -993,7 +1188,6 @@ func TestRunDockerAgentInContainerCancelInterruptsDocker(t *testing.T) {
 	runner := newRunner(
 		config.NewFileSource(filepath.Join(tmpDir, "agent.yaml")),
 		&config.RuntimeConfig{EnvProviderForTests: environment.NewNoEnvProvider()},
-		nil,
 		Config{},
 	)
 
@@ -1066,13 +1260,11 @@ func TestContainerRuntimeOrDefault(t *testing.T) {
 	assert.Equal(t, "podman", custom.containerRuntimeOrDefault())
 }
 
-// writeFakeContainerRuntime writes a POSIX shell script standing in for a
-// Docker-compatible container runtime CLI: it records its arguments to
-// argsFile and prints output on stdout. No daemon is involved.
-func writeFakeContainerRuntime(t *testing.T, path, argsFile, output string) {
+// Keep each script body beside its launcher symlink.
+func writeFakeContainerRuntime(t *testing.T, path, output string) {
 	t.Helper()
-	script := "#!/bin/sh\necho \"$@\" > \"" + argsFile + "\"\necho '" + output + "'\n"
-	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	script := "#!/bin/sh\necho \"$@\" > \"${0%/*}/args\"\necho '" + output + "'\n"
+	writeMockCLI(t, path, script)
 }
 
 // TestRunDockerAgentInContainerUsesConfiguredRuntime proves that container
@@ -1082,21 +1274,20 @@ func TestRunDockerAgentInContainerUsesConfiguredRuntime(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake container runtime executable is a POSIX shell script")
 	}
-	t.Parallel()
 
 	tmpDir := t.TempDir()
 	argsFile := filepath.Join(tmpDir, "args")
 	fakeRuntime := filepath.Join(tmpDir, "fake-podman")
-	writeFakeContainerRuntime(t, fakeRuntime, argsFile, `{"type":"agent_choice","content":"ok"}`)
+	writeFakeContainerRuntime(t, fakeRuntime, `{"type":"agent_choice","content":"ok"}`)
+	t.Parallel()
 
 	runner := newRunner(
 		config.NewFileSource(filepath.Join(tmpDir, "agent.yaml")),
 		&config.RuntimeConfig{EnvProviderForTests: environment.NewNoEnvProvider()},
-		nil,
 		Config{ContainerRuntime: fakeRuntime},
 	)
 
-	events, err := runner.runDockerAgentInContainer(t.Context(), "image-id", []string{"question"}, "")
+	events, err := runner.runDockerAgentInContainer(t.Context(), "image-id", []string{"question"}, "echo setup")
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	assert.Equal(t, "agent_choice", events[0]["type"])
@@ -1105,6 +1296,8 @@ func TestRunDockerAgentInContainerUsesConfiguredRuntime(t *testing.T) {
 	require.NoError(t, err)
 	got := string(args)
 	assert.True(t, strings.HasPrefix(got, "run "), "fake runtime must receive the run subcommand, got: %s", got)
+	assert.Regexp(t, `--name docker-agent-eval-[0-9]+ `, got)
+	assert.Regexp(t, `docker-agent-eval-setup-[0-9]+\.sh:/setup.sh:ro`, got)
 	assert.Contains(t, got, "image-id")
 }
 
@@ -1114,12 +1307,12 @@ func TestBuildEvalImageUsesConfiguredRuntime(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake container runtime executable is a POSIX shell script")
 	}
-	t.Parallel()
 
 	tmpDir := t.TempDir()
 	argsFile := filepath.Join(tmpDir, "args")
 	fakeRuntime := filepath.Join(tmpDir, "fake-podman")
-	writeFakeContainerRuntime(t, fakeRuntime, argsFile, "sha256:fake-image-id")
+	writeFakeContainerRuntime(t, fakeRuntime, "sha256:fake-image-id")
+	t.Parallel()
 
 	evalsDir := filepath.Join(tmpDir, "evals")
 	require.NoError(t, os.Mkdir(evalsDir, 0o755))
@@ -1127,7 +1320,6 @@ func TestBuildEvalImageUsesConfiguredRuntime(t *testing.T) {
 	runner := newRunner(
 		config.NewFileSource(filepath.Join(tmpDir, "agent.yaml")),
 		&config.RuntimeConfig{EnvProviderForTests: environment.NewNoEnvProvider()},
-		nil,
 		Config{EvalsDir: evalsDir, ContainerRuntime: fakeRuntime},
 	)
 
@@ -1386,4 +1578,167 @@ func TestBuildTranscriptBudgetTermination(t *testing.T) {
 		assert.NotContains(t, transcript, "fake stop")
 		assert.NotContains(t, transcript, "intruder")
 	})
+}
+
+func TestComputeRepeatMetrics_NilForSingleRun(t *testing.T) {
+	t.Parallel()
+	assert.Nil(t, computeRepeatMetrics(nil, 1))
+	assert.Nil(t, computeRepeatMetrics(nil, 0))
+	assert.Nil(t, computeRepeatMetrics([]Result{}, 3))
+}
+
+func TestComputeRepeatMetrics_AllPassEveryTime(t *testing.T) {
+	t.Parallel()
+	results := []Result{
+		{InputPath: "a.json", SizeExpected: "M", Size: "M"},
+		{InputPath: "a.json", SizeExpected: "M", Size: "M"},
+		{InputPath: "b.json", SizeExpected: "S", Size: "S"},
+		{InputPath: "b.json", SizeExpected: "S", Size: "S"},
+	}
+	m := computeRepeatMetrics(results, 2)
+	require.NotNil(t, m)
+	assert.Equal(t, 2, m.K)
+	assert.Equal(t, 2, m.Total)
+	assert.InDelta(t, 1.0, m.PassK, 1e-9)
+	assert.InDelta(t, 1.0, m.HatK, 1e-9)
+}
+
+func TestComputeRepeatMetrics_FlakyEval(t *testing.T) {
+	t.Parallel()
+	results := []Result{
+		{InputPath: "a.json", SizeExpected: "M", Size: "M"}, // pass
+		{InputPath: "a.json", SizeExpected: "M", Size: "S"}, // fail
+	}
+	m := computeRepeatMetrics(results, 2)
+	require.NotNil(t, m)
+	assert.InDelta(t, 1.0, m.PassK, 1e-9, "pass@k: passed at least once")
+	assert.InDelta(t, 0.0, m.HatK, 1e-9, "pass^k: did not pass every time")
+}
+
+func TestComputeRepeatMetrics_NeverPasses(t *testing.T) {
+	t.Parallel()
+	results := []Result{
+		{InputPath: "a.json", SizeExpected: "M", Size: "S"},
+		{InputPath: "a.json", SizeExpected: "M", Size: "S"},
+	}
+	m := computeRepeatMetrics(results, 2)
+	require.NotNil(t, m)
+	assert.InDelta(t, 0.0, m.PassK, 1e-9)
+	assert.InDelta(t, 0.0, m.HatK, 1e-9)
+}
+
+func TestComputeRepeatMetrics_MixedEvals(t *testing.T) {
+	t.Parallel()
+	// 3 unique evals repeated 2 times:
+	// a: pass, pass  → anyPass=true, allPass=true
+	// b: pass, fail  → anyPass=true, allPass=false
+	// c: fail, fail  → anyPass=false, allPass=false
+	results := []Result{
+		{InputPath: "a.json"},
+		{InputPath: "a.json"},
+		{InputPath: "b.json", SizeExpected: "M", Size: "M"},
+		{InputPath: "b.json", SizeExpected: "M", Size: "S"},
+		{InputPath: "c.json", Error: "boom"},
+		{InputPath: "c.json", Error: "boom"},
+	}
+	m := computeRepeatMetrics(results, 2)
+	require.NotNil(t, m)
+	assert.Equal(t, 3, m.Total)
+	assert.InDelta(t, 2.0/3.0, m.PassK, 1e-9, "2 of 3 evals passed at least once")
+	assert.InDelta(t, 1.0/3.0, m.HatK, 1e-9, "1 of 3 evals passed every time")
+}
+
+func TestPrintSummary_WithRepeatMetrics(t *testing.T) {
+	t.Parallel()
+	summary := Summary{
+		TotalEvals: 6,
+		RepeatMetrics: &RepeatMetrics{
+			K:     3,
+			PassK: 1.0,
+			HatK:  0.5,
+			Total: 2,
+		},
+	}
+	var buf bytes.Buffer
+	printSummary(&buf, summary, time.Minute)
+	output := buf.String()
+	assert.Contains(t, output, "pass@3")
+	assert.Contains(t, output, "pass^3")
+	assert.Contains(t, output, "100.0%")
+	assert.Contains(t, output, "50.0%")
+}
+
+func TestPrintSummary_NoRepeatMetricsWhenNil(t *testing.T) {
+	t.Parallel()
+	summary := Summary{TotalEvals: 2}
+	var buf bytes.Buffer
+	printSummary(&buf, summary, time.Minute)
+	output := buf.String()
+	assert.NotContains(t, output, "pass@")
+	assert.NotContains(t, output, "Repeat")
+}
+
+func TestResultCheckResults_AssertionsAllPass(t *testing.T) {
+	t.Parallel()
+	r := Result{
+		AssertionsTotal:  2,
+		AssertionsPassed: 2,
+		AssertionResults: []AssertionResult{
+			{Name: "a", Passed: true},
+			{Name: "b", Passed: true},
+		},
+	}
+	successes, failures := r.checkResults()
+	assert.Contains(t, successes, "assertions 2/2")
+	assert.Empty(t, failures)
+}
+
+func TestResultCheckResults_AssertionsPartialFail(t *testing.T) {
+	t.Parallel()
+	r := Result{
+		AssertionsTotal:  2,
+		AssertionsPassed: 1,
+		AssertionResults: []AssertionResult{
+			{Name: "has greeting", Type: "contains", Passed: true},
+			{Name: "no error", Type: "not_contains", Passed: false, Reason: `response contains "error"`},
+		},
+	}
+	successes, failures := r.checkResults()
+	assert.Empty(t, successes)
+	assert.Len(t, failures, 1)
+	assert.Contains(t, failures[0], "no error")
+	assert.Contains(t, failures[0], `response contains "error"`)
+}
+
+func TestResultCheckResults_AssertionsDoNotFireWhenZero(t *testing.T) {
+	t.Parallel()
+	r := Result{AssertionsTotal: 0}
+	successes, failures := r.checkResults()
+	assert.Empty(t, successes)
+	assert.Empty(t, failures)
+}
+
+func TestComputeSummary_Assertions(t *testing.T) {
+	t.Parallel()
+
+	results := []Result{
+		{Title: "a", AssertionsTotal: 3, AssertionsPassed: 2},
+		{Title: "b", AssertionsTotal: 2, AssertionsPassed: 2},
+		{Title: "c", Error: "boom", AssertionsTotal: 1},
+	}
+	s := computeSummary(results)
+	assert.Equal(t, 5, s.AssertionsTotal)
+	assert.Equal(t, 4, s.AssertionsPassed)
+}
+
+func TestParseContainerEventsEvaluatorSnapshot(t *testing.T) {
+	t.Parallel()
+	events := []map[string]any{
+		{"type": "token_usage", "usage": map[string]any{"cost": 0.1, "output_tokens": float64(50)}},
+		{"type": "evaluation_usage", "evaluation": map[string]any{"cost": 0.01, "usage": map[string]any{"output_tokens": float64(3)}}},
+		{"type": "token_usage", "usage": map[string]any{"cost": 0.11, "output_tokens": float64(50), "snapshot_only": true}},
+	}
+	_, cost, tokens, _ := parseContainerEvents(events)
+	assert.InDelta(t, 0.11, cost, 1e-12)
+	assert.Equal(t, int64(50), tokens, "evaluator snapshots must not duplicate chat output")
 }

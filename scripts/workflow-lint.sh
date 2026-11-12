@@ -10,8 +10,9 @@
 #                             which intentionally runs all events to completion
 #                             (see PR #2789);
 #
-#   2. pinned-by-sha:         every third-party `uses:` reference is
-#                             pinned by a 40-char SHA, not a tag/branch
+#   2. pinned-by-sha:         every third-party `uses:` reference, in
+#                             workflows and in .github/actions/*/action.yml,
+#                             is pinned by a 40-char SHA, not a tag/branch
 #                             (AGENTS.md § GitHub Actions);
 #
 #   3. payload-field deny:    no `github.event.X.Y` reference on the
@@ -39,6 +40,7 @@ else
 fi
 
 WORKFLOWS_DIR=".github/workflows"
+ACTIONS_DIR=".github/actions"
 errors=0
 
 note() {
@@ -87,7 +89,7 @@ done
 
 # Check 2: third-party `uses:` references pinned by 40-char SHA.
 #
-# Local references (`./...`, `../...`) and re-usable workflow refs
+# Local references (`$/...`, `./...`, `../...`) and re-usable workflow refs
 # without an `@` (handled by the regex below) are exempt; everything
 # else, including the `docker/` namespace, must look like
 # `owner/repo@<40hex>`. The trailing comment with the human-readable
@@ -111,7 +113,7 @@ while IFS= read -r line; do
 
   # Skip empty / local / re-usable workflow refs.
   case "$ref" in
-    '' | './'* | '../'*)
+    '' | './'* | '../'* | '$/'*)
       continue
       ;;
   esac
@@ -119,7 +121,7 @@ while IFS= read -r line; do
   if [[ ! "$ref" =~ @[0-9a-f]{40}$ ]]; then
     note "$file:$lineno" "third-party action $ref is not pinned by a 40-char SHA"
   fi
-done < <(grep -nE '^\s*-?\s*uses:' "$WORKFLOWS_DIR"/*.yml "$WORKFLOWS_DIR"/*.yaml 2>/dev/null || true)
+done < <(grep -nE '^\s*-?\s*uses:' "$WORKFLOWS_DIR"/*.yml "$WORKFLOWS_DIR"/*.yaml "$ACTIONS_DIR"/*/action.yml "$ACTIONS_DIR"/*/action.yaml 2>/dev/null || true)
 
 # Check 3: known-broken event-payload field references.
 #

@@ -2,28 +2,45 @@ package options
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/internal/deepcopy"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
+// TokenSource returns the bearer token for each provider request.
+type TokenSource func(context.Context) (string, error)
+
 type ModelOptions struct {
-	gateway          string
-	structuredOutput *latest.StructuredOutput
-	generatingTitle  bool
-	compacting       bool
-	noThinking       bool
-	maxTokens        int64
-	providers        map[string]latest.ProviderConfig
-	modelsDevStore   *modelsdev.Store
-	transportWrapper func(http.RoundTripper) http.RoundTripper
-	openAIVendor     bool
+	gateway              string
+	gatewaySet           bool
+	structuredOutputSet  bool
+	encryptedConfig      string
+	structuredOutput     *latest.StructuredOutput
+	generatingTitle      bool
+	compacting           bool
+	noThinking           bool
+	disableAutoPull      bool
+	maxTokens            int64
+	maxTokensInheritable bool
+	providers            map[string]latest.ProviderConfig
+	modelsDevStore       *modelsdev.Store
+	transportWrapper     func(http.RoundTripper) http.RoundTripper
+	tokenSource          TokenSource
+	openAIVendor         bool
 }
 
 func (c *ModelOptions) Gateway() string {
 	return c.gateway
+}
+
+// EncryptedConfig returns the opaque encrypted agent YAML to forward to a
+// trusted Docker models gateway, or "" when none was set.
+func (c *ModelOptions) EncryptedConfig() string {
+	return c.encryptedConfig
 }
 
 func (c *ModelOptions) StructuredOutput() *latest.StructuredOutput {
@@ -42,8 +59,20 @@ func (c *ModelOptions) MaxTokens() int64 {
 	return c.maxTokens
 }
 
+// MaxTokensInheritable reports whether an auxiliary cap applies to routed children.
+func (c *ModelOptions) MaxTokensInheritable() bool {
+	return c.maxTokensInheritable
+}
+
 func (c *ModelOptions) NoThinking() bool {
 	return c.noThinking
+}
+
+// DisableAutoPull reports whether providers must not download missing models
+// during client construction. DMR honors it by checking availability through
+// the read-only models API instead of running `docker model pull`.
+func (c *ModelOptions) DisableAutoPull() bool {
+	return c.disableAutoPull
 }
 
 func (c *ModelOptions) Providers() map[string]latest.ProviderConfig {
@@ -67,6 +96,10 @@ func (c *ModelOptions) OpenAIVendor() bool {
 	return c.openAIVendor
 }
 
+func (c *ModelOptions) TokenSource() TokenSource {
+	return c.tokenSource
+}
+
 // TransportWrapper returns the HTTP transport wrapper function registered via
 // WithHTTPTransportWrapper, or nil if none was set.
 func (c *ModelOptions) TransportWrapper() func(http.RoundTripper) http.RoundTripper {
@@ -82,7 +115,11 @@ func (c *ModelOptions) WrapTransport(ctx context.Context, client *http.Client) {
 	if w == nil || client == nil {
 		return
 	}
-	if wrapped := w(client.Transport); wrapped != nil {
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if wrapped := w(base); wrapped != nil {
 		client.Transport = wrapped
 	} else {
 		slog.WarnContext(ctx, "HTTP transport wrapper returned nil; using original transport")
@@ -104,9 +141,27 @@ func Apply(opts ...Opt) ModelOptions {
 	return m
 }
 
+// ForEvaluator applies connection overrides and the evaluator's explicit bypass.
+func ForEvaluator(cfg latest.EvaluatorConfig, opts ...Opt) ModelOptions {
+	m := Apply(opts...)
+	if cfg.BypassModelsGateway {
+		WithGateway("")(&m)
+	}
+	return m
+}
+
 func WithGateway(gateway string) Opt {
 	return func(cfg *ModelOptions) {
 		cfg.gateway = gateway
+		cfg.gatewaySet = true
+	}
+}
+
+// WithEncryptedConfig records the opaque encrypted agent YAML to forward to a
+// trusted Docker models gateway. An empty value is a no-op.
+func WithEncryptedConfig(encryptedConfig string) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.encryptedConfig = encryptedConfig
 	}
 }
 
@@ -117,7 +172,8 @@ func WithGateway(gateway string) Opt {
 // constrain the response natively in that mode.
 func WithStructuredOutput(structuredOutput *latest.StructuredOutput) Opt {
 	return func(cfg *ModelOptions) {
-		if structuredOutput.ToolMode() {
+		cfg.structuredOutputSet = true
+		if structuredOutput == nil || structuredOutput.ToolMode() {
 			cfg.structuredOutput = nil
 			return
 		}
@@ -140,12 +196,29 @@ func WithCompacting() Opt {
 func WithMaxTokens(maxTokens int64) Opt {
 	return func(cfg *ModelOptions) {
 		cfg.maxTokens = maxTokens
+		cfg.maxTokensInheritable = false
+	}
+}
+
+// WithAuxiliaryMaxTokens imposes a cap on both direct and routed providers.
+func WithAuxiliaryMaxTokens(maxTokens int64) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.maxTokens = maxTokens
+		cfg.maxTokensInheritable = true
 	}
 }
 
 func WithNoThinking() Opt {
 	return func(cfg *ModelOptions) {
 		cfg.noThinking = true
+	}
+}
+
+// WithDisableAutoPull prevents providers from downloading missing models
+// during client construction.
+func WithDisableAutoPull() Opt {
+	return func(cfg *ModelOptions) {
+		cfg.disableAutoPull = true
 	}
 }
 
@@ -172,9 +245,17 @@ func WithOpenAIVendor(v bool) Opt {
 	}
 }
 
+// WithTokenSource configures request-time bearer-token resolution. OpenAI
+// direct clients use it before token_key; Gemini Vertex clients use it instead
+// of ADC. Gateway and ChatGPT auth stay separate.
+func WithTokenSource(source TokenSource) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.tokenSource = source
+	}
+}
+
 // WithHTTPTransportWrapper registers a function that wraps the HTTP transport
-// used by provider clients (Anthropic, OpenAI, and Gemini with the Gemini API
-// backend). The function receives the transport that docker-agent built
+// used by provider clients (Anthropic, OpenAI, and Gemini). The function receives the transport that docker-agent built
 // (including OTel instrumentation, SSE decompression fix, and Desktop proxy
 // support) and must return a new RoundTripper that delegates to it. The wrapper
 // is applied in both direct mode and gateway/proxy mode.
@@ -189,8 +270,9 @@ func WithOpenAIVendor(v bool) Opt {
 //   - OpenAI clients configured with transport=websocket bypass the HTTP
 //     transport layer entirely; the wrapper is not applied in that mode.
 //   - Gemini clients using the Vertex AI backend (project/location config or
-//     GOOGLE_GENAI_USE_VERTEXAI) rely on the genai SDK's default HTTP client;
-//     the wrapper is not applied and a warning is logged.
+//     GOOGLE_GENAI_USE_VERTEXAI) use ADC unless WithTokenSource is supplied.
+//     With a token source the wrapper applies; otherwise setting a wrapper
+//     selects the Gemini API backend instead.
 //
 // The wrapper function must return a non-nil RoundTripper; returning nil is a
 // no-op (a warning is logged and the original transport is kept).
@@ -210,10 +292,13 @@ func WithHTTPTransportWrapper(fn func(base http.RoundTripper) http.RoundTripper)
 // Opt configuration functions. Later Opts override earlier ones when applied.
 func FromModelOptions(m ModelOptions) []Opt {
 	var out []Opt
-	if g := m.Gateway(); g != "" {
-		out = append(out, WithGateway(g))
+	if m.gatewaySet {
+		out = append(out, WithGateway(m.gateway))
 	}
-	if m.structuredOutput != nil {
+	if m.encryptedConfig != "" {
+		out = append(out, WithEncryptedConfig(m.encryptedConfig))
+	}
+	if m.structuredOutputSet {
 		out = append(out, WithStructuredOutput(m.structuredOutput))
 	}
 	if m.generatingTitle {
@@ -225,8 +310,15 @@ func FromModelOptions(m ModelOptions) []Opt {
 	if m.noThinking {
 		out = append(out, WithNoThinking())
 	}
+	if m.disableAutoPull {
+		out = append(out, WithDisableAutoPull())
+	}
 	if m.maxTokens != 0 {
-		out = append(out, WithMaxTokens(m.maxTokens))
+		if m.maxTokensInheritable {
+			out = append(out, WithAuxiliaryMaxTokens(m.maxTokens))
+		} else {
+			out = append(out, WithMaxTokens(m.maxTokens))
+		}
 	}
 	if len(m.providers) > 0 {
 		out = append(out, WithProviders(m.providers))
@@ -237,8 +329,26 @@ func FromModelOptions(m ModelOptions) []Opt {
 	if m.transportWrapper != nil {
 		out = append(out, WithHTTPTransportWrapper(m.transportWrapper))
 	}
+	if m.tokenSource != nil {
+		out = append(out, WithTokenSource(m.tokenSource))
+	}
 	if m.openAIVendor {
 		out = append(out, WithOpenAIVendor(true))
 	}
 	return out
+}
+
+// Clone copies mutable option state while preserving shared services and callbacks.
+func (c *ModelOptions) Clone() (ModelOptions, error) {
+	cloned := *c
+	var err error
+	cloned.structuredOutput, err = deepcopy.Value(c.structuredOutput)
+	if err != nil {
+		return ModelOptions{}, fmt.Errorf("copying structured_output: %w", err)
+	}
+	cloned.providers, err = deepcopy.Value(c.providers)
+	if err != nil {
+		return ModelOptions{}, fmt.Errorf("copying providers: %w", err)
+	}
+	return cloned, nil
 }

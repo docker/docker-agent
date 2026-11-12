@@ -3,7 +3,6 @@
 package treesitter
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"log/slog"
@@ -517,14 +516,25 @@ func extractPackageName(root *sitter.Node, content []byte) string {
 		}
 	}
 
-	scanner := bufio.NewScanner(bytes.NewReader(content))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if after, ok := strings.CutPrefix(line, "package "); ok {
-			return strings.TrimSpace(after)
+	return scanPackageName(content)
+}
+
+// scanPackageName returns the package name found by scanning content line by
+// line, or "" when there is no package clause. It works on byte offsets so a
+// line of any length is examined whole: a reader buffer boundary can neither
+// hide a clause behind leading whitespace nor truncate the identifier.
+func scanPackageName(content []byte) string {
+	for len(content) > 0 {
+		line := content
+		if i := bytes.IndexByte(content, '\n'); i >= 0 {
+			line, content = content[:i], content[i+1:]
+		} else {
+			content = nil
+		}
+		if after, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte("package ")); ok {
+			return string(bytes.TrimSpace(after))
 		}
 	}
-
 	return ""
 }
 

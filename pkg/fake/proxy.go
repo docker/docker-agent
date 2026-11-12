@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"gopkg.in/dnaeon/go-vcr.v4/pkg/recorder"
 
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/httpclient"
 )
 
 // ProxyOptions configures the fake proxy behavior.
@@ -33,12 +35,20 @@ type ProxyOptions struct {
 	// StreamChunkDelay is the delay between SSE chunks when SimulateStream is true.
 	// Defaults to 15ms if not set.
 	StreamChunkDelay time.Duration
+	// StreamEventGate optionally pauses after an SSE event (or EOF fragment) is flushed.
+	// Return nil to continue, or a channel to await; request cancellation also releases it.
+	// The event is only valid during the call. Calls from different streams may overlap.
+	// Overrides simulated delays when set.
+	StreamEventGate func(event []byte) <-chan struct{}
 	// UpstreamGateway, when set, forwards requests to this models gateway
 	// instead of the provider's public endpoint. Used when recording a
 	// session that normally routes through a models gateway. Only honored
 	// by the streaming recording path (StartRecordingProxy); the go-vcr
 	// replay path never forwards upstream.
 	UpstreamGateway string
+
+	// ReplayOnly permits cassette matching for custom origins without live forwarding.
+	ReplayOnly bool
 }
 
 // ProxyOption is a function that configures ProxyOptions.
@@ -94,6 +104,16 @@ func StartStreamingRecordingProxy(
 	upstreamGateway string,
 	headerUpdater func(host string, req *http.Request),
 ) (string, func() error, error) {
+	return startStreamingRecordingProxy(ctx, cassettePath, upstreamGateway, headerUpdater, http.DefaultTransport)
+}
+
+func startStreamingRecordingProxy(
+	ctx context.Context,
+	cassettePath string,
+	upstreamGateway string,
+	headerUpdater func(host string, req *http.Request),
+	transport http.RoundTripper,
+) (string, func() error, error) {
 	// Fail fast on a bad gateway URL instead of returning 500s per request.
 	if upstreamGateway != "" {
 		if u, err := url.Parse(upstreamGateway); err != nil || u.Scheme == "" || u.Host == "" {
@@ -105,6 +125,27 @@ func StartStreamingRecordingProxy(
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create streaming recorder: %w", err)
 	}
+
+	streamRec.transport = transport
+	streamRec.SetCaptureRequest(func(req *http.Request) ([]byte, error) {
+		recorded := req.Clone(req.Context())
+		if req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			recorded.Body = body
+		}
+		if err := httpclient.RemoveEncryptedConfig(recorded); err != nil {
+			return nil, err
+		}
+		req.Header.Del(httpclient.EncryptedConfigDigestHeader)
+		if recorded.Body == nil || recorded.Body == http.NoBody {
+			return nil, nil
+		}
+		defer recorded.Body.Close()
+		return io.ReadAll(recorded.Body)
+	})
 
 	e := echo.New()
 	e.HideBanner = true
@@ -142,9 +183,12 @@ func StartStreamingRecordingProxy(
 // APIKeyHeaderUpdater injects API keys from environment variables into request headers.
 // This is used when recording API interactions to ensure real API calls succeed.
 func APIKeyHeaderUpdater(host string, req *http.Request) {
+	if req.Header.Get("X-Cagent-Evaluator-Recording") == "1" && req.Header.Get("Authorization") != "" {
+		return
+	}
 	key := envAPIKeyForHost(host)
 	switch host {
-	case "https://api.openai.com/v1", "https://api.mistral.ai/v1", "https://openrouter.ai/api/v1":
+	case "https://api.openai.com/v1", "https://api.typesafe.ai", "https://api.mistral.ai/v1", "https://openrouter.ai/api/v1":
 		req.Header.Set("Authorization", "Bearer "+key)
 	case "https://api.anthropic.com":
 		req.Header.Del("Authorization")
@@ -161,6 +205,8 @@ func envAPIKeyForHost(host string) string {
 	switch host {
 	case "https://api.openai.com/v1":
 		return os.Getenv("OPENAI_API_KEY")
+	case "https://api.typesafe.ai":
+		return os.Getenv("TYPESAFE_API_KEY")
 	case "https://api.anthropic.com":
 		return os.Getenv("ANTHROPIC_API_KEY")
 	case "https://generativelanguage.googleapis.com":
@@ -192,9 +238,68 @@ func gatewayAuthHeaderUpdater(gateway string) func(host string, req *http.Reques
 		req.Header.Del("Authorization")
 		req.Header.Del("X-Api-Key")
 		req.Header.Del("X-Goog-Api-Key")
-		if envAPIKeyForHost(host) != "" {
+		if !isEvaluatorRequest(req) && envAPIKeyForHost(host) != "" {
 			APIKeyHeaderUpdater(host, req)
 		}
+	}
+}
+
+func isEvaluatorRequest(req *http.Request) bool {
+	return req.Header.Get("X-Cagent-Evaluator") == "1" ||
+		(req.Method == http.MethodPost && (strings.HasSuffix(req.URL.Path, "/v1/systemone") || strings.HasSuffix(req.URL.Path, "/v1/decisions")))
+}
+
+// RecordingTransport routes already-authenticated evaluator calls through a
+// local recorder without replacing environment-provider credentials.
+func RecordingTransport(gateway string) func(http.RoundTripper) http.RoundTripper {
+	return func(base http.RoundTripper) http.RoundTripper {
+		return &recordingTransport{base: base, gateway: gateway}
+	}
+}
+
+type recordingTransport struct {
+	base    http.RoundTripper
+	gateway string
+	replay  bool
+}
+
+func (t *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	forward := req.URL.Scheme + "://" + req.URL.Host
+	if forward == "https://api.openai.com" {
+		forward += "/v1"
+	}
+	// The recorder only replays known provider origins; private endpoints stay direct.
+	if !t.replay && TargetURLForHost(forward) == nil {
+		return t.base.RoundTrip(req)
+	}
+	target, err := GatewayTargetURL(t.gateway, req)
+	if err != nil {
+		return nil, err
+	}
+	recorded := req.Clone(req.Context())
+	recorded.URL, err = url.Parse(target)
+	if err != nil {
+		return nil, err
+	}
+	recorded.Header.Set("X-Cagent-Forward", forward)
+	recorded.Header.Set("X-Cagent-Evaluator", "1")
+	if t.replay {
+		recorded.Header.Del("Authorization")
+		recorded.Header.Del("X-Api-Key")
+		recorded.Header.Del("X-Goog-Api-Key")
+		if err := httpclient.RemoveEncryptedConfig(recorded); err != nil {
+			return nil, err
+		}
+	} else {
+		recorded.Header.Set("X-Cagent-Evaluator-Recording", "1")
+	}
+	return t.base.RoundTrip(recorded)
+}
+
+// ReplayTransport routes every evaluator request to an offline cassette proxy.
+func ReplayTransport(gateway string) func(http.RoundTripper) http.RoundTripper {
+	return func(base http.RoundTripper) http.RoundTripper {
+		return &recordingTransport{base: base, gateway: gateway, replay: true}
 	}
 }
 
@@ -234,7 +339,9 @@ func StartProxyWithOptions(
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
-	e.Any("/*", Handle(transport, headerUpdater, options))
+	handlerOptions := *options
+	handlerOptions.ReplayOnly = mode == recorder.ModeReplayOnly
+	e.Any("/*", Handle(transport, headerUpdater, &handlerOptions))
 
 	httpServer := httptest.NewServer(e)
 
@@ -294,9 +401,6 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 	toolChoiceRegex := regexp.MustCompile(`"tool_choice":"[^"]*",?`)
 	// Normalize prompt-file paths (they are machine-specific absolute paths).
 	promptFileRegex := regexp.MustCompile(`Instructions from: (?:[^\\"\r\n]|\\\\)+`)
-	// Normalize the working directory stated in the filesystem toolset
-	// instructions (machine-specific absolute path).
-	workingDirRegex := regexp.MustCompile(`The working directory is \\"(?:[^\\"\r\n]|\\\\)+\\"`)
 
 	return func(r *http.Request, i cassette.Request) bool {
 		if r.Body == nil || r.Body == http.NoBody {
@@ -321,6 +425,12 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 		r.Body.Close()
 		r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
 
+		if isEvaluatorRequest(r) {
+			request, requestErr := canonicalEvaluatorBody(reqBody)
+			recorded, recordedErr := canonicalEvaluatorBody([]byte(i.Body))
+			return requestErr == nil && recordedErr == nil && bytes.Equal(request, recorded)
+		}
+
 		// Normalize dynamic fields for matching
 		normalizedReq := callIDRegex.ReplaceAllString(string(reqBody), "call_ID")
 		normalizedReq = maxTokensRegex.ReplaceAllString(normalizedReq, "")
@@ -328,17 +438,27 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 		normalizedReq = reasoningRegex.ReplaceAllString(normalizedReq, "")
 		normalizedReq = toolChoiceRegex.ReplaceAllString(normalizedReq, "")
 		normalizedReq = promptFileRegex.ReplaceAllString(normalizedReq, "Instructions from: FILE")
-		normalizedReq = workingDirRegex.ReplaceAllString(normalizedReq, "The working directory is WD")
 		normalizedCassette := callIDRegex.ReplaceAllString(i.Body, "call_ID")
 		normalizedCassette = maxTokensRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = thinkingConfigRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = reasoningRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = toolChoiceRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = promptFileRegex.ReplaceAllString(normalizedCassette, "Instructions from: FILE")
-		normalizedCassette = workingDirRegex.ReplaceAllString(normalizedCassette, "The working directory is WD")
 
 		return normalizedReq == normalizedCassette
 	}
+}
+
+func canonicalEvaluatorBody(body []byte) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, errors.New("evaluator request must be a JSON object")
+	}
+	delete(fields, httpclient.EncryptedConfigBodyField)
+	return json.Marshal(fields)
 }
 
 // TargetURLForHost returns the target URL builder for a given forwarding host.
@@ -348,6 +468,10 @@ func TargetURLForHost(host string) func(req *http.Request) string {
 	case "https://api.openai.com/v1":
 		return func(req *http.Request) string {
 			return "https://api.openai.com" + req.URL.Redacted()
+		}
+	case "https://api.typesafe.ai":
+		return func(req *http.Request) string {
+			return "https://api.typesafe.ai" + req.URL.Redacted()
 		}
 	case "https://api.anthropic.com":
 		return func(req *http.Request) string {
@@ -433,10 +557,18 @@ func Handle(transport http.RoundTripper, headerUpdater func(host string, req *ht
 				recordURL = hostURL.Scheme + "://" + hostURL.Host + c.Request().URL.Redacted()
 			}
 		} else {
-			if toTargetURL == nil {
+			switch {
+			case toTargetURL != nil:
+				targetURL = toTargetURL(c.Request())
+			case options.ReplayOnly:
+				u, err := url.Parse(host)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+					return echo.NewHTTPError(http.StatusBadRequest, "invalid replay origin")
+				}
+				targetURL = u.Scheme + "://" + u.Host + c.Request().URL.RequestURI()
+			default:
 				return echo.NewHTTPError(http.StatusBadRequest, "unknown service host "+host)
 			}
-			targetURL = toTargetURL(c.Request())
 		}
 
 		if recordURL != "" {
@@ -453,10 +585,19 @@ func Handle(transport http.RoundTripper, headerUpdater func(host string, req *ht
 		if headerUpdater != nil {
 			headerUpdater(host, req)
 		}
+		req.Header.Del("X-Cagent-Evaluator-Recording")
+		if !environment.IsTrustedDockerURL(options.UpstreamGateway) {
+			if err := httpclient.RemoveEncryptedConfig(req); err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "Failed to scrub encrypted agent config")
+			}
+		}
 
 		client := &http.Client{
 			Timeout:   0, // no timeout, let ctx control it
 			Transport: transport,
+		}
+		if isEvaluatorRequest(req) {
+			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		}
 
 		resp, err := client.Do(req)
@@ -473,6 +614,9 @@ func Handle(transport http.RoundTripper, headerUpdater func(host string, req *ht
 		c.Response().WriteHeader(resp.StatusCode)
 
 		if IsStreamResponse(resp) {
+			if options.StreamEventGate != nil {
+				return gatedStreamCopy(c, resp, options.StreamEventGate)
+			}
 			if options.SimulateStream {
 				return SimulatedStreamCopy(c, resp, options.StreamChunkDelay)
 			}
@@ -481,6 +625,39 @@ func Handle(transport http.RoundTripper, headerUpdater func(host string, req *ht
 
 		_, err = io.Copy(c.Response().Writer, resp.Body)
 		return err
+	}
+}
+
+func gatedStreamCopy(c echo.Context, resp *http.Response, gate func([]byte) <-chan struct{}) error {
+	ctx := c.Request().Context()
+	reader := bufio.NewReader(resp.Body)
+	var event []byte
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		event = append(event, line...)
+		if err == nil && !bytes.Equal(line, []byte("\n")) && !bytes.Equal(line, []byte("\r\n")) {
+			continue
+		}
+		if len(event) > 0 {
+			if _, err := c.Response().Write(event); err != nil {
+				return err
+			}
+			c.Response().Flush()
+			if resume := gate(event); resume != nil {
+				select {
+				case <-resume:
+				case <-ctx.Done():
+					return nil
+				}
+			}
+			event = event[:0]
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -13,19 +14,21 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/goccy/go-yaml"
 
-	hclconv "github.com/docker/docker-agent/pkg/config/hcl"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
 // LoadOption customizes a single Load call.
 type LoadOption func(*loadOptions)
 
 type loadOptions struct {
-	flavors []string
+	flavors  []string
+	versions VersionRegistrar
 }
 
 // WithFlavors enables the named flavor patches for this load. Order matters:
@@ -38,30 +41,23 @@ func WithFlavors(names ...string) LoadOption {
 }
 
 func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Config, error) {
-	var options loadOptions
+	var loadOpts loadOptions
 	for _, opt := range opts {
-		opt(&options)
+		opt(&loadOpts)
 	}
 
 	data, err := source.Read(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	// Configurations may be authored in HCL as an alternative to YAML.
-	// Detect the format from the source name extension or, when no hint is
-	// available (OCI artifacts, etc.), from the content itself, then
-	// transparently convert to YAML for the rest of the pipeline.
-	if isHCLSource(source.Name(), data) {
-		data, err = hclconv.ToYAML(data, source.Name())
-		if err != nil {
-			return nil, fmt.Errorf("parsing HCL config file: %w", err)
-		}
-	}
+	// Editors and PowerShell 5 (Out-File, Set-Content -Encoding utf8) save
+	// UTF-8 with a byte order mark, which the YAML parser would otherwise
+	// read as part of the first key (`unknown field "\ufeffagents"`).
+	data = trimUTF8BOM(data)
 
 	// Flavor patches rewrite the raw document, so they run before anything
 	// (including the version sniff below) reads it.
-	if data, err = applyFlavors(ctx, data, options.flavors); err != nil {
+	if data, err = applyFlavors(ctx, data, loadOpts.flavors); err != nil {
 		return nil, err
 	}
 
@@ -73,16 +69,19 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 	}
 	raw.Version = cmp.Or(raw.Version, latest.Version)
 
-	oldConfig, err := parseCurrentVersion(data, raw.Version)
+	parsers, upgraders := versions(loadOpts.versions)
+	oldConfig, err := parseCurrentVersion(data, raw.Version, parsers)
 	if err != nil {
 		msg := yaml.FormatError(err, true, true)
-		if hint := newerVersionHint(data, raw.Version, err); hint != "" {
+		if hint := newerVersionHint(data, raw.Version, err, parsers); hint != "" {
+			msg += "\n" + hint
+		} else if hint := removedFieldHint(raw.Version, err, parsers); hint != "" {
 			msg += "\n" + hint
 		}
 		return nil, fmt.Errorf("parsing config file\n%s", msg)
 	}
 
-	config, err := migrateToLatestConfig(oldConfig, data)
+	config, err := migrateToLatestConfig(oldConfig, data, upgraders)
 	if err != nil {
 		return nil, fmt.Errorf("migrating config: %w", err)
 	}
@@ -168,17 +167,20 @@ func readInstructionFiles(parentDir string, paths []string) (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
+// ErrGatewayAuthentication means the Docker models gateway has no login token.
+var ErrGatewayAuthentication = errors.New("sorry, you first need to sign in Docker Desktop to use the Docker AI Gateway")
+
 // CheckRequiredEnvVars checks which environment variables are required by the models and tools.
 //
 // This allows exiting early with a proper error message instead of failing later when trying to use a model or tool.
-func CheckRequiredEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway string, env environment.Provider) error {
-	if modelsGateway != "" && environment.IsTrustedDockerURL(modelsGateway) {
+func CheckRequiredEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway string, env environment.Provider, evaluatorOpts ...options.Opt) error {
+	if modelsGateway != "" && environment.IsDockerDomainURL(modelsGateway) {
 		if jwt, _ := env.Get(ctx, environment.DockerDesktopTokenEnv); jwt == "" {
-			return errors.New("sorry, you first need to sign in Docker Desktop to use the Docker AI Gateway")
+			return ErrGatewayAuthentication
 		}
 	}
 
-	missing, missingModelCreds, err := gatherMissingEnvVars(ctx, cfg, modelsGateway, env)
+	missing, missingModelCreds, err := gatherMissingEnvVars(ctx, cfg, modelsGateway, env, evaluatorOpts...)
 	if err != nil {
 		// If there's a tool preflight error, log it but continue
 		slog.WarnContext(ctx, "Failed to preflight toolset environment variables; continuing", "error", err)
@@ -195,8 +197,7 @@ func CheckRequiredEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway
 	return nil
 }
 
-func parseCurrentVersion(data []byte, version string) (any, error) {
-	parsers, _ := versions()
+func parseCurrentVersion(data []byte, version string, parsers map[string]func([]byte) (any, error)) (any, error) {
 	parser, found := parsers[version]
 	if !found {
 		return nil, fmt.Errorf("unsupported config version: %v (valid versions: %s)", version, strings.Join(slices.Sorted(maps.Keys(parsers)), ", "))
@@ -204,15 +205,19 @@ func parseCurrentVersion(data []byte, version string) (any, error) {
 	return parser(data)
 }
 
-// newerVersionHint returns a user-facing hint when a strict-parse failure is
-// caused by a key that a newer schema version accepts. It tries the parsers
-// for every version above the declared one, in order, and points the user at
-// the smallest version that parses the config successfully. Best-effort: a
-// newer version may accept the config for unrelated reasons (laxer schema),
-// so the original unknown-field error is always shown before the hint.
-func newerVersionHint(data []byte, version string, parseErr error) string {
+// newerVersionHint returns a hint when a parse error is caused by a key or a
+// value shape that a newer config version accepts (an unknown field, or a type
+// mismatch such as a list where an older schema only takes a string), so the
+// user is pointed at the `version` bump instead of a generic YAML error. It
+// tries the parsers for every version above the declared one, in order, and
+// points the user at the smallest version that parses the config successfully.
+// Best-effort: a newer version may accept the config for unrelated reasons
+// (laxer schema), so the original unknown-field error is always shown before
+// the hint.
+func newerVersionHint(data []byte, version string, parseErr error, parsers map[string]func([]byte) (any, error)) string {
 	var unknownField *yaml.UnknownFieldError
-	if !errors.As(parseErr, &unknownField) {
+	var typeErr *yaml.TypeError
+	if !errors.As(parseErr, &unknownField) && !errors.As(parseErr, &typeErr) {
 		return ""
 	}
 
@@ -221,7 +226,6 @@ func newerVersionHint(data []byte, version string, parseErr error) string {
 		return ""
 	}
 
-	parsers, _ := versions()
 	var newer []int
 	for v := range parsers {
 		if n, err := strconv.Atoi(v); err == nil && n > current {
@@ -233,17 +237,16 @@ func newerVersionHint(data []byte, version string, parseErr error) string {
 	for _, n := range newer {
 		v := strconv.Itoa(n)
 		if _, err := parsers[v](data); err == nil {
-			return fmt.Sprintf("hint: this key is supported by config version %s; update the top-level 'version' field (currently %s)", v, version)
+			return fmt.Sprintf("hint: this syntax is supported by config version %s; update the top-level 'version' field (currently %s)", v, version)
 		}
 	}
 
 	return ""
 }
 
-func migrateToLatestConfig(c any, raw []byte) (latest.Config, error) {
+func migrateToLatestConfig(c any, raw []byte, upgraders []func(any, []byte) (any, error)) (latest.Config, error) {
 	var err error
 
-	_, upgraders := versions()
 	for _, upgrade := range upgraders {
 		c, err = upgrade(c, raw)
 		if err != nil {
@@ -251,10 +254,17 @@ func migrateToLatestConfig(c any, raw []byte) (latest.Config, error) {
 		}
 	}
 
-	return c.(latest.Config), nil
+	cfg, ok := c.(latest.Config)
+	if !ok {
+		return latest.Config{}, fmt.Errorf("migration did not produce latest.Config (got %T)", c)
+	}
+	return cfg, nil
 }
 
 func validateConfig(cfg *latest.Config) error {
+	if err := cfg.ValidateEvaluators(); err != nil {
+		return err
+	}
 	if len(cfg.Agents) == 0 {
 		return errors.New("at least one agent must be configured (add an entry under 'agents')")
 	}
@@ -265,14 +275,6 @@ func validateConfig(cfg *latest.Config) error {
 
 	if cfg.Models == nil {
 		cfg.Models = map[string]latest.ModelConfig{}
-	}
-
-	for name := range cfg.Models {
-		if cfg.Models[name].ParallelToolCalls == nil {
-			m := cfg.Models[name]
-			m.ParallelToolCalls = new(true)
-			cfg.Models[name] = m
-		}
 	}
 
 	if err := ensureModelsExist(cfg); err != nil {
@@ -392,16 +394,6 @@ func validateForceHandoffs(cfg *latest.Config, allNames map[string]bool) error {
 	}
 
 	return nil
-}
-
-// isHCLSource reports whether the configuration data should be parsed as HCL
-// rather than YAML. The decision is based first on the source name extension,
-// and then on a content-based heuristic when no extension hint is available.
-func isHCLSource(name string, data []byte) bool {
-	if strings.EqualFold(filepath.Ext(name), ".hcl") {
-		return true
-	}
-	return hclconv.LooksLikeHCL(data)
 }
 
 // providerAPITypes are the allowed values for api_type in provider configs
@@ -548,6 +540,12 @@ func validateSkills(label string, sc *latest.SkillsConfig) error {
 		if strings.TrimSpace(inline.Name) == "" {
 			return fmt.Errorf("%s has an inline skill with no name", label)
 		}
+		// The name doubles as the `/<name>` slash command, whose parser splits
+		// the input on the first space, so whitespace here would silently
+		// produce a skill that command can never reach.
+		if strings.ContainsFunc(inline.Name, unicode.IsSpace) {
+			return fmt.Errorf("%s inline skill '%s' must not have whitespace in its name: it doubles as the /%s command", label, inline.Name, inline.Name)
+		}
 		if strings.TrimSpace(inline.Description) == "" {
 			return fmt.Errorf("%s inline skill '%s' is missing a description", label, inline.Name)
 		}
@@ -571,4 +569,9 @@ func validateSkills(label string, sc *latest.SkillsConfig) error {
 		seenInline[inline.Name] = true
 	}
 	return nil
+}
+
+// trimUTF8BOM drops a leading UTF-8 byte order mark.
+func trimUTF8BOM(data []byte) []byte {
+	return bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 }

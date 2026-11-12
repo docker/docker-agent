@@ -38,11 +38,23 @@ type ElicitationField struct {
 	Name, Title, Type, Description string
 	Required                       bool
 	EnumValues                     []string
-	Default                        any
-	MinLength, MaxLength           int
-	Format, Pattern                string
-	Minimum, Maximum               float64
-	HasMinimum, HasMaximum         bool
+	// EnumTitles and EnumDescriptions parallel EnumValues for titled choices
+	// (oneOf / items.anyOf); EnumTitles are shown instead of the values.
+	EnumTitles, EnumDescriptions []string
+	Default                      any
+	MinLength, MaxLength         int
+	MinItems, MaxItems           int
+	Format, Pattern              string
+	Minimum, Maximum             float64
+	HasMinimum, HasMaximum       bool
+}
+
+// optionLabels returns what the dialog shows for each choice.
+func (f ElicitationField) optionLabels() []string {
+	if len(f.EnumTitles) == len(f.EnumValues) {
+		return f.EnumTitles
+	}
+	return f.EnumValues
 }
 
 // ElicitationDialog implements Dialog for MCP elicitation requests.
@@ -64,6 +76,8 @@ type ElicitationDialog struct {
 	inputs        []textinput.Model
 	boolValues    map[int]bool
 	enumIndexes   map[int]int // selected index for enum fields
+	multiChecked  map[int][]bool
+	multiCursor   map[int]int // focused option of multiselect fields
 	currentField  int
 	keyMap        elicitationKeyMap
 	fieldErrors   map[int]string  // validation error messages per field
@@ -155,6 +169,8 @@ func NewElicitationDialog(message string, schema any, meta map[string]any, elici
 		inputs:        make([]textinput.Model, len(fields)),
 		boolValues:    make(map[int]bool),
 		enumIndexes:   make(map[int]int),
+		multiChecked:  make(map[int][]bool),
+		multiCursor:   make(map[int]int),
 		fieldErrors:   make(map[int]string),
 		keyMap: elicitationKeyMap{
 			Up:       key.NewBinding(key.WithKeys("up")),
@@ -239,7 +255,12 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, d.keyMap.Space) && !d.isTextInputField() && !d.hasFreeFormInput():
-		// Space cycles forward through options, same as down arrow
+		// Space toggles a multiselect option, and cycles forward through
+		// other options, same as down arrow
+		if d.fields[d.currentField].Type == "multiselect" {
+			d.toggleOption(d.currentField, d.multiCursor[d.currentField])
+			return d, nil
+		}
 		d.moveSelection(1)
 		return d, nil
 	case key.Matches(msg, d.keyMap.Escape):
@@ -282,7 +303,22 @@ func (d *ElicitationDialog) moveSelection(delta int) {
 			return
 		}
 		d.enumIndexes[d.currentField] = (d.enumIndexes[d.currentField] + delta + n) % n
+	case "multiselect":
+		n := len(field.EnumValues)
+		d.multiCursor[d.currentField] = (d.multiCursor[d.currentField] + delta + n) % n
 	}
+	d.ensureFocusVisible()
+}
+
+// toggleOption checks or unchecks option j of multiselect field i.
+func (d *ElicitationDialog) toggleOption(i, j int) {
+	checked := d.multiChecked[i]
+	if j < 0 || j >= len(checked) {
+		return
+	}
+	delete(d.fieldErrors, i)
+	checked[j] = !checked[j]
+	d.multiCursor[i] = j
 	d.ensureFocusVisible()
 }
 
@@ -383,6 +419,8 @@ func (d *ElicitationDialog) focusRange() (start, end int) {
 		}
 	case "enum":
 		idx = max(0, min(d.enumIndexes[d.currentField], len(f.EnumValues)-1))
+	case "multiselect":
+		idx = d.multiCursor[d.currentField]
 	}
 	if idx < 0 || idx >= len(geom.optionStarts) {
 		line := fieldStart + geom.labelHeight // input line
@@ -398,7 +436,7 @@ func (d *ElicitationDialog) isTextInputField() bool {
 		return false
 	}
 	ft := d.fields[d.currentField].Type
-	return ft != "boolean" && ft != "enum"
+	return ft != "boolean" && ft != "enum" && ft != "multiselect"
 }
 
 func (d *ElicitationDialog) close(action tools.ElicitationAction, content map[string]any) tea.Cmd {
@@ -427,6 +465,21 @@ func (d *ElicitationDialog) collectAndValidate() (map[string]any, int) {
 				continue
 			}
 			content[field.Name] = field.EnumValues[idx]
+		case "multiselect":
+			selected := []any{}
+			for j, checked := range d.multiChecked[i] {
+				if checked {
+					selected = append(selected, field.EnumValues[j])
+				}
+			}
+			if errMsg := validateSelectionCount(len(selected), field); errMsg != "" {
+				d.fieldErrors[i] = errMsg
+				if firstErrorIdx < 0 {
+					firstErrorIdx = i
+				}
+				continue
+			}
+			content[field.Name] = selected
 		default:
 			raw := d.inputs[i].Value()
 			val := strings.TrimSpace(raw)
@@ -640,6 +693,9 @@ func (d *ElicitationDialog) helpPairs() []string {
 	if d.hasSelectionFields() {
 		pairs = append(pairs, "↑/↓", "select")
 	}
+	if slices.ContainsFunc(d.fields, func(f ElicitationField) bool { return f.Type == "multiselect" }) {
+		pairs = append(pairs, "space", "toggle")
+	}
 	if len(d.fields) > 0 {
 		pairs = append(pairs, "tab", "next field")
 	}
@@ -650,10 +706,10 @@ func (d *ElicitationDialog) helpPairs() []string {
 	return pairs
 }
 
-// hasSelectionFields returns true if any field uses selection-based input (boolean or enum).
+// hasSelectionFields returns true if any field uses selection-based input (boolean, enum or multiselect).
 func (d *ElicitationDialog) hasSelectionFields() bool {
 	for _, field := range d.fields {
-		if field.Type == "boolean" || field.Type == "enum" {
+		if field.Type == "boolean" || field.Type == "enum" || field.Type == "multiselect" {
 			return true
 		}
 	}
@@ -689,6 +745,8 @@ func (d *ElicitationDialog) renderField(content *Content, i int, field Elicitati
 		d.renderBooleanField(content, &geom, i, isFocused, contentWidth)
 	case "enum":
 		d.renderEnumField(content, &geom, i, field, isFocused, contentWidth)
+	case "multiselect":
+		d.renderMultiSelectField(content, &geom, i, field, isFocused, contentWidth)
 	default:
 		d.inputs[i].SetWidth(contentWidth)
 		content.AddContent(d.inputs[i].View())
@@ -707,35 +765,65 @@ func (d *ElicitationDialog) renderBooleanField(content *Content, geom *fieldGeom
 	if d.boolValues[i] {
 		selectedIdx = 0
 	}
-	d.renderSelectionField(content, geom, []string{"Yes", "No"}, selectedIdx, isFocused, contentWidth)
+	d.renderSelectionField(content, geom, []string{"Yes", "No"}, nil, selectedIdx, isFocused, contentWidth)
 }
 
 func (d *ElicitationDialog) renderEnumField(content *Content, geom *fieldGeometry, i int, field ElicitationField, isFocused bool, contentWidth int) {
-	d.renderSelectionField(content, geom, field.EnumValues, d.enumIndexes[i], isFocused, contentWidth)
+	d.renderSelectionField(content, geom, field.optionLabels(), field.EnumDescriptions, d.enumIndexes[i], isFocused, contentWidth)
 }
 
-func (d *ElicitationDialog) renderSelectionField(content *Content, geom *fieldGeometry, options []string, selectedIdx int, isFocused bool, contentWidth int) {
+func (d *ElicitationDialog) renderSelectionField(content *Content, geom *fieldGeometry, options, descriptions []string, selectedIdx int, isFocused bool, contentWidth int) {
+	d.renderOptions(content, geom, options, descriptions, contentWidth, func(j int) (string, bool) {
+		if j != selectedIdx {
+			return "  ○ ", false
+		}
+		if isFocused {
+			return "› ● ", true
+		}
+		return "  ● ", true
+	})
+}
+
+func (d *ElicitationDialog) renderMultiSelectField(content *Content, geom *fieldGeometry, i int, field ElicitationField, isFocused bool, contentWidth int) {
+	checked, cursor := d.multiChecked[i], d.multiCursor[i]
+	d.renderOptions(content, geom, field.optionLabels(), field.EnumDescriptions, contentWidth, func(j int) (string, bool) {
+		lead, box := "  ", "[ ] "
+		if isFocused && j == cursor {
+			lead = "› "
+		}
+		if checked[j] {
+			box = "[x] "
+		}
+		return lead + box, checked[j]
+	})
+}
+
+// renderOptions renders one row per option, with its description below in a
+// muted style; marker gives each option's prefix and whether it stands out.
+func (d *ElicitationDialog) renderOptions(content *Content, geom *fieldGeometry, options, descriptions []string, contentWidth int, marker func(j int) (prefix string, highlighted bool)) {
 	selectedStyle := styles.DialogContentStyle.Foreground(styles.TextBright).Bold(true)
 	unselectedStyle := styles.DialogContentStyle.Foreground(styles.TextMuted)
+	descriptionStyle := styles.DialogContentStyle.Foreground(styles.TextMuted).Italic(true)
 
-	// All prefixes are equally wide, so option heights don't change with
-	// focus/selection and wrapped rows hang-indent under the option text.
-	textWidth := max(1, contentWidth-lipgloss.Width("  ○ "))
 	row := geom.labelHeight
 	for j, option := range options {
-		prefix := "  ○ "
+		prefix, highlighted := marker(j)
 		style := unselectedStyle
-		if j == selectedIdx {
-			prefix = "  ● "
-			if isFocused {
-				prefix = "› ● "
-			}
+		if highlighted {
 			style = selectedStyle
+		}
+		// All prefixes of a field are equally wide, so option heights don't
+		// change with focus/selection and wrapped rows hang-indent under the
+		// option text.
+		textWidth := max(1, contentWidth-lipgloss.Width(prefix))
+		text := style.Width(textWidth).Render(option)
+		if j < len(descriptions) && descriptions[j] != "" {
+			text = lipgloss.JoinVertical(lipgloss.Left, text, descriptionStyle.Width(textWidth).Render(descriptions[j]))
 		}
 		// Wrap long agent-supplied options instead of letting the scrollview
 		// clip them; JoinHorizontal keeps continuation rows aligned under the
 		// first row's text column.
-		rendered := lipgloss.JoinHorizontal(lipgloss.Top, style.Render(prefix), style.Width(textWidth).Render(option))
+		rendered := lipgloss.JoinHorizontal(lipgloss.Top, style.Render(prefix), text)
 		content.AddContent(rendered)
 		height := lipgloss.Height(rendered)
 		geom.optionStarts = append(geom.optionStarts, row)
@@ -786,6 +874,8 @@ func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Mode
 			if opt < len(f.EnumValues) {
 				d.enumIndexes[i] = opt
 			}
+		case "multiselect":
+			d.toggleOption(i, opt)
 		}
 		return d, nil
 	}
@@ -825,6 +915,15 @@ func (d *ElicitationDialog) createInput(field ElicitationField, idx int) textinp
 		// Initialize enum selection to first option
 		d.enumIndexes[idx] = 0
 		return ti // Enum fields don't use text input
+
+	case "multiselect":
+		defaults, _ := field.Default.([]any)
+		checked := make([]bool, len(field.EnumValues))
+		for j, value := range field.EnumValues {
+			checked[j] = slices.Contains(defaults, any(value))
+		}
+		d.multiChecked[idx] = checked
+		return ti
 
 	case "number", "integer":
 		ti.Placeholder = cmp.Or(field.Description, "Enter a number")

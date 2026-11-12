@@ -23,11 +23,46 @@ func drainEvents(ch <-chan Event) []Event {
 	var out []Event
 	for {
 		select {
-		case ev := <-ch:
+		case ev, ok := <-ch:
+			if !ok {
+				return out
+			}
 			out = append(out, ev)
 		default:
 			return out
 		}
+	}
+}
+
+func TestDrainEvents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		assert.Empty(t, drainEvents(make(chan Event)))
+	})
+	t.Run("nil", func(t *testing.T) {
+		t.Parallel()
+		assert.Empty(t, drainEvents(nil))
+	})
+	for _, closed := range []bool{false, true} {
+		name := "open"
+		if closed {
+			name = "closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			first, last := Warning("first", "root"), Warning("last", "root")
+			ch := make(chan Event, 3)
+			ch <- first
+			ch <- nil
+			ch <- last
+			if closed {
+				close(ch)
+			}
+			assert.Equal(t, []Event{first, nil, last}, drainEvents(ch))
+			assert.Empty(t, drainEvents(ch))
+		})
 	}
 }
 
@@ -109,11 +144,14 @@ func TestEnforceMaxIterations_Interactive_ApproveExtends(t *testing.T) {
 	sess := session.New()
 	events := make(chan Event, 8)
 
-	// Pre-load an approval onto the resume channel so enforceMaxIterations
-	// returns immediately instead of blocking on user input.
-	go func() { rt.resumeChan <- ResumeApprove() }()
+	sink := EventSinkFunc(func(ev Event) {
+		events <- ev
+		if _, ok := ev.(*MaxIterationsReachedEvent); ok {
+			rt.Resume(t.Context(), ResumeApprove())
+		}
+	})
 
-	newMax, decision := rt.enforceMaxIterations(t.Context(), sess, a, 10, 10, NewChannelSink(events))
+	newMax, decision := rt.enforceMaxIterations(t.Context(), sess, a, 10, 10, sink)
 
 	assert.Equal(t, iterationContinue, decision)
 	assert.Equal(t, 20, newMax, "approve must extend by 10 iterations beyond the current iteration")
@@ -126,9 +164,14 @@ func TestEnforceMaxIterations_Interactive_RejectStops(t *testing.T) {
 	sess := session.New()
 	events := make(chan Event, 8)
 
-	go func() { rt.resumeChan <- ResumeReject("no thanks") }()
+	sink := EventSinkFunc(func(ev Event) {
+		events <- ev
+		if _, ok := ev.(*MaxIterationsReachedEvent); ok {
+			rt.Resume(t.Context(), ResumeReject("no thanks"))
+		}
+	})
 
-	_, decision := rt.enforceMaxIterations(t.Context(), sess, a, 10, 10, NewChannelSink(events))
+	_, decision := rt.enforceMaxIterations(t.Context(), sess, a, 10, 10, sink)
 
 	assert.Equal(t, iterationStop, decision)
 
@@ -177,9 +220,9 @@ func TestHandleStreamError_ContextCanceled_Fatal(t *testing.T) {
 }
 
 // errModelStore is a ModelStore that always returns an error from GetModel,
-// keeping doCompact from progressing past its model-lookup guard. It lets
-// handleStreamError tests exercise the retry branch without Summarize
-// trying to drive a real compaction agent.
+// so compaction bails at its context-limit guard. It lets
+// handleStreamError tests exercise the retry branch without
+// compactWithReason driving a real compaction agent.
 type errModelStore struct{ ModelStore }
 
 func (errModelStore) GetModel(_ context.Context, _ modelsdev.ID) (*modelsdev.Model, error) {

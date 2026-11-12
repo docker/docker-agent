@@ -29,12 +29,11 @@ func versionFromDir(dir string) (int, bool) {
 // Re-uses [versionFromDir] for the vN suffix, so the two helpers cannot
 // drift apart.
 func versionFromImport(importPath string) (int, bool) {
-	const marker = "pkg/config/"
-	idx := strings.LastIndex(importPath, marker)
-	if idx < 0 {
+	_, dir, found := strings.CutLast(importPath, "pkg/config/")
+	if !found {
 		return 0, false
 	}
-	return versionFromDir(importPath[idx+len(marker):])
+	return versionFromDir(dir)
 }
 
 // highestSiblingVersion returns the largest N such that pkg/config/vN/

@@ -250,6 +250,12 @@ func resolveRealPath(p string) (string, error) {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
+	// A dangling symlink is not a missing path: a write could create its target.
+	if info, err := os.Lstat(abs); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("cannot resolve symlink %q", abs)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
 	// Walk up to find the nearest existing ancestor.
 	parent := filepath.Dir(abs)
 	if parent == abs {

@@ -2,8 +2,8 @@
 
 FROM {{.BaseImage}}
 LABEL "io.docker.agent.evals.image"="custom"
-COPY --from=docker/docker-agent:edge /docker-agent /
-RUN printf '#!/usr/bin/env sh\nset -euo pipefail\nexec "$@"\n' > /run.sh && chmod +x /run.sh
+{{if .AgentImage}}COPY --from={{.AgentImage}} /docker-agent /
+{{end}}RUN printf '#!/usr/bin/env sh\nset -euo pipefail\nexec "$@"\n' > /run.sh && chmod +x /run.sh
 WORKDIR /working_dir
 ENV TELEMETRY_ENABLED=false
 ENV DOCKER_AGENT_HIDE_TELEMETRY_BANNER=1

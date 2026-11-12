@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 func TestLoadConfig_InvalidPath(t *testing.T) {
@@ -24,11 +25,11 @@ agents:
 	err := tmpRoot.WriteFile("valid.yaml", []byte(validConfig), 0o644)
 	require.NoError(t, err)
 
-	cfg, err := Load(t.Context(), NewFileSource(filepath.Join(tmp, "valid.yaml")))
+	cfg, err := Load(t.Context(), NewFileSource(filepath.Join(tmp, "valid.yaml")), WithVersions(legacy.Register))
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
-	_, err = Load(t.Context(), NewFileSource(filepath.Join(tmp, "../../../etc/passwd"))) //nolint: gocritic // testing invalid path
+	_, err = Load(t.Context(), NewFileSource(filepath.Join(tmp, "../../../etc/passwd")), WithVersions(legacy.Register)) //nolint: gocritic // testing invalid path
 	require.Error(t, err)
 }
 
@@ -61,7 +62,7 @@ func TestValidationErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := Load(t.Context(), NewFileSource(filepath.Join("testdata", tt.path)))
+			_, err := Load(t.Context(), NewFileSource(filepath.Join("testdata", tt.path)), WithVersions(legacy.Register))
 			require.Error(t, err)
 		})
 	}
@@ -116,6 +117,37 @@ func TestCompactionThresholdValidation(t *testing.T) {
 	}
 }
 
+// TestValidateAddPromptFilesDepth keeps the Go validation in step with the
+// JSON schema's "minimum": 0 — YAML loading only goes through the former.
+func TestValidateAddPromptFilesDepth(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		depth   int
+		wantErr bool
+	}{
+		{name: "disabled", depth: 0},
+		{name: "positive", depth: 3},
+		{name: "negative rejected", depth: -1, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := latest.Config{Agents: []latest.AgentConfig{
+				{Name: "root", Model: "openai/gpt-4o", AddPromptFilesDepth: tt.depth},
+			}}
+			err := cfg.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "agents.root: add_prompt_files_depth must be >= 0, got -1")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_UnsupportedVersion(t *testing.T) {
 	t.Parallel()
 
@@ -124,7 +156,7 @@ agents:
   root:
     model: openai/gpt-4
 `
-	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfg)))
+	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfg)), WithVersions(legacy.Register))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported config version: 99")
 	assert.Contains(t, err.Error(), "valid versions")
@@ -142,7 +174,7 @@ models:
     provider: openai
     model: gpt-4o-mini
 `
-	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfg)))
+	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfg)), WithVersions(legacy.Register))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one agent must be configured")
 }
@@ -180,7 +212,7 @@ func TestValidSkillsConfiguration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := Load(t.Context(), NewFileSource(filepath.Join("testdata", tt.path)))
+			cfg, err := Load(t.Context(), NewFileSource(filepath.Join("testdata", tt.path)), WithVersions(legacy.Register))
 			require.NoError(t, err)
 			require.NotNil(t, cfg)
 		})
@@ -201,7 +233,7 @@ agents:
     toolsets:
       - type: filesystem
 `
-	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfgStr)))
+	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfgStr)), WithVersions(legacy.Register))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty skills entry")
 }
@@ -405,7 +437,7 @@ agents:
     toolsets:
       - type: filesystem
 `
-	cfg, err := Load(t.Context(), NewBytesSource("test", []byte(cfgStr)))
+	cfg, err := Load(t.Context(), NewBytesSource("test", []byte(cfgStr)), WithVersions(legacy.Register))
 	require.NoError(t, err)
 	agent, ok := cfg.Agents.Lookup("root")
 	require.True(t, ok)

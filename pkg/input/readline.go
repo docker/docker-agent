@@ -6,29 +6,25 @@ import (
 	"io"
 )
 
+// ReadLine waits for a line or cancellation; cancellation cannot interrupt rd itself.
 func ReadLine(ctx context.Context, rd io.Reader) (string, error) {
-	lines := make(chan string)
-	errs := make(chan error)
-
+	type result struct {
+		line string
+		err  error
+	}
+	results := make(chan result, 1)
 	go func() {
-		defer close(lines)
-		defer close(errs)
-
-		reader := bufio.NewReader(rd)
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			errs <- err
-		} else {
-			lines <- line
-		}
+		line, err := bufio.NewReader(rd).ReadString('\n')
+		results <- result{line: line, err: err}
 	}()
 
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case err := <-errs:
-		return "", err
-	case line := <-lines:
-		return line, nil
+	case result := <-results:
+		if result.err != nil {
+			return "", result.err
+		}
+		return result.line, nil
 	}
 }

@@ -1,0 +1,19 @@
+#!yaml
+# Public GitHub skill sources. GITHUB_TOKEN is optional and uses the configured
+# environment provider. Branch/tag resolutions are cached for five minutes;
+# immutable commit snapshots are reused without downloading again.
+agents:
+  root:
+    model: openai/gpt-4o-mini
+    description: Assistant with Docker skills from GitHub.
+    instruction: Use the available skills when a task matches their description.
+    skills:
+      - local
+      - https://github.com/docker/skills
+      # To pin a revision or select a directory instead:
+      # - https://github.com/docker/skills/tree/main/skills
+      # - https://github.com/docker/skills?ref=v0.3.0
+      # - https://github.com/owner/repo?ref=feature%2Fskills&path=skills
+    toolsets:
+      - type: filesystem
+      - type: shell

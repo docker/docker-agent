@@ -15,12 +15,16 @@
 package promptfiles
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 
 	"github.com/docker/docker-agent/pkg/skills"
 )
+
+// InstructionGroup identifies prompt-file sources in persisted instruction context.
+const InstructionGroup = "core/prompt-files"
 
 // KitSubdir is the subdirectory inside a docker-agent kit that holds
 // staged prompt files. The host writes to it; the in-sandbox lookup
@@ -39,23 +43,32 @@ const KitSubdir = "prompt_files"
 // homeDir == "" disables the home-dir lookup — useful in tests so
 // they don't need to touch the real $HOME.
 func Paths(workDir, homeDir, kitDir, filename string) []string {
+	paths, _ := PathsWithError(workDir, homeDir, kitDir, filename)
+	return paths
+}
+
+// PathsWithError preserves partial matches but reports non-missing discovery failures.
+func PathsWithError(workDir, homeDir, kitDir, filename string) ([]string, error) {
 	var paths []string
-	if p := FindInHierarchy(workDir, filename); p != "" {
+	p, lookupErr := findInHierarchy(workDir, filename)
+	if p != "" {
 		paths = append(paths, p)
 	}
+	var extra string
 	switch {
 	case kitDir != "":
-		p := filepath.Join(kitDir, KitSubdir, filename)
-		if isFile(p) && !slices.Contains(paths, p) {
-			paths = append(paths, p)
-		}
+		extra = filepath.Join(kitDir, KitSubdir, filename)
 	case homeDir != "":
-		p := filepath.Join(homeDir, filename)
-		if isFile(p) && !slices.Contains(paths, p) {
-			paths = append(paths, p)
+		extra = filepath.Join(homeDir, filename)
+	}
+	if extra != "" {
+		exists, err := fileExists(extra)
+		lookupErr = errors.Join(lookupErr, err)
+		if exists && !slices.Contains(paths, extra) {
+			paths = append(paths, extra)
 		}
 	}
-	return paths
+	return paths, lookupErr
 }
 
 // PathsFromEnv is a convenience wrapper around Paths that reads the
@@ -66,22 +79,22 @@ func PathsFromEnv(workDir, homeDir, filename string) []string {
 	return Paths(workDir, homeDir, os.Getenv(skills.KitDirEnv), filename)
 }
 
-// FindInHierarchy searches for filename starting at startDir and
-// walking up the directory tree. Returns the path of the first match,
-// or "" if none.
-func FindInHierarchy(startDir, filename string) string {
+func findInHierarchy(startDir, filename string) (string, error) {
 	dir, err := filepath.Abs(startDir)
 	if err != nil {
-		return ""
+		return "", err
 	}
+	var lookupErr error
 	for {
 		path := filepath.Join(dir, filename)
-		if isFile(path) {
-			return path
+		exists, err := fileExists(path)
+		lookupErr = errors.Join(lookupErr, err)
+		if exists {
+			return path, lookupErr
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return ""
+			return "", lookupErr
 		}
 		dir = parent
 	}
@@ -89,6 +102,17 @@ func FindInHierarchy(startDir, filename string) string {
 
 // isFile reports whether path exists and is a regular file.
 func isFile(path string) bool {
+	exists, _ := fileExists(path)
+	return exists
+}
+
+func fileExists(path string) (bool, error) {
 	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !info.IsDir(), nil
 }

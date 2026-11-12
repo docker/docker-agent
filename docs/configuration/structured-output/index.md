@@ -164,10 +164,15 @@ Structured output support varies by provider:
 | Provider      | Support    | Notes                                   |
 | ------------- | ---------- | --------------------------------------- |
 | OpenAI        | ✓ Full     | Native JSON mode with schema validation |
-| Anthropic     | ✓ Full     | Tool-based structured output            |
+| Anthropic     | ✓ Native / tool | Beta Messages JSON schema on supported endpoints/models; tool mode is separate |
 | Google Gemini | ✓ Full     | Native JSON mode                        |
-| AWS Bedrock   | ✓ Partial  | Depends on underlying model             |
+| AWS Bedrock   | ✓ Tool mode | No native JSON-schema wiring in the current Converse client |
 | DMR           | ⚠️ Limited | Depends on model capabilities           |
+
+For Claude, enforcement depends on the path: native Beta Messages, an
+OpenAI-compatible host that may ignore `response_format`, or client-validated
+tool mode. Google organization policy and model-specific restrictions still apply.
+See [Claude access paths](../../providers/anthropic/index.md#feature-and-access-limits).
 
 ## Example: Data Extraction Agent
 
@@ -247,4 +252,4 @@ agents:
 > [!WARNING]
 > **Tool Limitations**
 >
-> When using native structured output, the agent typically cannot use tools since its response format is constrained to the schema. Design your agent workflow accordingly — native structured output agents work best for single-turn analysis or extraction tasks. Use `mode: tool` when the agent needs to call tools before producing its schema-constrained final answer.
+> Native structured output can coexist with tool calls when the provider and model support both; Docker Agent sends the tools alongside the output schema. Check your provider's restrictions rather than assuming tools are disabled. Use `mode: tool` when native schemas are unsupported or you want the final response submitted through an explicit output tool.

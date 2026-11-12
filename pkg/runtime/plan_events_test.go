@@ -3,9 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +18,18 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 )
+
+func TestPointerIdentity_Nil(t *testing.T) {
+	t.Parallel()
+
+	key, ok := pointerIdentity(nil)
+	assert.False(t, ok)
+	assert.Equal(t, notifierIdentity{}, key)
+	var notifier plan.ChangeNotifier = (*fakePlanNotifier)(nil)
+	key, ok = pointerIdentity(notifier)
+	assert.True(t, ok)
+	assert.Equal(t, notifierIdentity{typ: reflect.TypeFor[*fakePlanNotifier]()}, key)
+}
 
 func TestPlanChangedEventSerialization(t *testing.T) {
 	t.Parallel()
@@ -37,39 +47,6 @@ func TestPlanChangedEventSerialization(t *testing.T) {
 	assert.Equal(t, 3, decoded.Version)
 	assert.Equal(t, "architect", decoded.GetAgentName())
 	assert.NotContains(t, string(data), "content", "the event must never carry plan content")
-}
-
-// TestClient_DecodesPlanChangedEvent verifies the event is registered in the
-// client's event registry, so remote runtimes deliver it typed rather than
-// dropping it.
-func TestClient_DecodesPlanChangedEvent(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "data: {\"type\":\"plan_changed\",\"scope\":\"shared\",\"name\":\"release\",\"action\":\"status\",\"version\":4}\n\n")
-	}))
-	t.Cleanup(srv.Close)
-
-	c, err := NewClient(srv.URL)
-	require.NoError(t, err)
-
-	ch, err := c.StreamSessionEvents(t.Context(), "s")
-	require.NoError(t, err)
-
-	var got *PlanChangedEvent
-	for ev := range ch {
-		if planEv, ok := ev.(*PlanChangedEvent); ok {
-			got = planEv
-			break
-		}
-	}
-	require.NotNil(t, got, "plan_changed must decode to *PlanChangedEvent")
-	assert.Equal(t, "release", got.Name)
-	assert.Equal(t, "status", got.Action)
-	assert.Equal(t, 4, got.Version)
-	assert.Equal(t, "shared", got.Scope)
 }
 
 // planToolHandler finds one of the plan toolset's tools by name. The write
@@ -539,7 +516,7 @@ func awaitEvent[T Event](t *testing.T, ch <-chan Event, what string) T {
 	}
 }
 
-func requirePlanChanged(t *testing.T, events chan Event) *PlanChangedEvent {
+func requirePlanChanged(t *testing.T, events <-chan Event) *PlanChangedEvent {
 	t.Helper()
 	select {
 	case ev := <-events:
@@ -552,7 +529,7 @@ func requirePlanChanged(t *testing.T, events chan Event) *PlanChangedEvent {
 	}
 }
 
-func requireNoEvent(t *testing.T, events chan Event) {
+func requireNoEvent(t *testing.T, events <-chan Event) {
 	t.Helper()
 	select {
 	case ev := <-events:

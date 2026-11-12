@@ -8,26 +8,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
-)
-
-// GitHub Copilot's API requires a Copilot-Integration-Id header to
-// identify the client integration when authenticating with a GitHub
-// token. Without it, requests to https://api.githubcopilot.com are
-// rejected with "Bad Request".
-//
-// We default to "copilot-developer-cli" because, unlike "vscode-chat",
-// it is accepted by the Copilot API for both OAuth tokens and Personal
-// Access Tokens (PATs). Most docker-agent users authenticate with a
-// PAT exported as GITHUB_TOKEN, so this default makes the provider
-// usable out of the box.
-//
-// Users can still override this via provider_opts.http_headers (see
-// buildHeaderOptions below).
-//
-// See https://github.com/docker/docker-agent/issues/2471
-const (
-	copilotIntegrationIDHeader  = "Copilot-Integration-Id"
-	copilotIntegrationIDDefault = "copilot-developer-cli"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
 // buildHeaderOptions returns OpenAI client options for every custom
@@ -65,8 +46,10 @@ func buildHeaderMap(cfg *latest.ModelConfig) map[string]string {
 	// Canonicalizing keys de-duplicates headers case-insensitively:
 	// defaults are applied first, then user config clobbers conflicts.
 	headers := map[string]string{}
-	if cfg != nil && cfg.Provider == "github-copilot" {
-		headers[copilotIntegrationIDHeader] = copilotIntegrationIDDefault
+	if cfg != nil {
+		for name, value := range catalog.Lookup(cfg.Provider).Headers {
+			headers[http.CanonicalHeaderKey(name)] = sanitizeHeaderValue(value)
+		}
 	}
 	for name, value := range userHeaders(cfg) {
 		headers[http.CanonicalHeaderKey(name)] = sanitizeHeaderValue(value)

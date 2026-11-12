@@ -18,13 +18,14 @@ func newACPCmd() *cobra.Command {
 	var flags acpFlags
 
 	cmd := &cobra.Command{
-		Use:   "acp <agent-file>|<registry-ref>",
+		Use:   "acp [<agent-file>|<registry-ref>]",
 		Short: "Start an agent as an ACP (Agent Client Protocol) server",
-		Long:  "Start an ACP server that exposes the agent via the Agent Client Protocol",
-		Example: `  docker-agent serve acp ./agent.yaml
+		Long:  "Start an ACP server that exposes the agent via the Agent Client Protocol. Uses the default built-in agent when no agent is specified.",
+		Example: `  docker-agent serve acp
+  docker-agent serve acp ./agent.yaml
   docker-agent serve acp ./team.yaml
   docker-agent serve acp myorg/agent:tag`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: flags.runACPCommand,
 	}
 
@@ -41,7 +42,10 @@ func (f *acpFlags) runACPCommand(cmd *cobra.Command, args []string) (commandErr 
 		telemetry.TrackCommandError(ctx, "serve", append([]string{"acp"}, args...), commandErr)
 	}()
 
-	agentFilename := args[0]
+	var agentFilename string
+	if len(args) > 0 {
+		agentFilename = args[0]
+	}
 
 	// Expand tilde in session database path
 	sessionDB, err := pathx.ExpandHomeDir(sessionDBPath(f.sessionDB))

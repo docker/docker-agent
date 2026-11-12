@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -24,7 +25,7 @@ type agentDetailsDialog struct {
 	readOnlyScrollDialog
 
 	agent runtime.AgentDetails
-	cfg   runtime.AgentConfigInfo
+	cfg   inspection.AgentConfigInfo
 	usage *runtime.Usage
 	cost  *float64
 }
@@ -43,7 +44,7 @@ type agentDetailsDialog struct {
 // the sidebar. cost carries the agent's cumulative attributed cost with the
 // same semantics as the sidebar roster (see service.SessionState AgentCost);
 // pass nil when no cost is attributable.
-func NewAgentDetailsDialog(a runtime.AgentDetails, cfg runtime.AgentConfigInfo, usage *runtime.Usage, cost *float64) Dialog {
+func NewAgentDetailsDialog(a runtime.AgentDetails, cfg inspection.AgentConfigInfo, usage *runtime.Usage, cost *float64) Dialog {
 	d := &agentDetailsDialog{agent: a, cfg: cfg, usage: usage, cost: cost}
 	d.readOnlyScrollDialog = newReadOnlyScrollDialog(
 		readOnlyScrollDialogSize{widthPercent: 70, minWidth: 50, maxWidth: 100, heightPercent: 80, heightMax: 40},
@@ -74,6 +75,7 @@ func (d *agentDetailsDialog) renderLines(contentWidth, _ int) []string {
 		lines = append(lines, marker+" "+styles.MutedStyle.Render("current agent"), "")
 	}
 
+	lines = append(lines, d.executionLines(contentWidth)...)
 	lines = append(lines, detailField("Model", d.modelText()))
 	if len(d.cfg.Fallbacks) > 0 {
 		lines = append(lines, detailField("Fallback", strings.Join(d.cfg.Fallbacks, ", ")))
@@ -103,6 +105,43 @@ func (d *agentDetailsDialog) renderLines(contentWidth, _ int) []string {
 	lines = append(lines, d.commandLines(contentWidth)...)
 
 	return lines
+}
+
+func (d *agentDetailsDialog) executionLines(contentWidth int) []string {
+	capabilities := d.cfg.ExecutionCapabilities
+	if capabilities == nil {
+		capabilities = d.agent.ExecutionCapabilities
+	}
+	if capabilities == nil {
+		return nil
+	}
+	lines := []string{
+		detailField("Execution", capabilities.Mode),
+		detailField("Tool execution", capabilities.ToolExecution),
+		detailField("Tool approval", capabilities.ToolApproval),
+	}
+	for _, feature := range []struct {
+		label     string
+		supported bool
+	}{
+		{"Budgets", capabilities.BudgetSupported},
+		{"Native compaction", capabilities.CompactionSupported},
+		{"Mid-turn steering", capabilities.MidTurnSteeringSupported},
+		{"Prompt-hook context", capabilities.PromptHookContextSupported},
+	} {
+		value := "unsupported"
+		if feature.supported {
+			value = "supported"
+			if feature.label == "Budgets" {
+				value += "; requires runtime configuration"
+			}
+		}
+		lines = append(lines, detailField(feature.label, value))
+	}
+	if capabilities.Mode == inspection.ExecutionModeHarness {
+		lines = append(lines, toolcommon.WrapLinesWords("External tool events report actions; docker-agent does not approve them.", contentWidth)...)
+	}
+	return append(lines, "")
 }
 
 func (d *agentDetailsDialog) modelText() string {
@@ -200,7 +239,7 @@ func (d *agentDetailsDialog) toolsetLines(contentWidth int) []string {
 	return lines
 }
 
-func toolsetHeaderLine(ts runtime.ToolsetDetail) string {
+func toolsetHeaderLine(ts inspection.ToolsetDetail) string {
 	header := toolsetStateGlyph(ts.State) + " " + ts.Name +
 		styles.MutedStyle.Render(" ("+toolsetKindLabel(ts.Kind)+")")
 	if n := len(ts.Tools); n > 0 {
@@ -209,12 +248,12 @@ func toolsetHeaderLine(ts runtime.ToolsetDetail) string {
 	return header
 }
 
-func toolsetToolLines(contentWidth int, ts runtime.ToolsetDetail) []string {
+func toolsetToolLines(contentWidth int, ts inspection.ToolsetDetail) []string {
 	if len(ts.Tools) == 0 {
 		return nil
 	}
 	body := strings.Join(ts.Tools, ", ")
-	if ts.State != runtime.ToolsetStarted {
+	if ts.State != inspection.ToolsetStarted {
 		body = "declared: " + body
 	}
 	const indent = "    "
@@ -232,11 +271,11 @@ func toolsetToolLines(contentWidth int, ts runtime.ToolsetDetail) []string {
 
 // toolsetStateGlyph returns the colored status marker for a toolset's lifecycle
 // bucket, reusing the success/warning/muted palette.
-func toolsetStateGlyph(state runtime.ToolsetState) string {
+func toolsetStateGlyph(state inspection.ToolsetState) string {
 	switch state {
-	case runtime.ToolsetError:
+	case inspection.ToolsetError:
 		return styles.WarningStyle.Render(toolsetGlyphError)
-	case runtime.ToolsetStopped:
+	case inspection.ToolsetStopped:
 		return styles.MutedStyle.Render(toolsetGlyphStopped)
 	default:
 		return styles.SuccessStyle.Render(toolsetGlyphStarted)

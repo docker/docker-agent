@@ -1,0 +1,10 @@
+rules:
+  dangerous-triggers:
+    # pr-review reacts to pr-review-trigger via workflow_run by design: the
+    # trigger workflow runs with no permissions and only uploads event context.
+    ignore:
+      - pr-review.yml
+  ref-version-mismatch:
+    # docker/docs pins a moving main revision while retaining its branch label.
+    ignore:
+      - docs.yml

@@ -25,18 +25,6 @@ type RotatingFile struct {
 
 type Option func(*RotatingFile)
 
-func WithMaxSize(size int64) Option {
-	return func(r *RotatingFile) {
-		r.maxSize = size
-	}
-}
-
-func WithMaxBackups(count int) Option {
-	return func(r *RotatingFile) {
-		r.maxBackups = count
-	}
-}
-
 // NewRotatingFile creates a new rotating file writer.
 func NewRotatingFile(path string, opts ...Option) (*RotatingFile, error) {
 	r := &RotatingFile{

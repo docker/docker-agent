@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"gotest.tools/v3/assert"
 
@@ -15,8 +18,10 @@ import (
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/jscommands"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/tools"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
@@ -26,13 +31,17 @@ func TestMain(m *testing.M) {
 	// PrepareUserMessage tests exercise ${...} expansion without going
 	// through Run, which normally does this registration.
 	jscommands.Register()
-	os.Exit(m.Run())
+	os.Exit(testutil.RunWithTempHome(m.Run))
 }
 
 // mockRuntime implements runtime.Runtime for testing the CLI runner.
 // It emits pre-configured events from RunStream and records Resume calls.
 type mockRuntime struct {
 	events []runtime.Event
+	// runStreamFn, when set, replaces the default pre-buffered RunStream —
+	// used to model a live runtime that only makes progress while the
+	// consumer keeps draining.
+	runStreamFn func(context.Context, *session.Session) <-chan runtime.Event
 
 	mu                    sync.Mutex
 	resumes               []runtime.ResumeRequest
@@ -66,9 +75,13 @@ func (m *mockRuntime) CurrentAgentName(context.Context) string { return "test" }
 func (m *mockRuntime) CurrentAgentInfo(context.Context) runtime.CurrentAgentInfo {
 	return runtime.CurrentAgentInfo{Name: "test"}
 }
-func (m *mockRuntime) SetCurrentAgent(context.Context, string) error                        { return nil }
-func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error)              { return nil, nil }
-func (m *mockRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus                   { return nil }
+
+func (m *mockRuntime) SetCurrentAgent(context.Context, string) error { return nil }
+
+func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+func (m *mockRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus { return nil }
+
 func (m *mockRuntime) RestartToolset(context.Context, string) error                         { return nil }
 func (m *mockRuntime) EmitStartupInfo(context.Context, *session.Session, runtime.EventSink) {}
 func (m *mockRuntime) EmitAgentInfo(context.Context, runtime.EventSink)                     {}
@@ -84,10 +97,13 @@ func (m *mockRuntime) ResumeElicitation(_ context.Context, action tools.Elicitat
 	m.elicitationLastAction = action
 	return nil
 }
+
 func (m *mockRuntime) SessionStore() session.Store                                            { return nil }
 func (m *mockRuntime) Summarize(context.Context, *session.Session, string, runtime.EventSink) {}
 func (m *mockRuntime) PermissionsInfo() *runtime.PermissionsInfo                              { return nil }
-func (m *mockRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet                         { return nil }
+
+func (m *mockRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet { return nil }
+
 func (m *mockRuntime) RunSkillFork(context.Context, *session.Session, skillstool.RunSkillArgs, runtime.EventSink) (*tools.ToolCallResult, error) {
 	return nil, nil
 }
@@ -99,14 +115,23 @@ func (m *mockRuntime) CurrentMCPPrompts(context.Context) map[string]mcptools.Pro
 func (m *mockRuntime) ExecuteMCPPrompt(context.Context, string, map[string]string) (string, error) {
 	return "", nil
 }
+
 func (m *mockRuntime) UpdateSessionTitle(context.Context, *session.Session, string) error { return nil }
-func (m *mockRuntime) TitleGenerator(context.Context) *sessiontitle.Generator             { return nil }
-func (m *mockRuntime) Close() error                                                       { return nil }
-func (m *mockRuntime) Steer(context.Context, runtime.QueuedMessage) error                 { return nil }
-func (m *mockRuntime) FollowUp(context.Context, runtime.QueuedMessage) error              { return nil }
-func (m *mockRuntime) QueueStatus() runtime.QueueStatus                                   { return runtime.QueueStatus{} }
-func (m *mockRuntime) TogglePause(context.Context) (bool, error)                          { return false, nil }
-func (m *mockRuntime) SetAgentModel(context.Context, string, string) error                { return nil }
+
+func (m *mockRuntime) TitleGenerator(context.Context) *sessiontitle.Generator { return nil }
+
+func (m *mockRuntime) Close() error { return nil }
+
+func (m *mockRuntime) Steer(context.Context, runtime.QueuedMessage) error { return nil }
+
+func (m *mockRuntime) FollowUp(context.Context, runtime.QueuedMessage) error { return nil }
+
+func (m *mockRuntime) QueueStatus() runtime.QueueStatus { return runtime.QueueStatus{} }
+
+func (m *mockRuntime) TogglePause(context.Context) (bool, error) { return false, nil }
+
+func (m *mockRuntime) SetAgentModel(context.Context, string, string) error { return nil }
+
 func (m *mockRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
@@ -114,7 +139,9 @@ func (m *mockRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.L
 func (m *mockRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
-func (m *mockRuntime) AvailableModels(context.Context) []runtime.ModelChoice                 { return nil }
+
+func (m *mockRuntime) AvailableModels(context.Context) []modelcatalog.ModelChoice { return nil }
+
 func (m *mockRuntime) SupportsModelSwitching() bool                                          { return false }
 func (m *mockRuntime) OnToolsChanged(func(runtime.Event))                                    {}
 func (m *mockRuntime) OnBackgroundEvent(func(runtime.Event))                                 {}
@@ -127,7 +154,10 @@ func (m *mockRuntime) Resume(_ context.Context, req runtime.ResumeRequest) {
 	m.resumes = append(m.resumes, req)
 }
 
-func (m *mockRuntime) RunStream(_ context.Context, _ *session.Session) <-chan runtime.Event {
+func (m *mockRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan runtime.Event {
+	if m.runStreamFn != nil {
+		return m.runStreamFn(ctx, sess)
+	}
 	ch := make(chan runtime.Event, len(m.events))
 	for _, e := range m.events {
 		ch <- e
@@ -139,8 +169,10 @@ func (m *mockRuntime) RunStream(_ context.Context, _ *session.Session) <-chan ru
 func (m *mockRuntime) getResumes() []runtime.ResumeRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]runtime.ResumeRequest, len(m.resumes))
-	copy(result, m.resumes)
+	result := slices.Clone(m.resumes)
+	if result == nil {
+		result = []runtime.ResumeRequest{}
+	}
 	return result
 }
 
@@ -577,4 +609,57 @@ func TestErrorEventReturnedNotPrinted(t *testing.T) {
 	var runtimeErr RuntimeError
 	assert.Equal(t, errors.As(err, &runtimeErr), true)
 	assert.Equal(t, strings.Contains(buf.String(), "model failed"), false)
+}
+
+// A non-OAuth MCP elicitation must be declined in CLI mode without abandoning the event
+// stream: the runtime only makes progress while the consumer drains, so
+// returning early would stall the follow-up events (redirect warning,
+// assistant response) and lose the turn. The unbuffered stream below makes
+// the test fail (bounded, not wedged) if Run stops consuming after the
+// decline.
+func TestNonOAuthElicitationDeclinedAndStreamDrained(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		drained := make(chan struct{})
+		rt := &mockRuntime{
+			runStreamFn: func(context.Context, *session.Session) <-chan runtime.Event {
+				ch := make(chan runtime.Event) // unbuffered: every send needs a live consumer
+				go func() {
+					defer close(ch)
+					defer close(drained)
+					ch <- &runtime.ElicitationRequestEvent{Type: "elicitation_request", Message: "Choose a deployment region"}
+					ch <- runtime.Warning("The deployment choice was declined", "test")
+					ch <- runtime.AgentChoice("test", "sess", "Continuing without deployment.")
+				}()
+				return ch
+			},
+		}
+
+		var buf bytes.Buffer
+		out := NewPrinter(&buf)
+		sess := session.New()
+
+		err := Run(t.Context(), out, Config{}, rt, sess, []string{"hello"})
+		assert.NilError(t, err)
+
+		select {
+		case <-drained:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the CLI stopped draining the stream after declining the elicitation")
+		}
+
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		assert.Equal(t, rt.elicitationDeclines, 1)
+		assert.Equal(t, rt.elicitationLastAction, tools.ElicitationAction("decline"))
+		assert.Check(t, strings.Contains(buf.String(), "deployment choice was declined"),
+			"the warning must be surfaced: %q", buf.String())
+		assert.Check(t, strings.Contains(buf.String(), "Continuing without deployment."),
+			"the assistant response must still be printed: %q", buf.String())
+	})
+}
+
+func (m *mockRuntime) ReadSkillContent(context.Context, *session.Session, string) (string, error) {
+	return "", nil
 }

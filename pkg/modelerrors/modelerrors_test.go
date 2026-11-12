@@ -152,6 +152,8 @@ func TestIsContextOverflowError(t *testing.T) {
 		{name: "reduce your prompt", err: errors.New("please reduce your prompt"), expected: true},
 		{name: "reduce the length", err: errors.New("please reduce the length of the messages"), expected: true},
 		{name: "token limit", err: errors.New("token limit exceeded"), expected: true},
+		{name: "llama.cpp exceeds context size", err: errors.New("error receiving from stream: HTTP 400: request (12009 tokens) exceeds the available context size (2048 tokens), try increasing it"), expected: true},
+		{name: "llama.cpp exceeds context size (older wording, #577)", err: errors.New("error, status code: 400, status: 400 Bad Request, message: the request exceeds the available context size, try increasing it"), expected: true},
 		{name: "wrapped ContextOverflowError", err: &ContextOverflowError{Underlying: errors.New("test")}, expected: true},
 		{name: "errors.As wrapped", err: fmt.Errorf("all models failed: %w", &ContextOverflowError{Underlying: errors.New("test")}), expected: true},
 		{name: "500 internal server error", err: errors.New("500 Internal Server Error"), expected: false},
@@ -179,13 +181,23 @@ func TestClassifyOverflow(t *testing.T) {
 		{
 			name: "anthropic 413 with request_too_large body",
 			err: &StatusError{StatusCode: 413, Err: errors.New(
-				`POST "https://api.anthropic.com/v1/messages": 413 Payload Too Large {"type":"error","error":{"type":"request_too_large","message":"Request exceeds 32MB limit"}}`)},
+				`POST "https://api.anthropic.com/v1/messages": 413 Payload Too Large {"type":"error","error":{"type":"request_too_large","message":"Request exceeds 32MB limit"}}`,
+			)},
 			want: OverflowKindWire,
 		},
 		{
 			name: "openai context_length_exceeded structured code",
 			err: errors.New(
-				`POST "https://api.openai.com/v1/chat/completions": 400 Bad Request {"error":{"message":"maximum context length is 128000 tokens","type":"invalid_request_error","code":"context_length_exceeded"}}`),
+				`POST "https://api.openai.com/v1/chat/completions": 400 Bad Request {"error":{"message":"maximum context length is 128000 tokens","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+			),
+			want: OverflowKindTokens,
+		},
+		{
+			// Body captured from Docker Model Runner (llama.cpp) with a 2048-token context.
+			name: "llama.cpp exceed_context_size_error structured type",
+			err: errors.New(
+				`POST "http://localhost:12434/engines/llama.cpp/v1/chat/completions": 400 Bad Request {"error":{"code":400,"message":"request (12009 tokens) exceeds the available context size (2048 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":12009,"n_ctx":2048}}`,
+			),
 			want: OverflowKindTokens,
 		},
 		{
@@ -196,7 +208,8 @@ func TestClassifyOverflow(t *testing.T) {
 		{
 			name: "vertex 413 with prompt-too-long body — wire wins via 413",
 			err: &StatusError{StatusCode: 413, Err: errors.New(
-				`413 Payload Too Large {"error":{"message":"Prompt is too long"}}`)},
+				`413 Payload Too Large {"error":{"message":"Prompt is too long"}}`,
+			)},
 			want: OverflowKindWire,
 		},
 
@@ -204,13 +217,15 @@ func TestClassifyOverflow(t *testing.T) {
 		{
 			name: "anthropic 400 prompt too long",
 			err: errors.New(
-				`POST "https://api.anthropic.com/v1/messages": 400 Bad Request {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 137500 tokens > 135000 maximum"}}`),
+				`POST "https://api.anthropic.com/v1/messages": 400 Bad Request {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 137500 tokens > 135000 maximum"}}`,
+			),
 			want: OverflowKindTokens,
 		},
 		{
 			name: "gemini input token count exceeds maximum",
 			err: errors.New(
-				`googleapi: Error 400: input token count 200000 exceeds the maximum of 128000`),
+				`googleapi: Error 400: input token count 200000 exceeds the maximum of 128000`,
+			),
 			want: OverflowKindTokens,
 		},
 		{
@@ -260,7 +275,8 @@ func TestClassifyOverflow(t *testing.T) {
 		{
 			name: "anthropic image exceeds size",
 			err: errors.New(
-				`400 Bad Request {"error":{"message":"image exceeds 5 MB maximum: 5316852 bytes > 5242880 bytes"}}`),
+				`400 Bad Request {"error":{"message":"image exceeds 5 MB maximum: 5316852 bytes > 5242880 bytes"}}`,
+			),
 			want: OverflowKindMedia,
 		},
 		{
@@ -351,7 +367,8 @@ func TestOverflowKindOf(t *testing.T) {
 		t.Parallel()
 		// Anthropic 413 with structured body → wire
 		under := &StatusError{StatusCode: 413, Err: errors.New(
-			`413 Payload Too Large {"type":"error","error":{"type":"request_too_large","message":"too big"}}`)}
+			`413 Payload Too Large {"type":"error","error":{"type":"request_too_large","message":"too big"}}`,
+		)}
 		wrapped := NewContextOverflowError(under)
 		assert.Equal(t, OverflowKindWire, wrapped.Kind)
 
@@ -934,6 +951,86 @@ func TestScalarStringEdgeCases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.expected, scalarString(tt.input))
+		})
+	}
+}
+
+func TestRetryableHTTPStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		// Retryable HTTP codes via *StatusError.
+		{name: "429 rate-limit StatusError", err: &StatusError{StatusCode: 429, Err: errors.New("rate limited")}, expected: true},
+		{name: "408 request timeout StatusError", err: &StatusError{StatusCode: 408, Err: errors.New("timeout")}, expected: true},
+		{name: "500 server error StatusError", err: &StatusError{StatusCode: 500, Err: errors.New("internal server error")}, expected: true},
+		{name: "503 unavailable StatusError", err: &StatusError{StatusCode: 503, Err: errors.New("service unavailable")}, expected: true},
+		{name: "529 overloaded StatusError", err: &StatusError{StatusCode: 529, Err: errors.New("overloaded")}, expected: true},
+		// Non-retryable HTTP codes via *StatusError.
+		{name: "400 bad request StatusError", err: &StatusError{StatusCode: 400, Err: errors.New("bad request")}, expected: false},
+		{name: "401 unauthorized StatusError", err: &StatusError{StatusCode: 401, Err: errors.New("unauthorized")}, expected: false},
+		{name: "403 forbidden StatusError", err: &StatusError{StatusCode: 403, Err: errors.New("forbidden")}, expected: false},
+		{name: "404 not found StatusError", err: &StatusError{StatusCode: 404, Err: errors.New("not found")}, expected: false},
+		// Plain string errors without HTTP codes: must stay non-retryable so
+		// MCP/LSP "connection refused" errors are not paced.
+		{name: "connection refused", err: errors.New("connection refused: dial tcp 127.0.0.1:9999"), expected: false},
+		{name: "no such host", err: errors.New("no such host: example.invalid"), expected: false},
+		// Plain text that DOES contain a retryable HTTP code: the regex fallback
+		// in extractHTTPStatusCode finds it. NOTE: RetryableHTTPStatus returns
+		// true here, but startBackoffRetryable (the toolset gate classifier)
+		// requires a *StatusError and returns false for the same input — the
+		// narrowing is deliberate to prevent port-number/chunk-count false positives.
+		{name: "503 in plain text", err: errors.New("upstream: 503 Service Unavailable"), expected: true},
+		{name: "429 in plain text", err: errors.New("provider said: 429 Too Many Requests"), expected: true},
+		// HTTP-status precedence: a StatusError{429} wrapped alongside
+		// context.DeadlineExceeded must return true — the HTTP signal wins.
+		{
+			name: "429 StatusError + DeadlineExceeded in chain",
+			err: fmt.Errorf("start budget exceeded: %w, provider said: %w",
+				context.DeadlineExceeded,
+				&StatusError{StatusCode: 429, Err: errors.New("rate limited")}),
+			expected: true,
+		},
+		// Bare context errors: no HTTP code, must return false.
+		{name: "bare DeadlineExceeded", err: context.DeadlineExceeded, expected: false},
+		{name: "bare Canceled", err: context.Canceled, expected: false},
+		{name: "nil error", err: nil, expected: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := RetryableHTTPStatus(tc.err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestInvalidFunctionCallClassification(t *testing.T) {
+	t.Parallel()
+
+	for _, detail := range []string{
+		"", "timeout", "500", "429", "number of function response parts",
+		"token limit", "request too large", "image exceeds", "unexpected EOF",
+		`{"error":{"code":"context_length_exceeded"}}`,
+	} {
+		t.Run(detail, func(t *testing.T) {
+			t.Parallel()
+			err := fmt.Errorf("stream failed: %w: %s", ErrInvalidFunctionCall, detail)
+			retryable, rateLimited, retryAfter := ClassifyModelError(err)
+			assert.False(t, retryable)
+			assert.False(t, rateLimited)
+			assert.Zero(t, retryAfter)
+			assert.False(t, isRetryableModelError(err))
+			assert.Zero(t, extractHTTPStatusCode(err))
+			assert.False(t, RetryableHTTPStatus(err))
+			assert.False(t, IsContextOverflowError(err))
+			assert.Empty(t, OverflowKindOf(err))
+			assert.False(t, IsStreamTruncationError(err))
+			assert.Equal(t, err.Error(), FormatError(err))
 		})
 	}
 }

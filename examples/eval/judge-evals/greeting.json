@@ -1,0 +1,20 @@
+{
+  "id": "65e7cbe8-a521-4b84-8d2f-3f6bf2679792",
+  "title": "Greeting the user",
+  "messages": [
+    {
+      "message": {
+        "agent_name": "root",
+        "message": {
+          "role": "user",
+          "content": "Say hello to me in English."
+        }
+      }
+    }
+  ],
+  "evals": {
+    "relevance": [
+      "The agent greets the user in English."
+    ]
+  }
+}

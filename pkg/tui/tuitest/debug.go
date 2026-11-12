@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -15,10 +14,9 @@ import (
 // an approximate live view of what the harness sees.
 var liveFrames = flag.Bool("tuitest.live", false, "stream captured TUI frames to stderr while tests run")
 
-// dumpFrames writes every captured frame to testdata/frames/<test-name>/NNNN.txt.
-// It is useful when a WaitFor fails in CI: upload the directory as an artifact
-// and inspect the frame sequence after the fact.
-var dumpFrames = flag.Bool("tuitest.frames", false, "dump captured TUI frames to testdata/frames/<test-name>/NNNN.txt")
+// dumpFrames writes captured frames under testing.TB.ArtifactDir.
+// Use -artifacts to retain dumps after the test finishes.
+var dumpFrames = flag.Bool("tuitest.frames", false, "dump captured TUI frames to the test artifact directory (use -artifacts to retain)")
 
 // liveWriter is overridden by unit tests.
 var liveWriter io.Writer = os.Stderr
@@ -48,13 +46,12 @@ func newDebugSink(tb testing.TB) frameSink {
 
 	s := &debugSink{live: *liveFrames}
 	if *dumpFrames {
-		s.dumpDir = filepath.Join(goldenDir, "frames", safeTestName(tb.Name()))
-		if err := os.RemoveAll(s.dumpDir); err != nil {
-			tb.Fatalf("tuitest: clearing frame dump dir %s: %v", s.dumpDir, err)
+		// A test can create multiple drivers; keep their frame sequences separate.
+		dir, err := os.MkdirTemp(tb.ArtifactDir(), "frames-") //nolint:usetesting // TempDir would discard dumps even with -artifacts.
+		if err != nil {
+			tb.Fatalf("tuitest: creating frame dump dir: %v", err)
 		}
-		if err := os.MkdirAll(s.dumpDir, 0o750); err != nil {
-			tb.Fatalf("tuitest: creating frame dump dir %s: %v", s.dumpDir, err)
-		}
+		s.dumpDir = dir
 		tb.Logf("tuitest: dumping frames to %s", s.dumpDir)
 	}
 	return s
@@ -92,21 +89,4 @@ func (s *debugSink) err() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.firstErr
-}
-
-func safeTestName(name string) string {
-	var b strings.Builder
-	b.Grow(len(name))
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	if b.Len() == 0 {
-		return "unnamed"
-	}
-	return b.String()
 }

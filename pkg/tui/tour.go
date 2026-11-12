@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
 	tourstate "github.com/docker/docker-agent/pkg/tour"
@@ -50,6 +51,11 @@ func (m *appModel) handleTourOfferResult(choice dialog.TourOfferChoice) (tea.Mod
 	}
 }
 
+var (
+	tourEscapeKey = key.NewBinding(key.WithKeys("esc"))
+	tourEnterKey  = key.NewBinding(key.WithKeys("enter"))
+)
+
 // handleTourKey routes the tour's two control keys while it is running: Esc
 // quits the tour and Enter (on an empty editor) advances past the current
 // step. Enter with draft text keeps its normal send behavior, and both keys
@@ -59,11 +65,11 @@ func (m *appModel) handleTourKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	if !m.tour.Active() {
 		return nil, false
 	}
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, tourEscapeKey):
 		return m.tour.Quit(), true
-	case "enter":
-		if m.focusedPanel == PanelEditor && strings.TrimSpace(m.editor.Value()) == "" {
+	case key.Matches(msg, tourEnterKey):
+		if m.focusedPanel == PanelEditor && strings.TrimSpace(m.activeTab.editor.Value()) == "" {
 			return m.tour.Advance(), true
 		}
 	}

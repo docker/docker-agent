@@ -14,7 +14,8 @@
 #   - model        optional; model override for fork-mode skills
 #   - allowed_tools optional; tools the skill expects to use
 #
-# Inline skills are always exposed and are never affected by name filters.
+# Inline skills are always exposed and are never affected by name filters. They
+# also take precedence over a discovered skill of the same name.
 agents:
   root:
     model: openai/gpt-4o-mini
@@ -32,6 +33,20 @@ agents:
           1. Pick the right category: Added, Changed, Fixed, Removed.
           2. Write one imperative sentence summarising the user-visible change.
           3. Avoid implementation detail; focus on what changed for users.
+
+      # Like a SKILL.md file, an inline body can embed !`command` patterns. The
+      # command is emitted as a `shell` tool call and goes through the normal
+      # approval policy before it runs; refusing it leaves an error note behind.
+      - name: release-notes
+        description: Draft release notes for the commits since the last tag.
+        instructions: |
+          Draft release notes for this repository.
+
+          Current branch: !`git branch --show-current`
+          Commits since the last tag:
+          !`git log $(git describe --tags --abbrev=0)..HEAD --oneline`
+
+          Group the commits by theme and summarise each group in one sentence.
 
       # A fork-mode skill: runs in an isolated sub-session via run_skill.
       - name: triage

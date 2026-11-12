@@ -2,7 +2,6 @@ package builtins
 
 import (
 	"context"
-	"fmt"
 	"runtime"
 
 	"github.com/docker/docker-agent/pkg/hooks"
@@ -11,29 +10,13 @@ import (
 // AddEnvironmentInfo is the registered name of the add_environment_info builtin.
 const AddEnvironmentInfo = "add_environment_info"
 
-// addEnvironmentInfo emits cwd / git / OS / arch info as session_start
-// additional context. No-op when Cwd is empty.
+// addEnvironmentInfo emits cwd/git/OS/arch/shell as session_start context.
+// No-op when Cwd is empty.
 func addEnvironmentInfo(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
 	if in == nil || in.Cwd == "" {
 		return nil, nil
 	}
 	return hooks.NewAdditionalContextOutput(hooks.EventSessionStart, environmentInfo(in.Cwd)), nil
-}
-
-// environmentInfo formats the env block injected at session_start:
-// working directory, git-repo status, and human-readable OS / arch.
-func environmentInfo(workingDir string) string {
-	gitRepo := "No"
-	if isGitRepo(workingDir) {
-		gitRepo = "Yes"
-	}
-	return fmt.Sprintf(`Here is useful information about the environment you are running in:
-	<env>
-	Working directory: %s
-	Is directory a git repo: %s
-	Operating System: %s
-	CPU Architecture: %s
-	</env>`, workingDir, gitRepo, displayOS(), displayArch())
 }
 
 // displayOS returns a friendlier label for the common values of

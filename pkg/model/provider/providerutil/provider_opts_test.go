@@ -118,3 +118,15 @@ func TestGetProviderOptInt64(t *testing.T) {
 		})
 	}
 }
+
+func TestHasProviderOpt(t *testing.T) {
+	t.Parallel()
+	for value, want := range map[any]bool{"default": true, "": false, 1: true} {
+		assert.Equal(t, want, HasProviderOpt(map[string]any{"k": value}, "k"), "%v", value)
+	}
+	assert.False(t, HasProviderOpt(nil, "k"))
+	assert.False(t, HasProviderOpt(map[string]any{"k": nil}, "k"))
+	assert.False(t, HasProviderOpt(map[string]any{"k": []any{}}, "k"))
+	assert.False(t, HasProviderOpt(map[string]any{"k": []string{}}, "k"))
+	assert.True(t, HasProviderOpt(map[string]any{"k": []any{"a"}}, "k"))
+}

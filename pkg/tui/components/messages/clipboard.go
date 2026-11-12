@@ -9,7 +9,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
@@ -80,47 +79,6 @@ func stripBorderChars(s string) string {
 	return result.String()
 }
 
-// isWordChar returns true if the rune is a word character (letter, digit, or underscore)
-func isWordChar(r rune) bool {
-	return (r >= 'a' && r <= 'z') ||
-		(r >= 'A' && r <= 'Z') ||
-		(r >= '0' && r <= '9') ||
-		r == '_' ||
-		r >= 0x80 // Include non-ASCII characters (unicode letters, etc.)
-}
-
-// displayWidthToRuneIndex converts a display width to a rune index
-func displayWidthToRuneIndex(s string, targetWidth int) int {
-	if targetWidth <= 0 {
-		return 0
-	}
-
-	runes := []rune(s)
-	currentWidth := 0
-
-	for i, r := range runes {
-		if currentWidth >= targetWidth {
-			return i
-		}
-		currentWidth += runewidth.RuneWidth(r)
-	}
-
-	return len(runes)
-}
-
-// runeIndexToDisplayWidth converts a rune index to display width
-func runeIndexToDisplayWidth(s string, runeIdx int) int {
-	runes := []rune(s)
-	if runeIdx > len(runes) {
-		runeIdx = len(runes)
-	}
-	width := 0
-	for i := range runeIdx {
-		width += runewidth.RuneWidth(runes[i])
-	}
-	return width
-}
-
 // uiAffordanceLines lists the purely decorative click affordances (copy,
 // edit, retry labels, collapse indicator) that can appear on their own line
 // in rendered messages. Built as a slice because some labels share the same
@@ -156,70 +114,38 @@ func isUIAffordanceLine(trimmed string) bool {
 
 // extractSelectedText extracts the currently selected text from rendered content
 func (m *model) extractSelectedText() string {
-	if !m.selection.active {
+	if !m.selection.hasRange() {
 		return ""
 	}
 
-	m.ensureAllItemsRendered()
-	lines := m.renderedLines
+	m.updateScrollState()
 	startLine, startCol, endLine, endCol := m.selection.normalized()
 
-	if startLine < 0 || startLine >= len(lines) {
+	if startLine < 0 || startLine >= m.totalHeight {
 		return ""
 	}
-	if endLine >= len(lines) {
-		endLine = len(lines) - 1
+	if endLine >= m.totalHeight {
+		endLine = m.totalHeight - 1
 	}
 
 	var selected []string
-	for i := startLine; i <= endLine && i < len(lines); i++ {
-		originalLine := lines[i]
-		// Strip ANSI codes first to get the displayed text with borders
-		plainLine := ansi.Strip(originalLine)
-		// Strip border characters to get the actual text content
-		line := stripBorderChars(plainLine)
-		runes := []rune(line)
-
-		// Map visual column positions from the plain line (with borders) to the
-		// stripped line (without borders) by tracking which runes correspond to
-		// which visual columns
-		visualToRune := make(map[int]int)
-		visualCol := 0
-		lineRuneIdx := 0
-		for _, r := range plainLine {
-			if !boxDrawingChars[r] {
-				// This rune is kept in the stripped line
-				visualToRune[visualCol] = lineRuneIdx
-				lineRuneIdx++
-			}
-			visualCol += runewidth.RuneWidth(r)
+	for i := startLine; i <= endLine && i < m.totalHeight; i++ {
+		plainLine := ansi.Strip(m.renderedLine(i))
+		from, to := 0, ansi.StringWidth(plainLine)
+		if i == startLine {
+			from = startCol
+		}
+		if i == endLine {
+			to = endCol
 		}
 
-		// Find the closest rune index for the start and end columns
-		lineWidth := visualCol
-		startRuneIdx := findClosestRuneIndex(visualToRune, startCol, len(runes), lineWidth)
-		endRuneIdx := findClosestRuneIndex(visualToRune, endCol, len(runes), lineWidth)
-
-		var lineText string
-		switch i {
-		case startLine:
-			if startLine == endLine {
-				if startRuneIdx < len(runes) && startRuneIdx < endRuneIdx {
-					lineText = string(runes[startRuneIdx:endRuneIdx])
-				}
-				break
+		var text strings.Builder
+		for _, cluster := range lineGraphemes(plainLine) {
+			if cluster.endCol > from && cluster.startCol < to {
+				text.WriteString(cluster.text)
 			}
-			// First line: from startCol to end
-			if startRuneIdx < len(runes) {
-				lineText = string(runes[startRuneIdx:])
-			}
-		case endLine:
-			// Last line: from start to endCol
-			lineText = string(runes[:endRuneIdx])
-		default:
-			// Middle lines: entire line
-			lineText = line
 		}
+		lineText := stripBorderChars(text.String())
 
 		// Keep leading whitespace (indentation) but drop the width padding
 		// that rendered lines carry on the right.
@@ -272,39 +198,6 @@ func cleanSelectedLines(lines []string) string {
 		}
 	}
 	return strings.Join(out, "\n")
-}
-
-// findClosestRuneIndex finds the rune index for a given visual column,
-// or the closest next rune if the exact column doesn't exist.
-// Columns at or beyond the end of the line map to one past the last rune, so
-// a selection dragged past the end of an unpadded line still includes its
-// last character (slicing treats the end index as exclusive).
-func findClosestRuneIndex(visualToRune map[int]int, visualCol, maxRunes, lineWidth int) int {
-	// Try exact match first
-	if runeIdx, ok := visualToRune[visualCol]; ok {
-		return runeIdx
-	}
-
-	if visualCol >= lineWidth {
-		return maxRunes
-	}
-
-	// Find the next available rune index after the visual column
-	for col := visualCol + 1; col <= visualCol+10; col++ {
-		if runeIdx, ok := visualToRune[col]; ok {
-			return runeIdx
-		}
-	}
-
-	// Find the previous available rune index
-	for col := visualCol - 1; col >= 0; col-- {
-		if runeIdx, ok := visualToRune[col]; ok {
-			return runeIdx
-		}
-	}
-
-	// Fallback: return the last rune index
-	return maxRunes
 }
 
 // copySelectionToClipboard copies the currently selected text to clipboard

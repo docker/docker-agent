@@ -22,11 +22,11 @@ import (
 //   - AddEnvironmentInfo -> session_start (wd/OS/arch don't change)
 //
 // The behavior of each builtin (what it puts in AdditionalContext) is
-// covered by pkg/hooks/builtins; this test only asserts the wiring,
-// using a smoke Dispatch to confirm that the registered builtin name
-// actually resolves on the runtime's private registry. That smoke
-// check catches mismatches between the constants used here and those
-// in the builtins package.
+// covered by pkg/hooks/builtins; this test only asserts the wiring, plus a
+// smoke Dispatch of the builtins wired by builtins.ApplyAgentDefaults.
+// These events don't block, so an unresolved builtin name would only show
+// up in the result's FailedHooks/SystemMessage, which the test doesn't
+// check.
 func TestHooksExecWiresAgentFlagsToBuiltins(t *testing.T) {
 	t.Parallel()
 
@@ -101,10 +101,9 @@ func TestHooksExecWiresAgentFlagsToBuiltins(t *testing.T) {
 			assert.Equal(t, tc.wantSessStart, exec.Has(hooks.EventSessionStart),
 				"session_start activation must match flags")
 
-			// Smoke Dispatch: confirms the builtin name registered by
-			// hooksExec actually resolves on the runtime's private
-			// registry. This catches mismatches between the constants used
-			// in runtime.go and those in pkg/hooks/builtins.
+			// Smoke Dispatch of the builtins wired by
+			// builtins.ApplyAgentDefaults on the runtime's private registry
+			// (populated by builtins.Register).
 			if tc.wantTurnStart {
 				res, err := exec.Dispatch(t.Context(), hooks.EventTurnStart, &hooks.Input{
 					SessionID: "test-session",

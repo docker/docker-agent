@@ -51,7 +51,7 @@ const (
 // cross-origin redirects; a custom header value carrying a secret (e.g.
 // X-OIDC-Token) would still be re-sent to the new host. Identity-token
 // endpoints (GitHub Actions, IMDS, GCP/Azure metadata, ...) don't redirect.
-var noRedirectClient = &http.Client{
+var noRedirectClient = &http.Client{ //rubocop:disable Lint/HTTPClientTransport // no-redirect client for federation OIDC; default transport is correct
 	CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	},

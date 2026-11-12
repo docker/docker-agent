@@ -7,7 +7,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -25,15 +24,13 @@ type maxIterationsDialog struct {
 	BaseDialog
 
 	maxIterations int
-	app           *app.App
 	keyMap        ConfirmKeyMap
 }
 
 // NewMaxIterationsDialog creates a new max iterations confirmation dialog
-func NewMaxIterationsDialog(maxIterations int, appInstance *app.App) Dialog {
+func NewMaxIterationsDialog(maxIterations int) Dialog {
 	return &maxIterationsDialog{
 		maxIterations: maxIterations,
-		app:           appInstance,
 		keyMap:        DefaultConfirmKeyMap(),
 	}
 }
@@ -114,13 +111,12 @@ func wrapDisplayText(text string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return text
 	}
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return text
-	}
+	words := strings.FieldsSeq(text)
 	var lines []string
 	var current string
-	for _, w := range words {
+	seenWord := false
+	for w := range words {
+		seenWord = true
 		if lipgloss.Width(current) == 0 {
 			current = w
 			continue
@@ -131,6 +127,9 @@ func wrapDisplayText(text string, maxWidth int) string {
 			lines = append(lines, current)
 			current = w
 		}
+	}
+	if !seenWord {
+		return text
 	}
 	if current != "" {
 		lines = append(lines, current)

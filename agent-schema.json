@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/docker/docker-agent/blob/main/agent-schema.json",
   "title": "Docker Agent Configuration",
-  "description": "Configuration schema for Docker Agent v15",
+  "description": "Configuration schema for Docker Agent v16",
   "type": "object",
   "properties": {
     "version": {
@@ -24,7 +24,8 @@
         "12",
         "13",
         "14",
-        "15"
+        "15",
+        "16"
       ],
       "examples": [
         "0",
@@ -42,7 +43,8 @@
         "12",
         "13",
         "14",
-        "15"
+        "15",
+        "16"
       ]
     },
     "providers": {
@@ -112,7 +114,7 @@
     },
     "runtime": {
       "$ref": "#/definitions/RuntimeDefaults",
-      "description": "Execution-time defaults the agent author wants applied. Values act as defaults only — explicit CLI flags or user-config settings always win."
+      "description": "Execution-time defaults the agent author wants applied. Values act as defaults only \u2014 explicit CLI flags or user-config settings always win."
     },
     "budget": {
       "$ref": "#/definitions/BudgetConfig",
@@ -127,9 +129,19 @@
     },
     "flavors": {
       "type": "object",
-      "description": "Named YAML patches applied on top of the rest of the document when enabled at run time (e.g. 'docker agent run --flavor <name>'). Each flavor is a partial config document merged with JSON Merge Patch semantics: objects merge recursively, scalars and arrays replace, null deletes a key. A key ending in '+' appends its items to the existing array (e.g. 'toolsets+:'); a key ending in '-' removes entries — from an object by key name, from an array by scalar equality or partial object match (e.g. 'toolsets-: [{type: shell}]'). Enabled flavors are applied in the order they were requested; requested flavors not defined here are ignored.",
+      "description": "Named YAML patches applied on top of the rest of the document when enabled at run time (e.g. 'docker agent run --flavor <name>'). Each flavor is a partial config document merged with JSON Merge Patch semantics: objects merge recursively, scalars and arrays replace, null deletes a key. A key ending in '+' appends its items to the existing array (e.g. 'toolsets+:'); a scalar existing value is promoted to a one-element array first, so 'instruction+:' extends a string instruction. A key ending in '-' removes entries \u2014 from an object by key name, from an array by scalar equality or partial object match (e.g. 'toolsets-: [{type: shell}]'). Enabled flavors are applied in the order they were requested; requested flavors not defined here are ignored.",
       "additionalProperties": {
-        "type": ["object", "null"]
+        "type": [
+          "object",
+          "null"
+        ]
+      }
+    },
+    "evaluators": {
+      "type": "object",
+      "description": "Named provider-backed assessments, independent of chat models and decision policies.",
+      "additionalProperties": {
+        "$ref": "#/definitions/EvaluatorConfig"
       }
     }
   },
@@ -162,7 +174,7 @@
         },
         "call_timeout": {
           "type": "string",
-          "description": "Cap on an individual tool call, including one reconnect-retry. Enforced: on expiry the call is cancelled and surfaced to the model as a tool error; cancellation is propagated to the server. The budget includes any nested sampling/elicitation time. Go duration format (e.g. '30s', '2m'). 0/unset means no timeout (opt-in; no profile default)."
+          "description": "Cap on an individual tool call, including one reconnect-retry. Enforced: on expiry the call is cancelled and surfaced to the model as a tool error; cancellation is propagated to the server. The budget includes any nested elicitation time. Go duration format (e.g. '30s', '2m'). 0/unset means no timeout (opt-in; no profile default)."
         },
         "restart": {
           "type": "string",
@@ -212,7 +224,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "The underlying provider type. Defaults to \"openai\" when not set. Supported values: openai, anthropic, google, amazon-bedrock, dmr, and any built-in alias (requesty, openrouter, azure, xai, ollama, mistral, baseten, ovhcloud, groq, fireworks, deepseek, cerebras, together, huggingface, moonshot, vercel, cloudflare-workers-ai, cloudflare-ai-gateway, nvidia, github-copilot, chatgpt, etc.).",
+          "description": "The underlying provider type. Defaults to \"openai\" when not set. Supported values: openai, anthropic, google, amazon-bedrock, dmr, and any built-in alias (requesty, openrouter, opper, runcrate, api-route, lunaroute, orcarouter, atlascloud, cloudgpu, obscurify, azure, xai, ollama, mistral, baseten, daoxe, ovhcloud, groq, fireworks-ai, deepseek, cerebras, togetherai, huggingface, moonshotai, vercel, cloudflare-workers-ai, cloudflare-ai-gateway, nvidia, github-copilot, chatgpt, opencode, opencode-go, etc.).",
           "examples": [
             "openai",
             "anthropic",
@@ -300,7 +312,14 @@
         },
         "provider_opts": {
           "type": "object",
-          "description": "Provider-specific options passed through to the underlying client.",
+          "properties": {
+            "extra_body": {
+              "type": "object",
+              "description": "OpenAI-compatible providers and DMR: top-level Chat Completions request overrides, including OpenAI-client reranking. Explicit values win over generated fields, including internal no-thinking settings; nested objects are replaced, not deep-merged. Streaming calls always force stream=true. Not applied to Responses, embeddings, or DMR model configuration.",
+              "additionalProperties": true
+            }
+          },
+          "description": "Provider-specific options passed through to the underlying client. Anthropic/amazon-bedrock: thinking_prefix_mismatch (error or drop_block). Anthropic: thinking_display (including updates on supported Fable/Mythos models), strict_tools (boolean or list of tool names), cache_diagnostics (boolean), native_compaction (boolean), cache_preserving_updates (boolean), speed ('fast' or 'standard'; 'fast' requests fast mode at premium pricing on supported models, Claude API only). OpenAI-compatible APIs: service_tier (string) selects the processing tier for Chat Completions and Responses requests; use 'fast' or 'priority' for Fast mode at premium pricing on supported models. Google (Gemini): service_tier (string) selects the Gemini API service tier ('flex', 'standard', or 'priority'). Model-level options override these defaults.",
           "additionalProperties": true
         },
         "track_usage": {
@@ -604,8 +623,18 @@
           }
         },
         "instruction": {
-          "type": "string",
-          "description": "Instructions for the agent"
+          "description": "Instructions for the agent (the system prompt). Accepts a single string or a list of strings; list items are concatenated in order, separated by a blank line.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
         },
         "instruction_file": {
           "description": "Path(s) to a file or files, relative to the config file's directory, whose contents become the agent's instruction. Accepts a single string or a list of strings; when several files are given their contents are concatenated in order, separated by a blank line. Loaded at startup. Mutually exclusive with 'instruction'. Each path must be a local relative path inside the config directory (absolute paths and '..' traversal are rejected). Only supported for local file-based configs, not OCI/URL sources.",
@@ -647,6 +676,9 @@
           "type": "string",
           "description": "Name of an agent that unconditionally receives the conversation whenever this agent produces a final response, bypassing the LLM's tool-calling entirely. Guarantees deterministic routing for strict pipelines (e.g. extractor -> summarizer). Can be the name of an agent defined in this config or an external reference. Pin an external OCI reference to an immutable digest (e.g. 'namespace/repo@sha256:...') to avoid a per-run registry lookup. Must not reference the agent itself, and force_handoff chains must not form a cycle."
         },
+        "routing": {
+          "$ref": "#/definitions/AgentRouting"
+        },
         "add_date": {
           "type": "boolean",
           "description": "Whether to add date information"
@@ -667,12 +699,12 @@
             "restricted",
             "autonomous"
           ],
-          "description": "Safety mode new sessions started on this agent default to when the user has not chosen one (no --safety/--yolo flag, no alias option, no user-config setting). Takes precedence over the config-wide runtime.safety. A default only: it never overrides a user choice and never replaces the mode stored on a resumed session. 'restricted' is the fail-closed profile for unattended runs: safe calls auto-approve, every other unmatched call is denied without prompting. Trust warning: 'autonomous' auto-approves every tool call — review configs from URLs or OCI registries before running them."
+          "description": "Safety mode new sessions started on this agent default to when the user has not chosen one (no --safety/--yolo flag, no alias option, no user-config setting). Takes precedence over the config-wide runtime.safety. A default only: it never overrides a user choice and never replaces the mode stored on a resumed session. 'restricted' is the fail-closed profile for unattended runs: safe calls auto-approve, every other unmatched call is denied without prompting. Trust warning: 'autonomous' auto-approves every tool call \u2014 review configs from URLs or OCI registries before running them."
         },
         "redact_secrets": {
           "type": "boolean",
           "default": true,
-          "description": "Enabled by default. When true (the default), the runtime auto-installs the redact_secrets builtin on all three of pre_tool_use (scrubs detected secrets from tool arguments), before_llm_call (scrubs the messages sent to the LLM), and tool_response_transform (scrubs tool output before it reaches event consumers, the persisted session, the post_tool_use hook input, or the next LLM call). Set to false to opt out. The same hook entries can be authored directly in YAML for finer-grained control \u2014 see the hooks.tool_response_transform / hooks.before_llm_call / hooks.pre_tool_use sections. Detection uses the portcullis ruleset (GitHub PATs, AWS keys, Stripe / Slack / GitLab tokens, JWTs, private keys, etc.). Each detected span is replaced with the literal '[REDACTED]'."
+          "description": "Enabled by default. When true (the default), the runtime auto-installs the redact_secrets builtin on all three of tool_input_transform (scrubs detected secrets from tool arguments before approval), before_llm_call (scrubs the messages sent to the LLM), and tool_response_transform (scrubs tool output before it reaches event consumers, the persisted session, the post_tool_use hook input, or the next LLM call). Set to false to opt out. The same hook entries can be authored directly in YAML for finer-grained control \u2014 see the hooks.tool_response_transform / hooks.before_llm_call / hooks.tool_input_transform sections. Detection uses the portcullis ruleset (GitHub PATs, AWS keys, Stripe / Slack / GitLab tokens, JWTs, private keys, etc.). Each detected span is replaced with the literal '[REDACTED]'."
         },
         "max_iterations": {
           "type": "integer",
@@ -745,6 +777,11 @@
           "items": {
             "type": "string"
           }
+        },
+        "add_prompt_files_depth": {
+          "type": "integer",
+          "description": "Also list, by path only, the add_prompt_files names found up to this many directory levels below the working directory (1 = direct subdirectories). Contents are not loaded: the agent reads the ones it needs. Useful in monorepos where each sub-project carries its own AGENTS.md. 0 (default) disables the scan.",
+          "minimum": 0
         },
         "commands": {
           "description": "Named prompts for /commands. Supports simple string format or advanced object format with description and instruction.",
@@ -991,7 +1028,8 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Skill identifier used by read_skill / run_skill and the /<name> slash command."
+          "pattern": "^\\S+$",
+          "description": "Skill identifier used by read_skill / run_skill and the /<name> slash command. Must not contain whitespace, which the slash command parser uses to separate the name from its argument."
         },
         "description": {
           "type": "string",
@@ -1068,7 +1106,8 @@
             "claude-code",
             "codex",
             "pi",
-            "opencode"
+            "opencode",
+            "command-code"
           ],
           "examples": [
             "claude-code",
@@ -1176,186 +1215,226 @@
       "type": "object",
       "description": "Lifecycle hooks configuration for an agent. Hooks allow running shell commands at various points in the agent's execution lifecycle.",
       "properties": {
+        "prompt_file_guard": {
+          "type": "array",
+          "description": "Checks loaded and retained prompt-file instructions before storage or use. Every hook must explicitly approve; failures stop the turn in every safety mode.",
+          "items": { "$ref": "#/definitions/NonEvaluatorHookDefinition" }
+        },
+        "skill_content_guard": {
+          "type": "array",
+          "description": "Checks raw skill text before expansion or delivery. Every hook must explicitly approve; denials and failures reject the load in every safety mode.",
+          "items": { "$ref": "#/definitions/NonEvaluatorHookDefinition" }
+        },
         "pre_tool_use": {
           "type": "array",
           "description": "Hooks that run before a tool is executed. Can allow/deny/modify tool calls.",
           "items": {
-            "$ref": "#/definitions/HookMatcherConfig"
+            "$ref": "#/definitions/NonEvaluatorHookMatcherConfig"
           }
         },
         "post_tool_use": {
           "type": "array",
           "description": "Hooks that run after a tool completes (both success and failure). The result is delivered in tool_response (failed calls carry an is_error flag and any error text). Returning decision=block or exit code 2 stops the run loop after the current tool batch \u2014 useful for circuit-breaker patterns.",
           "items": {
-            "$ref": "#/definitions/HookMatcherConfig"
+            "$ref": "#/definitions/NonEvaluatorHookMatcherConfig"
           }
         },
         "permission_request": {
           "type": "array",
           "description": "Hooks that run just before the runtime prompts the user to approve a tool call (i.e. when the safety mode and permission rules did not short-circuit the decision). Hooks may auto-allow or auto-deny via hook_specific_output.permission_decision; otherwise control falls through to the interactive confirmation. Tool-matched, like pre_tool_use.",
           "items": {
-            "$ref": "#/definitions/HookMatcherConfig"
+            "$ref": "#/definitions/NonEvaluatorHookMatcherConfig"
           }
         },
         "session_start": {
           "type": "array",
           "description": "Hooks that run when a session begins. Can load context or setup environment.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "user_prompt_submit": {
           "type": "array",
           "description": "Hooks that run once per user message, after the user has submitted their prompt and before the first model call of the turn. The submitted text is passed in the prompt field. Hooks can block submission (decision=block / continue=false / exit code 2) or contribute additional_context that is spliced into the conversation as a transient system message for that turn only. Sub-sessions (transferred tasks, background agents) do NOT fire this event because their kick-off message is synthesised by the runtime.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "user_steering_messages_submit": {
           "type": "array",
           "description": "Hooks that run each time the runtime drains the steering queue and appends the queued user messages to the session \u2014 messages the user submitted while the agent was already working (mid-turn, after the model stopped, or while idle before the first model call). The drained messages are passed in the steering_messages field. Like user_prompt_submit, hooks can block the run (decision=block / continue=false / exit code 2) or contribute additional_context that is spliced into the conversation as a transient system message for the steered turn only \u2014 it is NOT persisted to the session.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "user_followup_submit": {
           "type": "array",
           "description": "Hooks that run each time the runtime dequeues a follow-up message at the end of a turn and starts a fresh turn for it. Follow-ups are user messages queued for end-of-turn processing (the FollowUp API / queue), distinct from mid-turn steering \u2014 the model sees them as fresh input. The follow-up text is passed in the prompt field. Like user_prompt_submit, hooks can block the run (decision=block / continue=false / exit code 2) or contribute additional_context that is spliced into the conversation as a transient system message for the follow-up turn only \u2014 it is NOT persisted to the session.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "turn_start": {
           "type": "array",
           "description": "Hooks that run at the start of every agent turn (each model call). Their AdditionalContext is appended as transient system messages for that turn only \u2014 it is NOT persisted to the session, so per-turn signals (date, prompt files) are recomputed every turn instead of bloating message history on every resume.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "turn_end": {
           "type": "array",
           "description": "Hooks that run once per agent turn when the turn finishes \u2014 the symmetric counterpart of turn_start. Fires no matter why the turn ended: a normal stop, an error, a hook-driven shutdown, the loop detector, or context cancellation. The reason is reported via the hook input's reason field ('normal', 'continue', 'steered', 'error', 'canceled', 'hook_blocked', 'loop_detected'). Observational; output is ignored.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "before_llm_call": {
           "type": "array",
           "description": "Hooks that run just before each model call (after turn_start has assembled the messages). Use for observability, cost guardrails, or auditing without contributing system messages \u2014 turn_start is the right event for the latter.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "after_llm_call": {
           "type": "array",
           "description": "Hooks that run just after each successful model call, before the response is recorded into the session and tool calls are dispatched. Receives the assistant text content in stop_response. Failed calls fire on_error instead.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "session_end": {
           "type": "array",
           "description": "Hooks that run when a session ends. Can perform cleanup or logging.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "pre_compact": {
           "type": "array",
           "description": "Hooks that run just before the runtime compacts the session transcript into a summary. The trigger is reported in source: 'manual' (user-initiated /compact), 'auto' (proactive threshold), 'overflow' (context-overflow recovery), or 'tool_overflow' (proactive after tool results pushed past the threshold). Hooks may block compaction (decision=block / continue=false / exit code 2) or contribute additional_context that is appended to the compaction prompt \u2014 useful for steering the summary without modifying the agent's instruction.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "subagent_stop": {
           "type": "array",
           "description": "Hooks that run when a sub-agent (transferred task, background agent, skill sub-session) finishes. Fires against the parent agent's executor so handlers configured on the orchestrator see every child completion. The sub-agent's name is in agent_name and its final assistant message in stop_response.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "on_user_input": {
           "type": "array",
           "description": "Hooks that run when the agent needs user input. Can send notifications or log events.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "stop": {
           "type": "array",
           "description": "Hooks that run when the model finishes responding and is about to hand control back to the user. Can perform post-response validation or logging.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "notification": {
           "type": "array",
           "description": "Hooks that run when the agent sends a notification (error, warning) to the user. Can send external notifications or log events.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "on_error": {
           "type": "array",
           "description": "Hooks that run when the runtime hits an error during a turn (model failures, repetitive tool-call loops). Fires alongside notification (level=error); use this for structured error-only handlers without parsing notification_level.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "on_max_iterations": {
           "type": "array",
           "description": "Hooks that run when the runtime reaches its configured max_iterations limit. Fires alongside notification (level=warning); use this for structured handlers (e.g. log to a metrics pipeline) without parsing notification_message.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "on_agent_switch": {
           "type": "array",
           "description": "Hooks that run whenever the runtime moves the active agent to a new one (transfer_task, handoff, or the return after a transferred task completes). Receives from_agent, to_agent, and agent_switch_kind in the input. Observational; useful for audit, transcript, and metrics pipelines that track which agent ran which tools.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "on_session_resume": {
           "type": "array",
           "description": "Hooks that run when the user explicitly approves the runtime to continue past its configured max_iterations limit. Receives previous_max_iterations and new_max_iterations in the input. Observational; useful for alerting on extended-runtime sessions or for billing/quota pipelines that meter resumes.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "on_tool_approval_decision": {
           "type": "array",
           "description": "Hooks that run after the runtime's tool approval chain (custom rules / safety mode / hooks / ask) resolves a verdict for a tool call, before the call is executed (allow) or its error response is recorded (deny / canceled). Receives approval_decision (\"allow\" | \"deny\" | \"canceled\"), approval_source (a stable classifier of which step decided), and safety_label (the runtime classifier's safe / destructive / unknown verdict). Observational; gives audit pipelines a single \"who approved what\" record without re-implementing the chain.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "before_compaction": {
           "type": "array",
           "description": "Hooks that run immediately before a session compaction. The Input carries input_tokens, output_tokens, context_limit, and compaction_reason ('threshold', 'overflow', 'manual'). A hook may veto compaction by setting decision='block' (or exiting with code 2), or supply a custom summary via hookSpecificOutput.summary, in which case the runtime applies that summary verbatim and skips the LLM-based summarization. Be cautious about denying when compaction_reason='overflow': the runtime is recovering from a context-overflow error and a denial there will leave the session unable to make progress.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "after_compaction": {
           "type": "array",
           "description": "Hooks that run after a successful compaction (a summary was applied to the session). Receives the final summary text in Input.summary alongside input_tokens, output_tokens, context_limit and compaction_reason. Purely observational \u2014 hook output is ignored.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         },
         "tool_response_transform": {
           "type": "array",
           "description": "Hooks that fire between a tool's execution and the runtime's emission/record of the response, with the rewrite reaching event consumers, the persisted session, the post_tool_use hook input, and the next LLM call. A hook may rewrite the tool's textual output by setting hookSpecificOutput.updated_tool_response \u2014 the symmetric counterpart of pre_tool_use's updated_input, applied to tool RESULTS instead of tool ARGUMENTS. The redact_secrets builtin uses this event for the third leg of the redact_secrets feature; custom rewriters can also truncate excessive output, scrub PII, or normalise tool dialects. Tool-matched, like pre_tool_use / post_tool_use.",
           "items": {
+            "$ref": "#/definitions/NonEvaluatorHookMatcherConfig"
+          }
+        },
+        "tool_input_transform": {
+          "type": "array",
+          "description": "Hooks that run before every tool call, ahead of the deterministic approval pipeline (safety mode, permission rules, --yolo) and of tool_guard. Hooks run sequentially, each seeing the preceding rewrite, and may patch tool arguments via hookSpecificOutput.updated_input exactly like pre_tool_use; the approval pipeline and every later hook see the rewritten arguments. Rewrite-only: verdicts belong on tool_guard. Failures follow the hook's on_error policy (default warn; block denies the call). The redact_secrets builtin's argument-scrubbing leg is auto-injected here. Tool-matched, like pre_tool_use; preempt_yolo is rejected because the event always preempts approval.",
+          "items": {
+            "$ref": "#/definitions/NonEvaluatorHookMatcherConfig"
+          }
+        },
+        "tool_guard": {
+          "type": "array",
+          "description": "Hooks that run after tool_input_transform and before the deterministic approval pipeline, so their verdict cannot be bypassed by any safety mode (including autonomous / --yolo) or permission allow-rule. Hooks run concurrently; hookSpecificOutput.permission_decision verdicts aggregate to the most restrictive (deny > ask > allow). deny rejects the call; ask forces the interactive prompt even when the session already allowed the tool; allow is advisory (the pipeline still runs). hookSpecificOutput.metadata is merged into the confirmation prompt. updated_input is ignored \u2014 use tool_input_transform to rewrite arguments. Hook execution failures fail closed (deny), like pre_tool_use. Tool-matched; preempt_yolo is rejected because the event always preempts approval.",
+          "items": {
             "$ref": "#/definitions/HookMatcherConfig"
+          }
+        },
+        "before_agent_run": {
+          "type": "array",
+          "description": "Hooks that run once per agent activation, before the agent's model is selected or its response cache is consulted. A hook may return hookSpecificOutput.transition {action: route, agent} to replace the activation with another agent from the agent's routing.allowed_agents; the skipped agent never calls its model. Each destination has its own activation. At most one hook is allowed per agent after merging identical definitions; requires the agent's routing declaration. Output is always validated strictly and failures block the run; blocking beats any transition.",
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/definitions/RoutingHookDefinition"
+          }
+        },
+        "after_agent_complete": {
+          "type": "array",
+          "description": "Hooks that run once after an agent completes successfully (natural completion, accepted structured output, or a cached answer), before the run decides whether it is finished. A hook may return hookSpecificOutput.transition {action: route, agent} to continue the same conversation with another agent from routing.allowed_agents. Not fired on errors, cancellation, budget stops, iteration-limit pauses, or empty completions. At most one hook is allowed per agent; cannot be combined with force_handoff. Output is always validated strictly and failures block the run.",
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/definitions/RoutingHookDefinition"
           }
         },
         "worktree_create": {
           "type": "array",
           "description": "Hooks that run once, just after `docker agent run --worktree` creates a git worktree and before the session starts. They execute inside the new worktree (their working directory is the fresh checkout), and the worktree path, branch, and source repository root are passed in worktree_path / worktree_branch / worktree_source_dir. Use them to prepare the checkout: copy untracked files like .env, install dependencies, warm caches, before the agent begins. A hook may abort the run by blocking (decision=block / continue=false / exit code 2); stdout is surfaced as additional context. Dispatched from the CLI rather than the run loop because the worktree (and the working directory every downstream component captures) must be settled before the runtime and session exist.",
           "items": {
-            "$ref": "#/definitions/HookDefinition"
+            "$ref": "#/definitions/NonEvaluatorHookDefinition"
           }
         }
       },
@@ -1384,7 +1463,7 @@
         },
         "preempt_yolo": {
           "type": "boolean",
-          "description": "Opt a pre_tool_use entry into firing BEFORE the deterministic approval pipeline (custom allow/ask/deny rules + safety mode). A deny/ask verdict from a preempting hook cannot be bypassed by any safety mode (including autonomous) or permission allow-rules; an allow verdict is advisory (the pipeline still runs Decide() and the rest of pre_tool_use). Default pre_tool_use entries fire AFTER Decide(). Only meaningful on pre_tool_use; ignored on other events. Set it on hooks that implement a security-critical check that must not be bypassed by auto-approval."
+          "description": "Opt a pre_tool_use entry into firing BEFORE the deterministic approval pipeline (custom allow/ask/deny rules + safety mode). A deny/ask verdict from a preempting hook cannot be bypassed by any safety mode (including autonomous) or permission allow-rules; an allow verdict is advisory (the pipeline still runs Decide() and the rest of pre_tool_use). Default pre_tool_use entries fire AFTER Decide(). Only valid on pre_tool_use; rejected on every other event. Set it on hooks that implement a security-critical check that must not be bypassed by auto-approval."
         }
       },
       "required": [
@@ -1394,19 +1473,24 @@
     },
     "HookDefinition": {
       "type": "object",
-      "description": "Definition of a single hook command",
+      "description": "Definition of a lifecycle hook",
       "properties": {
+        "system_prompt": {
+          "type": "string",
+          "description": "Literal system message for a model hook. Overrides the default; not templated."
+        },
         "name": {
           "type": "string",
           "description": "Optional friendly hook name used in logs and runtime hook events."
         },
         "type": {
           "type": "string",
-          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime; 'model' asks an LLM and translates its reply into the hook's native output (used for LLM-as-a-judge pre_tool_use, summarizers, etc., with no Go code). The docker-agent runtime ships these builtins: 'add_date' (turn_start: today's date), 'add_environment_info' (session_start: cwd, git, OS, arch), 'add_prompt_files' (turn_start: contents of named files looked up in the workdir hierarchy and the home directory), 'add_git_status' (turn_start: `git status --short --branch`), 'add_git_diff' (turn_start: `git diff --stat`, or full diff with args=['full']), 'add_directory_listing' (session_start: top-level entries of cwd), 'add_user_info' (session_start: current OS user and hostname), 'add_recent_commits' (session_start: `git log --oneline -n N`, default N=10, override via args=['<N>']), 'max_iterations' (before_llm_call: hard stop after N model calls; args=['<N>'] required), 'redact_secrets' (pre_tool_use / before_llm_call / tool_response_transform: scrubs detected secrets from tool arguments, outgoing chat content, and tool output \u2014 the same builtin handles all three legs and dispatches on the event; the matching agent-level 'redact_secrets: true' flag auto-injects the entries for all three), 'unload' (on_agent_switch: POSTs `{\"model\": \"<id>\"}` to the previous agent's DMR model endpoints \u2014 e.g. asks Docker Model Runner to release the GPU/RAM held by the just-departing model so the next agent's model can claim it. Pure HTTP, no provider-specific runtime coupling; non-DMR providers are silently skipped. Opt in by adding the entry to the agent's hooks.on_agent_switch list).",
+          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime; 'model' asks an LLM and translates its reply into the hook's native output (used for LLM-as-a-judge pre_tool_use, summarizers, etc., with no Go code). The docker-agent runtime ships these builtins: 'add_context' (context-contributing events: renders Go templates in args against hook input and joins non-empty results with newlines as additional context), 'add_date' (turn_start: today's date), 'add_environment_info' (session_start: cwd, git, OS, arch), 'add_prompt_files' (turn_start: contents of named files looked up in the workdir hierarchy and the home directory; args may include '--depth=<N>' to additionally list, by path only, the same filenames found up to N levels below the working directory), 'add_git_status' (turn_start: `git status --short --branch`), 'add_git_diff' (turn_start: `git diff --stat`, or full diff with args=['full']), 'add_directory_listing' (session_start: top-level entries of cwd), 'add_user_info' (session_start: current OS user and hostname), 'add_recent_commits' (session_start: `git log --oneline -n N`, default N=10, override via args=['<N>']), 'max_iterations' (before_llm_call: hard stop after N model calls; args=['<N>'] required), 'redact_secrets' (tool_input_transform or pre_tool_use / before_llm_call / tool_response_transform: scrubs detected secrets from tool arguments, outgoing chat content, and tool output — the same builtin handles all three legs and dispatches on the event; the matching agent-level 'redact_secrets: true' flag auto-injects the entries on tool_input_transform, before_llm_call, and tool_response_transform), 'transform_json' (tool_response_transform: keeps the top-level JSON fields named in args), 'limit_large_tool_results' (tool_response_transform and session_end: stores oversized tool output in a per-session temp file and replaces it with a bounded excerpt; always injected by the runtime), 'safer_shell' (pre_tool_use: deprecated compatibility shim that attaches shell safety classification metadata), 'http_post' (any event: POSTs args[1] to the URL in args[0]), 'keep_awake' (CLI session_start and session_end: prevents idle system sleep when the user setting keep_awake is enabled), 'snapshot' (session_start, turn_start, turn_end, pre_tool_use, post_tool_use, and session_end: records filesystem snapshots in a shadow git repository), 'unload' (on_agent_switch: POSTs `{\"model\": \"<id>\"}` to the previous agent's DMR model endpoints — e.g. asks Docker Model Runner to release the GPU/RAM held by the just-departing model so the next agent's model can claim it. Pure HTTP, no provider-specific runtime coupling; non-DMR providers are silently skipped. Opt in by adding the entry to the agent's hooks.on_agent_switch list). 'evaluator' assesses tool input through a named evaluator and applies a separate policy (tool_guard only).",
           "enum": [
             "command",
             "builtin",
-            "model"
+            "model",
+            "evaluator"
           ]
         },
         "command": {
@@ -1415,7 +1499,7 @@
         },
         "args": {
           "type": "array",
-          "description": "Arbitrary string arguments passed to the hook handler. Builtin handlers receive them as a typed parameter; e.g. 'add_prompt_files' takes the list of prompt files to load, 'add_recent_commits' optionally takes a positive integer commit limit, 'add_git_diff' accepts 'full' to emit the full unified diff, and 'max_iterations' takes a positive integer call limit.",
+          "description": "Arbitrary string arguments passed to the hook handler. Builtin handlers receive them as a typed parameter; e.g. 'add_context' takes Go text/template strings using hook input fields such as {{ .SessionID }}, 'add_prompt_files' takes the list of prompt files to load, 'add_recent_commits' optionally takes a positive integer commit limit, 'add_git_diff' accepts 'full' to emit the full unified diff, and 'max_iterations' takes a positive integer call limit.",
           "items": {
             "type": "string"
           }
@@ -1439,13 +1523,18 @@
         },
         "on_error": {
           "type": "string",
-          "description": "How non-fail-closed hook failures are handled. 'warn' logs and continues (default), 'ignore' continues silently, and 'block' denies the event.",
+          "description": "Policy for execution errors, timeouts, unexpected nonzero exits and invalid output. 'warn' reports and continues (default), 'ignore' continues silently, and 'block' denies block-capable events. pre_tool_use and tool_guard always fail closed. on_error=block is rejected on observational events.",
           "enum": [
             "warn",
             "ignore",
             "block"
           ],
           "default": "warn"
+        },
+        "strict_output": {
+          "type": "boolean",
+          "description": "Require a single JSON output object (or empty stdout), reject unknown fields and outputs unsupported by the hook event. Failures follow on_error; pre_tool_use and tool_guard fail closed.",
+          "default": false
         },
         "model": {
           "type": "string",
@@ -1458,6 +1547,17 @@
         "schema": {
           "type": "string",
           "description": "Well-known response interpretation for type=model hooks. Empty: return the model's reply as additional_context. 'pre_tool_use_decision': ask the model for {decision, reason} JSON and produce a permission_decision verdict (allow|ask|deny)."
+        },
+        "evaluator": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Top-level evaluator referenced by type=evaluator hooks: tool_guard hooks use evaluator_policy, before_agent_run and after_agent_complete hooks use routing_policy."
+        },
+        "evaluator_policy": {
+          "$ref": "#/definitions/EvaluatorPolicy"
+        },
+        "routing_policy": {
+          "$ref": "#/definitions/RoutingPolicy"
         }
       },
       "required": [
@@ -1515,6 +1615,56 @@
               "model",
               "prompt"
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "evaluator"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "evaluator"
+            ],
+            "oneOf": [
+              {
+                "required": [
+                  "evaluator_policy"
+                ]
+              },
+              {
+                "required": [
+                  "routing_policy"
+                ]
+              }
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "evaluator"
+                  ]
+                },
+                {
+                  "required": [
+                    "evaluator_policy"
+                  ]
+                },
+                {
+                  "required": [
+                    "routing_policy"
+                  ]
+                }
+              ]
+            }
           }
         }
       ]
@@ -1599,7 +1749,14 @@
         },
         "provider_opts": {
           "type": "object",
-          "description": "Provider-specific options. Sampling parameters: top_k (integer, supported by anthropic, google, amazon-bedrock, and custom OpenAI-compatible providers like vLLM/Ollama), repetition_penalty (float, forwarded to custom OpenAI-compatible providers), min_p (float, forwarded to custom providers), seed (integer, forwarded to OpenAI). Lifecycle: unload_api (string) overrides the unload endpoint inherited from the provider config (relative path resolved against base_url's scheme+host, or an absolute URL); used by the runtime's `unload` on_agent_switch builtin hook to release model resources between agent switches. Infrastructure options: http_headers (map of string to string, adds custom HTTP headers to every request; used for OpenAI-compatible providers like github-copilot which requires Copilot-Integration-Id). dmr: runtime_flags; supports_images (boolean) and supports_pdf (boolean) declare which document attachment types the local model accepts. DMR-hosted models are not in the models.dev catalog, so attachment capabilities cannot be detected automatically and default to text-only; set supports_images: true for a vision model so image attachments are forwarded instead of silently dropped. anthropic/amazon-bedrock (Claude): interleaved_thinking (boolean, default true). anthropic: thinking_display ('summarized', 'omitted', or 'display') controls whether thinking blocks are returned in responses when thinking is enabled. Claude Opus 4.7 hides thinking by default ('omitted'); set thinking_display: summarized to receive thinking blocks. 'display' (full thinking blocks) is only accepted by pre-4.6 token-thinking models (e.g. Sonnet 4.5, Haiku 4.5); models from the adaptive-thinking generation onward (Opus/Sonnet 4.6+, Sonnet 5, Fable 5) reject it, and docker-agent fails fast with a configuration error (fallbacks models are validated too); fallbacks (array of model ID strings, in priority order; enables the server-side-fallback beta so requests refused by safety classifiers, e.g. on Claude Fable 5, are retried with the listed models in a single round trip). openai: transport ('sse' or 'websocket') to choose between SSE and WebSocket streaming for the Responses API. openai/anthropic/google: rerank_prompt (string) to fully override the system prompt used for RAG reranking (advanced - prefer using results.reranking.criteria for domain-specific guidance). Google: google_search (boolean) enables Google Search grounding, google_maps (boolean) enables Google Maps grounding, code_execution (boolean) enables server-side code execution.",
+          "properties": {
+            "extra_body": {
+              "type": "object",
+              "description": "OpenAI-compatible providers and DMR: top-level Chat Completions request overrides, including OpenAI-client reranking. Explicit values win over generated fields, including internal no-thinking settings; nested objects are replaced, not deep-merged. Streaming calls always force stream=true. Not applied to Responses, embeddings, or DMR model configuration.",
+              "additionalProperties": true
+            }
+          },
+          "description": "Provider-specific options. Anthropic/amazon-bedrock: thinking_prefix_mismatch (error or drop_block; defaults to drop_block on Claude models whose server checks thinking prefixes: Haiku 5.5, Opus 5.5, Sonnet 5.5, Fable 5.1/5.2 and Mythos 5.2; Bedrock applies it only to listed prefix-checking models when thinking is enabled). Anthropic: strict_tools (true for eligible schemas or a tool-name array requiring strict mode), cache_diagnostics (boolean; Claude API only), native_compaction (boolean; synchronous whole-history signed compaction on Claude API), cache_preserving_updates (boolean; native system/tool/effort changes with turn-scoped reminders on supported models), thinking_display: updates (progress updates beta on Fable 5+ and Mythos 5.1+), speed ('fast' or 'standard'; 'fast' sends speed: fast with the fast-mode-2026-02-01 beta on every request using the model, at premium pricing on supported models, Claude API only; omitted, empty or 'standard' leaves the API default; other values are rejected). Sampling parameters: top_k (integer, supported by anthropic, google, amazon-bedrock, and custom OpenAI-compatible providers like vLLM/Ollama), repetition_penalty (float, forwarded to custom OpenAI-compatible providers), min_p (float, forwarded to custom providers), seed (integer, forwarded to OpenAI). Lifecycle: unload_api (string) overrides the unload endpoint inherited from the provider config (relative path resolved against base_url's scheme+host, or an absolute URL); used by the runtime's `unload` on_agent_switch builtin hook to release model resources between agent switches. Infrastructure options: http_headers (map of string to string, adds custom HTTP headers to every request; used for OpenAI-compatible providers like github-copilot which requires Copilot-Integration-Id). dmr: runtime_flags; supports_images (boolean) and supports_pdf (boolean) declare which document attachment types the local model accepts. DMR-hosted models are not in the models.dev catalog, so attachment capabilities cannot be detected automatically and default to text-only; set supports_images: true for a vision model so image attachments are forwarded instead of silently dropped. anthropic/amazon-bedrock (Claude): interleaved_thinking (boolean, default true). anthropic: thinking_display ('summarized', 'omitted', 'updates', or 'display') controls whether thinking blocks are returned in responses when thinking is enabled. Claude Opus 4.7 hides thinking by default ('omitted'); set thinking_display: summarized to receive thinking blocks. 'display' (full thinking blocks) is only accepted by pre-4.6 token-thinking models (e.g. Sonnet 4.5, Haiku 4.5); models from the adaptive-thinking generation onward (Opus/Sonnet 4.6+, Sonnet 5, Fable 5) reject it, and docker-agent fails fast with a configuration error (fallbacks models are validated too); fallbacks (\"default\" for the server's recommended routing, or an array of up to three distinct model ID strings in priority order; enables the server-side-fallback-2026-07-01 beta so refused requests are retried in a single round trip; Claude API only, rejected on Vertex AI, Bedrock, gateways and other base_url hosts; a list is rejected for Claude Haiku 5.5, which has no server-side fallback). OpenAI-compatible APIs: service_tier (string, forwarded unchanged to Chat Completions and Responses, including WebSocket and reranking; 'fast' or 'priority' enables Fast mode at premium pricing on supported models; omitted or empty leaves the API default, non-string values are ignored). openai/chatgpt: preserve_reasoning (boolean, default false) preserves ordered Responses output and encrypted reasoning for stateless continuation; native_tool_search also enables output replay. Any OpenAI-compatible destination: replay_reasoning (boolean) replays the reasoning stored on assistant turns back as a reasoning_content field on later Chat Completions requests, so a reasoning model sees its own earlier reasoning instead of re-deriving it after each tool call (distinct from preserve_reasoning, which replays encrypted reasoning items on the Responses API and does not apply to Chat Completions); default true for Chat Completions; set replay_reasoning to false for an endpoint that rejects or must not receive the non-standard field; a non-boolean value also disables replay. openai: cache_diagnostics (boolean, default false) logs Responses prompt-cache comparison results with --debug on GPT-5.6+; comparisons are scoped to the current session and resolved model; ignored for chatgpt and custom base_url endpoints. transport ('sse' or 'websocket') to choose between SSE and WebSocket streaming for the Responses API; native_tool_search (boolean, default false; also enables ordered output replay) declares the agent's deferred tools with defer_loading and a server-executed tool_search tool so OpenAI's hosted tool search discovers them (only openai models supporting deferred tools, gpt-5.4+; ignored on chatgpt, OpenAI-compatible endpoints including a custom base_url, and Chat Completions requests). openai/anthropic/google: rerank_prompt (string) to fully override the system prompt used for RAG reranking (advanced - prefer using results.reranking.criteria for domain-specific guidance). Google: google_search (boolean) enables Google Search grounding, google_maps (boolean) enables Google Maps grounding, code_execution (boolean) enables server-side code execution, url_context (boolean) enables reading public URLs during generation, output_dimensionality (positive integer) truncates Gemini embedding vectors to that size when the model is used as a RAG embedding_model; service_tier (string, forwarded unchanged as the top-level serviceTier of every generateContent request, including reranking, title generation, and compaction, on the Gemini API, Vertex AI, and the Docker models gateway; 'flex' for discounted, queued processing that may wait up to 15 minutes before the first byte, 'standard' for the default tier, 'priority' for premium processing; omitted or empty leaves the API default, non-string values are ignored; cost estimates are not tier-adjusted, set the model's cost override).",
           "additionalProperties": true
         },
         "track_usage": {
@@ -1738,7 +1895,11 @@
         },
         "capabilities": {
           "$ref": "#/definitions/CapabilitiesConfig",
-          "description": "Explicit attachment capability override for models the models.dev catalogue does not describe correctly (custom OpenAI-compatible providers, local models like Ollama, or dropped model versions). When set, the declared flags are authoritative and no models.dev lookup is performed; when omitted, capabilities are detected automatically. Without it, such models fall back to text-only and their image/PDF attachments are silently dropped."
+          "description": "Explicit attachment capability override for models the models.dev catalogue does not describe correctly (custom OpenAI-compatible providers, local models like Ollama, or dropped model versions). When set, the declared flags are authoritative and no models.dev lookup is performed; when omitted, capabilities are detected automatically. Without it, such models fall back to text-only and their image/PDF/audio/video attachments are silently dropped."
+        },
+        "output_capabilities": {
+          "$ref": "#/definitions/OutputCapabilitiesConfig",
+          "description": "Optional generative output capability override for this model. Resolution precedence is explicit false, explicit true, then the exact models.dev record's Modalities.Output=image for an omitted image flag (including an empty block). Unknown or unavailable catalogue metadata stays disabled; model names are never used to infer capability. Cannot be combined with first_available (set output_capabilities.image on the candidate models instead)."
         },
         "cost": {
           "$ref": "#/definitions/CostConfig",
@@ -1758,6 +1919,25 @@
         "pdf": {
           "type": "boolean",
           "description": "Whether the model accepts PDF (application/pdf) attachments"
+        },
+        "audio": {
+          "type": "boolean",
+          "description": "Whether the model accepts audio attachments"
+        },
+        "video": {
+          "type": "boolean",
+          "description": "Whether the model accepts video attachments"
+        }
+      },
+      "additionalProperties": false
+    },
+    "OutputCapabilitiesConfig": {
+      "type": "object",
+      "description": "Generative output capability overrides for a model. Resolution precedence is explicit false, explicit true, then the exact models.dev record's Modalities.Output=image when the image flag is omitted, including an empty block. Unknown or unavailable catalogue metadata stays disabled; model names are never used to infer capability.",
+      "properties": {
+        "image": {
+          "type": "boolean",
+          "description": "Whether the model can generate image output. Explicit false takes precedence over explicit true; when omitted, Docker Agent uses the exact models.dev record's output modalities and otherwise leaves image output disabled."
         }
       },
       "additionalProperties": false
@@ -1868,7 +2048,7 @@
             "restricted",
             "autonomous"
           ],
-          "description": "Safety mode new sessions default to when the user has not chosen one (no --safety/--yolo flag, no alias option, no user-config setting). A per-agent 'safety' takes precedence over this config-wide default. A default only: it never overrides a user choice and never replaces the mode stored on a resumed session. 'restricted' is the fail-closed profile for unattended runs: safe calls auto-approve, every other unmatched call is denied without prompting. Trust warning: 'autonomous' auto-approves every tool call — review configs from URLs or OCI registries before running them."
+          "description": "Safety mode new sessions default to when the user has not chosen one (no --safety/--yolo flag, no alias option, no user-config setting). A per-agent 'safety' takes precedence over this config-wide default. A default only: it never overrides a user choice and never replaces the mode stored on a resumed session. 'restricted' is the fail-closed profile for unattended runs: safe calls auto-approve, every other unmatched call is denied without prompting. Trust warning: 'autonomous' auto-approves every tool call \u2014 review configs from URLs or OCI registries before running them."
         }
       },
       "additionalProperties": false
@@ -1899,7 +2079,7 @@
         "max_time": {
           "type": "string",
           "description": "Maximum time the agents spend working, in Go duration format (e.g., '10m', '30s', '1h30m'). This is the sum of turn durations, NOT wall-clock since the session opened, so idle time while the user reads and types does not count. Checked at turn boundaries, so it will not interrupt an in-flight model call or tool.",
-          "pattern": "^([0-9]+(ns|us|µs|ms|s|m|h))+$",
+          "pattern": "^([0-9]+(ns|us|\u00b5s|ms|s|m|h))+$",
           "examples": [
             "30s",
             "10m",
@@ -2126,14 +2306,16 @@
             "mcp",
             "mcp_catalog",
             "script",
+            "calculator",
             "think",
+            "random",
             "memory",
             "filesystem",
+            "file",
             "shell",
             "background_jobs",
             "tasks",
             "plan",
-            "session_plan",
             "session_context",
             "todo",
             "fetch",
@@ -2148,7 +2330,9 @@
             "scheduler",
             "rag",
             "git",
-            "webhook"
+            "webhook",
+            "environment",
+            "datetime"
           ]
         },
         "instruction": {
@@ -2223,7 +2407,7 @@
         },
         "post_edit": {
           "type": "array",
-          "description": "Post-edit commands for filesystem tool",
+          "description": "Post-edit commands for filesystem and file tools",
           "items": {
             "$ref": "#/definitions/PostEditConfig"
           }
@@ -2247,7 +2431,7 @@
         },
         "allow_list": {
           "type": "array",
-          "description": "Allow-list of directories the filesystem tool is permitted to access (only valid for type 'filesystem'). Each entry may be '.' (the agent's working directory), '~' or '~/...' (the user's home directory), an absolute path, or a relative path (anchored at the working directory). Symlinks are followed before the containment check, so they cannot be used to escape the allow-list. An empty or omitted list preserves the default behaviour (any path the agent process can reach).",
+          "description": "Allow-list of directories the filesystem or file tool is permitted to access. Each entry may be '.' (the agent's working directory), '~' or '~/...' (the user's home directory), an absolute path, or a relative path (anchored at the working directory). Symlinks are followed before the containment check, so they cannot be used to escape the allow-list. An empty or omitted list preserves the default behaviour (any path the agent process can reach).",
           "items": {
             "type": "string"
           },
@@ -2267,7 +2451,7 @@
         },
         "deny_list": {
           "type": "array",
-          "description": "Deny-list of directories the filesystem tool is forbidden to access (only valid for type 'filesystem'). Uses the same expansion rules as 'allow_list'. The deny-list takes precedence over the allow-list: a path that matches both is rejected.",
+          "description": "Deny-list of directories the filesystem or file tool is forbidden to access. Uses the same expansion rules as 'allow_list'. The deny-list takes precedence over the allow-list: a path that matches both is rejected.",
           "items": {
             "type": "string"
           },
@@ -2310,6 +2494,17 @@
           "description": "HTTP timeout in seconds (valid for type 'fetch', 'api', and 'openapi'). Defaults to 30 seconds when omitted.",
           "minimum": 1
         },
+        "max_output_bytes": {
+          "type": "integer",
+          "description": "Maximum OpenAPI text output in bytes (only valid for type 'openapi'). Defaults to 30000 when omitted; 0 disables the text cutoff.",
+          "minimum": 0,
+          "default": 30000
+        },
+        "escape_html": {
+          "type": "boolean",
+          "description": "Restore legacy HTML escaping of <, > and & in multi-URL JSON results (only valid for type 'fetch'). Defaults to false to reduce token usage. Decoded content and single-URL results are unchanged.",
+          "default": false
+        },
         "allowed_domains": {
           "type": "array",
           "description": "Allow-list of domains the fetch tool is permitted to fetch (only valid for type 'fetch'). Patterns are case-insensitive. A bare host ('example.com') matches the apex AND any subdomain. A leading dot ('.example.com') or wildcard ('*.example.com') matches strict subdomains only. CIDR ranges ('10.0.0.0/8', '::1/128') match when the URL host parses as an IP inside the network. Mutually exclusive with 'blocked_domains'.",
@@ -2351,7 +2546,7 @@
         },
         "allow_private_ips": {
           "type": "boolean",
-          "description": "Opt in to dialling non-public IP addresses (valid for type 'fetch', 'api', 'openapi', 'a2a', and remote MCP toolsets). By default protected HTTP clients refuse connections \u2014 after DNS resolution, so DNS rebinding is also blocked \u2014 to loopback, RFC1918 private ranges, link-local (including the cloud metadata endpoint at 169.254.169.254), multicast and the unspecified address. Set this to true when an agent legitimately needs to call internal services. For fetch, 'allowed_domains' / 'blocked_domains' are evaluated independently and still apply."
+          "description": "Opt in to dialling non-public IP addresses (valid for type 'fetch', 'api', 'openapi', 'a2a', and remote MCP toolsets). By default, on the direct path (Docker Desktop unavailable, disabled, or target host is not in the Docker-owned allowlist), protected HTTP clients refuse connections \u2014 after DNS resolution, defeating DNS rebinding \u2014 to loopback, RFC1918 private ranges, link-local (including the cloud metadata endpoint at 169.254.169.254), multicast and the unspecified address. When Docker Desktop is running, only Docker-owned hostnames (docker.com, docker.io families) go through its PAC proxy; dial-time enforcement does not apply on that path. Set this to true when an agent legitimately needs to call internal services. For fetch, 'allowed_domains' / 'blocked_domains' are evaluated independently and still apply."
         },
         "sudo_askpass": {
           "type": "boolean",
@@ -2360,10 +2555,6 @@
         "recall": {
           "type": "boolean",
           "description": "Opt in to background-job recall for the background_jobs toolset (only valid for type 'background_jobs'). When enabled, run_background_job exposes a recall boolean parameter. If the agent sets recall=true for a background job, the runtime injects a steering message with a short completion sentence and the job output when the job finishes. Default false."
-        },
-        "safer": {
-          "type": "boolean",
-          "description": "Deprecated and ignored (only valid for type 'shell'). The runtime now classifies every shell command natively (safe / destructive / unknown) and gates it through the session's safety mode (strict / balanced / restricted / autonomous), so the opt-in is meaningless. Kept so existing YAMLs with safer: true still parse."
         },
         "url": {
           "type": "string",
@@ -2433,6 +2624,21 @@
         }
       },
       "additionalProperties": false,
+      "if": {
+        "required": [
+          "max_output_bytes"
+        ]
+      },
+      "then": {
+        "properties": {
+          "type": {
+            "const": "openapi"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
       "anyOf": [
         {
           "allOf": [
@@ -2471,14 +2677,16 @@
                 "mcp",
                 "mcp_catalog",
                 "script",
+                "calculator",
                 "think",
+                "random",
                 "memory",
                 "filesystem",
+                "file",
                 "shell",
                 "background_jobs",
                 "tasks",
                 "plan",
-                "session_plan",
                 "session_context",
                 "todo",
                 "fetch",
@@ -2489,7 +2697,8 @@
                 "model_picker",
                 "background_agents",
                 "scheduler",
-                "git"
+                "git",
+                "datetime"
               ]
             }
           }
@@ -2645,6 +2854,11 @@
         "oauth": {
           "$ref": "#/definitions/RemoteOAuthConfig",
           "description": "Explicit OAuth credentials for servers that do not support Dynamic Client Registration"
+        },
+        "standalone_sse": {
+          "type": "boolean",
+          "description": "Open the streamable-HTTP standalone SSE GET stream for server-initiated messages (keepalive pings, tools/list_changed). Needed by MCP gateways that close sessions they cannot ping. Ignored for the sse transport.",
+          "default": false
         }
       },
       "required": [
@@ -2854,6 +3068,10 @@
           "type": "boolean",
           "description": "Whether to respect VCS ignore files (e.g., .gitignore) when collecting documents for indexing. When true (default), files matching ignore patterns will be excluded. Can be overridden per-strategy.",
           "default": true
+        },
+        "indexing_timeout": {
+          "type": "string",
+          "description": "Cap on a single indexing run started by this RAG source, detached from the much shorter 30s toolset-start wait budget: indexing keeps running in the background past that budget and the tool appears once it is ready, resuming from per-file progress on a later start. Go duration format (e.g. '30m', '2h'). Default '30m' when omitted; '0s' means no bound."
         },
         "strategies": {
           "type": "array",
@@ -3148,6 +3366,305 @@
           "description": "Optional OAuth redirect URI used in place of http://127.0.0.1:{callbackPort}/callback. The literal placeholder ${callbackPort} is replaced with the actual local callback port at runtime. The external URL is expected to redirect the browser back to the local callback server."
         }
       }
+    },
+    "EvaluatorConfig": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Evaluator backend (typesafe or openai Decisions), or a named provider."
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instructions": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "boolean",
+            "choice",
+            "score"
+          ]
+        },
+        "base_url": {
+          "type": "string",
+          "description": "API base URL. TypeSafe defaults to https://api.typesafe.ai with /v1/systemone; OpenAI defaults to https://api.openai.com/v1 with /decisions."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Exact HTTP(S) evaluator URL, overriding base_url and its default path. No credentials, query, or fragment."
+        },
+        "token_key": {
+          "type": "string",
+          "description": "API key environment variable for direct calls (TYPESAFE_API_KEY or OPENAI_API_KEY)."
+        },
+        "bypass_models_gateway": {
+          "type": "boolean",
+          "description": "Connect directly even when a models gateway is configured. Custom base_url and endpoint do not implicitly bypass the gateway."
+        },
+        "choices": {
+          "type": "object",
+          "minProperties": 2,
+          "maxProperties": 255,
+          "propertyNames": {
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "levels": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 10,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "timeout": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ],
+          "description": "Request timeout, default 10s."
+        },
+        "cost": {
+          "$ref": "#/definitions/CostConfig",
+          "description": "Explicit USD pricing per one million evaluator input/output tokens. Overrides built-in evaluator pricing, including on custom endpoints. An empty object declares free evaluations; cache rates are unused."
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "type",
+        "instructions"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "choice"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "choices"
+            ],
+            "not": {
+              "required": [
+                "levels"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "score"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "levels"
+            ],
+            "not": {
+              "required": [
+                "choices"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "boolean"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "choices"
+                  ]
+                },
+                {
+                  "required": [
+                    "levels"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "EvaluatorPolicy": {
+      "type": "object",
+      "properties": {
+        "decisions": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Choice keys (or true/false for booleans) mapped to guard decisions.",
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "ask",
+              "deny"
+            ]
+          }
+        },
+        "min_probability": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "Minimum selected-outcome probability to apply its mapping; not the confidence metric."
+        },
+        "fallback": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "deny"
+          ],
+          "description": "Decision for uncertainty or unmapped outcomes; provider failures always block."
+        }
+      },
+      "required": [
+        "decisions",
+        "min_probability",
+        "fallback"
+      ],
+      "additionalProperties": false
+    },
+    "AgentRouting": {
+      "type": "object",
+      "description": "Local agents that this agent's before_agent_run and after_agent_complete hooks may route to. Requires at least one of those hooks; the agent cannot route to itself or to harness agents, and the combined graph of possible routes and force_handoff edges must not contain a cycle.",
+      "properties": {
+        "allowed_agents": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Names of agents defined in this config that a hook may select. A transition to any other agent fails the run."
+        },
+        "default_agent": {
+          "type": "string",
+          "description": "Agent used when a choice-evaluator assessment is uncertain (low probability, tie, invalid distribution) or the evaluator fails. Required when an evaluator selects the route; must be in allowed_agents. Cancellation and budget exhaustion never use it."
+        }
+      },
+      "required": [
+        "allowed_agents"
+      ],
+      "additionalProperties": false
+    },
+    "RoutingPolicy": {
+      "type": "object",
+      "description": "Maps a choice evaluator's outcomes to agents. Kept apart from the evaluator so the same assessment can drive different actions.",
+      "properties": {
+        "routes": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Every evaluator choice mapped to an agent in routing.allowed_agents. Missing or unknown choices are configuration errors.",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "min_probability": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "Minimum selected-choice probability required to use its route. Enforced by the runtime, not the evaluator prompt; calibrate on representative requests."
+        }
+      },
+      "required": [
+        "routes",
+        "min_probability"
+      ],
+      "additionalProperties": false
+    },
+    "RoutingHookDefinition": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/HookDefinition"
+        },
+        {
+          "not": {
+            "properties": {
+              "type": {
+                "const": "model"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "evaluator_policy"
+            ]
+          }
+        }
+      ]
+    },
+    "NonEvaluatorHookDefinition": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/HookDefinition"
+        },
+        {
+          "not": {
+            "properties": {
+              "type": {
+                "const": "evaluator"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        }
+      ]
+    },
+    "NonEvaluatorHookMatcherConfig": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/HookMatcherConfig"
+        },
+        {
+          "properties": {
+            "hooks": {
+              "items": {
+                "$ref": "#/definitions/NonEvaluatorHookDefinition"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

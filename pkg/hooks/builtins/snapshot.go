@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/hooks"
@@ -378,7 +379,7 @@ func (b *snapshotBuiltin) popHistoryTail(sessionID string, keep int) []snapshotC
 	if keep >= len(s.history) {
 		return nil
 	}
-	tail := append([]snapshotCheckpoint(nil), s.history[keep:]...)
+	tail := slices.Clone(s.history[keep:])
 	clear(s.history[keep:])
 	s.history = s.history[:keep]
 	return tail

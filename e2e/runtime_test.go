@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
@@ -19,7 +19,7 @@ func TestRuntime_OpenAI_Basic(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	agentSource, err := config.Resolve("testdata/basic.yaml", nil)
+	agentSource, err := sources.Resolve("testdata/basic.yaml", nil)
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)
@@ -56,7 +56,7 @@ func TestRuntime_MultiAgent_SessionReload(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	agentSource, err := config.Resolve("testdata/multi_transfer.yaml", nil)
+	agentSource, err := sources.Resolve("testdata/multi_transfer.yaml", nil)
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)
@@ -105,7 +105,7 @@ func TestRuntime_Mistral_Basic(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	agentSource, err := config.Resolve("testdata/basic.yaml", nil)
+	agentSource, err := sources.Resolve("testdata/basic.yaml", nil)
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)

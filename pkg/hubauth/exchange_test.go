@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -58,63 +59,73 @@ func TestExchangeRejectsUnusableTokens(t *testing.T) {
 
 func TestExchangeRetriesTransientFailures(t *testing.T) {
 	t.Run("retries a server error", func(t *testing.T) {
-		token := longLived(t)
-		var attempts int
-		resetState(t)
-		loginEndpoint = newServer(t, func(w http.ResponseWriter, _ *http.Request) {
-			attempts++
-			if attempts == 1 {
-				http.Error(w, "boom", http.StatusBadGateway)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
-		})
-		installSecret(t, testToken)
+		synctest.Test(t, func(t *testing.T) {
+			token := longLived(t)
+			var attempts int
+			resetState(t)
+			loginEndpoint = newInMemoryServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				attempts++
+				if attempts == 1 {
+					http.Error(w, "boom", http.StatusBadGateway)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
+			})
+			installSecret(t, testToken)
 
-		got, err := Token(t.Context())
-		require.NoError(t, err)
-		assert.Equal(t, token, got)
-		assert.Equal(t, 2, attempts)
+			got, err := Token(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, token, got)
+			assert.Equal(t, 2, attempts)
+		})
 	})
 
 	t.Run("gives up after maxAttempts", func(t *testing.T) {
-		hub := installFakeHub(t, longLived(t))
-		installSecret(t, testToken)
-		hub.fail(http.StatusInternalServerError, nil)
+		synctest.Test(t, func(t *testing.T) {
+			hub := installInMemoryHub(t, longLived(t))
+			installSecret(t, testToken)
+			hub.fail(http.StatusInternalServerError, nil)
 
-		_, err := Token(t.Context())
-		require.ErrorIs(t, err, errTransient)
-		assert.Len(t, hub.received(), maxAttempts)
+			_, err := Token(t.Context())
+			require.ErrorIs(t, err, errTransient)
+			assert.Len(t, hub.received(), maxAttempts)
+		})
 	})
 
 	t.Run("does not retry a refusal", func(t *testing.T) {
-		hub := installFakeHub(t, longLived(t))
-		installSecret(t, testToken)
-		hub.fail(http.StatusForbidden, nil)
+		synctest.Test(t, func(t *testing.T) {
+			hub := installInMemoryHub(t, longLived(t))
+			installSecret(t, testToken)
+			hub.fail(http.StatusForbidden, nil)
 
-		_, err := Token(t.Context())
-		require.ErrorIs(t, err, errRejected)
-		assert.Len(t, hub.received(), 1)
+			_, err := Token(t.Context())
+			require.ErrorIs(t, err, errRejected)
+			assert.Len(t, hub.received(), 1)
+		})
 	})
 
 	t.Run("honours a short Retry-After", func(t *testing.T) {
-		hub := installFakeHub(t, longLived(t))
-		installSecret(t, testToken)
-		hub.fail(http.StatusTooManyRequests, http.Header{"Retry-After": []string{"0"}})
+		synctest.Test(t, func(t *testing.T) {
+			hub := installInMemoryHub(t, longLived(t))
+			installSecret(t, testToken)
+			hub.fail(http.StatusTooManyRequests, http.Header{"Retry-After": []string{"0"}})
 
-		_, err := Token(t.Context())
-		require.ErrorIs(t, err, errTransient)
-		assert.Len(t, hub.received(), maxAttempts)
+			_, err := Token(t.Context())
+			require.ErrorIs(t, err, errTransient)
+			assert.Len(t, hub.received(), maxAttempts)
+		})
 	})
 
 	t.Run("gives up on a long Retry-After", func(t *testing.T) {
-		hub := installFakeHub(t, longLived(t))
-		installSecret(t, testToken)
-		hub.fail(http.StatusTooManyRequests, http.Header{"Retry-After": []string{"600"}})
+		synctest.Test(t, func(t *testing.T) {
+			hub := installInMemoryHub(t, longLived(t))
+			installSecret(t, testToken)
+			hub.fail(http.StatusTooManyRequests, http.Header{"Retry-After": []string{"600"}})
 
-		_, err := Token(t.Context())
-		require.ErrorIs(t, err, errTransient)
-		assert.Len(t, hub.received(), 1, "the server asked us to stay away")
+			_, err := Token(t.Context())
+			require.ErrorIs(t, err, errTransient)
+			assert.Len(t, hub.received(), 1, "the server asked us to stay away")
+		})
 	})
 }
 
@@ -165,6 +176,7 @@ func TestLoginEndpointOverride(t *testing.T) {
 		want string
 	}{
 		{name: "unset", url: "", want: defaultLoginEndpoint},
+		{name: "mixed-case docker host", url: "https://HUB-STAGE.DOCKER.COM/v2/users/login", want: "https://HUB-STAGE.DOCKER.COM/v2/users/login"},
 		{name: "docker host", url: "https://hub-stage.docker.com/v2/users/login", want: "https://hub-stage.docker.com/v2/users/login"},
 		{name: "other host", url: "https://evil.example.com/login", want: defaultLoginEndpoint},
 		{name: "plain HTTP", url: "http://hub.docker.com/v2/users/login", want: defaultLoginEndpoint},
@@ -174,6 +186,32 @@ func TestLoginEndpointOverride(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(envLoginURL, tt.url)
 			assert.Equal(t, tt.want, resolveLoginEndpoint())
+		})
+	}
+}
+
+func TestIsStagingEndpoint(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		want     bool
+	}{
+		{endpoint: defaultLoginEndpoint, want: false},
+		{endpoint: "https://hub-stage.docker.com/v2/users/login", want: true},
+		{endpoint: "https://login-stage.docker.com/v2/users/login", want: true},
+		{endpoint: "https://HUB-STAGE.docker.com/v2/users/login", want: true},
+		{endpoint: "https://HuB-StAgE.DoCkEr.CoM/v2/users/login", want: true},
+		{endpoint: "https://HUB.DOCKER.COM/v2/users/login", want: false},
+		{endpoint: "https://HUB-STAGE.DOCKER.COM.evil.example/login", want: false},
+		{endpoint: "https://hub.docker.com/hub-stage/v2/users/login", want: false},
+		{endpoint: "https://hub-stage.example.com/v2/users/login", want: false},
+		{endpoint: "https://hub-stage.docker.com.example.com/login", want: false},
+		{endpoint: "http://127.0.0.1:1234/v2/users/login", want: false},
+		{endpoint: "://not a url", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.endpoint, func(t *testing.T) {
+			assert.Equal(t, tt.want, isStagingEndpoint(tt.endpoint))
 		})
 	}
 }

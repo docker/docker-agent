@@ -180,11 +180,9 @@ func TestMap_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for i := range 100 {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			m.Store(n, n*2)
-		}(i)
+		wg.Go(func() {
+			m.Store(i, i*2)
+		})
 	}
 
 	wg.Wait()

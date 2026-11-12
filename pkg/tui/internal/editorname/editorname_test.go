@@ -109,6 +109,22 @@ func TestFromEnv(t *testing.T) {
 			want:      "$EDITOR",
 		},
 		{
+			name:      "Unicode whitespace around command",
+			editorEnv: "\u2003/usr/bin/vim\u00a0--clean",
+			want:      "Vim",
+		},
+		{
+			name:      "Whitespace-only VISUAL masks EDITOR",
+			visual:    "\u2003\t\n",
+			editorEnv: "vim",
+			want:      "$EDITOR",
+		},
+		{
+			name:      "Invalid UTF-8 executable falls back",
+			editorEnv: "\xff --wait",
+			want:      "$EDITOR",
+		},
+		{
 			name:      "Nano",
 			visual:    "",
 			editorEnv: "nano",
