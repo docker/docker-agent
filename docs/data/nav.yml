@@ -209,6 +209,8 @@
       url: /providers/google/
     - title: Groq
       url: /providers/groq/
+    - title: HopBase
+      url: /providers/hopbase/
     - title: Hugging Face
       url: /providers/huggingface/
     - title: Local Models

@@ -155,6 +155,16 @@
     ]
   },
   {
+    "name": "hopbase",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.hop-base.com/v1",
+    "default_model": "glm-5.3",
+    "token_env_vars": [
+      "HOPBASE_API_KEY"
+    ]
+  },
+  {
     "name": "baseten",
     "merge_consecutive_messages": true,
     "api_type": "openai",
