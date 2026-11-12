@@ -390,7 +390,7 @@ func (e *fallbackExecutor) execute(
 
 			announceServing(stream)
 
-			idleTimeout := streamIdleTimeoutFor(modelEntry.provider)
+			idleTimeout := streamIdleTimeoutFor(modelEntry.provider, stream, a)
 			res, err := handleStream(streamCtx, streamCancel, stream, a, attemptTools, sess, events, idleTimeout)
 			res.Serving = servingModelFrom(stream)
 			res.Dispatched = dispatchedModelFrom(stream)
@@ -432,6 +432,7 @@ func (e *fallbackExecutor) execute(
 					stream, err = modelEntry.provider.CreateChatCompletionStream(streamCtx, attemptMessages, attemptTools)
 					if err == nil {
 						announceServing(stream)
+						idleTimeout = streamIdleTimeoutFor(modelEntry.provider, stream, a)
 						res, err = handleStream(streamCtx, streamCancel, stream, a, attemptTools, sess, events, idleTimeout)
 						res.Serving = servingModelFrom(stream)
 						res.Dispatched = dispatchedModelFrom(stream)

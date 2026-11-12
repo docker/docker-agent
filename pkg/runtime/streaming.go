@@ -12,38 +12,25 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// defaultStreamIdleTimeout is the maximum time handleStream will wait for the
-// next SSE chunk before declaring the upstream connection stalled. A
-// half-open TCP connection to the model gateway (remote side gone without
-// sending FIN) would otherwise block the goroutine forever and prevent
-// graceful shutdown.
-//
-// Five minutes is intentionally generous: LLM streams can legitimately pause
-// for tens of seconds during extended thinking. The timeout only fires when
-// absolutely no bytes arrive at the SSE layer (not just no new tokens).
-//
-// handleStream takes the idle timeout as a parameter rather than reading this
-// constant directly, so tests can pass a short timeout without mutating shared
-// state (and can therefore run in parallel).
-const defaultStreamIdleTimeout = 5 * time.Minute
-
-// flexStreamIdleTimeout replaces defaultStreamIdleTimeout for Gemini Flex
-// requests, which Google may queue for up to 15 minutes before the first byte.
-const flexStreamIdleTimeout = 15 * time.Minute
-
-// streamIdleTimeoutFor returns the idle timeout for p's streams. Only Gemini
-// Flex gets the longer window; every other provider and tier keeps the default.
-func streamIdleTimeoutFor(p provider.Provider) time.Duration {
+// streamIdleTimeoutFor resolves explicit target, entry and file settings in order.
+func streamIdleTimeoutFor(p provider.Provider, stream chat.MessageStream, a *agent.Agent) time.Duration {
 	cfg := p.BaseConfig().ModelConfig
-	if cfg.Provider == "google" && cfg.ProviderOpts["service_tier"] == "flex" {
-		return flexStreamIdleTimeout
+	if target := dispatchedModelFrom(stream); target != nil && target.Config.ModelConfig.StreamIdleTimeout != nil {
+		return target.Config.ModelConfig.StreamIdleTimeout.Duration
 	}
-	return defaultStreamIdleTimeout
+	if cfg.StreamIdleTimeout != nil {
+		return cfg.StreamIdleTimeout.Duration
+	}
+	if timeout := a.StreamIdleTimeout(); timeout != nil {
+		return timeout.Duration
+	}
+	return latest.DisabledStreamIdleTimeout
 }
 
 // errStreamIdle is the sentinel error returned when the upstream model stream
@@ -97,7 +84,7 @@ type streamResult struct {
 // underlying TCP connection and unblocks the stream reader goroutine.
 //
 // idleTimeout bounds the wait for the next SSE chunk; production callers pass
-// streamIdleTimeoutFor(provider), tests pass a short value.
+// streamIdleTimeoutFor, tests pass a short value.
 //
 // handleStream is a pure stream-aggregation routine: it does not touch
 // runtime state and can be unit-tested by feeding a mock chat.MessageStream.
@@ -136,8 +123,13 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 		}
 	}()
 
-	idleTimer := time.NewTimer(idleTimeout)
-	defer idleTimer.Stop()
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	if idleTimeout != latest.DisabledStreamIdleTimeout {
+		idleTimer = time.NewTimer(idleTimeout)
+		idleC = idleTimer.C
+		defer idleTimer.Stop()
+	}
 
 	messageID := uuid.NewV4().String()
 	var fullContent strings.Builder
@@ -250,13 +242,15 @@ mainLoop:
 		select {
 		case res := <-recvCh:
 			// Reset the idle timer on every received chunk.
-			if !idleTimer.Stop() {
-				select {
-				case <-idleTimer.C:
-				default:
+			if idleTimer != nil {
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
 				}
+				idleTimer.Reset(idleTimeout)
 			}
-			idleTimer.Reset(idleTimeout)
 
 			if errors.Is(res.err, io.EOF) {
 				break mainLoop
@@ -486,7 +480,7 @@ mainLoop:
 			// stream). Return promptly so graceful shutdown can proceed.
 			return failedResult(), ctx.Err()
 
-		case <-idleTimer.C:
+		case <-idleC:
 			slog.WarnContext(ctx, "Model stream stalled: no data received within idle timeout",
 				"agent", a.Name(),
 				"session_id", sess.ID,

@@ -155,6 +155,7 @@ func defaultConfig() *config {
 		},
 		overrides: map[reflect.Type]func(*builder) (*jsonschema.Schema, error){
 			reflect.TypeFor[latest.Duration]():          durationSchema,
+			reflect.TypeFor[latest.StreamIdleTimeout](): streamIdleTimeoutSchema,
 			reflect.TypeFor[latest.InstructionFiles]():  instructionFilesSchema,
 			reflect.TypeFor[latest.SkillsConfig]():      skillsConfigSchema,
 			reflect.TypeFor[latest.ThinkingBudget]():    thinkingBudgetSchema,
