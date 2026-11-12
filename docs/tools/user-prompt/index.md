@@ -7,11 +7,9 @@ weight: 190
 canonical: https://docs.docker.com/ai/docker-agent/tools/user-prompt/
 ---
 
-_Ask the user questions and collect interactive input during agent execution._
-
 ## Overview
 
-The user prompt tool allows agents to ask questions and collect input from users during execution. This enables interactive workflows where the agent needs clarification, confirmation, or additional information before proceeding.
+The user prompt tool allows agents to ask questions and collect input from users during execution.
 
 > [!NOTE]
 > **When to Use**

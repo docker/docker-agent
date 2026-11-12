@@ -6,21 +6,9 @@ weight: 50
 canonical: https://docs.docker.com/ai/docker-agent/features/harnesses/
 ---
 
-_Delegate coding tasks to external AI coding CLIs (Claude Code, Codex, opencode) as sub-agents._
-
 ## Overview
 
 A **harness** agent delegates its work to an external coding CLI — `claude` (Claude Code), `codex` (OpenAI Codex), `opencode`, `pi`, or `cmd` (Command Code) — instead of calling a model API directly. The external CLI drives the coding loop while Docker Agent provides orchestration, hooks, permissions, and distribution.
-
-This pattern gives you the best of both worlds:
-
-- **External CLI strengths** — deep IDE integration, specialized coding workflows, CLI-native tool access
-- **Docker Agent strengths** — multi-agent coordination, hook-based auditing and policy enforcement, permission controls, OCI distribution, and the full agent config schema
-
-> [!NOTE]
-> **When to use harnesses**
->
-> Use a harness when you want a Claude Code / Codex / opencode session to act as a sub-agent inside a larger Docker Agent workflow — for example, an orchestrator that plans work and delegates coding tasks to specialized harness agents.
 
 ## Prerequisites
 

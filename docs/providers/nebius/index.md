@@ -6,8 +6,6 @@ weight: 190
 canonical: https://docs.docker.com/ai/docker-agent/providers/nebius/
 ---
 
-_Use Nebius Token Factory models with Docker Agent._
-
 ## Overview
 
 [Nebius Token Factory](https://tokenfactory.nebius.com/) (formerly Nebius AI Studio) provides hosted AI models through an OpenAI-compatible API. Docker Agent includes built-in support for Token Factory as the `nebius` alias provider.
@@ -25,8 +23,6 @@ _Use Nebius Token Factory models with Docker Agent._
 
 ### Inline Syntax
 
-The simplest way to use Nebius:
-
 ```yaml
 agents:
   root:
@@ -36,8 +32,6 @@ agents:
 ```
 
 ### Named Model
-
-For more control over parameters:
 
 ```yaml
 models:

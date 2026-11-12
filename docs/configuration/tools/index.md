@@ -9,8 +9,6 @@ aliases:
   - /ai/docker-agent/reference/toolsets/
 ---
 
-_Complete reference for configuring built-in tools, MCP tools, and Docker-based tools._
-
 ## Built-in Tools
 
 Built-in tools are included with Docker Agent and require no external dependencies. Add them to your agent's `toolsets` list by `type`. Each tool's dedicated page covers its full configuration options, available operations, and examples.
@@ -134,10 +132,6 @@ Where the aqua registry includes a checksum manifest, downloaded binaries are ve
 - **Unsupported or weak checksum types (e.g. md5, sha1)** — skipped with a warning; installation proceeds without verification.
 - **No manifest** — if no checksum is advertised in the registry entry, the binary is installed without verification.
 
-### version_overrides Resolution
-
-The auto-installer correctly resolves **`version_overrides`** entries in the aqua registry. Many common tools (for example, `fzf`) keep their package configuration — including download URLs and checksums — under `version_overrides` rather than at the top level of their registry entry. These tools previously failed to install silently; they are now handled correctly.
-
 ### Disabling Auto-Install
 
 **Per toolset** — set `version` to `"false"` or `"off"`:
@@ -234,7 +228,7 @@ toolsets:
 > [!NOTE]
 > **`required` is not yet enforced**
 >
-> The schema validates this field and the supervisor stores it, but no code path acts on it yet. It is documented now so config files written today keep working when the planned eager-startup phase lands. Picking the `strict` profile is forward-compatible — it will start enforcing `required=true` automatically.
+> `required` is informational and does not prevent an agent from starting when a toolset is unavailable.
 
 ### Inspecting and restarting toolsets at runtime
 

@@ -8,8 +8,6 @@ aliases:
   - /ai/docker-agent/tutorial/
 ---
 
-_Get up and running with Docker Agent in under 5 minutes. Pick whichever path suits you best._
-
 ## Option A: Run the Default Agent
 
 The fastest way to try Docker Agent — no config file needed:
@@ -18,8 +16,6 @@ The fastest way to try Docker Agent — no config file needed:
 # Launch the default agent with the interactive TUI
 $ docker agent run
 ```
-
-This starts a general-purpose assistant with sensible defaults. Just start chatting.
 
 > [!NOTE]
 > This needs a model: a cloud provider API key, or a local model pulled through Docker Model Runner. [Set Up a Model](../set-up-a-model/index.md) walks through both paths.
@@ -70,13 +66,6 @@ agents:
       - type: shell
       - type: think
 ```
-
-This gives your agent:
-
-- **Claude Sonnet 4.5** as the underlying model
-- **Filesystem access** to read and write files
-- **Shell access** to run commands
-- **Think tool** for step-by-step reasoning
 
 This config needs `ANTHROPIC_API_KEY` set. See [Set Up a Model](../set-up-a-model/index.md) for where to put it, or use a local `dmr/...` model that needs no key.
 
@@ -146,7 +135,7 @@ agents:
 > [!NOTE]
 > **Docker MCP Tools**
 >
-> The `ref: docker:duckduckgo` syntax runs the DuckDuckGo MCP server in a Docker container. This is the recommended way to use MCP tools — secure, isolated, and easy to configure. Requires Docker Desktop.
+> The `ref: docker:duckduckgo` syntax runs the DuckDuckGo MCP server in a Docker container. Requires Docker Desktop.
 
 ## What's Next?
 

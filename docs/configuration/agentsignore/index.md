@@ -6,8 +6,6 @@ weight: 75
 canonical: https://docs.docker.com/ai/docker-agent/configuration/agentsignore/
 ---
 
-_Hide files from the agent with a `.agentsignore` file, using the same syntax as `.gitignore`._
-
 ## Overview
 
 Put a `.agentsignore` file in your project and the agent stops seeing the paths it lists. Matched files are absent from directory listings and searches, and reads, writes and edits targeting them are refused.

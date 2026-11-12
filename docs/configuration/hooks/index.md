@@ -6,8 +6,6 @@ weight: 60
 canonical: https://docs.docker.com/ai/docker-agent/configuration/hooks/
 ---
 
-_Run shell commands at various points during agent execution for deterministic control over behavior._
-
 ## Overview
 
 Hooks allow you to execute shell commands or scripts at key points in an agent's lifecycle. They provide deterministic control that works alongside the LLM's behavior, enabling validation, logging, environment setup, and more.

@@ -177,7 +177,7 @@ The title is rendered in the agent's accent color. Sections appear in this order
 - **Execution capabilities** — native versus harness execution, tool execution/approval ownership, and support for budgets, native compaction, mid-turn steering and prompt-hook context. Support is not an enabled setting; budget support requires runtime configuration. Harness actions are reported, not approved by Docker Agent. Omitted when the server has not supplied a profile.
 - **Model / Fallback / Thinking** — the `provider/model`, any fallback models, and the gauge + value thinking line (omitted for models with no selectable thinking, e.g. harness-backed agents).
 - **Context** — the agent's latest known context usage, e.g. `Context: 12.8K of 128.0K tokens (10%)` (a bare token count when the context limit is unknown; omitted until the agent has run). Sub-agent and background-agent runs are accounted for. When a dedicated `compaction_model` caps the effective limit below the primary model's own window, the token-usage line also shows a short "⚠ capped" marker (see `/context` for the model and figure).
-- **Cost** — the agent's cumulative cost across all runs in the session tree. Repeated session snapshots are not double-counted. Omitted until the agent has run.
+- **Cost** — the agent's cumulative cost across all runs in the session tree. Omitted until the agent has run.
 - **Sub-agents (N) / Handoffs (N) / Skills (N)** — compact, inline, comma-separated lists wrapped to the dialog width.
 - **Limits** — the configured per-agent limits that are set, e.g. `Limits: max-iter 50 · history 40 · max-tool-calls 5`.
 - **Options** — the enabled option flags, e.g. `Options: add-date · add-environment-info · redact-secrets`.
@@ -200,7 +200,7 @@ The thinking state of each model is shown with a gauge + value on the card and a
 | Disabled (capable)     | `thinking ▱▱▱▱▱▱ off` (dimmed)  | `▱▱▱▱▱▱` (empty gauge)  |
 | Not reasoning-capable  | _(omitted)_                    | _(omitted)_            |
 
-The **effort gauge** is a fixed-width six-cell indicator (`▰` filled, `▱` empty) so the badge column stays aligned. It maps the six selectable levels one-to-one onto filled-cell counts — `minimal` → `▰▱▱▱▱▱`, `low` → `▰▰▱▱▱▱`, `medium` → `▰▰▰▱▱▱`, `high` → `▰▰▰▰▱▱`, `xhigh` → `▰▰▰▰▰▱`, `max` → `▰▰▰▰▰▰` — so the cell count alone is lossless, with a low→high color ramp as a secondary cue. A capable-but-disabled model shows a dim empty gauge (`▱▱▱▱▱▱` `off`), adaptive budgets show `auto`, and token budgets keep `◉ <count>`. The same gauge + value renders on the focus card, the Agent Inspector, and the row.
+The **effort gauge** is a fixed-width six-cell indicator (`▰` filled, `▱` empty) so the badge column stays aligned. It maps the six selectable levels one-to-one onto filled-cell counts — `minimal` → `▰▱▱▱▱▱`, `low` → `▰▰▱▱▱▱`, `medium` → `▰▰▰▱▱▱`, `high` → `▰▰▰▰▱▱`, `xhigh` → `▰▰▰▰▰▱`, `max` → `▰▰▰▰▰▰` — with a low→high color ramp as a secondary cue. A capable-but-disabled model shows a dim empty gauge (`▱▱▱▱▱▱` `off`), adaptive budgets show `auto`, and token budgets keep `◉ <count>`. The same gauge + value renders on the focus card, the Agent Inspector, and the row.
 
 Harness-backed agents (e.g. `claude-code`) show the harness type as their model. `claude-code` and `command-code` harnesses show their `effort` on the gauge, or `auto` while the CLI picks it; other harnesses show no thinking gauge. Press **Shift+Tab** to cycle the current model's thinking-effort level; a `✻ Thinking: <level>` toast confirms the change (useful when the sidebar is hidden).
 
@@ -454,7 +454,7 @@ The picker's catalog entries come from [models.dev](https://models.dev) and are 
 
 ## Editable Messages
 
-Edit any previous user message to branch the conversation. Hover a past user message and click **✎ edit** (or select it with the keyboard and press <kbd>e</kbd>) to modify it — the agent will re-process from that point, while the original session history is preserved. This is great for exploring alternative approaches without losing your work.
+Edit any previous user message to branch the conversation. Hover a past user message and click **✎ edit** (or select it with the keyboard and press <kbd>e</kbd>) to modify it — the agent will re-process from that point, while the original session history is preserved.
 
 Hovering a user or assistant message also reveals a **⎘ copy** button that copies the message text to the clipboard (<kbd>c</kbd> when a message is selected).
 
@@ -462,7 +462,7 @@ Hovering a user or assistant message also reveals a **⎘ copy** button that cop
 
 When an agent turn fails (fatal model error, hook block, loop detection, tool-setup failure), the TUI displays the error in the message stream and persists it to the session store. Errors survive a reload and are shown exactly where they occurred, making them visible in shared or remote sessions.
 
-Each error message includes a clickable **↻ retry** button. Clicking it resumes the conversation from the point of failure — without retyping your last message. This lets you recover from transient failures (rate limits, network blips, model API errors) in one click.
+Each error message includes a clickable **↻ retry** button. Clicking it resumes the conversation from the point of failure — without retyping your last message.
 
 ## Session Management
 
@@ -683,7 +683,7 @@ settings:
 > [!TIP]
 > **Hot Reload**
 >
-> Custom themes auto-reload when you save changes to the file — no restart needed. This makes it easy to tweak colors in real-time.
+> Custom themes reload when you save changes to the file.
 
 > [!WARNING]
 > **Partial overrides**
@@ -698,7 +698,7 @@ When an agent calls a tool, Docker Agent shows a confirmation dialog by default.
 - **Always allow** — Permanently approve this tool/command for the session
 - **Deny** — Reject the tool call
 
-**Granular permissions:** The permission system supports pattern-based matching. When you “Always allow” a specific tool command, only that exact pattern is auto-approved — other commands from the same tool still require confirmation. This lets you auto-approve safe, read-only operations while maintaining control over destructive ones.
+**Granular permissions:** The permission system supports pattern-based matching. When you “Always allow” a specific tool command, only that exact pattern is auto-approved — other commands from the same tool still require confirmation.
 
 > [!TIP]
 > **YOLO mode**
@@ -714,5 +714,3 @@ The TUI displays transient notification banners for agent warnings, errors, and 
 | Hover       | Pauses auto-dismiss; the notification stays visible until the mouse moves away |
 | Click       | Copies the notification text to the clipboard |
 | × (close)   | Dismisses immediately; the glyph turns red when hovered |
-
-Hint text in the top-left corner of the notification border shows the available actions at a glance.

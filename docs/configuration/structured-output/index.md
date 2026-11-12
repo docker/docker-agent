@@ -6,19 +6,9 @@ weight: 90
 canonical: https://docs.docker.com/ai/docker-agent/configuration/structured-output/
 ---
 
-_Force the agent to respond with JSON matching a specific schema._
-
 ## Overview
 
 Structured output constrains the agent's responses to match a predefined JSON schema. This is useful for building agents that need to produce machine-readable output for downstream processing, API responses, or integration with other systems.
-
-> [!NOTE]
-> **When to Use**
->
-> - Building API endpoints that need consistent JSON responses
-> - Data extraction and transformation pipelines
-> - Agents that feed into other automated systems
-> - Ensuring predictable output format for parsing
 
 ## Configuration
 

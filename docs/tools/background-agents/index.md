@@ -7,8 +7,6 @@ weight: 90
 canonical: https://docs.docker.com/ai/docker-agent/tools/background-agents/
 ---
 
-_Dispatch work to sub-agents concurrently and collect results asynchronously._
-
 ## Overview
 
 The background agents tool lets an orchestrator dispatch work to sub-agents concurrently and collect results asynchronously. Unlike [transfer_task](../transfer-task/index.md) (which blocks until the sub-agent finishes), background agent tasks run in parallel — the orchestrator can start several tasks, do other work, and check on them later.

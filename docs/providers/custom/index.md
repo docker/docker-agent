@@ -6,8 +6,6 @@ weight: 280
 canonical: https://docs.docker.com/ai/docker-agent/providers/custom/
 ---
 
-_Define reusable provider configurations with shared defaults for any provider type — OpenAI, Anthropic, Google, Bedrock, and more._
-
 ## Overview
 
 The `providers` section in your agent YAML lets you define named provider configurations that models can reference. This is useful for:

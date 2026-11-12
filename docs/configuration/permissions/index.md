@@ -6,8 +6,6 @@ weight: 70
 canonical: https://docs.docker.com/ai/docker-agent/configuration/permissions/
 ---
 
-_Control which tools can execute automatically, require confirmation, or are blocked entirely._
-
 ## Overview
 
 Permissions provide fine-grained control over tool execution. You can configure which tools are auto-approved (run without asking), which require user confirmation, and which are completely blocked.

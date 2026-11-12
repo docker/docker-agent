@@ -213,7 +213,7 @@ chunking:
 > [!NOTE]
 > **Language Support**
 >
-> Currently supports Go (`.go`) files. More languages will be added. Falls back to plain text chunking for unsupported file types.
+> Supports Go (`.go`) files. Falls back to plain text chunking for unsupported file types.
 
 ## Indexing failures, retries and backoff
 
@@ -236,9 +236,7 @@ on the failure:
   file in the run is successfully indexed** — every attempted file hit one
   of these retryable statuses — the run treats that as a sustained backend
   failure rather than a one-off hiccup, and surfaces the error so the gate
-  arms on the next turn (fixed in
-  [#4097](https://github.com/docker/docker-agent/issues/4097); previously
-  only 429 reached the gate).
+  arms on the next turn.
 
 | Failure kind | Behaviour |
 |---|---|
@@ -284,11 +282,8 @@ Starting any toolset — RAG included — is bounded by a 30-second *wait* budge
 tools, exactly as it would for a wedged MCP server. This budget exists to
 detect toolsets that never come up; it is not a deadline on indexing itself.
 
-A large knowledge base can legitimately take much longer than 30s to index.
-Rather than abort in-flight indexing at the 30s mark — which used to discard
-any embeddings not yet committed for the file being processed — the RAG
-toolset detaches indexing from the caller's wait budget the same way it
-already detaches its file watcher. When the 30s budget expires:
+Indexing can continue beyond the 30-second startup wait budget. When that
+budget expires:
 
 - The current turn proceeds without the RAG tool (the existing "taking too
   long to start" warning and TUI progress events still apply).
@@ -328,17 +323,6 @@ rag:
 - A 429/408/5xx from the provider *during* a detached indexing run is
   unaffected by any of this — it still aborts the run and arms the backoff
   gate exactly as described above.
-
-### Operational impact
-
-**Before**: a rate-limited knowledge base was re-indexed on every agent turn —
-`max_indexing_concurrency × max_embedding_concurrency` concurrent provider calls
-could relaunch within milliseconds, easily tripping rate limits for both the
-knowledge base and the agent's own model calls.
-
-**After**: retries are spaced out and jittered so the provider has room to recover
-before the next attempt. The agent continues working with any other toolsets that
-are not affected.
 
 ### What you will see
 
