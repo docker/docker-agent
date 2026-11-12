@@ -21,7 +21,7 @@ access; inference runs locally after the model is downloaded.
 
 ## Setup
 
-1. Install Rapid-MLX with Homebrew or pip (Python 3.10 or newer):
+1. Install Rapid-MLX with Homebrew or pip (Python 3.12 or newer):
 
    ```bash
    $ brew install rapid-mlx
@@ -143,9 +143,17 @@ parameter schemas clear, and retain tool approvals. See
 - **Docker Agent runs in a container:** Container-local `127.0.0.1` does not
   refer to your Mac. On Docker Desktop, use
   `http://host.docker.internal:8000/v1` and start the server with a host
-  reachable from the container (for example `--host 0.0.0.0`). Set an API key
-  before exposing the server beyond loopback; binding to `0.0.0.0` exposes it
-  to your LAN.
+  reachable from the container, an API key, and the Docker hostname in the
+  Host allowlist:
+
+  ```bash
+  $ rapid-mlx serve qwen3.5-4b-4bit --port 8000 --host 0.0.0.0 --api-key your-server-api-key --trusted-hosts host.docker.internal
+  ```
+
+  Configure Docker Agent with the same API key as described in
+  [Authentication](#authentication). `--trusted-hosts` replaces the default
+  loopback allowlist; add `localhost 127.0.0.1` if you also need local access.
+  Binding to `0.0.0.0` exposes the server to your LAN.
 
 For server options and endpoint details, see the Rapid-MLX
 [CLI reference](https://github.com/raullenchai/Rapid-MLX/blob/main/docs/reference/cli.md).
