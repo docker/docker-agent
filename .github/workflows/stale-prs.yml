@@ -1,0 +1,70 @@
+name: stale-prs
+
+on:
+  schedule:
+    # Daily, 08:00 UTC.
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview without changing pull requests
+        type: boolean
+        default: true
+        required: true
+
+permissions: {}
+
+# The action persists pagination state; overlapping runs could interfere.
+concurrency:
+  group: stale-prs
+  cancel-in-progress: false
+
+jobs:
+  stale:
+    if: github.repository == 'docker/docker-agent' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      issues: write
+      pull-requests: write
+    steps:
+      # actions/stale adds an existing label; it does not create one.
+      - name: Check stale label exists before modifying pull requests
+        if: github.event_name == 'schedule' || inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh api 'repos/{owner}/{repo}/labels/status%2Fstale' --silent; then
+            echo '::error::The status/stale label must exist before enabling live stale PR runs.'
+            exit 1
+          fi
+
+      - name: Warn and close inactive pull requests
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+          days-before-pr-stale: 23
+          days-before-pr-close: 7
+          stale-pr-label: status/stale
+          stale-pr-message: >-
+            This pull request has had no activity for 23 days and is marked as
+            needing action from its author. It may be closed after 7 more days
+            without activity. Please comment or update it if it is still needed.
+            If it is waiting for maintainer review instead, please ask a maintainer
+            to update its status labels.
+          close-pr-message: >-
+            This pull request was closed after 7 days without activity following
+            the stale warning. If it is still needed, please ask a maintainer to
+            reopen it.
+          # Only process PRs explicitly marked as needing author action.
+          any-of-pr-labels: status/needs-rebase,status/needs-signed-commits
+          exempt-pr-labels: status/blocked,status/in-progress,status/needs-design,status/ready-for-review
+          exempt-all-pr-milestones: true
+          exempt-draft-pr: false
+          remove-pr-stale-when-updated: true
+          ignore-pr-updates: false
+          delete-branch: false
+          debug-only: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
