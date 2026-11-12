@@ -16,6 +16,9 @@ import (
 
 const ToolNameUserPrompt = types.ToolNameUserPrompt
 
+// MetaKeyUI is the elicitation meta key that carries Args.UI to the client.
+const MetaKeyUI = "docker-agent/ui"
+
 // CreateToolSet is used by the tools registry.
 func CreateToolSet() (tools.ToolSet, error) {
 	return New(), nil
@@ -34,6 +37,7 @@ type Args struct {
 	Message string         `json:"message" jsonschema:"The message/question to display to the user"`
 	Title   string         `json:"title,omitempty" jsonschema:"Optional title for the dialog window (defaults to 'Question')"`
 	Schema  map[string]any `json:"schema,omitempty" jsonschema:"JSON Schema defining the expected response structure. Supports object schemas with properties or primitive type schemas."`
+	UI      string         `json:"ui,omitempty" jsonschema:"Optional form for clients that can draw one, in the format your instructions describe. Leave empty unless your instructions describe one. message must still state the question, for clients that can't draw it."`
 }
 
 type Response struct {
@@ -89,12 +93,19 @@ func (t *ToolSet) userPrompt(ctx context.Context, params Args) (*tools.ToolCallR
 		span.SetAttributes(
 			attribute.Int("cagent.tool.user_prompt.message_length", len(params.Message)),
 			attribute.Bool("cagent.tool.user_prompt.has_schema", params.Schema != nil),
+			attribute.Bool("cagent.tool.user_prompt.has_ui", params.UI != ""),
 		)
 	}
 
 	var meta mcp.Meta
 	if params.Title != "" {
 		meta = mcp.Meta{"cagent/title": params.Title}
+	}
+	if params.UI != "" {
+		if meta == nil {
+			meta = mcp.Meta{}
+		}
+		meta[MetaKeyUI] = params.UI
 	}
 
 	req := &mcp.ElicitParams{

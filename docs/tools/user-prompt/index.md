@@ -46,6 +46,7 @@ The `user_prompt` tool takes these parameters:
 | `message` | string | ✓        | The question or prompt to display.                                                                 |
 | `title`   | string | ✗        | Optional title for the dialog window in the TUI. Defaults to `"Question"` when not provided.       |
 | `schema`  | object | ✗        | JSON Schema defining the expected response structure (object or primitive).                        |
+| `ui`      | string | ✗        | Optional form for clients that can draw one, in a format the agent's instructions describe. See [Client-drawn forms](#client-drawn-forms). |
 
 ## Response Format
 
@@ -166,6 +167,12 @@ How the prompt appears depends on the interface:
 - **TUI**: Displays an interactive dialog with appropriate input controls
 - **CLI (exec mode)**: Automatically declines form prompts; the agent must handle the decline without reading an answer from stdin
 - **API/MCP**: Returns an elicitation request to the client
+
+### Client-drawn forms
+
+A client can draw a richer form than `schema` describes, such as grouped fields with context next to them. docker-agent doesn't define the form's format: the client and the agent's instructions agree on it. docker-agent passes `ui` through unchanged in the elicitation request's metadata, under the `docker-agent/ui` key, and returns whatever the client sends back in `content`.
+
+A client that doesn't recognize `docker-agent/ui` ignores it and shows `message` and `schema` as usual, so `message` should always state the question on its own.
 
 > [!TIP]
 > **Best Practice**

@@ -115,3 +115,42 @@ func TestUserPromptTool_WithSchema(t *testing.T) {
 	assert.Equal(t, "bob", response.Content["username"])
 	assert.Equal(t, true, response.Content["remember"])
 }
+
+func TestUserPromptTool_UIIsPassedInMeta(t *testing.T) {
+	t.Parallel()
+	tool := New()
+
+	var receivedMeta mcp.Meta
+	tool.SetElicitationHandler(func(_ context.Context, req *mcp.ElicitParams) (tools.ElicitationResult, error) {
+		receivedMeta = req.Meta
+		return tools.ElicitationResult{Action: tools.ElicitationActionAccept}, nil
+	})
+
+	_, err := tool.userPrompt(t.Context(), Args{
+		Message: "Which database?",
+		Title:   "Database",
+		UI:      `root = Form("Database", [db])`,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, mcp.Meta{
+		"cagent/title": "Database",
+		MetaKeyUI:      `root = Form("Database", [db])`,
+	}, receivedMeta)
+}
+
+func TestUserPromptTool_NoUILeavesMetaUnset(t *testing.T) {
+	t.Parallel()
+	tool := New()
+
+	var receivedMeta mcp.Meta
+	tool.SetElicitationHandler(func(_ context.Context, req *mcp.ElicitParams) (tools.ElicitationResult, error) {
+		receivedMeta = req.Meta
+		return tools.ElicitationResult{Action: tools.ElicitationActionAccept}, nil
+	})
+
+	_, err := tool.userPrompt(t.Context(), Args{Message: "Which database?"})
+	require.NoError(t, err)
+
+	assert.Nil(t, receivedMeta)
+}
