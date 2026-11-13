@@ -7,11 +7,9 @@ weight: 150
 canonical: https://docs.docker.com/ai/docker-agent/tools/plan/
 ---
 
-_Shared persistent scratchpad for multi-agent collaboration._
-
 ## Overview
 
-The plan tool gives agents a shared, persistent scratchpad of named documents. Any agent in a multi-agent config that loads the `plan` toolset can read and write the same plans, and those plans survive across sessions. This makes it straightforward to wire a planner agent that sketches work and one or more executor agents that consume it without any custom tool wiring.
+The plan tool gives agents a shared, persistent scratchpad of named documents. Any agent in a multi-agent config that loads the `plan` toolset can read and write the same plans, and those plans survive across sessions.
 
 Plans are stored as JSON files in the Docker Agent data directory (`~/.cagent/plans/` by default). Agents that share a process serialize on a single mutex, and every write or delete additionally holds an advisory lock on a sentinel file in the plans directory, so writers in *separate* Docker Agent processes are serialized too: a stale revision fails with a deterministic version conflict when the caller supplies `last_known_revision`. Without that guard, updates are last-writer-wins. Writes are atomic (temp file + rename), so a reader never observes partial content.
 

@@ -63,7 +63,7 @@ models:
 >
 > If `compaction_model` has a **smaller** context window than the primary model, Docker Agent triggers compaction against the smaller window so the summary call can always ingest the full conversation. Pair the primary model with a compaction model whose window is at least as large to keep the proactive trigger aligned with the primary model's window.
 >
-> The `/context` header and the sidebar's context gauge surface this cap when it applies: the `/context` header shows a second line reading "compaction cap: `<model>` • `<N>` tokens", and the sidebar shows a short "⚠ capped" marker. Live-sessions rows do not carry cap wording; the sidebar marker deliberately doesn't repeat the model name or figure — the `/context` header is the sole authority on why the reported limit is smaller than the primary model's own window.
+> The `/context` header and the sidebar's context gauge surface this cap when it applies: the `/context` header shows a second line reading "compaction cap: `<model>` • `<N>` tokens", and the sidebar shows a short "⚠ capped" marker.
 
 Disable compaction only when you specifically want a session to keep full, unabridged history and are willing to risk hitting the context limit:
 
@@ -85,7 +85,7 @@ You don't have to wait for the automatic threshold. Two TUI commands give you di
 - **`/compact`** — summarize and compact the current session's history right now, regardless of how full the context window is. Useful before starting a new phase of work that doesn't need the earlier detail.
 - **`/context`** — open a context-window breakdown: estimated tokens per category (system prompt, tool definitions, prompt files, messages, tool results, compaction summary), a **Live sessions** view listing the current session plus every running sub-agent session with its own context budget, and a per-file inventory of attachments and prompt files. When a compaction has occurred, the dialog also displays the verbatim text of the most recent compaction summary, preserving hard newlines and soft-wrapping long lines to the dialog width.
 
-From `/context`, select any live session with the arrow keys and press <kbd>Enter</kbd> to explicitly compact it — including a sub-agent's session, not just the main one. This is the only way cross-agent compaction happens: there's no idle-triggered automatic compaction of sub-agent sessions, so a long-running background agent stays under your control. The request is queued onto the target session's own run loop and applied at the next safe point between model turns, so it never corrupts an in-flight turn.
+From `/context`, select any live session with the arrow keys and press <kbd>Enter</kbd> to explicitly compact it — including a sub-agent's session, not just the main one. The request runs at the next safe point between model turns.
 
 ```bash
 $ docker agent run agent.yaml

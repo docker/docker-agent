@@ -6,8 +6,6 @@ weight: 26
 canonical: https://docs.docker.com/ai/docker-agent/providers/cloudgpu/
 ---
 
-_Use CloudGPU models with Docker Agent._
-
 ## Overview
 
 [CloudGPU](https://cloudgpu.app/api/docs) serves DeepSeek, Kimi, GLM and MiniMax
@@ -39,8 +37,6 @@ agents:
 ```
 
 ### Named Model
-
-For more control over parameters:
 
 ```yaml
 models:

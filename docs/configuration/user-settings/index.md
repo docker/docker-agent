@@ -7,8 +7,6 @@ weight: 110
 canonical: https://docs.docker.com/ai/docker-agent/configuration/user-settings/
 ---
 
-_Full reference for the global settings block in your user config file._
-
 ## Where Settings Live
 
 Docker Agent reads a single user-level config file, independent of any agent YAML:

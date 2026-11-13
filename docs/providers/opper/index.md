@@ -6,8 +6,6 @@ weight: 225
 canonical: https://docs.docker.com/ai/docker-agent/providers/opper/
 ---
 
-_Use Opper models with Docker Agent._
-
 ## Overview
 
 [Opper](https://opper.ai) is an EU-hosted AI gateway that serves models from

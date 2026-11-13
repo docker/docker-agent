@@ -6,8 +6,6 @@ weight: 10
 canonical: https://docs.docker.com/ai/docker-agent/concepts/agents/
 ---
 
-_Agents are the core building blocks of Docker Agent. Each agent is an AI-powered entity with a model, instructions, tools, and optional sub-agents._
-
 ## What is an Agent?
 
 An agent in Docker Agent is defined by:

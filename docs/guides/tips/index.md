@@ -8,8 +8,6 @@ aliases:
   - /ai/docker-agent/best-practices/
 ---
 
-_Expert guidance for building effective, efficient, and secure agents._
-
 ## Configuration Tips
 
 ### Auto Mode for Quick Start

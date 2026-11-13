@@ -7,8 +7,6 @@ weight: 10
 canonical: https://docs.docker.com/ai/docker-agent/tools/filesystem/
 ---
 
-_Read, write, list, search, and navigate files and directories._
-
 ## Overview
 
 The filesystem tool gives agents the ability to explore codebases, read and edit files, create new files, search across files, and navigate directory structures.

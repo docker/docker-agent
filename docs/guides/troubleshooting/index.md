@@ -8,8 +8,6 @@ aliases:
   - /ai/docker-agent/community/troubleshooting/
 ---
 
-_Common issues and how to resolve them when working with Docker Agent._
-
 ## Common Errors
 
 ### Context Window Exceeded
@@ -195,7 +193,7 @@ MCP tools using stdio transport must complete the initialization handshake befor
 > [!NOTE]
 > **Startup tool-listing timeout**
 >
-> At startup, Docker Agent queries each toolset for its tool list. If a toolset does not respond within 10 seconds (e.g. a wedged MCP stdio server that never answers `tools/list`), that toolset is skipped with a warning and the remaining toolsets load normally. The sidebar resolves showing whichever tools did load — no infinite spinner. Enable `--debug` to see the warning message, and use `/toolset-restart <name>` once the server becomes responsive.
+> At startup, Docker Agent queries each toolset for its tool list. If a toolset does not respond within 10 seconds (e.g. a wedged MCP stdio server that never answers `tools/list`), that toolset is skipped with a warning and the remaining toolsets load normally. Enable `--debug` to see the warning message, and use `/toolset-restart <name>` once the server becomes responsive.
 
 If a toolset keeps crashing in a tight loop, tune the [`lifecycle`](../../configuration/tools/index.md#toolset-lifecycle) block on the toolset (e.g. raise `backoff.initial`, lower `max_restarts`, or switch to the `best-effort` profile) so a flaky dependency does not amplify into a restart storm.
 

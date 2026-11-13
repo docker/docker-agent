@@ -6,8 +6,6 @@ weight: 135
 canonical: https://docs.docker.com/ai/docker-agent/providers/hopbase/
 ---
 
-_Use HopBase models with Docker Agent._
-
 ## Overview
 
 [HopBase](https://hop-base.com) is a hosted AI API gateway. It serves GPT,
@@ -40,8 +38,6 @@ agents:
 ```
 
 ### Named Model
-
-For more control over parameters:
 
 ```yaml
 models:

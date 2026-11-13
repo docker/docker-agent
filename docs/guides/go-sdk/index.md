@@ -6,8 +6,6 @@ weight: 40
 canonical: https://docs.docker.com/ai/docker-agent/guides/go-sdk/
 ---
 
-_Use Docker Agent as a Go library to embed AI agents in your applications._
-
 ## Overview
 
 Docker Agent can be used as a Go library, allowing you to build AI agents directly into your Go applications. This gives you full programmatic control over agent creation, tool integration, and execution.

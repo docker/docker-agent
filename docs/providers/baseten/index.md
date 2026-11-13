@@ -6,8 +6,6 @@ weight: 40
 canonical: https://docs.docker.com/ai/docker-agent/providers/baseten/
 ---
 
-_Use Baseten AI models with Docker Agent._
-
 ## Overview
 
 Baseten provides AI models through an OpenAI-compatible API. Docker Agent includes built-in support for Baseten as an alias provider.
@@ -25,8 +23,6 @@ Baseten provides AI models through an OpenAI-compatible API. Docker Agent includ
 
 ### Inline Syntax
 
-The simplest way to use Baseten:
-
 ```yaml
 agents:
   root:
@@ -36,8 +32,6 @@ agents:
 ```
 
 ### Named Model
-
-For more control over parameters:
 
 ```yaml
 models:

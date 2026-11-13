@@ -6,8 +6,6 @@ weight: 80
 canonical: https://docs.docker.com/ai/docker-agent/features/api-server/
 ---
 
-_Expose your agents via an HTTP API for programmatic access, web frontends, and integrations._
-
 ## Overview
 
 The `docker agent serve api` command starts an HTTP server that exposes your agents through a REST-style API with Server-Sent Events (SSE) streaming. Use it to build web UIs, integrate with CI/CD pipelines, or connect agents to other services.

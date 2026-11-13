@@ -9,8 +9,6 @@ aliases:
   - /ai/docker-agent/integrations/mcp/
 ---
 
-_Extend agents with external tools via the Model Context Protocol (MCP)._
-
 ## Overview
 
 The `mcp` toolset connects your agent to any MCP server — a process or remote service that exposes tools, resources, and prompts over the [Model Context Protocol](https://modelcontextprotocol.io/). Three flavours are supported:

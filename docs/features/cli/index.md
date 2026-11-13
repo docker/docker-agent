@@ -8,8 +8,6 @@ aliases:
   - /ai/docker-agent/reference/cli/
 ---
 
-_Complete reference for all Docker Agent command-line commands and flags._
-
 > [!TIP]
 > **No config needed**
 >
