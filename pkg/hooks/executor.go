@@ -545,6 +545,9 @@ func aggregate(results []hookResult, event EventType) *Result {
 			if contract.Rewrite == events.RewriteToolResponse && hso.UpdatedToolResponse != nil {
 				final.UpdatedToolResponse = hso.UpdatedToolResponse
 			}
+			if contract.Rewrite == events.RewriteToolResponse && hso.UpdatedToolResultMeta != nil {
+				final.UpdatedToolResultMeta = hso.UpdatedToolResultMeta
+			}
 			if contract.Metadata && len(hso.Metadata) > 0 {
 				// Metadata from every matching hook is merged so multiple
 				// hooks can each contribute keys. On a key clash the last

@@ -47,7 +47,7 @@ func (c *SidebarComponent) SetTodos(result *tools.ToolCallResult) error {
 		return nil
 	}
 
-	todos, ok := result.Meta.([]todo.Todo)
+	todos, ok := tools.DecodeResultMeta[[]todo.Todo](result.Meta)
 	if !ok {
 		return nil
 	}

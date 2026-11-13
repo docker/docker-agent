@@ -1511,6 +1511,7 @@
         "is_error": {
           "type": "boolean"
         },
+        "tool_result_meta": true,
         "created_at": {
           "type": "string"
         },

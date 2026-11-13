@@ -788,6 +788,7 @@ func (s *Session) snapshotItems() []Item {
 // cloneChatMessage returns a deep copy of a chat.Message, duplicating
 // all slice and pointer fields that would otherwise alias the original.
 func cloneChatMessage(m chat.Message) chat.Message {
+	m.ToolResultMeta = cloneToolResultMeta(m.ToolResultMeta)
 	m.OpenAIResponse = m.OpenAIResponse.Clone()
 	if m.MultiContent != nil {
 		orig := m.MultiContent
@@ -831,6 +832,23 @@ func cloneChatMessage(m chat.Message) chat.Message {
 	m.ProviderState = m.ProviderState.Clone()
 	m.Compaction = m.Compaction.Clone()
 	return m
+}
+
+// cloneToolResultMeta snapshots display data as JSON, matching persisted session metadata.
+func cloneToolResultMeta(meta any) any {
+	if meta == nil {
+		return nil
+	}
+	if raw, ok := meta.(json.RawMessage); ok {
+		return slices.Clone(raw)
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		// Invalid display metadata must not alias mutable state in the source session.
+		slog.Warn("Dropping unserializable tool result metadata from session snapshot", "error", err)
+		return nil
+	}
+	return json.RawMessage(data)
 }
 
 func cloneToolDefinitions(src []tools.Tool) []tools.Tool {

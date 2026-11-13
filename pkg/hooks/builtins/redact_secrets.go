@@ -133,23 +133,35 @@ func redactOutgoingMessages(in *hooks.Input) *hooks.Output {
 // docs); a redaction that wipes the entire output to "" is still
 // honoured by the runtime.
 func redactToolOutput(in *hooks.Input) *hooks.Output {
-	if in.ToolResponse == nil {
+	out := &hooks.HookSpecificOutput{HookEventName: hooks.EventToolResponseTransform}
+	if original, ok := in.ToolResponse.(string); ok {
+		if scrubbed := portcullis.Redact(original); scrubbed != original {
+			out.UpdatedToolResponse = &scrubbed
+		}
+	}
+	if meta, changed := redactResultMeta(in.ToolResultMeta); changed {
+		out.UpdatedToolResultMeta = meta
+	}
+	if out.UpdatedToolResponse == nil && out.UpdatedToolResultMeta == nil {
 		return nil
 	}
-	original, ok := in.ToolResponse.(string)
-	if !ok {
-		return nil
+	return &hooks.Output{HookSpecificOutput: out}
+}
+
+func redactResultMeta(meta any) (json.RawMessage, bool) {
+	if meta == nil {
+		return nil, false
 	}
-	scrubbed := portcullis.Redact(original)
-	if scrubbed == original {
-		return nil
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		// Unserializable metadata cannot be scrubbed safely.
+		return json.RawMessage("null"), true
 	}
-	return &hooks.Output{
-		HookSpecificOutput: &hooks.HookSpecificOutput{
-			HookEventName:       hooks.EventToolResponseTransform,
-			UpdatedToolResponse: &scrubbed,
-		},
+	redacted, changed := redactRequestContext(raw)
+	if changed && len(redacted) == 0 {
+		return json.RawMessage("null"), true
 	}
+	return redacted, changed
 }
 
 // redactToolInput returns a map containing only the top-level keys of
@@ -239,6 +251,9 @@ func redactAny(v any) (any, bool) {
 func redactMessage(m chat.Message) chat.Message {
 	m.Content = portcullis.Redact(m.Content)
 	m.ReasoningContent = portcullis.Redact(m.ReasoningContent)
+	if meta, changed := redactResultMeta(m.ToolResultMeta); changed {
+		m.ToolResultMeta = meta
+	}
 
 	if len(m.MultiContent) > 0 {
 		m.MultiContent = slices.Clone(m.MultiContent)
@@ -327,6 +342,11 @@ func redactRequestContext(raw json.RawMessage) (json.RawMessage, bool) {
 // short-circuits on the first hit.
 func messageChanged(orig, rewritten chat.Message) bool {
 	if orig.Content != rewritten.Content {
+		return true
+	}
+	originalMeta, _ := json.Marshal(orig.ToolResultMeta)
+	rewrittenMeta, _ := json.Marshal(rewritten.ToolResultMeta)
+	if !bytes.Equal(originalMeta, rewrittenMeta) {
 		return true
 	}
 	if orig.ReasoningContent != rewritten.ReasoningContent {

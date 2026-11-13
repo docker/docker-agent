@@ -1871,11 +1871,15 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 	}
 
 	// addStandaloneToolCall adds a tool call as a standalone message (not in a reasoning block)
-	addStandaloneToolCall := func(agentName string, tc tools.ToolCall, toolDef tools.Tool, toolResults map[string]string) {
+	addStandaloneToolCall := func(agentName string, tc tools.ToolCall, toolDef tools.Tool, toolResults map[string]*tools.ToolCallResult) {
 		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusCompleted)
 		// Apply tool result if available
 		if result, ok := toolResults[tc.ID]; ok {
-			toolMsg.Content = strings.ReplaceAll(result, "\t", "    ")
+			toolMsg.Content = strings.ReplaceAll(result.Output, "\t", "    ")
+			toolMsg.ToolResult = result.WithoutPayload()
+			if result.IsError {
+				toolMsg.ToolStatus = types.ToolStatusError
+			}
 		}
 		view := m.createToolCallView(toolMsg)
 		appendSessionMessage(toolMsg, view)
@@ -1896,14 +1900,18 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 	var cmds []tea.Cmd
 
 	// First pass: collect tool results by ToolCallID
-	toolResults := make(map[string]string)
+	toolResults := make(map[string]*tools.ToolCallResult)
 	for _, item := range sess.Messages {
 		if !item.IsMessage() {
 			continue
 		}
 		smsg := item.Message
 		if smsg.Message.Role == chat.MessageRoleTool && smsg.Message.ToolCallID != "" {
-			toolResults[smsg.Message.ToolCallID] = smsg.Message.Content
+			toolResults[smsg.Message.ToolCallID] = &tools.ToolCallResult{
+				Output:  smsg.Message.Content,
+				IsError: smsg.Message.IsError,
+				Meta:    smsg.Message.ToolResultMeta,
+			}
 		}
 	}
 
@@ -1973,7 +1981,11 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 						toolMsg := types.ToolCallMessage(smsg.AgentName, tc, toolDef, types.ToolStatusCompleted)
 						reasoningBlock.AddToolCall(toolMsg)
 						if result, ok := toolResults[tc.ID]; ok {
-							reasoningBlock.UpdateToolResult(tc.ID, result, types.ToolStatusCompleted, nil)
+							status := types.ToolStatusCompleted
+							if result.IsError {
+								status = types.ToolStatusError
+							}
+							reasoningBlock.UpdateToolResult(tc.ID, result.Output, status, result)
 						}
 						continue
 					}

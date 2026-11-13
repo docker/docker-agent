@@ -1,15 +1,47 @@
 package todotool
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/docker/portcullis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/internal/portcullistest"
 	"github.com/docker/docker-agent/pkg/tools"
 	todo "github.com/docker/docker-agent/pkg/tools/builtin/todo/types"
 )
+
+func TestSetTodosRedactedMetadata(t *testing.T) {
+	t.Parallel()
+	secret := portcullistest.FakeGitHubPAT("cxLeRrvbJfmYdUtr70xnNE3Q7Gvli4")
+	registry := hooks.NewRegistry()
+	require.NoError(t, builtins.Register(registry))
+	executor := hooks.NewExecutorWithRegistry(&hooks.Config{ToolResponseTransform: []hooks.MatcherConfig{{Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: builtins.RedactSecrets}}}}}, t.TempDir(), nil, registry)
+	result, err := executor.Dispatch(t.Context(), hooks.EventToolResponseTransform, &hooks.Input{ToolResponse: "updated", ToolResultMeta: []todo.Todo{{ID: "one", Description: "check " + secret, Status: "completed"}}})
+	require.NoError(t, err)
+	require.NotNil(t, result.UpdatedToolResultMeta)
+	var decoded any
+	require.NoError(t, json.Unmarshal(result.UpdatedToolResultMeta, &decoded))
+	for _, meta := range []any{result.UpdatedToolResultMeta, decoded} {
+		c := NewSidebarComponent()
+		c.SetSize(100)
+		require.NoError(t, c.SetTodos(todoResult("previous task")))
+		_ = c.Render()
+		require.NoError(t, c.SetTodos(&tools.ToolCallResult{Meta: meta}))
+		completed, total := c.Counts()
+		assert.Equal(t, 1, completed)
+		assert.Equal(t, 1, total)
+		assert.Contains(t, c.Render(), portcullis.Marker)
+		assert.NotContains(t, c.Render(), secret)
+		require.NoError(t, c.SetTodos(&tools.ToolCallResult{Meta: json.RawMessage(`[]`)}))
+		assert.Empty(t, c.Render())
+	}
+}
 
 func todoResult(descriptions ...string) *tools.ToolCallResult {
 	items := make([]todo.Todo, len(descriptions))

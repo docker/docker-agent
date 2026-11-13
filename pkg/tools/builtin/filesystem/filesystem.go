@@ -823,19 +823,18 @@ func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools
 	}
 
 	originalContent := string(content)
-	modifiedContent := originalContent
+	modifiedContent, err := types.ApplyEdits(originalContent, args.Edits)
+	if err != nil {
+		return tools.ResultError(err.Error()), nil
+	}
+
+	meta, err := types.NewEditFileMeta(args.Path, originalContent, modifiedContent)
+	if err != nil {
+		return tools.ResultError(err.Error()), nil
+	}
 
 	var changes []string
 	for i, edit := range args.Edits {
-		// strings.Contains always matches "" and strings.Replace would insert
-		// newText at offset 0, silently prepending to the file.
-		if edit.OldText == "" {
-			return tools.ResultError(fmt.Sprintf("Edit %d failed: oldText must not be empty", i+1)), nil
-		}
-		if !strings.Contains(modifiedContent, edit.OldText) {
-			return tools.ResultError(fmt.Sprintf("Edit %d failed: old text not found", i+1)), nil
-		}
-		modifiedContent = strings.Replace(modifiedContent, edit.OldText, edit.NewText, 1)
 		changes = append(changes, fmt.Sprintf("Edit %d: Replaced %d characters", i+1, len(edit.OldText)))
 	}
 
@@ -843,15 +842,30 @@ func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools
 		return tools.ResultError(fmt.Sprintf("Error writing file: %s", err)), nil
 	}
 
-	if err := t.executePostEditCommands(ctx, resolvedPath); err != nil {
-		return tools.ResultError(fmt.Sprintf("File edited successfully but post-edit command failed: %s", err)), nil
+	postEditErr := t.executePostEditCommands(ctx, resolvedPath)
+	if len(t.postEditCommands) > 0 {
+		finalContent, readErr := t.readFile(resolvedPath)
+		if errors.Is(readErr, fs.ErrNotExist) {
+			finalContent, readErr = nil, nil
+		}
+		if readErr != nil {
+			return tools.ResultError(fmt.Sprintf("File edited but could not read post-edit contents: %s", readErr)), nil
+		}
+		meta, err = types.NewEditFileMeta(args.Path, originalContent, string(finalContent))
+		if err != nil {
+			return tools.ResultError(err.Error()), nil
+		}
 	}
 
+	result := tools.ResultSuccess("File edited successfully. Changes:\n" + strings.Join(changes, "\n"))
 	if len(changes) == 1 {
-		return tools.ResultSuccess("File edited successfully. " + strings.TrimPrefix(changes[0], "Edit 1: ")), nil
+		result.Output = "File edited successfully. " + strings.TrimPrefix(changes[0], "Edit 1: ")
 	}
-
-	return tools.ResultSuccess("File edited successfully. Changes:\n" + strings.Join(changes, "\n")), nil
+	if postEditErr != nil {
+		result = tools.ResultError(fmt.Sprintf("File edited successfully but post-edit command failed: %s", postEditErr))
+	}
+	result.Meta = meta
+	return result, nil
 }
 
 func (t *ToolSet) handleListDirectory(ctx context.Context, args ListDirectoryArgs) (*tools.ToolCallResult, error) {

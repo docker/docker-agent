@@ -31,6 +31,7 @@ func NewPostToolHooksInput(sess *session.Session, toolCall tools.ToolCall, res *
 	if res != nil {
 		input.ToolResponse = res.Output
 		input.ToolError = res.IsError
+		input.ToolResultMeta = res.Meta
 	}
 	return input
 }

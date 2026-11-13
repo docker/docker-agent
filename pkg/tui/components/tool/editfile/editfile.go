@@ -59,9 +59,13 @@ func render(
 		)
 
 		// Truncate to terminal width to avoid wrapping
-		return styles.BaseStyle.
-			MaxWidth(width).
-			Render(line)
+		line = styles.BaseStyle.MaxWidth(width).Render(line)
+		if !sessionState.HideToolResults() {
+			if diff := renderEditFile(msg, width-styles.ToolCallResult.GetHorizontalFrameSize(), sessionState.SplitDiffView()); diff != "" {
+				line += "\n" + styles.ToolCallResult.Render(diff)
+			}
+		}
+		return line
 	}
 
 	// ---- Normal (non-error) rendering ----
@@ -97,14 +101,9 @@ func render(
 		// ToolCallResult frame padding.
 		contentWidth := width - styles.ToolCallResult.GetHorizontalFrameSize()
 
-		content += "\n" + styles.ToolCallResult.Render(
-			renderEditFile(
-				msg.ToolCall,
-				contentWidth,
-				sessionState.SplitDiffView(),
-				msg.ToolStatus,
-			),
-		)
+		if diff := renderEditFile(msg, contentWidth, sessionState.SplitDiffView()); diff != "" {
+			content += "\n" + styles.ToolCallResult.Render(diff)
+		}
 	}
 
 	return content
@@ -139,7 +138,7 @@ func renderCollapsed(
 	}
 
 	// Count added/removed lines
-	added, removed := countDiffLines(msg.ToolCall, msg.ToolStatus)
+	added, removed := countDiffLines(msg)
 	var diffSummary string
 	if added > 0 || removed > 0 {
 		addStr := styles.DiffAddStyle.Render(fmt.Sprintf("+%d", added))
