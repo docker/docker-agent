@@ -1,10 +1,12 @@
 package worktree
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -388,4 +390,150 @@ func TestCreatePRValidatesRefBeforeGit(t *testing.T) {
 	t.Parallel()
 	_, err := CreatePR(t.Context(), t.TempDir(), "not-a-pr")
 	assert.ErrorIs(t, err, ErrInvalidPRRef)
+}
+
+// TestCreateWaitsForInflightAdd pins the per-repository serialization of
+// `git worktree add` (#4922): concurrent adds in one repo race on the
+// .git/worktrees admin entries.
+func TestCreateWaitsForInflightAdd(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+
+	commonDir, err := repoCommonDir(t.Context(), dir)
+	require.NoError(t, err)
+	unlock, err := lockAdds(t.Context(), commonDir)
+	require.NoError(t, err)
+
+	worktreeRoot := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Create(t.Context(), dir, "blocked", WithRoot(worktreeRoot))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Create finished while another add held the repo lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unlock()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Create did not finish after the repo lock was released")
+	}
+}
+
+// TestCreateLockSharedAcrossLinkedCheckouts pins that the add lock is keyed
+// by the common git directory: a main checkout and its linked worktrees
+// update the same .git/worktrees, so creations through either serialize.
+func TestCreateLockSharedAcrossLinkedCheckouts(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+
+	linked := filepath.Join(t.TempDir(), "linked")
+	runGit(t, dir, "worktree", "add", "--detach", linked)
+
+	mainCommon, err := repoCommonDir(t.Context(), dir)
+	require.NoError(t, err)
+	linkedCommon, err := repoCommonDir(t.Context(), linked)
+	require.NoError(t, err)
+	require.Equal(t, mainCommon, linkedCommon, "both checkouts must resolve the same common git directory")
+
+	unlock, err := lockAdds(t.Context(), mainCommon)
+	require.NoError(t, err)
+
+	worktreeRoot := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Create(t.Context(), linked, "blocked", WithRoot(worktreeRoot))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Create from a linked checkout finished while the repo lock was held: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unlock()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Create did not finish after the repo lock was released")
+	}
+}
+
+// TestRepoCommonDirCanonicalAcrossSpellings pins that one repository maps to
+// one add-lock key however its path is spelled: through a parent ".."
+// segment, and through a symlink alias.
+func TestRepoCommonDirCanonicalAcrossSpellings(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+
+	base, err := repoCommonDir(t.Context(), dir)
+	require.NoError(t, err)
+
+	viaDotDot, err := repoCommonDir(t.Context(), dir+"/../"+filepath.Base(dir))
+	require.NoError(t, err)
+	require.Equal(t, base, viaDotDot, "\"..\" spelling must resolve to one identity")
+
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(dir, alias); err != nil {
+		t.Skipf("symlink aliases unavailable: %v", err)
+	}
+	viaAlias, err := repoCommonDir(t.Context(), alias)
+	require.NoError(t, err)
+	require.Equal(t, base, viaAlias, "symlink alias must resolve to one identity")
+}
+
+// TestLockAddsCancelsWaiter pins the cancellable acquisition directly: while
+// one caller holds the repository's add semaphore, a second acquisition with
+// a cancelled context returns the context error instead of waiting for the
+// holder to release. No Create call is involved, so no repository-probe
+// timing can mask a regression back to an unconditional wait.
+func TestLockAddsCancelsWaiter(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+
+	key, err := repoCommonDir(t.Context(), dir)
+	require.NoError(t, err)
+	release, err := lockAdds(t.Context(), key)
+	require.NoError(t, err)
+	defer release()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, err := lockAdds(ctx, key)
+		done <- err
+	}()
+	// The semaphore is held, so the send case can never be chosen; the only
+	// way out of the acquisition select is ctx.Done().
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled, "a cancelled waiter must return the context error")
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled acquisition did not return while the semaphore was held")
+	}
+}
+
+// TestCreateCancelledDuringRepoProbe keeps repository-probe cancellation as
+// its own regression: a cancellation landing before or inside the probe must
+// surface as the context error, not ErrNotGitRepository — a killed probe is
+// cancellation, not proof the directory is not a repository.
+func TestCreateCancelledDuringRepoProbe(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := Create(ctx, dir, "cancelled", WithRoot(t.TempDir()))
+	require.ErrorIs(t, err, context.Canceled)
 }
