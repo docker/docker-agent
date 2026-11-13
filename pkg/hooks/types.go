@@ -381,8 +381,9 @@ type Input struct {
 	// tool_response_transform hook produced — hooks scrubbing secrets
 	// upstream are visible to downstream observers without a second
 	// pass.
-	ToolResponse any  `json:"tool_response,omitempty"`
-	ToolError    bool `json:"tool_error,omitempty"`
+	ToolResponse   any  `json:"tool_response,omitempty"`
+	ToolError      bool `json:"tool_error,omitempty"`
+	ToolResultMeta any  `json:"tool_result_meta,omitempty"`
 
 	// Messages is the conversation snapshot the runtime is about to send
 	// to the model. Populated only for [EventBeforeLLMCall] dispatches
@@ -681,6 +682,10 @@ type HookSpecificOutput struct {
 	// The last non-nil rewrite, including an empty string, is returned.
 	UpdatedToolResponse *string `json:"updated_tool_response,omitempty"`
 
+	// UpdatedToolResultMeta replaces display metadata before emission and persistence.
+	// JSON null clears metadata; nil leaves it unchanged.
+	UpdatedToolResultMeta json.RawMessage `json:"updated_tool_result_meta,omitempty"`
+
 	// Transition is a control hook's route request. Only
 	// [EventBeforeAgentRun] and [EventAfterAgentComplete] accept it; any
 	// other event rejects output that carries one.
@@ -737,7 +742,8 @@ type Result struct {
 	// tool's response before emission, recording, post_tool_use, and
 	// the next LLM call. Pointer-typed so callers can distinguish
 	// "explicitly cleared" (empty string) from "no rewrite" (nil).
-	UpdatedToolResponse *string
+	UpdatedToolResponse   *string
+	UpdatedToolResultMeta json.RawMessage
 
 	// Metadata aggregates the key/value annotations contributed by
 	// [EventPermissionRequest], [EventToolGuard] and control-event hooks. The runtime

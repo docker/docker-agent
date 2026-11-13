@@ -258,9 +258,9 @@ func isTodoTool(toolName string) bool {
 
 // buildPlanUpdateFromTodos converts todo metadata to an ACP plan update.
 func buildPlanUpdateFromTodos(meta any) *acp.SessionUpdate {
-	todos, ok := meta.([]todo.Todo)
+	todos, ok := tools.DecodeResultMeta[[]todo.Todo](meta)
 	if !ok {
-		slog.Debug("Todo meta is not []todo.Todo", "type", fmt.Sprintf("%T", meta))
+		slog.Debug("Cannot decode todo metadata", "type", fmt.Sprintf("%T", meta))
 		return nil
 	}
 

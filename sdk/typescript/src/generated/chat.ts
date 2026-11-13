@@ -28,6 +28,7 @@ export interface ChatMessage {
   tool_definitions?: Tool[];
   tool_call_id?: string;
   is_error?: boolean;
+  tool_result_meta?: unknown;
   created_at?: string;
   usage?: Usage;
   model?: string;

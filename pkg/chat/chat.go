@@ -101,6 +101,9 @@ type Message struct {
 	// IsError indicates the tool call failed (only for Role=tool messages).
 	IsError bool `json:"is_error,omitempty"`
 
+	// ToolResultMeta preserves display metadata without adding it to model input.
+	ToolResultMeta any `json:"tool_result_meta,omitempty"`
+
 	CreatedAt string `json:"created_at,omitempty"`
 
 	// Usage tracks token usage for this message (only set for assistant messages)

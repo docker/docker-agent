@@ -1,8 +1,16 @@
 package listdirectory
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/docker/portcullis"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/internal/portcullistest"
 	"github.com/docker/docker-agent/pkg/tools"
 	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/types"
@@ -68,6 +76,24 @@ func TestExtractResult(t *testing.T) {
 				t.Errorf("extractResult() = %q, want %q", result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestExtractResultRedactedMetadata(t *testing.T) {
+	t.Parallel()
+	secret := portcullistest.FakeGitHubPAT("cxLeRrvbJfmYdUtr70xnNE3Q7Gvli4")
+	registry := hooks.NewRegistry()
+	require.NoError(t, builtins.Register(registry))
+	executor := hooks.NewExecutorWithRegistry(&hooks.Config{ToolResponseTransform: []hooks.MatcherConfig{{Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: builtins.RedactSecrets}}}}}, t.TempDir(), nil, registry)
+	result, err := executor.Dispatch(t.Context(), hooks.EventToolResponseTransform, &hooks.Input{ToolResponse: "listed", ToolResultMeta: filesystem.ListDirectoryMeta{Files: []string{secret}, Dirs: []string{"dir"}, Truncated: true}})
+	require.NoError(t, err)
+	require.NotNil(t, result.UpdatedToolResultMeta)
+	assert.NotContains(t, string(result.UpdatedToolResultMeta), secret)
+	assert.Contains(t, string(result.UpdatedToolResultMeta), portcullis.Marker)
+	var decoded any
+	require.NoError(t, json.Unmarshal(result.UpdatedToolResultMeta, &decoded))
+	for _, meta := range []any{result.UpdatedToolResultMeta, decoded} {
+		assert.Equal(t, "1 file and 1 directory (truncated)", extractResult(&types.Message{ToolResult: &tools.ToolCallResult{Meta: meta}}))
 	}
 }
 

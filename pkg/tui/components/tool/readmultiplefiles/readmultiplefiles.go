@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	pathx "github.com/docker/docker-agent/pkg/path"
+	"github.com/docker/docker-agent/pkg/tools"
 	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
@@ -33,7 +34,7 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 	// For completed/error state, render each file line
 	var meta *filesystem.ReadMultipleFilesMeta
 	if msg.ToolResult != nil {
-		if m, ok := msg.ToolResult.Meta.(filesystem.ReadMultipleFilesMeta); ok {
+		if m, ok := tools.DecodeResultMeta[filesystem.ReadMultipleFilesMeta](msg.ToolResult.Meta); ok {
 			meta = &m
 		}
 	}

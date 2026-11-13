@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	filesystemtypes "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 )
 
 // initGitRepo initializes a git repository in the given directory
@@ -514,6 +515,11 @@ func TestFilesystemTool_EditFile(t *testing.T) {
 	require.NoError(t, err)
 	expected := "Hi Universe\nThis is a test\nSee you later"
 	assert.Equal(t, expected, string(editedContent))
+	meta, ok := filesystemtypes.DecodeEditFileMeta(result.Meta)
+	require.True(t, ok)
+	expectedMeta, err := filesystemtypes.NewEditFileMeta(testFile, originalContent, expected)
+	require.NoError(t, err)
+	assert.Equal(t, expectedMeta, meta)
 	result, err = tool.handleEditFile(t.Context(), EditFileArgs{
 		Path: testFile,
 		Edits: []Edit{
@@ -525,6 +531,7 @@ func TestFilesystemTool_EditFile(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "old text not found")
+	assert.Nil(t, result.Meta)
 }
 
 // An empty oldText is never a meaningful edit: strings.Contains(s, "") is always

@@ -75,6 +75,7 @@ func validateOutput(event EventType, out *Output, strict bool) error {
 		{"updated_input", hso.UpdatedInput != nil, c.Rewrite == events.RewriteToolInput},
 		{"updated_messages", hso.UpdatedMessages != nil, c.Rewrite == events.RewriteMessages},
 		{"updated_tool_response", hso.UpdatedToolResponse != nil, c.Rewrite == events.RewriteToolResponse},
+		{"updated_tool_result_meta", hso.UpdatedToolResultMeta != nil, c.Rewrite == events.RewriteToolResponse},
 		{"metadata", hso.Metadata != nil, c.Metadata},
 		{"additional_context", hso.AdditionalContext != "", c.Context},
 		{"instruction_context", hso.InstructionContext != nil, c.Instructions},

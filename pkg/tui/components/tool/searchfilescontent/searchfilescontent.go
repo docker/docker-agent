@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	pathx "github.com/docker/docker-agent/pkg/path"
+	"github.com/docker/docker-agent/pkg/tools"
 	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
@@ -41,7 +42,7 @@ func extractResult(msg *types.Message) string {
 	if msg.ToolResult == nil {
 		return "no matches"
 	}
-	meta, ok := msg.ToolResult.Meta.(filesystem.SearchFilesContentMeta)
+	meta, ok := tools.DecodeResultMeta[filesystem.SearchFilesContentMeta](msg.ToolResult.Meta)
 	if !ok {
 		return "no matches"
 	}

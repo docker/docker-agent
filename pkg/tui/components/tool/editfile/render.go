@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/lrucache"
 	"github.com/docker/docker-agent/pkg/tools"
+	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
@@ -34,17 +35,13 @@ const (
 )
 
 type toolRenderCache struct {
-	// Line counts - computed once, never change
-	added       int
-	removed     int
-	lineCounted bool
-
 	// Rendered output - invalidated when width/splitView/status changes
 	rendered       string
 	renderCached   bool
 	renderedWidth  int
 	renderedSplit  bool
 	renderedStatus types.ToolStatus
+	renderedResult *tools.ToolCallResult
 }
 
 var (
@@ -94,21 +91,22 @@ func getOrCreateCache(toolCallID string) *toolRenderCache {
 	return c
 }
 
-func renderEditFile(toolCall tools.ToolCall, width int, splitView bool, toolStatus types.ToolStatus) string {
-	c := getOrCreateCache(toolCall.ID)
+func renderEditFile(msg *types.Message, width int, splitView bool) string {
+	c := getOrCreateCache(msg.ToolCall.ID)
 
 	cacheMu.Lock()
 	if c.renderCached &&
 		c.renderedWidth == width &&
 		c.renderedSplit == splitView &&
-		c.renderedStatus == toolStatus {
+		c.renderedStatus == msg.ToolStatus &&
+		c.renderedResult == msg.ToolResult {
 		result := c.rendered
 		cacheMu.Unlock()
 		return result
 	}
 	cacheMu.Unlock()
 
-	result := renderEditFileUncached(toolCall, width, splitView, toolStatus)
+	result := renderEditFileUncached(msg, width, splitView)
 
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
@@ -116,147 +114,75 @@ func renderEditFile(toolCall tools.ToolCall, width int, splitView bool, toolStat
 	c.renderCached = true
 	c.renderedWidth = width
 	c.renderedSplit = splitView
-	c.renderedStatus = toolStatus
+	c.renderedStatus = msg.ToolStatus
+	c.renderedResult = msg.ToolResult
 
 	return result
 }
 
-func renderEditFileUncached(toolCall tools.ToolCall, width int, splitView bool, toolStatus types.ToolStatus) string {
-	args, err := parseEditFileArgs(toolCall.Function.Arguments)
-	if err != nil {
+func renderEditFileUncached(msg *types.Message, width int, splitView bool) string {
+	meta, ok := editFileDiff(msg)
+	if !ok {
 		return ""
 	}
-
-	var output strings.Builder
-	for i, edit := range args.Edits {
-		if i > 0 {
-			output.WriteString("\n\n")
-		}
-
-		if len(args.Edits) > 1 {
-			fmt.Fprintf(&output, "Edit #%d:\n", i+1)
-		}
-
-		diff := computeDiff(args.Path, edit.OldText, edit.NewText, toolStatus)
-		if splitView {
-			output.WriteString(renderSplitDiffWithSyntaxHighlight(diff, args.Path, width))
-		} else {
-			output.WriteString(renderDiffWithSyntaxHighlight(diff, args.Path, width))
-		}
+	var result string
+	if splitView {
+		result = renderSplitDiffWithSyntaxHighlight(meta.Hunks, meta.Path, width)
+	} else {
+		result = renderDiffWithSyntaxHighlight(meta.Hunks, meta.Path, width)
 	}
-
-	return output.String()
+	if meta.Truncated {
+		if result != "" {
+			result += "\n"
+		}
+		result += styles.ToolMessageStyle.Render("Diff truncated")
+	}
+	return result
 }
 
-// countDiffLines returns the number of added and removed lines for the edit.
-// Results are cached per tool call since arguments are immutable.
-func countDiffLines(toolCall tools.ToolCall, _ types.ToolStatus) (added, removed int) {
-	c := getOrCreateCache(toolCall.ID)
-
-	cacheMu.Lock()
-	if c.lineCounted {
-		added, removed = c.added, c.removed
-		cacheMu.Unlock()
-		return added, removed
-	}
-	cacheMu.Unlock()
-
-	added, removed = countDiffLinesUncached(toolCall)
-
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
-	c.added = added
-	c.removed = removed
-	c.lineCounted = true
-
-	return added, removed
-}
-
-func countDiffLinesUncached(toolCall tools.ToolCall) (added, removed int) {
-	args, err := parseEditFileArgs(toolCall.Function.Arguments)
-	if err != nil {
+func countDiffLines(msg *types.Message) (added, removed int) {
+	meta, ok := editFileDiff(msg)
+	if !ok {
 		return 0, 0
 	}
-
-	for _, edit := range args.Edits {
-		edits := udiff.Strings(edit.OldText, edit.NewText)
-		diff, err := udiff.ToUnifiedDiff("old", "new", edit.OldText, edits, 0)
-		if err != nil {
-			continue
-		}
-		for _, hunk := range diff.Hunks {
-			for _, line := range hunk.Lines {
-				switch line.Kind {
-				case udiff.Insert:
-					added++
-				case udiff.Delete:
-					removed++
-				}
+	if meta.Truncated {
+		return meta.Added, meta.Removed
+	}
+	for _, hunk := range meta.Hunks {
+		for _, line := range hunk.Lines {
+			switch line.Kind {
+			case udiff.Insert:
+				added++
+			case udiff.Delete:
+				removed++
 			}
 		}
 	}
 	return added, removed
 }
 
-func computeDiff(path, oldText, newText string, toolStatus types.ToolStatus) []*udiff.Hunk {
-	currentContent, err := os.ReadFile(path)
+func editFileDiff(msg *types.Message) (filesystem.EditFileMeta, bool) {
+	if msg.ToolResult != nil {
+		return filesystem.DecodeEditFileMeta(msg.ToolResult.Meta)
+	}
+	if msg.ToolStatus != types.ToolStatusConfirmation {
+		return filesystem.EditFileMeta{}, false
+	}
+
+	args, err := parseEditFileArgs(msg.ToolCall.Function.Arguments)
 	if err != nil {
-		return []*udiff.Hunk{}
+		return filesystem.EditFileMeta{}, false
 	}
-
-	var oldContent, newContent string
-
-	if toolStatus == types.ToolStatusConfirmation {
-		// During confirmation: file hasn't been modified yet
-		// currentContent is the old content, we need to compute what new would be
-		oldContent = string(currentContent)
-		newContent = strings.Replace(oldContent, oldText, newText, 1)
-	} else {
-		// After execution: file has been modified
-		// currentContent is the new content, we need to reconstruct old
-		newContent = string(currentContent)
-		oldContent = strings.Replace(newContent, newText, oldText, 1)
-	}
-
-	edits := udiff.Strings(oldContent, newContent)
-
-	diff, err := udiff.ToUnifiedDiff("old", "new", oldContent, edits, 3)
+	content, err := os.ReadFile(args.Path)
 	if err != nil {
-		return []*udiff.Hunk{}
+		return filesystem.EditFileMeta{}, false
 	}
-
-	return normalizeDiff(diff.Hunks)
-}
-
-func normalizeDiff(diff []*udiff.Hunk) []*udiff.Hunk {
-	for _, hunk := range diff {
-		if len(hunk.Lines) == 0 {
-			continue
-		}
-
-		normalized := make([]udiff.Line, 0, len(hunk.Lines))
-		for i := 0; i < len(hunk.Lines); i++ {
-			line := hunk.Lines[i]
-
-			if line.Kind == udiff.Delete && i+1 < len(hunk.Lines) {
-				next := hunk.Lines[i+1]
-				if next.Kind == udiff.Insert && line.Content == next.Content {
-					normalized = append(normalized, udiff.Line{
-						Kind:    udiff.Equal,
-						Content: line.Content,
-					})
-					i++
-					continue
-				}
-			}
-
-			normalized = append(normalized, line)
-		}
-
-		hunk.Lines = normalized
+	after, err := filesystem.ApplyEdits(string(content), args.Edits)
+	if err != nil {
+		return filesystem.EditFileMeta{}, false
 	}
-
-	return diff
+	meta, err := filesystem.NewEditFileMeta(args.Path, string(content), after)
+	return meta, err == nil
 }
 
 func syntaxHighlight(code, filePath string) []chromaToken {
@@ -493,9 +419,7 @@ func renderSplitDiffWithSyntaxHighlight(diff []*udiff.Hunk, filePath string, wid
 	return strings.TrimSuffix(output.String(), "\n")
 }
 
-// lineWordDiff holds the per-side segment arrays computed for one
-// delete/insert pair. It is keyed by the *delete* line index — the matching
-// insert sits directly after it.
+// lineWordDiff holds the per-side segment arrays for a paired replacement.
 type lineWordDiff struct {
 	old []wordSegment
 	new []wordSegment
@@ -503,18 +427,18 @@ type lineWordDiff struct {
 
 func buildLineWordDiffs(lines []udiff.Line) map[int]lineWordDiff {
 	out := map[int]lineWordDiff{}
-	for i := range len(lines) - 1 {
-		if lines[i].Kind != udiff.Delete || lines[i+1].Kind != udiff.Insert {
+	indices := make(map[*udiff.Line]int, len(lines))
+	for i := range lines {
+		indices[&lines[i]] = i
+	}
+	for _, pair := range pairDiffLines(lines, 0, 0) {
+		if pair.old == nil || pair.new == nil || pair.old.Kind != udiff.Delete || pair.new.Kind != udiff.Insert {
 			continue
 		}
-		// Use prepareContent so segment offsets align with the chroma
-		// tokens (which are produced from the same tab-expanded text).
-		oldText := prepareContent(lines[i].Content)
-		newText := prepareContent(lines[i+1].Content)
-		oldSegs, newSegs := diffWords(oldText, newText)
+		oldSegs, newSegs := diffWords(prepareContent(pair.old.Content), prepareContent(pair.new.Content))
 		wd := lineWordDiff{old: oldSegs, new: newSegs}
-		out[i] = wd
-		out[i+1] = wd
+		out[indices[pair.old]] = wd
+		out[indices[pair.new]] = wd
 	}
 	return out
 }
@@ -530,7 +454,7 @@ func getDisplayLineNumber(line *udiff.Line, oldLineNum, newLineNum *int) int {
 		*newLineNum++
 		return num
 	case udiff.Equal:
-		num := *oldLineNum
+		num := *newLineNum
 		*oldLineNum++
 		*newLineNum++
 		return num
@@ -729,26 +653,29 @@ func pairDiffLines(lines []udiff.Line, fromLine, toLine int) []linePair {
 			newLineNum++
 
 		case udiff.Delete:
-			// Check if next line is an insert to pair them
-			if i+1 < len(lines) && lines[i+1].Kind == udiff.Insert {
-				pairs = append(pairs, linePair{
-					old:        line,
-					new:        &lines[i+1],
-					oldLineNum: oldLineNum,
-					newLineNum: newLineNum,
-				})
-				oldLineNum++
-				newLineNum++
-				i++ // Skip the paired insert
-			} else {
-				// Unpaired delete
-				pairs = append(pairs, linePair{
-					old:        line,
-					new:        nil,
-					oldLineNum: oldLineNum,
-				})
-				oldLineNum++
+			deleteEnd := i
+			for deleteEnd < len(lines) && lines[deleteEnd].Kind == udiff.Delete {
+				deleteEnd++
 			}
+			insertEnd := deleteEnd
+			for insertEnd < len(lines) && lines[insertEnd].Kind == udiff.Insert {
+				insertEnd++
+			}
+			for offset := range max(deleteEnd-i, insertEnd-deleteEnd) {
+				var pair linePair
+				if i+offset < deleteEnd {
+					pair.old = &lines[i+offset]
+					pair.oldLineNum = oldLineNum
+					oldLineNum++
+				}
+				if deleteEnd+offset < insertEnd {
+					pair.new = &lines[deleteEnd+offset]
+					pair.newLineNum = newLineNum
+					newLineNum++
+				}
+				pairs = append(pairs, pair)
+			}
+			i = insertEnd - 1
 
 		case udiff.Insert:
 			// Unpaired insert (paired inserts are handled above)

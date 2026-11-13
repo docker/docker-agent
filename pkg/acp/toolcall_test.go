@@ -378,7 +378,7 @@ func TestBuildPlanUpdateFromTodos(t *testing.T) {
 		{name: "nil meta", meta: nil, want: nil},
 		{name: "empty todos", meta: []todo.Todo{}, want: []acpsdk.PlanEntry{}},
 		{name: "typed nil todos", meta: []todo.Todo(nil), want: []acpsdk.PlanEntry{}},
-		{name: "untyped empty slice", meta: []any{}, want: nil},
+		{name: "JSON-decoded empty todos", meta: []any{}, want: []acpsdk.PlanEntry{}},
 		{name: "JSON output is not metadata", meta: `{"todos":[]}`, want: nil},
 		{
 			name: "todos map to plan entries",

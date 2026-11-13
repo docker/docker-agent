@@ -30,7 +30,8 @@ func TestRunAgentEmptyPlanSnapshots(t *testing.T) {
 		{name: "failed update with authoritative snapshot", tool: todo.ToolNameUpdateTodos, result: &tools.ToolCallResult{IsError: true, Meta: []todo.Todo(nil)}, wantPlan: true},
 		{name: "nil result", tool: todo.ToolNameListTodos},
 		{name: "missing metadata", tool: todo.ToolNameListTodos, result: tools.ResultSuccess(`{"todos":[]}`)},
-		{name: "unrelated metadata", tool: todo.ToolNameListTodos, result: &tools.ToolCallResult{Meta: []any{}}},
+		{name: "JSON-decoded empty todos", tool: todo.ToolNameListTodos, result: &tools.ToolCallResult{Meta: []any{}}, wantPlan: true},
+		{name: "unrelated metadata", tool: todo.ToolNameListTodos, result: &tools.ToolCallResult{Meta: "not todos"}},
 		{name: "non-todo tool", tool: "other", result: &tools.ToolCallResult{Meta: []todo.Todo{}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
