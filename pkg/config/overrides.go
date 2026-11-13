@@ -160,13 +160,28 @@ func applySingleOverride(cfg *latest.Config, override string) error {
 		return nil
 	}
 
+	// Comma-separated overrides pack several "agent=spec" entries into one
+	// flag ("root=a,other=b"), so split them — but only when every segment
+	// carries the "agent=" form. A bare segment after an agent prefix
+	// ("root=a,b") is an alloy spec (first_available) whose commas belong to
+	// the spec itself; splitting it would silently re-assign every other
+	// agent.
 	if strings.Contains(override, ",") {
+		packed := true
 		for part := range strings.SplitSeq(override, ",") {
-			if err := applySingleOverride(cfg, part); err != nil {
-				return err
+			if _, _, ok := strings.Cut(part, "="); !ok {
+				packed = false
+				break
 			}
 		}
-		return nil
+		if packed {
+			for part := range strings.SplitSeq(override, ",") {
+				if err := applySingleOverride(cfg, part); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 	}
 
 	agentName, modelSpec, ok := strings.Cut(override, "=")
