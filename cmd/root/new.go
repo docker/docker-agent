@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/programstatus"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tui"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
@@ -89,7 +90,7 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 	}
 	sessOpts := []session.Opt{
 		session.WithTitle("New agent"),
-		session.WithMaxIterations(f.maxIterationsParam),
+		session.WithMaxIterations(newSessionMaxIterations(f.maxIterationsParam, t)),
 		session.WithToolsApproved(true),
 		session.WithWorkingDir(workingDir),
 	}
@@ -106,6 +107,46 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 	applyTheme("")
 
 	return runTUI(ctx, rt, sess, nil, nil, nil, appOpts...)
+}
+
+// dmrDefaultMaxIterations is the omitted --max-iterations guard for a DMR
+// creator model. Local models loop more often; 0 stays unlimited elsewhere.
+const dmrDefaultMaxIterations = 20
+
+// newSessionMaxIterations keeps an explicit non-zero flag. Zero selects the
+// DMR guard above and stays unlimited for every other provider.
+func newSessionMaxIterations(explicit int, t *team.Team) int {
+	if explicit != 0 {
+		return explicit
+	}
+	for _, name := range creatorModelProviders(t) {
+		if strings.EqualFold(name, "dmr") {
+			return dmrDefaultMaxIterations
+		}
+	}
+	return 0
+}
+
+// creatorModelProviders lists the providers on the creator's default agent.
+func creatorModelProviders(t *team.Team) []string {
+	if t == nil {
+		return nil
+	}
+	agt, err := t.DefaultAgent()
+	if err != nil || agt == nil {
+		return nil
+	}
+	models := agt.EffectiveModels()
+	names := make([]string, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if name := model.ID().Provider; name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func runTUI(ctx context.Context, rt runtime.Runtime, sess *session.Session, spawner tui.SessionSpawner, cleanup func(), tuiOpts []tui.Option, opts ...app.Opt) error {
