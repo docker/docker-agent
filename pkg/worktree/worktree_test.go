@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -388,4 +389,37 @@ func TestCreatePRValidatesRefBeforeGit(t *testing.T) {
 	t.Parallel()
 	_, err := CreatePR(t.Context(), t.TempDir(), "not-a-pr")
 	assert.ErrorIs(t, err, ErrInvalidPRRef)
+}
+
+// TestCreateWaitsForInflightAdd pins the per-repository serialization of
+// `git worktree add` (#4922): concurrent adds in one repo race on the
+// .git/worktrees admin entries.
+func TestCreateWaitsForInflightAdd(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+
+	root, err := repoRoot(t.Context(), dir)
+	require.NoError(t, err)
+	unlock := lockAdds(root)
+
+	worktreeRoot := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Create(t.Context(), dir, "blocked", WithRoot(worktreeRoot))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Create finished while another add held the repo lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unlock()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Create did not finish after the repo lock was released")
+	}
 }

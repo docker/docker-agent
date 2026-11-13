@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/worktree/namesgenerator"
@@ -35,6 +36,20 @@ var ErrInvalidPRRef = errors.New("invalid pull request reference")
 
 // ErrGHNotFound means the GitHub CLI (gh) is required but not installed.
 var ErrGHNotFound = errors.New("the GitHub CLI (gh) is required to check out a pull request")
+
+// addLocks serializes `git worktree add` per repository: concurrent adds in
+// one repository race on the .git/worktrees admin entries, where one add can
+// fail reading another's half-written commondir (#4922). In-process only —
+// separate processes sharing a repository are not covered.
+var addLocks sync.Map // map[string]*sync.Mutex
+
+// lockAdds acquires the repository's add lock and returns its release func.
+func lockAdds(root string) func() {
+	mu, _ := addLocks.LoadOrStore(root, &sync.Mutex{})
+	m := mu.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
+}
 
 // Worktree describes a git worktree created for an agent session.
 type Worktree struct {
@@ -164,7 +179,10 @@ func Create(ctx context.Context, dir, name string, opts ...CreateOption) (*Workt
 		addArgs = append(addArgs, cfg.base)
 	}
 
-	if err := git(ctx, root, addArgs...); err != nil {
+	unlockAdds := lockAdds(root)
+	err = git(ctx, root, addArgs...)
+	unlockAdds()
+	if err != nil {
 		if cfg.base != "" {
 			return nil, fmt.Errorf("%w: %s: %w", ErrInvalidBase, cfg.base, err)
 		}
@@ -219,7 +237,10 @@ func CreatePR(ctx context.Context, dir, ref string, opts ...CreateOption) (*Work
 	// Create the worktree first (detached at HEAD), then let gh check out the
 	// PR head into it. gh resolves the PR's head branch, adds a fork remote
 	// when needed, and sets upstream tracking so pushes return to the PR.
-	if err := git(ctx, root, "worktree", "add", "--detach", dest); err != nil {
+	unlockAdds := lockAdds(root)
+	err = git(ctx, root, "worktree", "add", "--detach", dest)
+	unlockAdds()
+	if err != nil {
 		return nil, fmt.Errorf("creating git worktree: %w", err)
 	}
 
