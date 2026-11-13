@@ -66,8 +66,8 @@ func TestStartupBannerIsCenteredInEmptyChat(t *testing.T) {
 	}
 	require.NotEqual(t, -1, firstBannerLine)
 	assert.Equal(t, (sl.chatHeight-len(tuibanner.Lines))/2, firstBannerLine)
-	assert.Equal(t, (sl.chatWidth-ansi.StringWidth(tuibanner.Lines[0]))/2,
-		strings.Index(ansi.Strip(lines[firstBannerLine]), "█"))
+	assert.Equal(t, (sl.chatWidth-tuibanner.Width)/2,
+		strings.Index(ansi.Strip(lines[firstBannerLine]), tuibanner.Lines[0]))
 }
 
 func TestStartupBannerHiddenWhenChatIsTooSmall(t *testing.T) {
