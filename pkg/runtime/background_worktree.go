@@ -57,6 +57,9 @@ func (r *LocalRuntime) prepareBackgroundWorktree(ctx context.Context, params age
 	if params.OnWorktree != nil {
 		params.OnWorktree(wt)
 	}
+	for _, warning := range wt.Warnings {
+		slog.WarnContext(ctx, warning, "worktree", wt.Dir)
+	}
 	// Keep the checkout even on setup failure: hooks may already have written files.
 	fail := func(err error) (*backgroundWorktree, error) {
 		return nil, fmt.Errorf("background worktree retained at %s (branch %s): %w", wt.Dir, wt.Branch, err)

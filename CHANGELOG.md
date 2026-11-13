@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.160.0] - 2026-11-11
+
+This release upgrades the Go toolchain to version 1.27.4, which includes security fixes.
+
+## Technical Changes
+- Upgrades Go toolchain from 1.27.3 to 1.27.4, incorporating security fixes in cgo, the Go command, compiler, linker, and net/http
+### Pull Requests
+
+- [#4900](https://github.com/docker/docker-agent/pull/4900) - docs: update CHANGELOG.md for v1.159.0
+- [#4902](https://github.com/docker/docker-agent/pull/4902) - chore: upgrade Go to 1.27.4
+
+
 ## [v1.159.0] - 2026-11-10
 
 This release adds new providers and Anthropic fast mode support, completes built-in agent definitions, fixes several correctness and security issues, and includes extensive internal refactoring.
@@ -7473,3 +7485,5 @@ This release improves the terminal user interface with better error handling and
 [v1.158.0]: https://github.com/docker/docker-agent/releases/tag/v1.158.0
 
 [v1.159.0]: https://github.com/docker/docker-agent/releases/tag/v1.159.0
+
+[v1.160.0]: https://github.com/docker/docker-agent/releases/tag/v1.160.0

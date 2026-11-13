@@ -64,3 +64,46 @@ func TestPrependBinDirToEnv_EmptyEnv(t *testing.T) {
 	require.Len(t, result, 1)
 	assert.Equal(t, "PATH="+filepath.Join(root, "bin"), result[0])
 }
+
+func TestPrependToPath_CaseInsensitiveKey(t *testing.T) {
+	t.Parallel()
+	sep := string(os.PathListSeparator)
+
+	tests := []struct {
+		name            string
+		env             []string
+		caseInsensitive bool
+		want            []string
+	}{
+		{
+			name:            "windows Path spelling is updated in place",
+			env:             []string{"Path=sys", "FOO=bar"},
+			caseInsensitive: true,
+			want:            []string{"Path=bin" + sep + "sys", "FOO=bar"},
+		},
+		{
+			name:            "case-sensitive platforms treat Path as a different variable",
+			env:             []string{"Path=sys"},
+			caseInsensitive: false,
+			want:            []string{"Path=sys", "PATH=bin"},
+		},
+		{
+			name:            "every spelling is updated so the last one still wins",
+			env:             []string{"Path=sys", "PATH=override"},
+			caseInsensitive: true,
+			want:            []string{"Path=bin" + sep + "sys", "PATH=bin" + sep + "override"},
+		},
+		{
+			name:            "keys that only start with PATH are left alone",
+			env:             []string{"PATHEXT=.EXE", "=C:=C:\\"},
+			caseInsensitive: true,
+			want:            []string{"PATHEXT=.EXE", "=C:=C:\\", "PATH=bin"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, prependToPath(tt.env, "bin", tt.caseInsensitive))
+		})
+	}
+}

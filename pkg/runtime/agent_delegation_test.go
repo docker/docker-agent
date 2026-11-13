@@ -693,6 +693,7 @@ func TestTransferTask_RetriesIdleStreamOnce(t *testing.T) {
 		}}
 		delegate := agent.New("delegate", "Delegate",
 			agent.WithModel(primary),
+			agent.WithStreamIdleTimeout(&latest.StreamIdleTimeout{Duration: testStreamIdleTimeout}),
 			agent.WithHooks(&hooks.Config{
 				SubagentStop: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "test_record_transfer_stop"}},
 			}),
@@ -738,7 +739,7 @@ func TestTransferTask_RetriesIdleStreamOnce(t *testing.T) {
 		}()
 
 		<-stalled.recvStarted
-		time.Sleep(defaultStreamIdleTimeout - time.Nanosecond) //nolint:forbidigo // Advances synthetic time to the boundary.
+		time.Sleep(testStreamIdleTimeout - time.Nanosecond) //nolint:forbidigo // Advances synthetic time to the boundary.
 		assert.Equal(t, 1, primary.callCount(), "retry must not start before the five-minute boundary")
 		synctest.Sleep(time.Nanosecond) // Crosses the synthetic timeout boundary.
 		outcome := <-resultCh

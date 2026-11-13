@@ -2,6 +2,8 @@ package gemini
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // A tool input schema containing a boolean sub-schema — the shape a JSON Schema
@@ -30,12 +32,8 @@ func TestConvertParametersToSchema_BooleanSubSchema(t *testing.T) {
 	}
 
 	schema, err := ConvertParametersToSchema(params)
-	if err != nil {
-		t.Fatalf("ConvertParametersToSchema: %v", err)
-	}
-	if schema == nil {
-		t.Fatal("nil schema")
-	}
+	require.NoError(t, err)
+	require.NotNil(t, schema)
 	if _, ok := schema.Properties["count"]; !ok {
 		t.Errorf("count property dropped; got %v", schema.Properties)
 	}

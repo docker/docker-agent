@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,7 +39,9 @@ func TestWorkspaceIsolatesShellFilesystemAndReusesModels(t *testing.T) {
 			return providers.New(ctx, cfg, env, opts...)
 		},
 	})
-	data := []byte(`agents:
+	data := []byte(`runtime:
+  stream_idle_timeout: 37s
+agents:
   root:
     model: openai/gpt-4o
     instruction: test
@@ -64,6 +67,10 @@ func TestWorkspaceIsolatesShellFilesystemAndReusesModels(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, nested.StopToolSets(t.Context())) })
 	assert.EqualValues(t, 1, modelBuilds.Load(), "workspace copies must not rebuild provider clients")
+	for _, a := range []*agent.Agent{original, rebuilt, nested} {
+		require.NotNil(t, a.StreamIdleTimeout())
+		assert.Equal(t, 37*time.Second, a.StreamIdleTimeout().Duration)
+	}
 	assert.Same(t, original.Model(t.Context()), rebuilt.Model(t.Context()))
 	assert.Same(t, rebuilt.Model(t.Context()), nested.Model(t.Context()))
 	assert.Equal(t, originalDir, runConfig.WorkingDir)

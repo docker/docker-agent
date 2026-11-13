@@ -224,7 +224,7 @@ func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
 		return nil, fmt.Errorf("compactor: cloning summary model: %w", err)
 	}
 
-	compactionAgent := agent.New(args.Agent.Name(), "", agent.WithModel(summaryModel))
+	compactionAgent := agent.New(args.Agent.Name(), "", agent.WithModel(summaryModel), agent.WithStreamIdleTimeout(args.Agent.StreamIdleTimeout()))
 
 	// conversationBudget caps the conversation handed to the summarizer;
 	// zero means "whatever fits ContextLimit".

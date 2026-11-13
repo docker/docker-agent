@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/goccy/go-yaml"
@@ -464,6 +466,127 @@ model: test-model
 	require.NotContains(t, outputStr, "  value:") // Should not be nested with internal fields
 	require.Contains(t, outputStr, "model: test-model")
 	require.NotContains(t, outputStr, "params:") // Should be flattened
+}
+
+func TestRAGStrategyConfig_Unmarshal_Limit(t *testing.T) {
+	t.Parallel()
+
+	const badLimit = "limit must be an integer of at least 1, got "
+
+	tests := []struct {
+		name       string
+		input      string
+		json       bool
+		roundTrip  bool
+		wantLimit  int
+		wantErr    string
+		wantParams map[string]any
+	}{
+		{name: "integer limit", input: "type: bm25\nlimit: 10\n", wantLimit: 10},
+		{name: "no limit", input: "type: bm25\nk1: 1.5\n", wantLimit: 0},
+		{name: "json integer limit", input: `{"type":"bm25","limit":10}`, json: true, wantLimit: 10},
+		{
+			name:      "json maximum limit",
+			input:     fmt.Sprintf(`{"type":"bm25","limit":%d,"k1":1.5,"nested":{"threshold":0.25},"weights":[1,2.5]}`, math.MaxInt),
+			json:      true,
+			wantLimit: math.MaxInt,
+			wantParams: map[string]any{
+				"k1":      1.5,
+				"nested":  map[string]any{"threshold": 0.25},
+				"weights": []any{1.0, 2.5},
+			},
+		},
+		{name: "json maximum limit round trip", json: true, roundTrip: true, wantLimit: math.MaxInt},
+		{name: "maximum limit", input: fmt.Sprintf("type: bm25\nlimit: %d\n", math.MaxInt), wantLimit: math.MaxInt},
+		{name: "int tag", input: "type: bm25\nlimit: !!int 7\n", wantLimit: 7},
+		{name: "int tag zero", input: "type: bm25\nlimit: !!int 0\n", wantErr: badLimit + "0"},
+		{name: "null", input: "type: bm25\nlimit:\n", wantLimit: 0},
+		{name: "json null", input: `{"type":"bm25","limit":null}`, json: true, wantLimit: 0},
+		{name: "negative", input: "type: bm25\nlimit: -1\n", wantErr: badLimit + "-1"},
+		{name: "zero", input: "type: bm25\nlimit: 0\n", wantErr: badLimit + "0"},
+		{name: "fraction", input: "type: bm25\nlimit: 2.5\n", wantErr: badLimit + "a decimal number"},
+		{name: "whole decimal", input: "type: bm25\nlimit: 1.0\n", wantErr: badLimit + "a decimal number"},
+		{name: "string", input: "type: bm25\nlimit: x\n", wantErr: badLimit + `"x"`},
+		{name: "quoted number", input: "type: bm25\nlimit: \"10\"\n", wantErr: badLimit + `"10"`},
+		{name: "overflow", input: "type: bm25\nlimit: 18446744073709551615\n", wantErr: badLimit + "18446744073709551615"},
+		{name: "json negative", input: `{"type":"bm25","limit":-3}`, json: true, wantErr: badLimit + "-3"},
+		{name: "json fraction", input: `{"type":"bm25","limit":2.5}`, json: true, wantErr: badLimit + "2.5"},
+		{name: "json rounded fraction", input: `{"type":"bm25","limit":1.0000000000000001}`, json: true, wantErr: badLimit + "1.0000000000000001"},
+		{name: "json whole decimal", input: `{"type":"bm25","limit":1.0}`, json: true, wantErr: badLimit + "1.0"},
+		{name: "json quoted number", input: `{"type":"bm25","limit":"10"}`, json: true, wantErr: badLimit + `"10"`},
+		{name: "json overflow", input: `{"type":"bm25","limit":18446744073709551615}`, json: true, wantErr: badLimit + "18446744073709551615"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var strategy latest.RAGStrategyConfig
+			var err error
+			input := []byte(tt.input)
+			if tt.roundTrip {
+				input, err = json.Marshal(latest.RAGStrategyConfig{Type: "bm25", Limit: tt.wantLimit})
+				require.NoError(t, err)
+			}
+			if tt.json {
+				err = json.Unmarshal(input, &strategy)
+			} else {
+				err = yaml.Unmarshal(input, &strategy)
+			}
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantLimit, strategy.Limit)
+			if tt.wantParams != nil {
+				require.Equal(t, tt.wantParams, strategy.Params)
+			}
+			// limit is a known field, so it must not leak into the strategy params
+			require.NotContains(t, strategy.Params, "limit")
+		})
+	}
+}
+
+func TestLoad_RAGStrategyLimit_OlderVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		limit   int
+		wantErr string
+	}{
+		{name: "zero", limit: 0, wantErr: "limit must be an integer of at least 1, got 0"},
+		{name: "maximum limit", limit: math.MaxInt},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			input := fmt.Sprintf(`
+version: "15"
+agents:
+  root:
+    model: openai/gpt-4o
+    toolsets:
+      - type: rag
+        rag_config:
+          docs: [./docs]
+          strategies:
+            - type: bm25
+              limit: %d
+`, tt.limit)
+			cfg, err := Load(t.Context(), NewBytesSource("config.yaml", []byte(input)), WithVersions(legacy.Register))
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			strategy := cfg.Agents[0].Toolsets[0].RAGConfig.Strategies[0]
+			require.Equal(t, tt.limit, strategy.Limit)
+			require.NotContains(t, strategy.Params, "limit")
+		})
+	}
 }
 
 func mustGetDBString(t *testing.T, db latest.RAGDatabaseConfig) string {

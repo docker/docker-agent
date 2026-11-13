@@ -259,7 +259,12 @@ func (t *task) worktreeSnapshot() *worktree.Worktree {
 
 func (t *task) worktreeSummary() string {
 	if wt := t.worktreeSnapshot(); wt != nil {
-		return fmt.Sprintf("Worktree: %s\nBranch:   %s\nBase:     %s\nRetained for inspection and merging; only committed changes can be merged.\n", wt.Dir, wt.Branch, wt.BaseCommit)
+		var summary strings.Builder
+		fmt.Fprintf(&summary, "Worktree: %s\nBranch:   %s\nBase:     %s\nRetained for inspection and merging; only committed changes can be merged.\n", wt.Dir, wt.Branch, wt.BaseCommit)
+		for _, warning := range wt.Warnings {
+			fmt.Fprintf(&summary, "Warning: %s\n", warning)
+		}
+		return summary.String()
 	}
 	return ""
 }

@@ -213,6 +213,12 @@ func WithRedactSecrets(redactSecrets bool) Opt {
 	}
 }
 
+func WithStreamIdleTimeout(timeout *latest.StreamIdleTimeout) Opt {
+	return func(a *Agent) {
+		a.streamIdleTimeout = timeout
+	}
+}
+
 // WithSafety sets the author-declared safety-mode default applied to new
 // sessions started on this agent when the user has not chosen a mode.
 func WithSafety(mode latest.SafetyMode) Opt {

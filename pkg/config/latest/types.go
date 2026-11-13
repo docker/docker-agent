@@ -178,6 +178,9 @@ func (m SafetyMode) Validate() error {
 // wants applied when this config is run. The values act as defaults
 // only: an explicit CLI flag or user-config setting always wins.
 type RuntimeDefaults struct {
+	// StreamIdleTimeout defaults the silence limit for every model in this file.
+	StreamIdleTimeout *StreamIdleTimeout `json:"stream_idle_timeout,omitempty" yaml:"stream_idle_timeout,omitempty"`
+
 	// Sandbox, when true, runs the agent inside a Docker sandbox by
 	// default — equivalent to passing --sandbox on the command line.
 	// Useful for agents that always need filesystem/network isolation.
@@ -1144,6 +1147,8 @@ func (a *AgentConfig) GetFallbackCooldown() time.Duration {
 
 // ModelConfig represents the configuration for a model
 type ModelConfig struct {
+	// StreamIdleTimeout overrides the agent-file stream silence limit.
+	StreamIdleTimeout *StreamIdleTimeout `json:"stream_idle_timeout,omitempty"`
 	// Name is the manifest model name (map key), populated at runtime.
 	// Not serialized — set by teamloader/model_switcher when resolving models.
 	Name     string `json:"-"`
@@ -1480,7 +1485,8 @@ func (f FlexibleModelConfig) MarshalYAML() (any, error) {
 
 // isShorthandOnly returns true if only provider and model are set
 func (f *FlexibleModelConfig) isShorthandOnly() bool {
-	return f.Description == "" &&
+	return f.StreamIdleTimeout == nil &&
+		f.Description == "" &&
 		f.Temperature == nil &&
 		f.MaxTokens == nil &&
 		f.TopP == nil &&
@@ -2261,8 +2267,12 @@ func (s *RAGStrategyConfig) UnmarshalYAML(unmarshal func(any) error) error {
 		delete(raw, "chunking")
 	}
 
-	if limit, ok := raw["limit"].(int); ok {
-		s.Limit = limit
+	if limit, ok := raw["limit"]; ok {
+		n, err := parseRAGStrategyLimit(limit)
+		if err != nil {
+			return err
+		}
+		s.Limit = n
 		delete(raw, "limit")
 	}
 
@@ -2329,8 +2339,18 @@ func (s *RAGStrategyConfig) UnmarshalJSON(data []byte) error {
 		delete(raw, "chunking")
 	}
 
-	if limit, ok := raw["limit"].(float64); ok {
-		s.Limit = int(limit)
+	if _, ok := raw["limit"]; ok {
+		// Read the limit from its token, as a float64 rounds large numbers
+		// and some fractions.
+		var tokens map[string]json.RawMessage
+		if err := json.Unmarshal(data, &tokens); err != nil {
+			return err
+		}
+		n, err := parseRAGStrategyLimit(tokens["limit"])
+		if err != nil {
+			return err
+		}
+		s.Limit = n
 		delete(raw, "limit")
 	}
 
@@ -2428,6 +2448,42 @@ func coerceToInt(v any) int {
 	default:
 		return 0
 	}
+}
+
+// parseRAGStrategyLimit reads a strategy limit from a decoded YAML value or a
+// raw JSON token. The schema declares an integer of at least 1, and a smaller
+// value panics when the results are sliced to the limit. YAML decodes an
+// integer as uint64 (int64 when negative, int with a !!int tag), and a decimal
+// as float64, which may already be rounded, so a decimal is rejected. JSON
+// passes the raw token, so a large number or a fraction is not rounded before
+// the check. An empty value is unset and gives 0.
+func parseRAGStrategyLimit(v any) (int, error) {
+	switch val := v.(type) {
+	case nil:
+		return 0, nil
+	case int:
+		if val >= 1 {
+			return val, nil
+		}
+	case uint64:
+		if val >= 1 && val <= math.MaxInt {
+			return int(val), nil
+		}
+	case json.RawMessage:
+		token := string(val)
+		if token == "null" {
+			return 0, nil
+		}
+		if n, err := strconv.ParseInt(token, 10, 64); err == nil && n >= 1 && n <= math.MaxInt {
+			return int(n), nil
+		}
+		v = token
+	case float64:
+		v = "a decimal number" // its value may be rounded, e.g. 1.0000000000000001
+	case string:
+		v = strconv.Quote(val) // keeps "10" from reading as a number in the error
+	}
+	return 0, fmt.Errorf("limit must be an integer of at least 1, got %v", v)
 }
 
 // RAGDatabaseConfig represents database configuration for RAG strategies.

@@ -170,7 +170,7 @@ func markerTurnMedia(t *testing.T, stream *mockStream, wantContent string) []cha
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, wantContent, res.Content, "the persisted text must carry no marker line")

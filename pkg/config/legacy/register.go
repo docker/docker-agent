@@ -50,6 +50,8 @@ func upgradeToLatest(c any, _ []byte) (any, error) {
 		return c, nil
 	}
 	var config latest.Config
-	types.CloneThroughJSON(old, &config)
+	if err := types.TryCloneThroughJSON(old, &config); err != nil {
+		return nil, err
+	}
 	return config, nil
 }

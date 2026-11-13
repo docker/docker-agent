@@ -1173,6 +1173,19 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		return ErrEmptyID
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := s.updateSessionTx(ctx, tx, session); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteSessionStore) updateSessionTx(ctx context.Context, tx *sql.Tx, session *Session) error {
 	// Snapshot the persisted fields under session.mu so the reads below
 	// don't race with concurrent writers on the runtime stream goroutine
 	// (SetUsage / ApplyCompaction update InputTokens/OutputTokens while a
@@ -1208,14 +1221,6 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		return err
 	}
 
-	// Use a transaction
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Use INSERT OR REPLACE for upsert behavior - creates if not exists, updates if exists
 	result, err := tx.ExecContext(ctx,
 		`INSERT INTO sessions (
 			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
@@ -1260,7 +1265,7 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 	// Note: Messages are NOT persisted here. They are persisted via events
 	// (UserMessageEvent, MessageAddedEvent, etc.) to avoid duplication.
 
-	return tx.Commit()
+	return nil
 }
 
 // SetSessionStarred sets the starred status of a session.
@@ -1364,11 +1369,12 @@ func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string
 	return nil
 }
 
-// AddSubSession creates a sub-session and links it to the parent.
+// AddSubSession atomically stores a completed sub-session snapshot and its parent link.
 func (s *SQLiteSessionStore) AddSubSession(ctx context.Context, parentSessionID string, subSession *Session) error {
 	if parentSessionID == "" || subSession.ID == "" {
 		return ErrEmptyID
 	}
+	snapshot := subSession.Clone()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1378,31 +1384,117 @@ func (s *SQLiteSessionStore) AddSubSession(ctx context.Context, parentSessionID 
 		_ = tx.Rollback()
 	}()
 
-	// 1. Set parent_id on sub-session
-	subSession.ParentID = parentSessionID
-
-	// 2. Insert sub-session as a new session row
-	if err := s.addSessionTx(ctx, tx, subSession); err != nil {
-		return fmt.Errorf("inserting sub-session: %w", err)
+	if err := s.saveSubSessionTx(ctx, tx, parentSessionID, snapshot); err != nil {
+		return err
 	}
 
-	// 3. Recursively add all items from the sub-session
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO session_items (session_id, position, item_type, subsession_id)
+		 SELECT ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'subsession', ?
+		 WHERE NOT EXISTS (SELECT 1 FROM session_items WHERE session_id = ? AND item_type = 'subsession' AND subsession_id = ?)`,
+		parentSessionID, parentSessionID, snapshot.ID, parentSessionID, snapshot.ID)
+	if err != nil {
+		return fmt.Errorf("inserting subsession reference: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	subSession.mu.Lock()
+	defer subSession.mu.Unlock()
+	if subSession.ParentID != parentSessionID {
+		subSession.ParentID = parentSessionID
+	}
+	return nil
+}
+
+func (s *SQLiteSessionStore) saveSubSessionTx(ctx context.Context, tx *sql.Tx, parentID string, subSession *Session) error {
+	if subSession.ID == "" {
+		return ErrEmptyID
+	}
+	if subSession.ID == parentID {
+		return fmt.Errorf("session %q cannot be its own parent", subSession.ID)
+	}
+	var origin string
+	var storedParent sql.NullString
+	err := tx.QueryRowContext(ctx, "SELECT origin, parent_id FROM sessions WHERE id = ?", subSession.ID).Scan(&origin, &storedParent)
+	subSession.ParentID = parentID
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if err := s.addSessionTx(ctx, tx, subSession); err != nil {
+			return fmt.Errorf("inserting sub-session: %w", err)
+		}
+	case err != nil:
+		return fmt.Errorf("reading sub-session: %w", err)
+	default:
+		if origin != subSession.Origin {
+			return fmt.Errorf("update sub-session %q: %w", subSession.ID, ErrOriginMismatch)
+		}
+		if storedParent.String != parentID {
+			return fmt.Errorf("sub-session %q belongs to another parent: %w", subSession.ID, ErrAlreadyExists)
+		}
+		if err := s.validateSubSessionItems(ctx, tx, subSession); err != nil {
+			return err
+		}
+		if err := s.updateSessionTx(ctx, tx, subSession); err != nil {
+			return err
+		}
+		// Metadata writes and compaction may have persisted only part of this history.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM session_items WHERE session_id = ?", subSession.ID); err != nil {
+			return fmt.Errorf("replacing sub-session items: %w", err)
+		}
+	}
 	for i, item := range subSession.Messages {
 		if err := s.addItemTx(ctx, tx, subSession.ID, i, item); err != nil {
 			return fmt.Errorf("inserting sub-session item %d: %w", i, err)
 		}
 	}
+	return nil
+}
 
-	// 4. Add reference in parent's items
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO session_items (session_id, position, item_type, subsession_id)
-		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'subsession', ?)`,
-		parentSessionID, parentSessionID, subSession.ID)
+// Refuse a stale completion snapshot rather than erase independently persisted work.
+func (s *SQLiteSessionStore) validateSubSessionItems(ctx context.Context, tx *sql.Tx, subSession *Session) error {
+	stored, err := s.loadSessionItems(ctx, tx, subSession.ID)
 	if err != nil {
-		return fmt.Errorf("inserting subsession reference: %w", err)
+		return err
 	}
+	next := 0
+	for _, item := range stored {
+		key, err := subSessionItemKey(item)
+		if err != nil {
+			return err
+		}
+		matched := false
+		for next < len(subSession.Messages) {
+			candidate, err := subSessionItemKey(subSession.Messages[next])
+			if err != nil {
+				return err
+			}
+			next++
+			if candidate == key {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("sub-session %q has stored history missing from completion snapshot: %w", subSession.ID, ErrAlreadyExists)
+		}
+	}
+	return nil
+}
 
-	return tx.Commit()
+func subSessionItemKey(item Item) (string, error) {
+	if item.SubSession != nil {
+		// Each child's history is checked separately when it is saved.
+		return "subsession:" + item.SubSession.ID, nil
+	}
+	if item.Message != nil {
+		message := *item.Message
+		message.ID = 0
+		item.Message = &message
+	}
+	encoded, err := json.Marshal(item)
+	return string(encoded), err
 }
 
 // addSessionTx inserts a session within a transaction.
@@ -1445,18 +1537,9 @@ func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionI
 		return err
 
 	case item.SubSession != nil:
-		// Recursively add the sub-session
 		subSession := item.SubSession
-		subSession.ParentID = sessionID
-
-		if err := s.addSessionTx(ctx, tx, subSession); err != nil {
-			return fmt.Errorf("inserting nested sub-session: %w", err)
-		}
-
-		for i, subItem := range subSession.Messages {
-			if err := s.addItemTx(ctx, tx, subSession.ID, i, subItem); err != nil {
-				return fmt.Errorf("inserting nested sub-session item %d: %w", i, err)
-			}
+		if err := s.saveSubSessionTx(ctx, tx, sessionID, subSession); err != nil {
+			return err
 		}
 
 		_, err := tx.ExecContext(ctx,

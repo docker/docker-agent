@@ -47,6 +47,7 @@ type Agent struct {
 	addEnvironmentInfo      bool
 	addDescriptionParameter bool
 	redactSecrets           bool
+	streamIdleTimeout       *latest.StreamIdleTimeout
 	safety                  latest.SafetyMode // Author-declared safety-mode default for new sessions; empty when unset
 	maxIterations           int
 	maxConsecutiveToolCalls int
@@ -124,6 +125,10 @@ func (a *Agent) AddEnvironmentInfo() bool {
 // input, or the next LLM call).
 func (a *Agent) RedactSecrets() bool {
 	return a.redactSecrets
+}
+
+func (a *Agent) StreamIdleTimeout() *latest.StreamIdleTimeout {
+	return a.streamIdleTimeout
 }
 
 func (a *Agent) MaxIterations() int {

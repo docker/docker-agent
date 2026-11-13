@@ -31,15 +31,16 @@ type waitResult struct {
 }
 
 type waitTaskResult struct {
-	TaskID     string `json:"task_id"`
-	Status     string `json:"status"`
-	Done       bool   `json:"done"`
-	Output     string `json:"output,omitempty"`
-	Error      string `json:"error,omitempty"`
-	Truncated  bool   `json:"truncated,omitempty"`
-	Worktree   string `json:"worktree,omitempty"`
-	Branch     string `json:"branch,omitempty"`
-	BaseCommit string `json:"base_commit,omitempty"`
+	TaskID     string   `json:"task_id"`
+	Status     string   `json:"status"`
+	Done       bool     `json:"done"`
+	Output     string   `json:"output,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	Truncated  bool     `json:"truncated,omitempty"`
+	Worktree   string   `json:"worktree,omitempty"`
+	Branch     string   `json:"branch,omitempty"`
+	BaseCommit string   `json:"base_commit,omitempty"`
+	Warnings   []string `json:"warnings,omitempty"`
 }
 
 // HandleWait joins a fixed set of tasks without cancelling their execution.
@@ -126,6 +127,7 @@ func (t *task) waitResult() waitTaskResult {
 	status := t.loadStatus()
 	if wt := t.worktreeSnapshot(); wt != nil {
 		entry.Worktree, entry.Branch, entry.BaseCommit = wt.Dir, wt.Branch, wt.BaseCommit
+		entry.Warnings = wt.Warnings
 	}
 	entry.Status = status.String()
 	switch status {

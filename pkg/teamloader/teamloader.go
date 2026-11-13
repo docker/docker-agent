@@ -474,6 +474,10 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithStructuredOutput(agentConfig.StructuredOutput),
 		}
 
+		if cfg.Runtime != nil {
+			opts = append(opts, agent.WithStreamIdleTimeout(cfg.Runtime.StreamIdleTimeout))
+		}
+
 		if agentConfig.Cache != nil && agentConfig.Cache.Enabled {
 			c, err := buildAgentCache(agentConfig.Name, agentConfig.Cache, parentDir)
 			if err != nil {

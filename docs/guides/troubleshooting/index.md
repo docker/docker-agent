@@ -289,7 +289,7 @@ A few things that catch people out:
 
 ### Delegated task appears stalled before its first response
 
-A direct `transfer_task` delegation automatically retries once when the child model stream is silent before sending any response payload. It emits the existing warning event, and the retry is immediate and applies once to the complete child run, including later turns and fallback models. Each nested native `transfer_task` starts a new child run with its own fresh retry allowance. The retry does not apply after partial output, to `background_agents`, or when cancellation or a run budget blocks it.
+When a configured [stream idle timeout](../../configuration/models/index.md#stream-idle-timeout) expires before the child model sends any response payload, a direct `transfer_task` delegation automatically retries once. The idle timeout is disabled by default. It emits the existing warning event, and the retry is immediate and applies once to the complete child run, including later turns and fallback models. Each nested native `transfer_task` starts a new child run with its own fresh retry allowance. The retry does not apply after partial output, to `background_agents`, or when cancellation or a run budget blocks it.
 
 Run with `--debug` and look for `Delegated model stream idle before response; retrying immediately`. If the child still fails, check provider connectivity, fallback configuration, cancellation, and run-budget events; Docker Agent does not retry when the context is canceled or the run budget is exhausted.
 

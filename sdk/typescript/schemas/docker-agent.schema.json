@@ -4308,6 +4308,9 @@
     "ModelConfig": {
       "type": "object",
       "properties": {
+        "stream_idle_timeout": {
+          "$ref": "#/$defs/StreamIdleTimeout"
+        },
         "provider": {
           "type": "string"
         },
@@ -5842,6 +5845,9 @@
     "RuntimeDefaults": {
       "type": "object",
       "properties": {
+        "stream_idle_timeout": {
+          "$ref": "#/$defs/StreamIdleTimeout"
+        },
         "sandbox": {
           "type": "boolean"
         },
@@ -6727,6 +6733,26 @@
       "$comment": "pkg/api/types.go SteerSessionRequest",
       "required": [
         "messages"
+      ]
+    },
+    "StreamIdleTimeout": {
+      "$comment": "pkg/config/latest/stream_idle_timeout.go StreamIdleTimeout",
+      "anyOf": [
+        {
+          "type": "string",
+          "description": "Positive Go duration."
+        },
+        {
+          "type": "integer",
+          "description": "Disable the idle timer.",
+          "enum": [
+            -1
+          ]
+        },
+        {
+          "type": "null",
+          "description": "Inherit the next setting."
+        }
       ]
     },
     "StreamStartedEvent": {

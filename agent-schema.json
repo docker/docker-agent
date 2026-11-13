@@ -224,7 +224,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "The underlying provider type. Defaults to \"openai\" when not set. Supported values: openai, anthropic, google, amazon-bedrock, dmr, and any built-in alias (requesty, openrouter, opper, runcrate, api-route, lunaroute, orcarouter, atlascloud, cloudgpu, obscurify, azure, xai, ollama, mistral, baseten, daoxe, ovhcloud, groq, fireworks-ai, deepseek, cerebras, togetherai, huggingface, moonshotai, vercel, cloudflare-workers-ai, cloudflare-ai-gateway, nvidia, github-copilot, chatgpt, opencode, opencode-go, etc.).",
+          "description": "The underlying provider type. Defaults to \"openai\" when not set. Supported values: openai, anthropic, google, amazon-bedrock, dmr, and any built-in alias (requesty, openrouter, opper, runcrate, api-route, lunaroute, orcarouter, atlascloud, cloudgpu, obscurify, hopbase, azure, xai, ollama, mistral, baseten, daoxe, ovhcloud, groq, fireworks-ai, deepseek, cerebras, togetherai, huggingface, moonshotai, vercel, cloudflare-workers-ai, cloudflare-ai-gateway, nvidia, github-copilot, chatgpt, opencode, opencode-go, etc.).",
           "examples": [
             "openai",
             "anthropic",
@@ -1673,6 +1673,9 @@
       "type": "object",
       "description": "Configuration for a model",
       "properties": {
+        "stream_idle_timeout": {
+          "$ref": "#/definitions/StreamIdleTimeout"
+        },
         "provider": {
           "type": "string",
           "description": "Model provider (e.g., openai, anthropic, dmr)",
@@ -2025,10 +2028,21 @@
       },
       "additionalProperties": false
     },
+    "StreamIdleTimeout": {
+      "description": "Maximum idle time between model stream chunks, as a positive Go duration; integer -1 disables the timer.",
+      "anyOf": [
+        { "type": "string", "minLength": 2, "allOf": [{ "pattern": "[1-9]" }], "pattern": "^[+]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:ns|us|µs|μs|ms|s|m|h)(?:(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:ns|us|µs|μs|ms|s|m|h))*$" },
+        { "type": "integer", "enum": [-1] },
+        { "type": "null" }
+      ]
+    },
     "RuntimeDefaults": {
       "type": "object",
       "description": "Execution-time defaults baked into the agent config. Values act as defaults only; explicit CLI flags and user-config settings still take precedence.",
       "properties": {
+        "stream_idle_timeout": {
+          "$ref": "#/definitions/StreamIdleTimeout"
+        },
         "sandbox": {
           "type": "boolean",
           "description": "When true, run the agent inside a Docker sandbox by default \u2014 equivalent to passing --sandbox on the command line. An explicit --sandbox=false on the CLI still wins."

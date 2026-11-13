@@ -455,6 +455,27 @@ File issues on the [GitHub issue tracker](https://github.com/docker/docker-agent
 4. **Sign and sign off** your commits with `git commit -S -s` (cryptographic signature and DCO required)
 5. **Open a pull request** against the `main` branch
 
+Pull requests, including drafts, with `status/needs-rebase` or
+`status/needs-signed-commits` may be marked `status/stale` after 23 days
+without activity and closed after another 7 days without activity. The daily
+workflow uses GitHub's last-updated timestamp, not who last acted; comments or
+updates reset the timer. Processing limits can delay warnings and closures. Issues are
+not affected, and branches are not deleted.
+
+Pull requests with a milestone or a `status/blocked`, `status/in-progress`,
+`status/needs-design`, or `status/ready-for-review` label are exempt. Other pull
+requests without either author-action label are also excluded, including those
+awaiting maintainer review. If a pull request is incorrectly labeled as needing
+author action, ask a maintainer to update its labels; a comment alone does not
+provide an ongoing exemption. An excluded pull request may keep its
+`status/stale` label until it is eligible for processing again. Ask a maintainer
+to reopen a closed pull request if it is still needed.
+
+Maintainers should create the `status/stale` label before enabling live runs,
+inspect a manual dry run, and check that author-action labels are current.
+Manual runs default to dry-run mode; scheduled runs are live. Dry-run output can omit pull
+requests already processed in a previous unfinished run.
+
 > [!TIP]
 > Use the dogfooding agent (`docker agent run ./golang_developer.yaml`) to help write and review your changes before submitting.
 

@@ -26,6 +26,9 @@ func (t *Config) Validate() error {
 		return fmt.Errorf("budget: %w", err)
 	}
 	if t.Runtime != nil {
+		if err := t.Runtime.StreamIdleTimeout.Validate(); err != nil {
+			return fmt.Errorf("runtime.stream_idle_timeout: %w", err)
+		}
 		if err := t.Runtime.Safety.Validate(); err != nil {
 			return fmt.Errorf("runtime.safety: %w", err)
 		}
@@ -42,6 +45,9 @@ func (t *Config) Validate() error {
 		}
 	}
 	for name, m := range t.Models {
+		if err := m.StreamIdleTimeout.Validate(); err != nil {
+			return fmt.Errorf("models.%s.stream_idle_timeout: %w", name, err)
+		}
 		if err := m.validateFirstAvailable(); err != nil {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
@@ -132,6 +138,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	}
 	if len(m.FirstAvailable) == 0 {
 		return errors.New("first_available must contain at least one candidate")
+	}
+	if m.StreamIdleTimeout != nil {
+		return errors.New("first_available cannot be combined with stream_idle_timeout (set it on the candidate models instead)")
 	}
 	if m.Provider != "" || m.Model != "" {
 		return errors.New("first_available cannot be combined with provider/model")

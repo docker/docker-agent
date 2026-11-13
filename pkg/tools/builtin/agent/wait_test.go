@@ -3,6 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -409,4 +413,75 @@ func TestWorktreeMetadataOwnsItsSnapshot(t *testing.T) {
 	snapshot := task.worktreeSnapshot()
 	snapshot.Dir = "also mutated"
 	assert.Equal(t, "initial", task.worktreeSnapshot().Dir)
+}
+
+func TestWorktreeWarningsVisibleAfterCompletion(t *testing.T) {
+	t.Parallel()
+	task := &task{id: "task", done: make(chan struct{}), result: "done"}
+	task.setWorktree(&worktree.Worktree{Dir: "checkout", Warnings: []string{"copy failed"}})
+	for _, status := range []taskStatus{taskRunning, taskCompleted, taskFailed} {
+		task.storeStatus(status)
+		assert.Contains(t, task.formatView(status, 0), "Warning: copy failed")
+		assert.Equal(t, []string{"copy failed"}, task.waitResult().Warnings)
+	}
+}
+
+func TestWorktreeWarningBudgetInTaskMetadata(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	}
+	git("init")
+	git("config", "user.name", "Test")
+	git("config", "user.email", "test@example.com")
+	git("config", "commit.gpgsign", "false")
+	write(".gitignore", "protected/\n*.env\n")
+	write("target", "target")
+	if err := os.Symlink("target", filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	git("add", ".gitignore", "target", "link")
+	git("commit", "-m", "base")
+	git("branch", "base")
+	require.NoError(t, os.Remove(filepath.Join(dir, "link")))
+	write(".gitignore", "protected/\n*.env\n*.key\n")
+	write(".worktreeinclude", "protected/\n*.env\n*.key\n")
+	write(".agentsignore", "protected/\nlink/hidden-name.env\n")
+	write("link/hidden-name.env", "hidden-content")
+	write("link/unprotected.env", "other")
+	write("safe.env", "safe")
+	for i := range 100 {
+		write(fmt.Sprintf("protected/hidden-%03d.env", i), "secret")
+		write(fmt.Sprintf("exposed-%03d.key", i), "secret")
+	}
+	wt, err := worktree.Create(t.Context(), dir, "metadata", worktree.WithRoot(t.TempDir()), worktree.WithBase("base"))
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(wt.Dir, "safe.env"))
+	h := newTestHandler()
+	task := insertTask(h, "task", "sub", taskCompleted)
+	task.setWorktree(wt)
+	view, err := h.HandleView(t.Context(), nil, makeToolCall(t, ViewBackgroundAgentArgs{TaskID: "task"}))
+	require.NoError(t, err)
+	list, err := h.HandleList(t.Context(), nil, tools.ToolCall{})
+	require.NoError(t, err)
+	wait, err := h.HandleWait(t.Context(), nil, makeToolCall(t, WaitBackgroundAgentsArgs{TaskIDs: []string{"task"}}))
+	joined := decodeWaitResult(t, wait, err)
+	assert.Equal(t, wt.Warnings, joined.Tasks[0].Warnings)
+	for _, output := range []string{view.Output, list.Output, wait.Output} {
+		assert.Contains(t, output, "skipped 101 files protected by .agentsignore")
+		assert.Contains(t, output, "additional warnings omitted")
+		assert.NotContains(t, output, "hidden-name")
+		assert.NotContains(t, output, "hidden-content")
+		assert.Less(t, len(output), 12000)
+	}
 }

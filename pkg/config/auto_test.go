@@ -129,6 +129,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "obscurify",
 		},
 		{
+			name: "hopbase api key present",
+			envVars: map[string]string{
+				"HOPBASE_API_KEY": "test-key",
+			},
+			expectedProvider: "hopbase",
+		},
+		{
 			name: "baseten api key present",
 			envVars: map[string]string{
 				"BASETEN_API_KEY": "test-key",
@@ -417,6 +424,15 @@ func TestAutoModelConfig(t *testing.T) {
 			},
 			expectedProvider:  "obscurify",
 			expectedModel:     "deepseek/deepseek-v4-flash",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "hopbase provider",
+			envVars: map[string]string{
+				"HOPBASE_API_KEY": "test-key",
+			},
+			expectedProvider:  "hopbase",
+			expectedModel:     "glm-5.3",
 			expectedMaxTokens: 32000,
 		},
 		{
