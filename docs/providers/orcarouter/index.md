@@ -6,8 +6,6 @@ weight: 231
 canonical: https://docs.docker.com/ai/docker-agent/providers/orcarouter/
 ---
 
-_Use OrcaRouter models with Docker Agent._
-
 ## Overview
 
 [OrcaRouter](https://www.orcarouter.ai) provides access to models from many providers through an OpenAI-compatible API. Docker Agent includes built-in support for OrcaRouter as an alias provider.
@@ -38,8 +36,6 @@ agents:
 `orcarouter/auto` is OrcaRouter's adaptive router. You can also reference a model served by the gateway with its upstream provider prefix, such as `orcarouter/anthropic/claude-sonnet-4.5` or `orcarouter/deepseek/deepseek-v4-pro`. Docker Agent splits only the first slash, so the full upstream model ID is preserved.
 
 ### Named Model
-
-For more control over parameters:
 
 ```yaml
 models:

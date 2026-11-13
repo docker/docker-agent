@@ -6,8 +6,6 @@ weight: 15
 canonical: https://docker.github.io/docker-agent/community/resources/
 ---
 
-Explore projects, talks, tutorials, and articles from the Docker Agent community.
-
 Community projects and third-party content are independently maintained. Inclusion
 here does not imply endorsement or support by Docker. Docker-published videos are
 identified by their publisher.
@@ -17,9 +15,7 @@ Check commands and configuration against the current documentation before using 
 
 ## Projects
 
-Projects are listed alphabetically. The language column describes the project's
-documentation, not its implementation. Added dates record inclusion in this list,
-not the project's creation date.
+Added dates record inclusion in this list, not the project's creation date.
 
 | Project | Description | Maintainer | Docs language | Added |
 | --- | --- | --- | --- | --- |
@@ -29,10 +25,6 @@ not the project's creation date.
 License note for measix-tuck: **No project license declared.**
 
 ## Videos
-
-Videos are listed newest first by publication date. Durations are rounded to the
-nearest whole minute (`N min`). Where an individual presenter is not credited, the
-publisher is listed instead.
 
 | Video | Speaker or creator | Publisher | Language | Duration | Published |
 | --- | --- | --- | --- | --- | --- |
@@ -48,13 +40,7 @@ publisher is listed instead.
 
 ## Articles
 
-Articles are listed newest first by the date shown. Dates are publication dates
-unless explicitly marked **Updated** or **Series start**. Reading times are those
-published by the source; **Not provided** means the source does not give a reading time.
-
-The nine-part *A mini code agent with Docker Agent* series by k33g has one row
-linking every part. Its reading time is the sum of the source-published times for
-all nine parts, not Part 1 alone; its date marks the series start.
+Reading times are those published by the source.
 
 | Article | Author or publisher | Language | Reading time | Date |
 | --- | --- | --- | --- | --- |

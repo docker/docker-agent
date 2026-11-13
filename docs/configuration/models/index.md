@@ -7,8 +7,6 @@ weight: 40
 canonical: https://docs.docker.com/ai/docker-agent/configuration/models/
 ---
 
-_Complete reference for defining models with providers, parameters, and reasoning settings._
-
 ## Full Schema
 
 <!-- yaml-lint:skip -->

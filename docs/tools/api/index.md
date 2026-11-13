@@ -7,8 +7,6 @@ weight: 240
 canonical: https://docs.docker.com/ai/docker-agent/tools/api/
 ---
 
-_Create custom tools that call HTTP APIs._
-
 ## Overview
 
 The API tool type lets you define custom tools that make HTTP requests to external APIs. This is useful for integrating agents with REST APIs, webhooks, or any HTTP-based service without writing code.

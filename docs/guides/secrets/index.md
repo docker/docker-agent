@@ -6,8 +6,6 @@ weight: 30
 canonical: https://docs.docker.com/ai/docker-agent/guides/secrets/
 ---
 
-_How to securely provide API keys and credentials to Docker Agent._
-
 ## Overview
 
 Docker Agent needs API keys to talk to model providers (OpenAI, Anthropic, etc.) and MCP tool servers (GitHub, Slack, etc.). Avoid putting literal secrets in agent configuration fields such as `env`, headers, or URLs. Docker Agent can resolve them at runtime through a chain of secret providers, checked in order (see `pkg/environment/default.go`):

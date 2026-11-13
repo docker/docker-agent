@@ -3,6 +3,46 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.161.0] - 2026-11-13
+
+This release delivers bug fixes across filesystem tools, path validation, session persistence, proxy transport, and Windows compatibility, along with new features including worktree file inclusion, model stream idle timeouts, and new provider catalog entries.
+
+## What's New
+
+- Adds support for a `.worktreeinclude` file to copy selected Git-ignored files into worktrees before setup hooks run
+- Adds configurable model stream idle timeouts, with agent-file-wide and per-model settings (use `-1` to disable)
+- Adds HopBase to the built-in provider catalog
+
+## Bug Fixes
+
+- Fixes `remove_directory` and `create_directory` not reporting successfully completed paths when a batch aborts partway through
+- Fixes proxy transport false-positives that misclassified target host failures as proxy failures
+- Fixes command prefix match for unsafe command detection
+- Fixes RAG strategy `limit` being ignored when specified as a YAML integer
+- Fixes path validation incorrectly rejecting valid paths whose names start with or contain `..` (e.g. `..env`, `app..v2`)
+- Fixes sub-session persistence failing with a `UNIQUE constraint` error when a session row already exists
+- Fixes the Nebius provider alias to point at the Token Factory endpoint (`https://api.tokenfactory.nebius.com/v1`)
+- Fixes model streams being limited by default; streams are now unlimited unless a timeout is explicitly configured
+- Fixes `serve mcp --attach` on Windows failing to detect live agent processes started with `run --listen`
+- Fixes MCP and language servers on Windows losing the system `PATH` when docker-agent adds its own tools folder
+### Pull Requests
+
+- [#3900](https://github.com/docker/docker-agent/pull/3900) - fix: resolve proxy transport false-positives
+- [#3934](https://github.com/docker/docker-agent/pull/3934) - fix(filesystem): report completed removals/creations when a directory batch aborts
+- [#4561](https://github.com/docker/docker-agent/pull/4561) - fix: fix command prefix match unsafe command
+- [#4646](https://github.com/docker/docker-agent/pull/4646) - fix(rag): honor a YAML integer strategy limit
+- [#4803](https://github.com/docker/docker-agent/pull/4803) - fix(path): only treat a ".." path element as traversal
+- [#4891](https://github.com/docker/docker-agent/pull/4891) - feat: support .worktreeinclude in worktrees
+- [#4899](https://github.com/docker/docker-agent/pull/4899) - feat: configure model stream idle timeouts
+- [#4903](https://github.com/docker/docker-agent/pull/4903) - fix(session): persist sub-sessions with existing rows
+- [#4905](https://github.com/docker/docker-agent/pull/4905) - docs: update CHANGELOG.md for v1.160.0
+- [#4906](https://github.com/docker/docker-agent/pull/4906) - fix: migrate Nebius alias to Token Factory
+- [#4910](https://github.com/docker/docker-agent/pull/4910) - fix(runregistry): detect live processes on Windows
+- [#4911](https://github.com/docker/docker-agent/pull/4911) - fix(toolinstall): keep the system PATH for child processes on Windows
+- [#4912](https://github.com/docker/docker-agent/pull/4912) - feat: add HopBase to the built-in provider catalog
+- [#4913](https://github.com/docker/docker-agent/pull/4913) - ci: close stale author-action pull requests
+
+
 ## [v1.160.0] - 2026-11-11
 
 This release upgrades the Go toolchain to version 1.27.4, which includes security fixes.
@@ -7487,3 +7527,5 @@ This release improves the terminal user interface with better error handling and
 [v1.159.0]: https://github.com/docker/docker-agent/releases/tag/v1.159.0
 
 [v1.160.0]: https://github.com/docker/docker-agent/releases/tag/v1.160.0
+
+[v1.161.0]: https://github.com/docker/docker-agent/releases/tag/v1.161.0

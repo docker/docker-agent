@@ -6,18 +6,11 @@ weight: 90
 canonical: https://docs.docker.com/ai/docker-agent/providers/dmr/
 ---
 
-_Run AI models locally with Docker — no API keys, no costs, full data privacy._
-
 ## Overview
 
 Docker Model Runner (DMR) lets you run open-source AI models directly on your machine. Models run in Docker, so there's no API key needed; with a local runner, prompts stay on your computer.
 
-Docker Agent automatically discovers models you have already pulled from DMR. When no model is explicitly configured, auto-selection prefers a locally-installed model (choosing the model specified via the `model:` key in the agent YAML if it is already pulled locally, or otherwise the first available non-embedding model) rather than always defaulting to `ai/qwen3:latest` and triggering a pull prompt.
-
-> [!TIP]
-> **No API key needed**
->
-> With a local DMR endpoint, your data stays on your machine. Great for development, sensitive data, or offline use.
+Docker Agent automatically discovers models you have already pulled from DMR. When no model is explicitly configured, auto-selection prefers a locally-installed model (choosing the model specified via the `model:` key in the agent YAML if it is already pulled locally, or otherwise the first available non-embedding model).
 
 ## Prerequisites
 
@@ -133,7 +126,7 @@ The model picker displays DMR's reported architecture, parameter count,
 quantization, size, and packaged context window when available. The packaged
 window can differ from a running model's configured context size.
 
-Docker Agent's auto-compaction scales its summary and keep-tail token budgets proportionally to `context_size`. This ensures compaction works correctly even for small context windows — for example, an 8k-token local model will not have its session history wiped during compaction.
+Docker Agent's auto-compaction scales its summary and keep-tail token budgets proportionally to `context_size`.
 
 ## Thinking / reasoning budget
 

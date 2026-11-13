@@ -6,8 +6,6 @@ weight: 120
 canonical: https://docs.docker.com/ai/docker-agent/features/remote-mcp/
 ---
 
-_Connect Docker Agent to cloud services via remote MCP servers with built-in OAuth authentication._
-
 ## Overview
 
 Docker Agent supports connecting to remote MCP servers over **Streamable HTTP**, **SSE** (Server-Sent Events), and **Unix domain sockets**. Streamable HTTP is the current recommended transport for most hosted MCP servers. Many popular services offer MCP endpoints with OAuth — Docker Agent handles the authentication flow automatically.
@@ -42,7 +40,7 @@ The path after `unix://` is the absolute path to the socket file. Configured `he
 > [!TIP]
 > **Cancelling the authorization dialog**
 >
-> If you dismiss the OAuth authorization dialog, the request is cancelled cleanly — no repeated prompts appear. The agent will report that authorization was declined. To try again, simply re-enable the server or repeat the request that triggered the flow.
+> Dismissing the OAuth authorization dialog cancels the request. To try again, re-enable the server or repeat the request that triggered the flow.
 
 ## Configuration
 
@@ -92,7 +90,7 @@ When Docker Desktop is running, eligible OAuth discovery, registration, token ex
 > - **Silent refresh:** when a refresh token is available, Docker Agent silently exchanges it for a new access token and replays the request — no user interaction required.
 > - **Re-authentication prompt:** when the refresh token is absent or has also expired, the toolset transitions to a "needs re-auth" state and surfaces an OAuth prompt on your next message (exactly like the first-time flow).
 >
-> Either way, the agent never burns 5 reconnect attempts on an auth failure — it fails fast and either refreshes silently or defers to interactive re-auth. If you want to trigger re-auth immediately without waiting for the next message, run `/toolset-restart <name>` from the TUI.
+> To trigger re-auth immediately without waiting for the next message, run `/toolset-restart <name>` from the TUI.
 
 ### OAuth for servers without Dynamic Client Registration
 
@@ -309,4 +307,4 @@ agents:
 > [!NOTE]
 > **Growing list**
 >
-> This list is updated as more services add MCP support. If a service you use isn't listed, check their documentation — many providers are adding MCP endpoints regularly.
+> For services not listed here, check their documentation for an MCP endpoint.

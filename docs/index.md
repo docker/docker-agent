@@ -39,9 +39,9 @@ description: "Run AI agents like containers. Define them in YAML, share them thr
 
 ## What Is Docker Agent?
 
-Docker Agent is an open-source tool from **Docker** — makers of [Docker Engine](https://www.docker.com/products/container-runtime/), [Docker Desktop](https://www.docker.com/products/docker-desktop/), [Docker Hub](https://hub.docker.com), and [Docker Scout](https://www.docker.com/products/docker-scout/) — that lets you **build, run, and share AI agents using simple configuration files** instead of writing application code.
+Docker Agent is an open-source tool from Docker that lets you **build, run, and share AI agents using YAML or HCL configuration files**.
 
-You describe what your agent does — its model, personality, tools, and teammates — in a YAML file. Docker Agent handles the LLM orchestration loop, tool execution, multi-agent delegation, and streaming output. You focus on *what* the agent should do, not *how* to wire it up.
+You describe what your agent does — its model, personality, tools, and teammates — in a YAML file. Docker Agent handles the LLM orchestration loop, tool execution, multi-agent delegation, and streaming output.
 
 ```yaml
 # agent.yaml — this is all you need
@@ -61,8 +61,6 @@ agents:
 ```bash
 $ docker agent run agent.yaml
 ```
-
-That's it. Your agent can now read and write files, run shell commands, and reason through problems — all through an interactive terminal UI.
 
 ## Without vs. with Docker Agent
 
@@ -130,8 +128,6 @@ $ docker agent run agent.yaml
 
 ## Why Docker Agent?
 
-Most AI agent frameworks ask you to write Python or TypeScript to glue together models, tools, and workflows. Docker Agent takes a different approach: **declare everything in config, run it with a single command.**
-
 <div class="pain-grid">
   <div class="pain-row">
     <div class="pain-pain"><span class="pain-x">×</span> “I rebuilt the same agent loop in three projects.”</div>
@@ -198,8 +194,6 @@ Most AI agent frameworks ask you to write Python or TypeScript to glue together 
 
 ## Use Cases
 
-What people build with Docker Agent today:
-
 <div class="usecase-grid">
   <div class="usecase">
     <div class="usecase-icon">
@@ -237,12 +231,9 @@ What people build with Docker Agent today:
 
 ## How It Works
 
-Docker Agent follows a simple loop:
-
 <figure class="flow-diagram">
   <img src="assets/how-it-works.svg" alt="agent.yaml is run by 'docker agent run', which loops through Model, Tools and Sub-agents, then streams results to the TUI or API." loading="lazy" class="theme-light-only">
   <img src="assets/how-it-works-dark.svg" alt="agent.yaml is run by 'docker agent run', which loops through Model, Tools and Sub-agents, then streams results to the TUI or API." loading="lazy" class="theme-dark-only">
-  <figcaption>Your YAML config is the input; the runtime drives a Model ↔ Tools ↔ Sub-agents loop until the task is done; results stream back to the TUI or any API client.</figcaption>
 </figure>
 
 1. **You define an agent** in YAML — its model, instructions, tools, and sub-agents
@@ -339,8 +330,6 @@ $ docker agent serve api agent.yaml --listen 127.0.0.1:8080
 </div>
 
 ## Part of the Docker ecosystem
-
-Docker Agent reuses the tooling and conventions you already know:
 
 <div class="ecosystem">
   <a class="ecosystem-tile" href="https://hub.docker.com" target="_blank" rel="noopener">

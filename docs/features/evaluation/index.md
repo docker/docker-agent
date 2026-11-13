@@ -8,8 +8,6 @@ aliases:
   - /ai/docker-agent/evals/
 ---
 
-_Measure agent quality with automated evaluations — tool call accuracy, response relevance, output size, and more._
-
 ## Overview
 
 The `docker agent eval` command runs your agent against a set of recorded sessions and scores the results. Each eval session captures a user question, the expected tool calls, and criteria the response must satisfy. Docker Agent replays the question, compares the agent's behavior to expectations, and produces a report.

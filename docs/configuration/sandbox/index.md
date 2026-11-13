@@ -6,8 +6,6 @@ weight: 80
 canonical: https://docs.docker.com/ai/docker-agent/configuration/sandbox/
 ---
 
-_Run agents in an isolated [Docker sandbox VM](https://docs.docker.com/ai/sandboxes/)._
-
 ## Overview
 
 Sandbox mode integrates Docker Agent with [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/).

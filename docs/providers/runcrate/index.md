@@ -6,8 +6,6 @@ weight: 25
 canonical: https://docs.docker.com/ai/docker-agent/providers/runcrate/
 ---
 
-_Use Runcrate models with Docker Agent._
-
 ## Overview
 
 [Runcrate](https://www.runcrate.ai/?utm_source=docker-agent&utm_medium=directory&utm_campaign=gpu_pricing)
@@ -48,8 +46,6 @@ Docker Agent splits only the first slash, so model IDs that include an
 organization prefix are preserved.
 
 ### Named Model
-
-For more control over parameters:
 
 ```yaml
 models:

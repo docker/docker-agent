@@ -6,8 +6,6 @@ weight: 25
 canonical: https://docs.docker.com/ai/docker-agent/providers/obscurify/
 ---
 
-_Use Obscurify.ai models with Docker Agent._
-
 ## Overview
 
 [Obscurify.ai](https://obscurify.ai/?utm_source=docker-agent) is a
@@ -49,8 +47,6 @@ Only the first slash separates the provider, so the rest of the model ID
 (`deepseek/deepseek-v4-flash`) is sent as is.
 
 ### Named Model
-
-For more control over parameters:
 
 ```yaml
 models:

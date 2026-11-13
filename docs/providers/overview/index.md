@@ -13,9 +13,9 @@ _Docker Agent supports multiple AI model providers. Choose the right one for you
 
 ## Supported Providers
 
-- [**OpenAI**](../openai/index.md) — GPT-5, GPT-5-mini, GPT-4o. The most widely used AI models.
+- [**OpenAI**](../openai/index.md) — GPT-5, GPT-5-mini, GPT-4o.
 - [**Anthropic**](../anthropic/index.md) — Claude models for coding and analysis. See [Claude access paths](../anthropic/index.md#claude-access-paths) for protocol, host and model-specific limits.
-- [**Google Gemini**](../google/index.md) — Gemini 2.5 Flash, Gemini 3 Pro. Fast and cost-effective.
+- [**Google Gemini**](../google/index.md) — Gemini 2.5 Flash, Gemini 3 Pro.
 - [**AWS Bedrock**](../bedrock/index.md) — access Claude, Nova, Llama, and more through AWS infrastructure.
 - [**Docker Model Runner**](../dmr/index.md) — run models locally with Docker. No API keys, no costs.
 - [**Local Models**](../local/index.md) — run Ollama, vLLM, or LocalAI locally. No API key required.
@@ -90,11 +90,6 @@ agents:
   root:
     model: mistral/mistral-large-latest
 ```
-
-> [!TIP]
-> **Multi-provider teams**
->
-> Use expensive models for complex reasoning and cheaper/local models for routine tasks. See the example below.
 
 ## Using Multiple Providers
 
