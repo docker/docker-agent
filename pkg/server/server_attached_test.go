@@ -735,3 +735,30 @@ func TestAttachedServer_StatusWaitTimesOut(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
+
+func TestSessionManager_DetachRuntimeReleasesAttachedSession(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	sm.RegisterFollowUpInjector(sess.ID, func(context.Context, string) {})
+	require.Len(t, sm.GetActiveSessions(), 1)
+
+	sm.DetachRuntime(sess.ID)
+
+	assert.Empty(t, sm.GetActiveSessions())
+	_, injected := sm.followUpInjectors.Load(sess.ID)
+	assert.False(t, injected, "follow-up injector must be released")
+
+	// The persisted session survives the detach.
+	_, err := store.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+
+	// Detaching an unknown or already detached session is a no-op.
+	sm.DetachRuntime(sess.ID)
+}

@@ -1397,6 +1397,12 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 
 		// Create cleanup function
 		cleanup := func() {
+			// Under --listen the session was attached to the serving manager
+			// (see recallCoordinatorOpt); release it when the tab goes away so
+			// the runtime, event log and injector are not retained.
+			if f.listenSM != nil {
+				f.listenSM.DetachRuntime(newSess.ID)
+			}
 			stopToolSets(spawnCtx, t)
 		}
 
