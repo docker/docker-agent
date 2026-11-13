@@ -2,15 +2,16 @@
 <header class="header" role="banner">
   <div class="header-inner">
     <a href="{{ "" | relURL }}" class="header-logo" aria-label="Docker Agent docs home">
-      <img class="docker-mark" src="{{ "assets/docker-mark.svg" | relURL }}" alt="" width="32" height="25">
+      <img class="docker-mark" src="{{ "assets/docker-mark.svg" | relURL }}" alt="" width="26" height="20">
       <span class="product-name">Docker Agent</span>
     </a>
 
     <div class="header-actions">
-      <div class="header-search">
+      <button type="button" id="search-input" aria-label="Search docs">
         <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <button type="button" id="search-input" aria-label="Search documentation">Search… ⌘K</button>
-      </div>
+        <span class="search-label">Search docs</span>
+        <kbd aria-hidden="true">⌘K</kbd>
+      </button>
 
       <button class="btn-icon" id="theme-toggle" aria-label="Switch to light theme" aria-pressed="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>

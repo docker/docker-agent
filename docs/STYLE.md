@@ -226,49 +226,34 @@ tokens, templates, or JS, keep these conventions:
   text) rather than the theme-varying `--accent` when the other color
   in the pair is hardcoded (here, white) — `--accent`'s dark value
   (blue-400) only reads 3.94:1 against white.
-- **`--bg-content`** is the content column's background (`.main`):
-  white in light mode, the same `--bg-dark` as the page in dark mode
-  (so dark is unaffected). Header/sidebar/footer chrome stays on
-  `--bg`/`--bg-sidebar` (gray-100 in light) — don't apply `--bg-content`
-  to chrome elements, or the light chrome-vs-content contrast is lost.
-- **`--accent-on-card`** is for brand-blue text sitting on `--bg-card`
-  (elevator labels, ecosystem tile headings, usecase links, glossary
-  terms): blue-300 in dark (blue-400 only reads 4.08:1 on the dark
-  card), blue-500 in light (already 5.0:1 there). Use it instead of
-  the bare `--accent` for any *new* text-on-card component.
-- **Links inside a callout need their own color, not the prose-link
-  one.** Callout panels (warning/info/tip) sit on their own
-  variant-colored background, not the page background, so
-  `--accent-hover` (the dark prose-link color) can fail there even
-  where it's fine everywhere else — it read only 3.95:1 on the dark
-  warning callout (`#643700`). `.content .callout a:not(.btn)` scopes
-  `--blue-200` to callout links in dark (6.46:1 warning / 11.50:1 info /
-  8.51:1 tip); light already passed with `--accent` (4.60–4.83:1) and
-  is restored explicitly rather than left to inherit the dark value.
-  Because that selector's specificity ties with `.content
-  a:not(.btn):hover`'s, the hover state needed its own explicit
-  `.content .callout a:not(.btn):hover` rule too — an unconditional,
-  equal-specificity selector coming later in the stylesheet otherwise
-  wins over a `:hover` one regardless of hover state, flattening the
-  hover color. **The same shadowing hit the light override too**: the
-  `[data-theme="light"]` default sits after the shared `:hover` rule,
-  so light hover silently fell back to `--accent` instead of
-  `--link-hover` (still AA — 4.60–4.83:1 — but not the intended token).
-  Fixed with a `[data-theme="light"] ... :hover` rule of its own, right
-  after the light default. Same lesson as the specificity bullets
-  above: always check what a new equal-or-higher-specificity rule
-  shadows nearby — including rules added later for the *other* theme.
+- **Palette.** Chrome and prose use a neutral zinc scale; Docker
+  blue (`--blue-*`) is the only accent. Header, sidebar, content and
+  footer share one surface per theme (`--bg`); separation comes from
+  1px `--border` hairlines, not background shifts. Raised surfaces
+  (cards, code blocks, callouts) use `--bg-card` / `--bg-code-block`.
+  Text-on-card uses the same tokens as text-on-page — every text token
+  is verified against both surfaces (see the table below).
+- **Check callout links against their tinted backgrounds.** Dark
+  callout links use the shared prose tokens: `--link` (blue-300) and
+  `--link-hover` (blue-200). In light mode, the default `--link`
+  (blue-500) is borderline on the tint, so
+  `[data-theme="light"] .content .callout a:not(.btn)` uses blue-600.
+  That selector is more specific than the shared prose `:hover` rule;
+  its matching light-theme `:hover` override restores `--link-hover`
+  (blue-700). Keep both light-theme rules together so the default
+  color does not override the hover color. See the contrast reference
+  below for the current ratios.
 - **SVGs embedded via `<img>` can't inherit `currentColor` or CSS
   custom properties from the page**, so a single hardcoded palette has
-  to clear AA against *both* a near-black dark card (`#1E2129`) and a
+  to clear AA against *both* a near-black dark card and a
   white light card at once — a neutral gray tops out around ~4:1
   against both simultaneously, which fails 4.5:1 normal-text AA in
   both themes. `assets/how-it-works.svg` used to ship exactly that
   compromise palette (a mistake, not a real fix — see git history);
   it's now two theme-specific files, `how-it-works.svg` (light: gray-600
   body text 5.88:1, blue-500 accent 5.00:1 — both on white) and
-  `how-it-works-dark.svg` (dark: gray-400 body text 5.59:1, blue-300
-  accent 5.89:1 — both on `#1E2129`), toggled purely with CSS
+  `how-it-works-dark.svg` (dark: `#8B99B2` body text 6.55:1, `#7997FF`
+  accent 6.90:1 — both on `--bg-card` `#111113`), toggled purely with CSS
   (`.flow-diagram img.theme-light-only` / `.theme-dark-only`, hidden
   with `display: none` so only one is ever in the accessibility tree).
   Prefer this per-theme-variant approach — or inlining the SVG in the
@@ -296,23 +281,22 @@ tokens, templates, or JS, keep these conventions:
 
 ### Contrast reference (light / dark, WCAG AA: 4.5:1 normal text, 3:1 large text / non-text UI)
 
+Dark surfaces: `--bg` `#09090B`, `--bg-card`/`--bg-code-block` `#111113`,
+`--bg-hover` `#18181B`. Light surfaces: `--bg`/`--bg-card` white,
+`--bg-code-block` `#FAFAFA`, `--bg-hover` `#F4F4F5`.
+
 | Token / use | Light | Dark |
 |---|---|---|
-| `--text-muted` on chrome (`--bg`) / content (`--bg-content`) | gray-600, 4.87:1 / 5.88:1 | gray-400, 6.37:1 |
-| Tiny uppercase labels (sidebar/footer/page-nav headings) | gray-700, 7.14:1 / 8.61:1 | gray-100 (unchanged) |
-| `--accent` on `.content a` | blue-500, 5.00:1 (on white) | blue-400 + `--accent-hover` blue, 7.2:1 |
-| `--link-hover` on `.content a:not(.btn):hover` (prose & card links) | blue-600, 6.76:1 (white content and white cards) | blue-200, 11.78:1 (page) / 10.34:1 (`--bg-card`, the harder case) — was `--docker-blue-light` blue-400, 3.94:1 / 4.08:1, both AA fails |
-| `--accent-on-card` | blue-500, 5.0:1 | blue-300, 5.89:1 |
-| Dark syntax comments | n/a | gray-400, 5.59:1 |
-| `kbd` text | `--text-muted` (as above) | gray-300, 6.07:1 |
-| `.copy-btn` text | gray-600, 5.52:1 | gray-400, 5.59:1 |
-| `.pain-x` badge (white text) | `--error-strong` `#DC2626`, 4.83:1 | same |
-| `#search-input` (search trigger button) text | `--text-muted` (gray-600), 5.88:1 on `--bg-hover` white | gray-300, 6.07:1 on `--bg-hover` gray-800 (was `--text-muted` gray-400, 4.42:1 — fail) |
-| `.preview-banner a` | `--accent-on-card` (unchanged, blue-500 5.0:1) | `--accent-on-card` blue-300, 5.89:1 (was `--accent` blue-400, 4.08:1 — fail) |
-| `.content .callout a:not(.btn)` (links inside a callout) | `--accent`, 4.60–4.83:1 (unchanged) | `--blue-200`, 6.46:1 warning / 11.50:1 info / 8.51:1 tip (was `--accent-hover` blue-400, 3.95:1 on warning — fail) |
-| `.content .callout a:not(.btn):hover` | `--link-hover` blue-600, 6.21–6.52:1 (was silently `--accent`, same as default — not a fail, but not the intended token) | `--link-hover` blue-200 (unchanged, same token/ratios as the shared prose-link hover above) |
-| `.btn-primary`/`.btn-secondary` as `.content a` links (Quick Start, Back to Docs) | unchanged (blue-500-on-white 5.00:1 / white-on-translucent) | own `color` restored via `.content a:not(.btn)`, was 2.55:1 (`--accent-hover` leaking onto a white button bg) |
-| `how-it-works.svg` diagram text | gray-600 body 5.88:1 / blue-500 accent 5.00:1 (light-only file, on white) | gray-400 body 5.59:1 / blue-300 accent 5.89:1 (dark-only file, on `#1E2129`) |
+| `--text-muted` (sidebar links, TOC, labels, `kbd`, copy button, search trigger) | zinc-600, 7.73:1 (white) / 7.03:1 (`--bg-hover`) | zinc-400, 7.76:1 (`--bg`) / 6.91:1 (`--bg-hover`, the hardest case) |
+| `--link` on `.content a:not(.btn)` | blue-500, 5.00:1 | blue-300, 9.16:1 (`--bg`) / 8.68:1 (`--bg-card`) |
+| `--link-hover` | blue-700, 8.79:1 | blue-200, 12.78:1 |
+| Callout title (`--callout-color`) on its 7% tint | info blue-600 6.08:1 / tip `#166534` 6.41:1 / warning `#92400E` 6.38:1 | info blue-300 8.41:1 / tip `#4ADE80` 10.4:1 / warning `#FBBF24` 10.8:1 |
+| `.content .callout a:not(.btn)` | blue-600, 6.08:1 (`--link` blue-500 only reached 4.50:1 on the tint) | `--link` blue-300, ≥ 8.30:1 |
+| `.btn-primary` | white on zinc-950, 19.9:1 | zinc-950 on zinc-50, 19.06:1 |
+| Syntax comments | zinc-600 on `#FAFAFA`, 7.41:1 | zinc-400 on `#111113`, 7.36:1 |
+| `.pain-x` / `.pain-check` badges (white text) | `--error-strong` `#DC2626` 4.83:1 / `--accent-strong` blue-500 5.00:1 | same |
+| `404.md` inline "Back to Docs" button | white on `--accent-strong`, 5.00:1 | same |
+| `how-it-works*.svg` diagram text | gray-600 5.88:1 / blue-500 5.00:1 (on white) | `#8B99B2` 6.55:1 / `#7997FF` 6.90:1 (on `#111113`) |
 
 ### Motion
 
