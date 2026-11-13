@@ -245,6 +245,8 @@
       url: /providers/orcarouter/
     - title: OVHcloud
       url: /providers/ovhcloud/
+    - title: Rapid-MLX
+      url: /providers/rapid-mlx/
     - title: Runcrate
       url: /providers/runcrate/
     - title: Together AI
