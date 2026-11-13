@@ -848,7 +848,7 @@ func (p *chatPage) messagesView(sl sidebarLayout) string {
 		return ""
 	}
 
-	banner := styles.BaseStyle.Foreground(styles.Accent).Render(strings.Join(tuibanner.Lines, "\n"))
+	banner := strings.Join(tuibanner.Render(), "\n")
 	return lipgloss.Place(
 		sl.chatWidth,
 		sl.chatHeight,
