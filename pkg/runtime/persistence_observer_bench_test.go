@@ -118,15 +118,114 @@ func TestPersistenceObserver_StreamingContentAccumulates(t *testing.T) {
 	assert.Equal(t, "hello", reloaded.Messages[1].Message.Message.Content)
 }
 
+// TestPersistenceObserver_FinalPayloadAndNextTurnReset verifies the canonical
+// MessageAdded payload replaces the streamed deltas in place (no extra
+// AddMessage), and that a second turn on the same observer opens a new row
+// while preserving the finalised first row.
+func TestPersistenceObserver_FinalPayloadAndNextTurnReset(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := newCountingPersistenceStore()
+	obs := newPersistenceObserver(store)
+	require.NotNil(t, obs)
+
+	sess := session.New(session.WithID("s1"), session.WithUserMessage("hi"))
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	// Turn one: stream deltas, then finalise with the canonical payload.
+	for _, tok := range []string{"dr", "af", "t"} {
+		obs.OnEvent(ctx, sess, AgentChoice("root", sess.ID, tok, "m1"))
+	}
+	assert.Equal(t, int64(1), store.addCalls.Load())
+
+	obs.OnEvent(ctx, sess, MessageAdded(sess.ID, &session.Message{
+		AgentName: "root",
+		Message: chat.Message{
+			Role:      chat.MessageRoleAssistant,
+			MessageID: "m1",
+			Content:   "done",
+		},
+	}, "root"))
+	assert.Equal(t, int64(1), store.addCalls.Load(), "MessageAdded finalises the row in place, no extra AddMessage")
+
+	reloaded, err := store.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Len(t, reloaded.Messages, 2) // user + assistant
+	require.NotNil(t, reloaded.Messages[1].Message)
+	assert.Equal(t, "done", reloaded.Messages[1].Message.Message.Content, "canonical payload replaces the streamed deltas")
+
+	// Turn two: the same observer and session must open a fresh row.
+	for _, tok := range []string{"sec", "ond"} {
+		obs.OnEvent(ctx, sess, AgentChoice("root", sess.ID, tok, "m2"))
+	}
+	assert.Equal(t, int64(2), store.addCalls.Load(), "second turn opens a new row")
+
+	obs.OnEvent(ctx, sess, MessageAdded(sess.ID, &session.Message{
+		AgentName: "root",
+		Message: chat.Message{
+			Role:      chat.MessageRoleAssistant,
+			MessageID: "m2",
+			Content:   "final",
+		},
+	}, "root"))
+	assert.Equal(t, int64(2), store.addCalls.Load())
+
+	reloaded, err = store.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Len(t, reloaded.Messages, 3) // user + two assistant rows
+	require.NotNil(t, reloaded.Messages[1].Message)
+	require.NotNil(t, reloaded.Messages[2].Message)
+	assert.Equal(t, "done", reloaded.Messages[1].Message.Message.Content, "first turn row preserved")
+	assert.Equal(t, "final", reloaded.Messages[2].Message.Message.Content, "second turn carries only its own content")
+}
+
+// TestPersistenceObserver_ReasoningAndTextDeltasAccumulate covers a
+// reasoning-first stream with interleaved reasoning/text deltas: one
+// AddMessage on the first delta, one UpdateMessage per later delta, and
+// Content and ReasoningContent accumulating independently in the store.
+func TestPersistenceObserver_ReasoningAndTextDeltasAccumulate(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := newCountingPersistenceStore()
+	obs := newPersistenceObserver(store)
+	require.NotNil(t, obs)
+
+	sess := session.New(session.WithID("s1"), session.WithUserMessage("hi"))
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	deltas := []Event{
+		AgentChoiceReasoning("root", sess.ID, "thi", "m1"),
+		AgentChoice("root", sess.ID, "hel", "m1"),
+		AgentChoiceReasoning("root", sess.ID, "nk", "m1"),
+		AgentChoice("root", sess.ID, "lo", "m1"),
+	}
+	for _, delta := range deltas {
+		obs.OnEvent(ctx, sess, delta)
+	}
+
+	assert.Equal(t, int64(1), store.addCalls.Load(), "first delta should INSERT")
+	assert.Equal(t, int64(3), store.updateCalls.Load(), "each later delta should UPDATE")
+
+	reloaded, err := store.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Len(t, reloaded.Messages, 2) // user + one assistant row
+	require.NotNil(t, reloaded.Messages[1].Message)
+	assert.Equal(t, "hello", reloaded.Messages[1].Message.Message.Content)
+	assert.Equal(t, "think", reloaded.Messages[1].Message.Message.ReasoningContent)
+}
+
 func BenchmarkPersistenceObserver_StreamingChunks(b *testing.B) {
 	ctx := b.Context()
 	obs, store := setupPersistenceObserverBench(b)
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	// Bound the store each iteration: UpdateMessage scans every session's
-	// messages, so a shared session (or accumulating sessions) makes ns/op
-	// a function of b.N rather than a per-turn baseline.
+	// Bound the store each iteration: UpdateMessage loads the target session
+	// and scans its message list, so reusing one session grows that list with
+	// b.N. Creating and deleting a session per iteration bounds both the
+	// per-session scan and the retained store state.
 	for i := range b.N {
 		sess := session.New(session.WithID(strconv.Itoa(i)), session.WithUserMessage("hi"))
 		if err := store.AddSession(ctx, sess); err != nil {
