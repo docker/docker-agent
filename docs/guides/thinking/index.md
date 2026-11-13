@@ -335,14 +335,24 @@ support that field.
 
 ## Changing Thinking Level at Runtime
 
-While running in the TUI, press **Shift+Tab** to cycle the thinking effort level for the current model without editing your YAML config, or type `/effort <level>` to jump straight to a specific level (e.g. `/effort high`). Running `/effort` without an argument opens a picker listing the levels the current model supports:
+Adjust reasoning effort in the TUI without editing your YAML:
 
-- The level steps through the model's supported range (model-specific), wrapping around — for example `none → minimal → low → medium → high → none` on OpenAI gpt-5/o-series, `none → minimal → low → medium → high → xhigh → none` on gpt-5.2+, `none → low → medium → high → xhigh → max → none` on gpt-5.6+ (no `minimal`), `none → low → medium → high → max → none` on Anthropic Opus 4.6 and Sonnet 4.6, and `none → low → medium → high → xhigh → max → none` on Anthropic Opus 4.7+, Fable 5, and Mythos 5. For older Anthropic models (e.g. Sonnet 4.5) that only accept token budgets, Docker Agent maps effort levels to fixed token budgets.
-- The current level is shown in the sidebar next to the model name (e.g. `openai/gpt-5 • high`).
-- This applies as a session override — it is **not** saved to the config file. The next session starts from the level defined in your YAML.
-- For models that don't support reasoning, and for remote runtimes, Shift+Tab is a no-op and an informational message is displayed.
-- `/effort` only accepts levels the current model supports; requesting an unsupported level shows the model's supported list. Like Shift+Tab, it is unavailable for non-reasoning models and remote runtimes.
-- Press <kbd>Tab</kbd> after `/effort` and a space to complete a level from the current model's supported range; it lists the same levels the picker shows (and, like the picker, offers no candidates for non-reasoning models or remote runtimes).
+| Control | Action |
+| --- | --- |
+| <kbd>Shift</kbd> + <kbd>Tab</kbd> | Cycle through supported levels, wrapping back to the first. |
+| `/effort` | Open a picker of supported levels. |
+| `/effort high` | Set a level directly. |
+| `/effort` + <kbd>Space</kbd> + <kbd>Tab</kbd> | Autocomplete a supported level. |
+
+The sidebar shows the current effort next to the model name. Available levels
+depend on the model; for older Claude models, Docker Agent maps levels to fixed
+token budgets.
+
+**Changes last for the current session only.** The next session uses the effort
+configured in your YAML.
+
+These controls require a reasoning-capable model and are unavailable with remote
+runtimes.
 
 ## Sharing Thinking Config Across Models
 

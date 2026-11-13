@@ -27,7 +27,7 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,100..900&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400..700&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ "css/style.css" | relURL }}">
   <link rel="icon" type="image/svg+xml" href="{{ "assets/docker-mark.svg" | relURL }}">
 </head>
@@ -38,7 +38,6 @@
 
   {{ $currentURL := .RelPermalink }}
   <nav class="sidebar" id="sidebar" role="navigation" aria-label="Documentation navigation">
-    <div class="sidebar-tagline">{{ site.Params.tagline }}</div>
     {{ range hugo.Data.nav }}
       {{/* Determine whether this section contains the current page */}}
       {{ $sectionActive := false }}

@@ -49,10 +49,10 @@ function toggleTheme() {
 
 // ---------- Table of Contents ----------
 // The right-column aside on each page contains:
-//   1. An "Edit this page" link to the source on GitHub (resolved
-//      from a <meta name="docs-edit-url"> set in the layout).
-//   2. A "Table of contents" heading + nested links to in-page
+//   1. An "On this page" heading + nested links to in-page
 //      <h2 id> / <h3 id> headings.
+//   2. An "Edit this page" link to the source on GitHub (resolved
+//      from a <meta name="docs-edit-url"> set in the layout).
 // We render the heading + nav unconditionally when there are at least
 // 2 headings; the edit link renders even on short pages.
 //
@@ -75,6 +75,38 @@ function buildTOC() {
   const inner = document.createElement('div');
   inner.className = 'toc-inner';
   aside.appendChild(inner);
+
+  // "On this page" + nav — only when there are enough headings.
+  if (headings.length >= 2) {
+    const heading = document.createElement('h2');
+    heading.className = 'toc-heading';
+    heading.textContent = 'On this page';
+    inner.appendChild(heading);
+
+    const nav = document.createElement('nav');
+    nav.className = 'toc-nav';
+    inner.appendChild(nav);
+
+    for (const h of headings) {
+      const a = document.createElement('a');
+      a.className = 'toc-link' + (h.tagName === 'H3' ? ' toc-h3' : '');
+      a.href = '#' + h.id;
+      a.dataset.id = h.id;
+      a.textContent = h.textContent;
+      nav.appendChild(a);
+    }
+
+    aside.addEventListener('click', (e) => {
+      const a = e.target.closest('.toc-link');
+      if (!a) return;
+      e.preventDefault();
+      const target = document.getElementById(a.dataset.id);
+      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      target?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+    });
+
+    setupScrollSpy(headings, aside);
+  }
 
   // "Edit this page" — only when an edit URL was provided.
   if (editUrl) {
@@ -103,38 +135,6 @@ function buildTOC() {
 
     actions.appendChild(link);
     inner.appendChild(actions);
-  }
-
-  // "Table of contents" + nav — only when there are enough headings.
-  if (headings.length >= 2) {
-    const heading = document.createElement('h2');
-    heading.className = 'toc-heading';
-    heading.textContent = 'Table of contents';
-    inner.appendChild(heading);
-
-    const nav = document.createElement('nav');
-    nav.className = 'toc-nav';
-    inner.appendChild(nav);
-
-    for (const h of headings) {
-      const a = document.createElement('a');
-      a.className = 'toc-link' + (h.tagName === 'H3' ? ' toc-h3' : '');
-      a.href = '#' + h.id;
-      a.dataset.id = h.id;
-      a.textContent = h.textContent;
-      nav.appendChild(a);
-    }
-
-    aside.addEventListener('click', (e) => {
-      const a = e.target.closest('.toc-link');
-      if (!a) return;
-      e.preventDefault();
-      const target = document.getElementById(a.dataset.id);
-      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-      target?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
-    });
-
-    setupScrollSpy(headings, aside);
   }
 
   const main = document.querySelector('.main');

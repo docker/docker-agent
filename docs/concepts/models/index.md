@@ -101,17 +101,10 @@ Control how much the model "thinks" before responding:
 | Gemini 3   | string     | `minimal`, `low`, `medium`, `high`                                  | varies                           |
 | All        | string/int | `none` or `0` clears Docker Agent's local config                    | —                                |
 
-`none` and `0` are not universal API-level disable switches. On genuine OpenAI
-endpoints running GPT-5.x from 5.6 onward or GPT-6 Sol/Luna, `none` is a real
-`reasoning_effort` value that Docker Agent sends as-is and the model does not
-reason. On GPT-6 Astra and older OpenAI models, `none`/`0` only clear the local `thinking_budget` — omitting the field
-has the same effect — and the model falls back to the API's own default effort
-(still reasoning internally for always-reasoning models like the o-series).
-Models that support disabling thinking (including applicable Gemini 2.5, Claude,
-and local models) can honor `none`/`0`. Claude models that require thinking
-instead use adaptive thinking with low effort. See the
-[Thinking / Reasoning guide](../../guides/thinking/index.md#disabling-thinking)
-for the full per-provider breakdown.
+**Turning thinking off:** Set `thinking_budget` to `none` or `0`. Models that
+support disabling reasoning turn it off; others keep reasoning at their default
+or minimum effort. Check your model's behavior in the
+[Thinking / Reasoning guide](../../guides/thinking/index.md#disabling-thinking).
 
 ```yaml
 models:
