@@ -662,7 +662,7 @@ The `hook_specific_output` for `tool_response_transform` supports:
 
 This is the symmetric counterpart of `tool_input_transform`'s `updated_input`, applied to tool **results** instead of tool **arguments**. The rewrite reaches every downstream consumer — event subscribers, the persisted session file, the `post_tool_use` hook input, and the next LLM call. Use it to truncate excessive output, scrub PII, or normalise tool dialects. The built-in `redact_secrets` registers itself on this event as the third leg of the redact_secrets feature.
 
-Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_result_meta`, the structured display metadata a tool recorded alongside its text output (the TUI renders completed `edit_file` diffs from it). A hook can rewrite it with `updated_tool_result_meta`, independently of `updated_tool_response`; the rewritten metadata is what gets emitted and persisted. `redact_secrets` also scrubs this metadata, and clears it when it cannot be serialized safely.
+Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_result_meta`, the structured display metadata a tool recorded alongside its text output (the TUI renders completed `edit_file` diffs from it). Only `tool_response_transform` hooks can rewrite it, with `updated_tool_result_meta` (independently of `updated_tool_response`); the rewritten metadata is what gets emitted and persisted. `post_tool_use` hooks receive the already-transformed metadata and cannot change it. `redact_secrets` also scrubs this metadata, and clears it when it cannot be serialized safely.
 
 ### Composing transformations
 
