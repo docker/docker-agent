@@ -217,6 +217,8 @@ $ docker agent new --model openai/gpt-5
 $ docker agent new --model dmr/ai/gemma3-qat:12B --max-iterations 15
 ```
 
+When `--max-iterations` is omitted (or `0`) and the agent creator uses a DMR model, the session stops after 20 iterations; with other providers it stays unlimited. An explicit non-zero value always wins.
+
 ### `docker agent getting-started`
 
 Run a short (about 2 minutes), skippable interactive tour inside the chat UI: sending messages, approving tool calls, the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>), slash commands, and how agents are configured. Aliased as `docker agent tour`. Requires an interactive terminal.
