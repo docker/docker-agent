@@ -492,6 +492,10 @@ func (s *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 			OutputSchema:   tools.MustSchemaFor[string](),
 			Annotations: tools.ToolAnnotations{
 				Title: "Run Skill",
+				// The wrapper only launches the child session; the child
+				// dispatcher gates every call with the inherited policy
+				// and permissions.
+				ReadOnlyHint: true,
 			},
 		})
 	}
