@@ -427,8 +427,8 @@ In addition to the common fields, each event ships its own payload:
 | `tool_input_transform`     | `agent_name`, `tool_name`, `tool_use_id`, `tool_category`, `tool_input`, `safety_policy` |
 | `tool_guard`               | `agent_name`, `tool_name`, `tool_use_id`, `tool_category`, `tool_input`, `safety_policy` |
 | `pre_tool_use`              | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`                                                                |
-| `tool_response_transform`   | `tool_name`, `tool_use_id`, `tool_input`, `tool_response`                                                             |
-| `post_tool_use`             | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `tool_error`                                 |
+| `tool_response_transform`   | `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `tool_result_meta`                                         |
+| `post_tool_use`             | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `tool_error`, `tool_result_meta`             |
 | `permission_request`        | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`                                                                |
 | `session_start`             | `source` — `startup` for each run stream                                                             |
 | `user_prompt_submit`        | `prompt` — the text the user just submitted                                                                           |
@@ -658,8 +658,11 @@ The `hook_specific_output` for `tool_response_transform` supports:
 | Field                   | Type   | Description                                   |
 | ----------------------- | ------ | --------------------------------------------- |
 | `updated_tool_response` | string | Rewritten tool output (replaces the original) |
+| `updated_tool_result_meta` | JSON | Replacement for the tool result's display metadata (for example, the recorded diff of an `edit_file` call). A JSON value replaces the metadata, `null` clears it, and omitting the field leaves it unchanged |
 
 This is the symmetric counterpart of `tool_input_transform`'s `updated_input`, applied to tool **results** instead of tool **arguments**. The rewrite reaches every downstream consumer — event subscribers, the persisted session file, the `post_tool_use` hook input, and the next LLM call. Use it to truncate excessive output, scrub PII, or normalise tool dialects. The built-in `redact_secrets` registers itself on this event as the third leg of the redact_secrets feature.
+
+Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_result_meta`, the structured display metadata a tool recorded alongside its text output (the TUI renders completed `edit_file` diffs from it). A hook can rewrite it with `updated_tool_result_meta`, independently of `updated_tool_response`; the rewritten metadata is what gets emitted and persisted. `redact_secrets` also scrubs this metadata, and clears it when it cannot be serialized safely.
 
 ### Composing transformations
 
@@ -670,7 +673,7 @@ Hooks for the following events run **sequentially in configuration order**:
 | `tool_input_transform` | `updated_input` | `tool_input` with the patch applied |
 | `pre_tool_use` (default lane) | `updated_input` | `tool_input` with the patch applied |
 | `before_llm_call` | `updated_messages` | The rewritten `messages` array |
-| `tool_response_transform` | `updated_tool_response` | The rewritten `tool_response` string |
+| `tool_response_transform` | `updated_tool_response`, `updated_tool_result_meta` | The rewritten `tool_response` string and `tool_result_meta` |
 
 Every matching hook on these events participates in the sequence, whether it
 rewrites, observes, or returns a verdict. Each hook sees the most recent
