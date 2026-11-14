@@ -16,7 +16,7 @@ models:
     first_available: [list] # Optional: candidate model refs, tried in order by available credentials.
                             # Mutually exclusive with other model settings.
     provider: string # Required unless using first_available. One of: openai, anthropic, google, amazon-bedrock,
-                     # dmr, mistral, xai, nebius, nvidia, minimax, baseten, daoxe, ovhcloud, groq, fireworks-ai, deepseek, cerebras, togetherai, huggingface, moonshotai, vercel, cloudflare-workers-ai, cloudflare-ai-gateway, requesty, openrouter, opper, runcrate, api-route, lunaroute, orcarouter, atlascloud, cloudgpu, obscurify, hopbase,
+                     # dmr, mistral, xai, nebius, nvidia, minimax, baseten, daoxe, ovhcloud, groq, fireworks-ai, deepseek, cerebras, togetherai, huggingface, moonshotai, vercel, cloudflare-workers-ai, cloudflare-ai-gateway, requesty, openrouter, opper, runcrate, api-route, lunaroute, orcarouter, atlascloud, popnow, cloudgpu, obscurify, hopbase,
                      # azure, ollama, github-copilot, or a named provider defined
                      # under the top-level `providers:` section.
     model: string # Required: model identifier
@@ -102,7 +102,7 @@ agents:
 | Property              | Type       | Required | Description                                                                           |
 | --------------------- | ---------- | -------- | ------------------------------------------------------------------------------------- |
 | `first_available`     | array      | ✗        | Candidate model references tried in order; selects the first whose credentials are configured. Mutually exclusive with other model settings. |
-| `provider`            | string     | ✓/✗      | Required for regular model definitions; omitted for `first_available` selectors. Provider: `openai`, `anthropic`, `google`, `amazon-bedrock`, `dmr`, `mistral`, `xai`, `nebius`, `nvidia`, `minimax`, `baseten`, `daoxe`, `ovhcloud`, `groq`, `fireworks-ai`, `deepseek`, `cerebras`, `togetherai`, `huggingface`, `moonshotai`, `vercel`, `cloudflare-workers-ai`, `cloudflare-ai-gateway`, `requesty`, `openrouter`, `opper`, `runcrate`, `api-route`, `lunaroute`, `orcarouter`, `atlascloud`, `cloudgpu`, `obscurify`, `hopbase`, `azure`, `ollama`, `github-copilot`, `chatgpt`, `opencode`, `opencode-go`, or any [named provider](../../providers/custom/index.md). |
+| `provider`            | string     | ✓/✗      | Required for regular model definitions; omitted for `first_available` selectors. Provider: `openai`, `anthropic`, `google`, `amazon-bedrock`, `dmr`, `mistral`, `xai`, `nebius`, `nvidia`, `minimax`, `baseten`, `daoxe`, `ovhcloud`, `groq`, `fireworks-ai`, `deepseek`, `cerebras`, `togetherai`, `huggingface`, `moonshotai`, `vercel`, `cloudflare-workers-ai`, `cloudflare-ai-gateway`, `requesty`, `openrouter`, `opper`, `runcrate`, `api-route`, `lunaroute`, `orcarouter`, `atlascloud`, `popnow`, `cloudgpu`, `obscurify`, `hopbase`, `azure`, `ollama`, `github-copilot`, `chatgpt`, `opencode`, `opencode-go`, or any [named provider](../../providers/custom/index.md). |
 | `model`               | string     | ✓/✗      | Required for regular model definitions; omitted for `first_available` selectors. Model name (e.g., `gpt-4o`, `claude-sonnet-4-5`, `gemini-3.5-flash`) |
 | `description`         | string     | ✗        | Informational, human-readable summary of the model's purpose or strengths (e.g., "fast and cheap, good for summaries"). Not sent to the model. Can be combined with `first_available` (a selector's description is kept when it resolves). |
 | `stream_idle_timeout` | duration/int | ✗ | Maximum silence between stream chunks; overrides `runtime.stream_idle_timeout`. See [Stream idle timeout](#stream-idle-timeout). |
@@ -601,7 +601,7 @@ for a complete local-server configuration.
 ## Custom HTTP Headers
 
 For OpenAI-compatible providers (`openai`, `github-copilot`, `mistral`, `xai`,
-`nebius`, `nvidia`, `minimax`, `baseten`, `daoxe`, `ovhcloud`, `groq`, `fireworks-ai`, `deepseek`, `cerebras`, `togetherai`, `huggingface`, `moonshotai`, `vercel`, `cloudflare-workers-ai`, `cloudflare-ai-gateway`, `requesty`, `openrouter`, `opper`, `runcrate`, `lunaroute`, `orcarouter`, `atlascloud`, `cloudgpu`, `obscurify`, `hopbase`, `ollama`, and any custom provider using the OpenAI API),
+`nebius`, `nvidia`, `minimax`, `baseten`, `daoxe`, `ovhcloud`, `groq`, `fireworks-ai`, `deepseek`, `cerebras`, `togetherai`, `huggingface`, `moonshotai`, `vercel`, `cloudflare-workers-ai`, `cloudflare-ai-gateway`, `requesty`, `openrouter`, `opper`, `runcrate`, `lunaroute`, `orcarouter`, `atlascloud`, `popnow`, `cloudgpu`, `obscurify`, `hopbase`, `ollama`, and any custom provider using the OpenAI API),
 `provider_opts.http_headers` adds arbitrary HTTP headers to every outgoing
 request:
 

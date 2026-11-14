@@ -115,6 +115,16 @@
     ]
   },
   {
+    "name": "popnow",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.popnow.ai/v1",
+    "default_model": "deepseek/v4-flash/chat",
+    "token_env_vars": [
+      "POPNOW_API_KEY"
+    ]
+  },
+  {
     "name": "opper",
     "merge_consecutive_messages": true,
     "api_type": "openai",
