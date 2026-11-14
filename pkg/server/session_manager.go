@@ -462,6 +462,31 @@ func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, r
 	return &rs.streaming
 }
 
+// DetachRuntime is the inverse of [SessionManager.AttachRuntime]: it releases
+// the manager's in-memory state for an attached session (runtime registration,
+// cancellation signal, event log, follow-up injector) without touching the
+// persisted session. An embedder calls it when it stops owning the session,
+// e.g. when a TUI tab is closed under --listen; otherwise the runtime and its
+// session would stay reachable (and listed as active) until the process exits.
+// Unlike [SessionManager.DeleteSession], the stored session is kept so it can
+// still be resumed later. It is a no-op for unknown sessions.
+func (sm *SessionManager) DetachRuntime(sessionID string) {
+	sm.mux.Lock()
+	defer sm.mux.Unlock()
+	rs, ok := sm.runtimeSessions.Load(sessionID)
+	if !ok {
+		return
+	}
+	if rs.cancel != nil {
+		rs.cancel()
+	}
+	sm.runtimeSessions.Delete(sessionID)
+	sm.dropEventLog(sessionID)
+	sm.followUpInjectors.Delete(sessionID)
+	sm.followUpKeys.Delete(sessionID)
+	sm.pendingSafetyDefaults.Delete(sessionID)
+}
+
 // GetSession retrieves a session by ID.
 func (sm *SessionManager) GetSession(ctx context.Context, id string) (*session.Session, error) {
 	if rs, ok := sm.runtimeSessions.Load(id); ok && rs.session != nil {
