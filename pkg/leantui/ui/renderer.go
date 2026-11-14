@@ -35,12 +35,16 @@ type Renderer struct {
 	width  int
 	height int
 
-	prev         []string
-	viewportTop  int // index in prev of the topmost visible row
-	cursorRow    int // buffer row the hardware cursor currently sits on
-	initialized  bool
-	needsRedraw  bool
-	liveToolRows [2]int
+	prev              []string
+	viewportTop       int // index in prev of the topmost visible row
+	cursorRow         int // buffer row the hardware cursor currently sits on
+	initialized       bool
+	needsRedraw       bool
+	interactionRedraw bool
+	interactive       bool
+	scrolled          bool
+	scrollRedraw      bool
+	liveToolRows      [2]int
 }
 
 func NewRenderer(w *bufio.Writer, width, height int) *Renderer {
@@ -60,6 +64,46 @@ func (r *Renderer) Repaint() {
 	r.needsRedraw = true
 }
 
+// SetInteractive establishes screen-relative coordinates for mouse hit-testing.
+func (r *Renderer) SetInteractive(enabled bool) {
+	if enabled && !r.interactive {
+		r.RepaintInteraction()
+	}
+	if !enabled && r.scrolled {
+		r.scrolled = false
+		r.RepaintInteraction()
+	}
+	r.interactive = enabled
+}
+
+// Scroll moves through the retained transcript. Reaching the bottom resumes follow mode.
+func (r *Renderer) Scroll(delta int) {
+	if !r.interactive {
+		return
+	}
+	bottom := max(0, len(r.prev)-r.height)
+	r.viewportTop = max(0, min(bottom, r.viewportTop+delta))
+	r.scrolled = r.viewportTop < bottom
+	r.scrollRedraw = true
+}
+
+// Follow returns to the input after keyboard interaction.
+func (r *Renderer) Follow() bool {
+	if r.scrolled {
+		r.scrolled = false
+		r.scrollRedraw = false
+		r.RepaintInteraction()
+		return true
+	}
+	return false
+}
+
+// RepaintInteraction redraws the visible tail after expanding or collapsing
+// details, without archiving hidden details or erasing terminal scrollback.
+func (r *Renderer) RepaintInteraction() {
+	r.interactionRedraw = true
+}
+
 // Frame reconciles the screen with newLines and places the hardware cursor at
 // (cursorLine, cursorCol), where cursorLine is an index into newLines.
 func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int, liveToolRows ...[2]int) {
@@ -72,10 +116,34 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int, liveToolR
 		newLines = []string{""}
 	}
 
+	if r.initialized && r.needsRedraw && r.scrolled {
+		r.needsRedraw = false
+		r.scrollRedraw = true
+	}
 	if !r.initialized || r.needsRedraw {
+		if r.interactionRedraw && !r.initialized {
+			r.write("\x1b[2J\x1b[H")
+		}
+		r.interactionRedraw = false
 		r.fullRedraw(newLines, cursorLine, cursorCol, r.initialized)
 		r.initialized = true
 		r.needsRedraw = false
+		return
+	}
+
+	if r.scrollRedraw || r.scrolled {
+		r.scrollRedraw = false
+		r.interactionRedraw = false
+		r.viewportTop = min(r.viewportTop, max(0, len(newLines)-r.height))
+		r.scrolled = r.viewportTop < max(0, len(newLines)-r.height)
+		r.paintViewport(newLines, cursorLine, cursorCol, r.viewportTop, false)
+		return
+	}
+
+	if r.interactionRedraw {
+		r.interactionRedraw = false
+		top := max(0, len(newLines)-r.height)
+		r.paintViewport(newLines, cursorLine, cursorCol, top, false)
 		return
 	}
 
@@ -151,10 +219,14 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int, liveToolR
 // the new visible tail; shrinkage simply replaces the visible rows.
 func (r *Renderer) repaintVisible(newLines []string, cursorLine, cursorCol int) {
 	top := max(r.viewportTop, len(newLines)-r.height)
+	r.paintViewport(newLines, cursorLine, cursorCol, top, true)
+}
+
+func (r *Renderer) paintViewport(newLines []string, cursorLine, cursorCol, top int, archive bool) {
 	var b strings.Builder
 	b.WriteString(seqSyncStart)
 	b.WriteString(seqHideCursor)
-	if delta := top - r.viewportTop; delta > 0 {
+	if delta := top - r.viewportTop; archive && delta > 0 {
 		r.moveRow(&b, r.cursorRow, r.viewportTop+r.height-1)
 		for range delta {
 			b.WriteString("\r\n")
@@ -172,7 +244,9 @@ func (r *Renderer) repaintVisible(newLines []string, cursorLine, cursorCol int) 
 	}
 	r.viewportTop = top
 	cur := r.moveCursor(&b, top+r.height-1, cursorLine, cursorCol)
-	b.WriteString(seqShowCursor)
+	if cursorLine >= top && cursorLine < top+r.height {
+		b.WriteString(seqShowCursor)
+	}
 	b.WriteString(seqSyncEnd)
 	r.write(b.String())
 	r.cursorRow = cur

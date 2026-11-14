@@ -34,6 +34,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
+| `compact_activity` | boolean | `false` | Summarize consecutive tool calls and hide routine output and reasoning in both TUIs. Click a visible summary to expand or collapse its details. File edits, errors, and approval prompts remain visible. In the lean TUI, hold Shift for native terminal selection and scrolling. |
 | `hide_tool_results` | boolean | `false` | Hide tool call results in the TUI by default. Mirrors the `--hide-tool-results` flag and the <kbd>Ctrl</kbd>+<kbd>O</kbd> toggle. |
 | `expand_thinking` | boolean | `false` | Start new sessions with thinking/tool blocks expanded instead of collapsed. |
 | `split_diff_view` | boolean | `true` | Render file-edit diffs side-by-side instead of unified. |

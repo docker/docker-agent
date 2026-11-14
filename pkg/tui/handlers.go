@@ -927,6 +927,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		SplitDiffView:                 settings.GetSplitDiffView(),
 		ExpandThinking:                settings.GetExpandThinking(),
 		HideToolResults:               settings.HideToolResults,
+		CompactActivity:               settings.CompactActivity,
 		RenderImages:                  settings.GetRenderImages(),
 		ShowBanner:                    settings.GetShowBanner(),
 		YOLO:                          settings.YOLO,
@@ -961,6 +962,13 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 		page := tab.chatPage
 		if page == nil {
 			continue
+		}
+		if state := tab.sessionState; state != nil && (state.ExpandThinking() != preferences.ExpandThinking || state.CompactActivity() != preferences.CompactActivity) {
+			state.SetExpandThinking(preferences.ExpandThinking)
+			state.SetCompactActivity(preferences.CompactActivity)
+			updated, effects := page.UpdateEffects(messages.ActivityDisplayChangedMsg{})
+			tab.chatPage = updated
+			cmd = tea.Batch(cmd, effects.Cmd(tab == m.activeTab))
 		}
 		page.SetSendMode(m.sendMode)
 		page.SetInterruptMode(m.interruptMode)
@@ -1063,6 +1071,7 @@ func savePreferences(p messages.Preferences) error {
 		}
 		s.WarnOnCacheMiss = boolPreference(p.WarnOnCacheMiss, false)
 		s.HideToolResults = p.HideToolResults
+		s.CompactActivity = p.CompactActivity
 		s.RenderImages = boolPreference(p.RenderImages, true)
 		s.ShowBanner = boolPreference(p.ShowBanner, true)
 		s.YOLO = p.YOLO
@@ -1126,7 +1135,8 @@ func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.Send
 	return savePreferences(messages.Preferences{
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
-		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
+		CompactActivity: settings.CompactActivity,
+		RenderImages:    settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
 		YOLO: settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
 		BackgroundCompaction:          settings.BackgroundCompaction,
 		BackgroundCompactionThreshold: settings.GetBackgroundCompactionThreshold(),

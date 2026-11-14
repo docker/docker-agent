@@ -51,6 +51,7 @@ const (
 	rowPlans
 	rowTodos
 	rowSplitDiff
+	rowCompactActivity
 	rowExpandThinking
 	rowHideToolResults
 	rowRenderImages
@@ -313,6 +314,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.Layout.HideTodos = !d.current.Layout.HideTodos
 		case rowSplitDiff:
 			d.current.SplitDiffView = !d.current.SplitDiffView
+		case rowCompactActivity:
+			d.current.CompactActivity = !d.current.CompactActivity
 		case rowExpandThinking:
 			d.current.ExpandThinking = !d.current.ExpandThinking
 		case rowHideToolResults:
@@ -536,6 +539,7 @@ func (d *settingsDialog) renderAppearanceTab(content *settingsContent, width int
 	}
 	content.addGroup("Chat display", width)
 	toggle(rowSplitDiff, "Split diff view", d.current.SplitDiffView)
+	toggle(rowCompactActivity, "Compact activity", d.current.CompactActivity)
 	toggle(rowExpandThinking, "Expand thinking by default", d.current.ExpandThinking)
 	toggle(rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)
 	toggle(rowRenderImages, "Render images", d.current.RenderImages)

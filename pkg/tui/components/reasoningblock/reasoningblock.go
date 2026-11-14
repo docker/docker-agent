@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -147,7 +148,7 @@ func New(ar *animation.Runtime, id, agentName string, sessionState service.Sessi
 		ar:            ar,
 		animationSub:  ar.Subscribe(), id: id,
 		agentName:    agentName,
-		expanded:     sessionState == nil || sessionState.ExpandThinking(),
+		expanded:     sessionState == nil || (sessionState.ExpandThinking() && !sessionState.CompactActivity()),
 		width:        80,
 		sessionState: sessionState,
 		now:          defaultNow,
@@ -531,6 +532,10 @@ func (m *Model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 // View renders the block.
 func (m *Model) View() string {
+	if m.sessionState != nil && m.sessionState.CompactActivity() {
+		content, _ := m.renderCompact()
+		return content
+	}
 	var content string
 	if m.expanded {
 		content = m.renderExpanded()
@@ -538,6 +543,56 @@ func (m *Model) View() string {
 		content = m.renderCollapsed()
 	}
 	return m.agentBadgePrefix() + content
+}
+
+func (m *Model) renderCompact() (string, []int) {
+	var toggleLines []int
+	var routine []toolEntry
+	parts := []string{m.agentBadgePrefix() + m.renderHeader(m.expanded)}
+	line, countedParts := 0, 0
+	flush := func() {
+		if len(routine) == 0 {
+			return
+		}
+		for _, part := range parts[countedParts:] {
+			line += strings.Count(part, "\n") + 1
+		}
+		countedParts = len(parts)
+		toggleLines = append(toggleLines, line)
+		messages := make([]*types.Message, 0, len(routine))
+		for _, entry := range routine {
+			messages = append(messages, entry.msg)
+		}
+		parts = append(parts, toolcommon.ActivityHeader(messages, m.width, m.expanded))
+		if m.expanded {
+			for _, entry := range routine {
+				parts = append(parts, m.renderToolExpanded(entry))
+			}
+		}
+		routine = nil
+	}
+	for _, item := range m.contentItems {
+		switch item.kind {
+		case contentItemReasoning:
+			if m.expanded && item.reasoning != "" {
+				flush()
+				parts = append(parts, m.renderReasoningChunk(item.reasoning))
+			}
+		case contentItemTool:
+			if item.toolIndex >= len(m.toolEntries) {
+				continue
+			}
+			entry := m.toolEntries[item.toolIndex]
+			if toolcommon.IsRoutineActivity(entry.msg) {
+				routine = append(routine, entry)
+			} else {
+				flush()
+				parts = append(parts, entry.view.View())
+			}
+		}
+	}
+	flush()
+	return strings.Join(parts, "\n"), toggleLines
 }
 
 // rendersAgentBadge reports whether the agent badge actually renders: it
@@ -730,6 +785,9 @@ func (m *Model) getVisibleToolsCollapsed() []toolEntry {
 // hasExtraContent returns true if there's content that would be shown when expanded
 // but is hidden when collapsed (truncated reasoning or completed tool calls).
 func (m *Model) hasExtraContent() bool {
+	if m.sessionState != nil && m.sessionState.CompactActivity() && m.Reasoning() != "" {
+		return true
+	}
 	return m.ensureCache().hasExtra
 }
 
@@ -841,7 +899,13 @@ func (m *Model) IsHeaderLine(lineIdx int) bool {
 }
 
 // IsToggleLine returns true if clicking this line should toggle the block.
-// Only the header is toggleable.
+// Compact activity summaries share the block's expand/collapse state.
 func (m *Model) IsToggleLine(lineIdx int) bool {
+	if m.sessionState != nil && m.sessionState.CompactActivity() {
+		_, lines := m.renderCompact()
+		if slices.Contains(lines, lineIdx) {
+			return true
+		}
+	}
 	return m.IsHeaderLine(lineIdx) && (m.expanded || m.hasExtraContent())
 }

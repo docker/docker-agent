@@ -30,6 +30,23 @@ import (
 )
 
 func (m *model) handleKey(ctx context.Context, k ui.Key) {
+	if k.Typ == ui.KeyMouseWheelUp || k.Typ == ui.KeyMouseWheelDown {
+		delta := 3
+		if k.Typ == ui.KeyMouseWheelUp {
+			delta = -delta
+		}
+		m.r.Scroll(delta)
+		return
+	}
+	if k.Typ == ui.KeyMouseClick {
+		if m.sessionState.CompactActivity() && k.X >= 0 && k.X < m.width && k.Y >= 0 && k.Y < m.height && m.screen.Transcript.ToggleActivityAt(m.r.ViewportTop()+k.Y) {
+			m.r.RepaintInteraction()
+		}
+		return
+	}
+	if m.r.Follow() && m.screen.Confirm != nil {
+		return
+	}
 	if k.Typ == ui.KeyCtrlO && m.screen.Settings == nil {
 		m.screen.Transcript.SetFullFilePreview(!m.screen.Transcript.FullFilePreview())
 		return
@@ -544,8 +561,8 @@ func (m *model) loadSessionTranscript(sess *session.Session) {
 		case chat.MessageRoleAssistant:
 			content = chat.VisibleAssistantContent(content)
 			if msg.Message.ReasoningContent != "" {
-				reasoning := msg.Message.ReasoningContent
-				m.screen.Transcript.AddBlock(func(w int) []string { return ui.RenderReasoningLines(reasoning, w) })
+				m.screen.Transcript.AppendReasoning(msg.Message.ReasoningContent)
+				m.screen.Transcript.FlushPending()
 			}
 			if content != "" {
 				identity := m.contentIdentity.Resolve(sess.ID, msg.Message.MessageID)

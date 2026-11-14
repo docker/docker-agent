@@ -385,6 +385,11 @@ func (m *model) resize(width, height int) {
 
 // render assembles the full frame and reconciles it with the terminal.
 func (m *model) render() {
+	compact := m.sessionState.CompactActivity()
+	if m.term != nil {
+		m.term.SetMouseEnabled(compact)
+	}
+	m.r.SetInteractive(compact)
 	lines, cursorLine, cursorCol := m.buildLines()
 	m.r.Frame(lines, cursorLine, cursorCol, m.screen.Transcript.LiveToolRows())
 }

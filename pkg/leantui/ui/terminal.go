@@ -22,7 +22,8 @@ type Terminal struct {
 	writer *bufio.Writer
 	reader cancelreader.CancelReader
 
-	prevState *term.State
+	mouseEnabled bool
+	prevState    *term.State
 }
 
 func NewTerminal(in, out *os.File) (*Terminal, error) {
@@ -84,6 +85,21 @@ func (t *Terminal) Writer() *bufio.Writer {
 	return t.writer
 }
 
+// SetMouseEnabled captures clicks without mouse motion reports. Shift bypasses
+// capture in supporting terminals for native selection and scrollback.
+func (t *Terminal) SetMouseEnabled(enabled bool) {
+	if t.mouseEnabled == enabled {
+		return
+	}
+	t.mouseEnabled = enabled
+	if enabled {
+		t.writeString(ansi.SetModeMouseExtSgr + ansi.SetModeMouseNormal)
+	} else {
+		t.writeString(ansi.ResetModeMouseNormal + ansi.ResetModeMouseExtSgr)
+	}
+	t.flush()
+}
+
 func (t *Terminal) SetClipboard(text string) {
 	t.writeString(ansi.SetSystemClipboard(text))
 	t.flush()
@@ -100,6 +116,7 @@ func (t *Terminal) flush() {
 // Restore tears the terminal back down: it disables bracketed paste, cancels
 // the reader, and restores the saved terminal state.
 func (t *Terminal) Restore() {
+	t.SetMouseEnabled(false)
 	t.writeString(seqDisableBracketedPaste)
 	t.writeString(ansi.PopKittyKeyboard(1))
 	t.writeString(seqShowCursor)

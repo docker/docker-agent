@@ -131,6 +131,7 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 		SplitDiffView:                 false,
 		ExpandThinking:                true,
 		HideToolResults:               true,
+		CompactActivity:               true,
 		ShowBanner:                    false,
 		YOLO:                          true,
 		RestoreTabs:                   true,
@@ -153,6 +154,7 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 	assert.Equal(t, preferences.SplitDiffView, settings.GetSplitDiffView())
 	assert.Equal(t, preferences.ExpandThinking, settings.GetExpandThinking())
 	assert.Equal(t, preferences.HideToolResults, settings.HideToolResults)
+	assert.Equal(t, preferences.CompactActivity, settings.CompactActivity)
 	assert.Equal(t, preferences.ShowBanner, settings.GetShowBanner())
 	assert.Equal(t, preferences.YOLO, settings.YOLO)
 	assert.Equal(t, preferences.RestoreTabs, settings.GetRestoreTabs())

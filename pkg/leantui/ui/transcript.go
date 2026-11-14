@@ -1,10 +1,12 @@
 package ui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/streamcontent"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
@@ -35,22 +37,25 @@ type PendingUserMessage struct {
 
 // pendingBlock accumulates the text of the block currently being streamed.
 type pendingBlock struct {
-	kind     blockKind
-	identity streamcontent.Identity
-	text     strings.Builder
+	activityID string
+	kind       blockKind
+	identity   streamcontent.Identity
+	text       strings.Builder
 }
 
 // block is a finalized piece of the conversation. Its lines are rendered lazily
 // and cached per width, so finalized content is not re-rendered every frame and
 // only reflows when the terminal is resized.
 type block struct {
-	render   func(width int) []string
-	identity streamcontent.Identity
-	kind     blockKind
-	text     string
-	cacheW   int
-	cache    []string
-	cached   bool
+	render     func(width int) []string
+	identity   streamcontent.Identity
+	kind       blockKind
+	text       string
+	tool       *ToolView
+	activityID string
+	cacheW     int
+	cache      []string
+	cached     bool
 }
 
 func (b *block) lines(width int) []string {
@@ -68,11 +73,14 @@ func (b *block) lines(width int) []string {
 // live region that changes each frame until they finalize into blocks.
 type Transcript struct {
 	fullFilePreview bool
+	nextActivityID  uint64
 	blocks          []*block
 	pending         *pendingBlock
 	toolz           *ToolTracker
 
-	liveToolRows [2]int
+	liveToolRows     [2]int
+	expandedActivity map[string]bool
+	activityRows     map[int][]string
 }
 
 // NewTranscript creates an empty transcript.
@@ -99,7 +107,8 @@ func (t *Transcript) appendPending(kind blockKind, identity streamcontent.Identi
 	}
 	if t.pending == nil || t.pending.kind != kind || t.pending.identity != identity {
 		t.FlushPending()
-		t.pending = &pendingBlock{kind: kind, identity: identity}
+		t.nextActivityID++
+		t.pending = &pendingBlock{kind: kind, identity: identity, activityID: fmt.Sprintf("reasoning:%d", t.nextActivityID)}
 	}
 	t.pending.text.WriteString(content)
 }
@@ -122,9 +131,11 @@ func (t *Transcript) FlushPending() {
 	text := t.pending.text.String()
 	kind := t.pending.kind
 	identity := t.pending.identity
+	b := textBlock(kind, identity, text)
+	b.activityID = t.pending.activityID
 	t.pending = nil
 
-	t.blocks = append(t.blocks, textBlock(kind, identity, text))
+	t.blocks = append(t.blocks, b)
 }
 
 func textBlock(kind blockKind, identity streamcontent.Identity, text string) *block {
@@ -209,7 +220,32 @@ func (t *Transcript) ReconcileAssistantContent(identity streamcontent.Identity, 
 
 // UpsertTool creates or updates an in-flight tool call.
 func (t *Transcript) UpsertTool(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status tuitypes.ToolStatus) {
+	id := ToolViewID(toolCall)
+	if t.toolz.Get(id) != nil {
+		t.toolz.Upsert(agentName, toolCall, toolDef, status)
+		return
+	}
+	previous := ""
+	switch {
+	case len(t.toolz.order) > 0:
+		last := t.toolz.Get(t.toolz.order[len(t.toolz.order)-1])
+		if last != nil && toolcommon.IsRoutineActivity(last.Message()) {
+			previous = ToolViewID(last.Message().ToolCall)
+		}
+	case t.pending != nil:
+		if t.pending.kind == blockReasoning {
+			previous = t.pending.activityID
+		}
+	case len(t.blocks) > 0:
+		last := t.blocks[len(t.blocks)-1]
+		if (last.tool != nil && toolcommon.IsRoutineActivity(last.tool.Message())) || (last.kind == blockReasoning && last.text != "") {
+			previous = last.activityID
+		}
+	}
 	t.toolz.Upsert(agentName, toolCall, toolDef, status)
+	if toolcommon.IsRoutineActivity(t.toolz.Get(id).Message()) && t.expandedActivity[previous] {
+		t.expandedActivity[id] = true
+	}
 }
 
 // Tool returns an in-flight tool call by id.
@@ -223,21 +259,24 @@ func (t *Transcript) RemoveTool(id string) { t.toolz.Remove(id) }
 func (t *Transcript) FinishTool(id string, result ToolResult, sessionState service.SessionStateReader) {
 	t.toolz.Complete(id, result)
 	for _, view := range t.toolz.DrainCompleted() {
-		t.AddBlock(func(w int) []string {
-			view.fullFilePreview = t.fullFilePreview
-			return RenderToolWithState(view, w, 0, sessionState)
-		})
+		t.addToolBlock(view, sessionState)
 	}
 }
 
 // FinalizeTools commits every in-flight tool with the given terminal status.
 func (t *Transcript) FinalizeTools(status tuitypes.ToolStatus, sessionState service.SessionStateReader) {
 	for _, view := range t.toolz.FinalizeAll(status) {
-		t.AddBlock(func(w int) []string {
-			view.fullFilePreview = t.fullFilePreview
-			return RenderToolWithState(view, w, 0, sessionState)
-		})
+		t.addToolBlock(view, sessionState)
 	}
+}
+
+func (t *Transcript) addToolBlock(view *ToolView, state service.SessionStateReader) {
+	b := &block{tool: view, activityID: ToolViewID(view.Message().ToolCall)}
+	b.render = func(w int) []string {
+		view.fullFilePreview = t.fullFilePreview
+		return RenderToolWithState(view, w, 0, state)
+	}
+	t.blocks = append(t.blocks, b)
 }
 
 // Lines renders everything that scrolls: finalized blocks, the in-progress
@@ -245,26 +284,95 @@ func (t *Transcript) FinalizeTools(status tuitypes.ToolStatus, sessionState serv
 // by the runtime. A blank line separates each entry.
 func (t *Transcript) Lines(width, spinnerFrame int, _ bool, sessionState service.SessionStateReader, pendingUsers []PendingUserMessage) []string {
 	var lines []string
+	compact := sessionState != nil && sessionState.CompactActivity()
+	t.activityRows = make(map[int][]string)
+	var routine []*block
+	flush := func() {
+		if len(routine) == 0 {
+			return
+		}
+		id := routine[0].activityID
+		expanded := t.expandedActivity[id]
+		messages := make([]*tuitypes.Message, 0, len(routine))
+		for _, view := range routine {
+			if view.tool != nil {
+				messages = append(messages, view.tool.Message())
+			}
+		}
+		header := toolcommon.ActivityHeader(messages, width, expanded)
+		ids := make([]string, 0, len(routine))
+		for _, entry := range routine {
+			ids = append(ids, entry.activityID)
+		}
+		t.activityRows[len(lines)] = ids
+		lines = append(lines, header)
+		if expanded {
+			for _, view := range routine {
+				lines = append(lines, view.lines(width)...)
+				lines = append(lines, "")
+			}
+		} else {
+			lines = append(lines, "")
+		}
+		routine = nil
+	}
 	for _, b := range t.blocks {
+		if compact && ((b.tool != nil && toolcommon.IsRoutineActivity(b.tool.Message())) || (b.kind == blockReasoning && b.text != "")) {
+			routine = append(routine, b)
+			continue
+		}
+		flush()
 		lines = append(lines, b.lines(width)...)
 		lines = append(lines, "")
 	}
 	if t.pending != nil {
-		lines = append(lines, t.pendingLines(width)...)
-		lines = append(lines, "")
+		if compact && t.pending.kind == blockReasoning {
+			b := textBlock(blockReasoning, t.pending.identity, t.pending.text.String())
+			b.activityID = t.pending.activityID
+			routine = append(routine, b)
+		} else {
+			flush()
+			lines = append(lines, t.pendingLines(width)...)
+			lines = append(lines, "")
+		}
 	}
 	t.liveToolRows[0] = len(lines)
 	t.toolz.ForEach(func(tv *ToolView) {
+		if compact && toolcommon.IsRoutineActivity(tv.Message()) {
+			routine = append(routine, &block{tool: tv, activityID: ToolViewID(tv.Message().ToolCall), render: func(w int) []string {
+				tv.fullFilePreview = t.fullFilePreview
+				return RenderToolWithState(tv, w, spinnerFrame, sessionState)
+			}})
+			return
+		}
+		flush()
 		tv.fullFilePreview = t.fullFilePreview
 		lines = append(lines, RenderToolWithState(tv, width, spinnerFrame, sessionState)...)
 		lines = append(lines, "")
 	})
+	flush()
 	t.liveToolRows[1] = len(lines)
 	for _, msg := range pendingUsers {
 		lines = append(lines, RenderPendingUserLines(msg, width)...)
 		lines = append(lines, "")
 	}
 	return lines
+}
+
+// ToggleActivityAt toggles the summary at a transcript row from the last frame.
+func (t *Transcript) ToggleActivityAt(row int) bool {
+	ids, ok := t.activityRows[row]
+	if !ok {
+		return false
+	}
+	if t.expandedActivity == nil {
+		t.expandedActivity = make(map[string]bool)
+	}
+	expanded := !t.expandedActivity[ids[0]]
+	for _, id := range ids {
+		t.expandedActivity[id] = expanded
+	}
+	return true
 }
 
 // LiveToolRows returns the half-open live tool range in the last rendered frame.
