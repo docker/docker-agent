@@ -884,3 +884,45 @@ func TestResponseStream_CopilotUnstableItemIDsOutputTextNotDuplicated(t *testing
 		})
 	}
 }
+
+// A refusal arrives as refusal deltas or only in the output_item.done
+// snapshot. Either way it must be shown once and end the turn as a refusal.
+func TestResponseStream_Refusal(t *testing.T) {
+	t.Parallel()
+
+	const refusal = "I can't help with that."
+	deltas := []map[string]any{
+		{"type": "response.refusal.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "I can't "},
+		{"type": "response.refusal.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "help with that."},
+		{"type": "response.refusal.done", "item_id": "msg_1", "output_index": 0, "content_index": 0, "refusal": refusal},
+	}
+	snapshot := map[string]any{
+		"type": "response.output_item.done", "output_index": 0,
+		"item": map[string]any{
+			"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+			"content": []any{map[string]any{"type": "refusal", "refusal": refusal}},
+		},
+	}
+	completed := map[string]any{
+		"type":     "response.completed",
+		"response": map[string]any{"id": "r1", "output": []any{}},
+	}
+
+	for name, raw := range map[string][]map[string]any{
+		"streamed deltas":   append(append([]map[string]any{}, deltas...), snapshot, completed),
+		"snapshot only":     {snapshot, completed},
+		"text stays a stop": {{"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": refusal}, completed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			adapter := newResponseStreamAdapter(&fakeEventStream{events: decodeEvents(t, raw)}, true)
+			content, finish := drainContent(t, adapter)
+			assert.Equal(t, refusal, content)
+			if name == "text stays a stop" {
+				assert.Equal(t, chat.FinishReasonStop, finish)
+				return
+			}
+			assert.Equal(t, chat.FinishReasonRefusal, finish)
+		})
+	}
+}
