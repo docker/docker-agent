@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  trustedrouter_model:
+    provider: trustedrouter
+    model: trustedrouter/auto
+
+agents:
+  root:
+    model: trustedrouter_model
+    description: Assistant using TrustedRouter
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think
