@@ -289,6 +289,9 @@ func (a *AgentConfig) validateHarness() error {
 
 func (t *Toolset) validate() error {
 	// Attributes used on the wrong toolset type.
+	if t.Experimental != nil && t.Type != "mcp" {
+		return errors.New("experimental can only be used with type 'mcp'")
+	}
 	if len(t.Shell) > 0 && t.Type != "script" {
 		return errors.New("shell can only be used with type 'script'")
 	}
