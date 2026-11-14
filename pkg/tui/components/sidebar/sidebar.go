@@ -78,6 +78,8 @@ type Model interface {
 	SetTokenUsage(event *runtime.TokenUsageEvent)
 	SetTodos(result *tools.ToolCallResult) error
 	SetMode(mode Mode)
+	// SetCommandSections adds sections that show a shell command's output.
+	SetCommandSections(sections []CommandSection)
 	// SetMirroredPadding swaps the horizontal edge padding so the sidebar hugs
 	// the terminal edge when rendered on the left of the chat.
 	SetMirroredPadding(mirrored bool)
@@ -419,8 +421,11 @@ type model struct {
 	// from blank-line heuristics.
 	agentLineOwners []string
 	planData        messages.PlanSidebarDataMsg
-	recentPlans     []plans.Plan
-	planClickZones  map[int]planClickZone
+	commandSections []commandSectionState
+	// commandSectionsPolling is set once the sections' refresh chain has started.
+	commandSectionsPolling bool
+	recentPlans            []plans.Plan
+	planClickZones         map[int]planClickZone
 }
 
 // New creates a new sidebar bound to the given session state.
@@ -465,7 +470,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 }
 
 func (m *model) Init() tea.Cmd {
-	return waitForGitBranch(m.gitBranchWatcher)
+	return tea.Batch(waitForGitBranch(m.gitBranchWatcher), m.pollCommandSections())
 }
 
 // needsSpinner returns true if any spinner-driving state is active.
@@ -1238,6 +1243,12 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case messages.PlanSidebarDataMsg:
 		m.setPlans(msg)
 		return m, nil
+	case commandSectionResultMsg:
+		cmd := m.handleCommandSection(msg)
+		return m, cmd
+	case commandSectionDueMsg:
+		cmd := m.runCommandSection(msg.index)
+		return m, cmd
 	case gitBranchChangedMsg:
 		m.gitBranchName = string(msg)
 		m.invalidateCache()
@@ -1846,6 +1857,9 @@ func (m *model) renderSections(contentWidth int) []string {
 
 	if !m.sectionVisibility.HideTools {
 		appendSection(m.toolsetInfo(contentWidth))
+	}
+	for _, section := range m.commandSections {
+		appendSection(m.commandSection(section, contentWidth))
 	}
 
 	if !m.sectionVisibility.HideTodos {

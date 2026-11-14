@@ -470,6 +470,14 @@ func WithShowBanner(show bool) PageOption {
 	}
 }
 
+// WithSidebarSections adds sidebar sections that show a shell command's
+// output, refreshed every few seconds.
+func WithSidebarSections(sections []sidebar.CommandSection) PageOption {
+	return func(p *chatPage) {
+		p.sidebar.SetCommandSections(sections)
+	}
+}
+
 // WithCommandParser injects a command parser for handling slash commands in the editor.
 func WithCommandParser(p *commands.Parser) PageOption {
 	return func(cp *chatPage) {
