@@ -96,7 +96,7 @@ func TestMigrate_v0_v1_todo(t *testing.T) {
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
 	assert.Equal(t, "todo", cfg.Agents.First().Toolsets[0].Type)
-	assert.False(t, cfg.Agents.First().Toolsets[0].Shared)
+	assert.Equal(t, latest.SharedScopeNone, cfg.Agents.First().Toolsets[0].Shared)
 	assert.Equal(t, "mcp", cfg.Agents.First().Toolsets[1].Type)
 }
 
@@ -108,7 +108,7 @@ func TestMigrate_v1_todo(t *testing.T) {
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
 	assert.Equal(t, "todo", cfg.Agents.First().Toolsets[0].Type)
-	assert.False(t, cfg.Agents.First().Toolsets[0].Shared)
+	assert.Equal(t, latest.SharedScopeNone, cfg.Agents.First().Toolsets[0].Shared)
 	assert.Equal(t, "mcp", cfg.Agents.First().Toolsets[1].Type)
 }
 
@@ -120,7 +120,7 @@ func TestMigrate_v0_v1_shared_todo(t *testing.T) {
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
 	assert.Equal(t, "todo", cfg.Agents.First().Toolsets[0].Type)
-	assert.True(t, cfg.Agents.First().Toolsets[0].Shared)
+	assert.Equal(t, latest.SharedScopeProcess, cfg.Agents.First().Toolsets[0].Shared)
 	assert.Equal(t, "mcp", cfg.Agents.First().Toolsets[1].Type)
 }
 
@@ -132,7 +132,7 @@ func TestMigrate_v1_shared_todo(t *testing.T) {
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
 	assert.Equal(t, "todo", cfg.Agents.First().Toolsets[0].Type)
-	assert.True(t, cfg.Agents.First().Toolsets[0].Shared)
+	assert.Equal(t, latest.SharedScopeProcess, cfg.Agents.First().Toolsets[0].Shared)
 	assert.Equal(t, "mcp", cfg.Agents.First().Toolsets[1].Type)
 }
 
