@@ -349,6 +349,10 @@ func TestLoadSessionTranscriptRestoresToolCalls(t *testing.T) {
 	assert.Contains(t, transcript, "pkg/leantui")
 	assert.Contains(t, transcript, "update.go")
 	assert.Zero(t, m.screen.Transcript.ToolCount())
+	m.sessionState.SetCompactActivity(true)
+	compact := strings.Join(m.screen.Transcript.Lines(80, 0, false, m.sessionState, nil), "\n")
+	assert.NotContains(t, compact, "I should inspect the files.")
+	assert.Contains(t, compact, "I found the issue.")
 }
 
 func TestSessionsCommandReportsNoSessionsInCurrentDirectory(t *testing.T) {

@@ -118,6 +118,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 		m.screen.Transcript.FinishTool(e.ToolCallID, ui.ToolResult{Response: e.Response, Result: e.Result, AgentName: e.GetAgentName(), ToolDefinition: e.ToolDefinition, Images: images}, m.sessionState)
 	case *runtime.ToolCallConfirmationEvent:
+		m.r.Follow()
 		m.confirmationEvent = e
 		m.screen.Transcript.RemoveTool(ui.ToolViewID(e.ToolCall))
 		toolDef := ui.EnsureToolDefinition(e.ToolCall, e.ToolDefinition)

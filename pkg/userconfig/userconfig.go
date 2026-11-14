@@ -63,6 +63,7 @@ func (a *Alias) GetSafety() latest.SafetyMode {
 
 // Settings represents global user settings
 type Settings struct {
+	CompactActivity bool `yaml:"compact_activity,omitempty"`
 	// HideToolResults hides tool call results in the TUI by default
 	HideToolResults bool `yaml:"hide_tool_results,omitempty"`
 	// ExpandThinking expands reasoning/tool blocks in the TUI by default.

@@ -33,6 +33,7 @@ type SessionStateReader interface {
 	ExpandThinking() bool
 	YoloMode() bool
 	HideToolResults() bool
+	CompactActivity() bool
 	CurrentAgentName() string
 	PreviousMessage() *types.Message
 	SessionTitle() string
@@ -52,6 +53,7 @@ type SessionState struct {
 	expandThinking  bool
 	yoloMode        bool
 	hideToolResults bool
+	compactActivity bool
 	sessionTitle    string
 
 	previousMessage  *types.Message
@@ -89,8 +91,9 @@ type SessionState struct {
 func NewSessionState(s *session.Session) *SessionState {
 	settings := userconfig.Get()
 	state := &SessionState{
-		splitDiffView:  settings.GetSplitDiffView(),
-		expandThinking: settings.GetExpandThinking(),
+		splitDiffView:   settings.GetSplitDiffView(),
+		expandThinking:  settings.GetExpandThinking(),
+		compactActivity: settings.CompactActivity,
 	}
 	if s != nil {
 		state.yoloMode = s.IsToolsApproved()
@@ -130,6 +133,10 @@ func (s *SessionState) YoloMode() bool {
 func (s *SessionState) SetYoloMode(yoloMode bool) {
 	s.yoloMode = yoloMode
 }
+
+func (s *SessionState) CompactActivity() bool { return s.compactActivity }
+
+func (s *SessionState) SetCompactActivity(enabled bool) { s.compactActivity = enabled }
 
 func (s *SessionState) HideToolResults() bool {
 	return s.hideToolResults

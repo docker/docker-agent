@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
@@ -228,6 +229,7 @@ type model struct {
 	totalHeight       int                              // Total height of all content in lines
 	renderDirty       bool                             // True when rendered content needs rebuild
 
+	expandedActivity map[string]bool
 	visualGeneration uint64
 
 	selection selectionState
@@ -397,6 +399,14 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		m.invalidateAllItems()
 		return m, nil
 
+	case messages.ActivityDisplayChangedMsg:
+		for _, view := range m.views {
+			if block, ok := view.(*reasoningblock.Model); ok {
+				block.SetExpanded(m.sessionState.ExpandThinking() && !m.sessionState.CompactActivity())
+			}
+		}
+		m.invalidateAllItems()
+
 	case messages.ImageRenderingChangedMsg:
 		m.invalidateAllItems()
 
@@ -481,6 +491,19 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) (model layout.Model, cmd
 	msgIdx, localLine, interactionCmd := m.globalLineToMessageLine(line)
 	materializeCmd = tea.Batch(materializeCmd, interactionCmd)
 	if msgIdx >= 0 {
+		if start, end, ok := m.activityGroup(msgIdx); ok && msgIdx == end-1 && localLine == 0 {
+			if m.expandedActivity == nil {
+				m.expandedActivity = make(map[string]bool)
+			}
+			id := m.messages[start].ToolCall.ID
+			expanded := !m.expandedActivity[id]
+			for _, tool := range m.messages[start:end] {
+				m.expandedActivity[tool.ToolCall.ID] = expanded
+			}
+			m.bottomSlack = 0
+			m.invalidateAllItems()
+			return m, nil
+		}
 		// Check for toggleable blocks (e.g. reasoning block, collapsed long messages)
 		if t, ok := m.views[msgIdx].(toggleableView); ok {
 			if t.IsToggleLine(localLine) {
@@ -1415,7 +1438,44 @@ func (m *model) shouldCacheMessage(index int) bool {
 	}
 }
 
+func (m *model) activityGroup(index int) (start, end int, ok bool) {
+	if !m.sessionState.CompactActivity() || index < 0 || index >= len(m.messages) || !toolcommon.IsRoutineActivity(m.messages[index]) {
+		return 0, 0, false
+	}
+	start, end = index, index+1
+	for start > 0 && toolcommon.IsRoutineActivity(m.messages[start-1]) {
+		start--
+	}
+	for end < len(m.messages) && toolcommon.IsRoutineActivity(m.messages[end]) {
+		end++
+	}
+	return start, end, true
+}
+
 func (m *model) renderItem(index int, view layout.Model) renderedItem {
+	if m.sessionState.CompactActivity() && toolcommon.IsRoutineActivity(m.messages[index]) && index+1 < len(m.messages) && toolcommon.IsRoutineActivity(m.messages[index+1]) {
+		return renderedItem{}
+	}
+	if start, end, ok := m.activityGroup(index); ok {
+		if index != end-1 {
+			return renderedItem{}
+		}
+		expanded := m.expandedActivity[m.messages[start].ToolCall.ID]
+		lines := []string{toolcommon.ActivityHeader(m.messages[start:end], m.contentWidth(), expanded)}
+		if expanded {
+			for i := start; i < end; i++ {
+				lines = append(lines, m.renderedItemLines(m.renderDetailItem(i, m.views[i]))...)
+				if i+1 < end && m.needsSeparator(i) {
+					lines = append(lines, "")
+				}
+			}
+		}
+		return renderedItem{lines: lines, height: len(lines)}
+	}
+	return m.renderDetailItem(index, view)
+}
+
+func (m *model) renderDetailItem(index int, view layout.Model) renderedItem {
 	// If this message is being inline edited, render the textarea instead
 	if index == m.inlineEditMsgIndex {
 		rendered := m.renderInlineEditTextarea()
@@ -1888,6 +1948,7 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 	m.StopAnimations()
 	m.messages = nil
 	m.views = nil
+	m.expandedActivity = nil
 	m.renderedItems.Clear()
 	m.renderedLines = nil
 	m.scrollOffset = 0
@@ -2060,6 +2121,9 @@ func (m *model) AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, t
 	// Otherwise create a standalone tool call message
 	m.finalizePreviousMessageView()
 	msg := types.ToolCallMessage(agentName, toolCall, toolDef, status)
+	if last := len(m.messages) - 1; last >= 0 && toolcommon.IsRoutineActivity(msg) && toolcommon.IsRoutineActivity(m.messages[last]) && m.expandedActivity[m.messages[last].ToolCall.ID] {
+		m.expandedActivity[toolCall.ID] = true
+	}
 	m.messages = append(m.messages, msg)
 	view := m.createToolCallView(msg)
 	m.views = append(m.views, view)

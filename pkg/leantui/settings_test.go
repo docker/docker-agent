@@ -70,6 +70,19 @@ func TestSettingsSavePreservesOtherPreferences(t *testing.T) {
 	assert.Equal(t, cfg.Settings.Layout, s.Layout)
 }
 
+func TestSettingsCompactActivity(t *testing.T) {
+	setupLeanSettingsTest(t)
+	m := bareModel(80)
+	for _, enabled := range []bool{true, false} {
+		m.openSettings()
+		m.screen.Settings.Selected = settingCompactActivity
+		m.handleSettingsKey(ui.Key{Typ: ui.KeyRight})
+		m.handleSettingsKey(ui.Key{Typ: ui.KeyEnter})
+		assert.Equal(t, enabled, m.sessionState.CompactActivity())
+		assert.Equal(t, enabled, userconfig.Get().CompactActivity)
+	}
+}
+
 func TestSettingsKeepAwake(t *testing.T) {
 	setupLeanSettingsTest(t)
 	m := bareModel(80)

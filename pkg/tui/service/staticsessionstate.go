@@ -21,6 +21,7 @@ type StaticSessionState struct {
 var _ SessionStateReader = StaticSessionState{}
 
 func (s StaticSessionState) SplitDiffView() bool                     { return false }
+func (s StaticSessionState) CompactActivity() bool                   { return false }
 func (s StaticSessionState) ExpandThinking() bool                    { return false }
 func (s StaticSessionState) YoloMode() bool                          { return false }
 func (s StaticSessionState) HideToolResults() bool                   { return false }

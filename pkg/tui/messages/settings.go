@@ -156,6 +156,7 @@ func ParseInterruptMode(raw string) InterruptMode {
 
 // Preferences contains the persistent values managed by the settings dialog.
 type Preferences struct {
+	CompactActivity               bool
 	Layout                        LayoutSettings
 	SendMode                      SendMode
 	SplitDiffView                 bool
@@ -180,6 +181,8 @@ type Preferences struct {
 
 // Settings dialog messages.
 type (
+	ActivityDisplayChangedMsg struct{}
+
 	// OpenSettingsDialogMsg opens the settings dialog (/settings).
 	OpenSettingsDialogMsg struct{}
 

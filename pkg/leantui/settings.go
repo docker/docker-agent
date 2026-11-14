@@ -24,6 +24,7 @@ const (
 	settingShowBanner
 	settingSplitDiff
 	settingFullFilePreview
+	settingCompactActivity
 	settingCount
 )
 
@@ -39,6 +40,7 @@ type leanSettings struct {
 func (m *model) openSettings() {
 	s := userconfig.Get()
 	values := [settingCount]bool{
+		settingCompactActivity:      m.sessionState.CompactActivity(),
 		settingFullFilePreview:      m.screen.Transcript.FullFilePreview(),
 		settingSendMode:             m.sendMode == messages.SendModeQueue,
 		settingYOLO:                 s.YOLO,
@@ -80,6 +82,7 @@ func (m *model) refreshSettingsRows() {
 		"Show startup banner (next launch)",
 		"Split diff view",
 		"Written file preview",
+		"Compact activity",
 	}
 	rows := make([]ui.SettingRow, settingCount)
 	for i, label := range labels {
@@ -153,6 +156,7 @@ func (m *model) handleSettingsKey(k ui.Key) {
 				m.renderImages = m.settings.values[settingRenderImages] && m.imageSupport
 			}
 			m.hideBanner = !m.settings.values[settingShowBanner]
+			m.sessionState.SetCompactActivity(m.settings.values[settingCompactActivity])
 			m.sessionState.SetSplitDiffView(m.settings.values[settingSplitDiff])
 			m.screen.Transcript.SetFullFilePreview(m.settings.values[settingFullFilePreview])
 			m.addNotice("", "Settings updated.", ui.StMuted())
@@ -225,6 +229,8 @@ func saveLeanSettings(p *leanSettings) error {
 				s.RenderImages = defaultOnPreference(value)
 			case settingShowBanner:
 				s.ShowBanner = defaultOnPreference(value)
+			case settingCompactActivity:
+				s.CompactActivity = value
 			case settingFullFilePreview:
 				s.LeanFullFilePreview = value
 			case settingSplitDiff:

@@ -12,6 +12,9 @@ type KeyType int
 const (
 	KeyNone KeyType = iota
 	KeyProgramStatus
+	KeyMouseClick
+	KeyMouseWheelUp
+	KeyMouseWheelDown
 	KeyRune
 	KeyPaste
 	KeyEnter
@@ -40,11 +43,12 @@ const (
 	KeyCtrlO // toggle compact/complete tool previews
 )
 
-// Key is a single decoded keyboard event. For KeyRune and KeyPaste the decoded
-// characters are carried in runes; every other key type carries no payload.
+// Key is a decoded input event. Text events carry Runes; mouse clicks carry
+// zero-based terminal coordinates in X and Y.
 type Key struct {
 	Typ   KeyType
 	Runes []rune
+	X, Y  int
 }
 
 var (
@@ -331,6 +335,29 @@ func parseCSI(b []byte) (int, Key) {
 	final := b[j]
 	params := string(b[2:j])
 	consumed := j + 1
+
+	if mouseParams, ok := strings.CutPrefix(params, "<"); ok {
+		parts := strings.Split(mouseParams, ";")
+		if len(parts) != 3 || final != 'M' {
+			return consumed, Key{Typ: KeyNone}
+		}
+		button, errButton := strconv.Atoi(parts[0])
+		x, errX := strconv.Atoi(parts[1])
+		y, errY := strconv.Atoi(parts[2])
+		if errButton != nil || errX != nil || errY != nil || x < 1 || y < 1 {
+			return consumed, Key{Typ: KeyNone}
+		}
+		typ := KeyNone
+		switch button {
+		case 0:
+			typ = KeyMouseClick
+		case 64:
+			typ = KeyMouseWheelUp
+		case 65:
+			typ = KeyMouseWheelDown
+		}
+		return consumed, Key{Typ: typ, X: x - 1, Y: y - 1}
+	}
 
 	modifier := func() string {
 		parts := strings.Split(params, ";")

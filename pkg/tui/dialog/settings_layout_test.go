@@ -338,11 +338,12 @@ func TestSettingsDialogChatDisplayRowsAreContiguous(t *testing.T) {
 				if !strings.Contains(line, "Split diff view") {
 					continue
 				}
-				require.GreaterOrEqual(t, len(content.lines)-i, 5)
-				assert.Contains(t, content.lines[i+1], "Expand thinking by default")
-				assert.Contains(t, content.lines[i+2], "Hide tool results by default")
-				assert.Contains(t, content.lines[i+3], "Render images")
-				assert.Contains(t, content.lines[i+4], "Show startup banner")
+				require.GreaterOrEqual(t, len(content.lines)-i, 6)
+				assert.Contains(t, content.lines[i+1], "Compact activity")
+				assert.Contains(t, content.lines[i+2], "Expand thinking by default")
+				assert.Contains(t, content.lines[i+3], "Hide tool results by default")
+				assert.Contains(t, content.lines[i+4], "Render images")
+				assert.Contains(t, content.lines[i+5], "Show startup banner")
 				return
 			}
 			t.Fatal("Chat display settings are missing")

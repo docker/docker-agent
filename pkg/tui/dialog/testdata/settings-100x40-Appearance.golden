@@ -21,11 +21,11 @@
 │                                                                                             │
 │          ── Chat display ────────────────────────────────────────────────────               │
 │            [x] Split diff view                                                              │
+│            [ ] Compact activity                                                             │
 │            [ ] Expand thinking by default                                                   │
 │            [ ] Hide tool results by default                                                 │
 │            [x] Render images                                                                │
 │            [x] Show startup banner                                                          │
-│                                                                                             │
 │                                                                                             │
 │                                                                                             │
 │               ↑↓ move  ←→/space change  tab category  enter open  esc cancel                │
