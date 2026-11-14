@@ -1395,11 +1395,6 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 		spawnReq.AgentName = agt.Name()
 		newSess := session.New(f.buildSessionOpts(agt, t, spawnReq)...)
 
-		// Create cleanup function
-		cleanup := func() {
-			stopToolSets(spawnCtx, t)
-		}
-
 		// Create the app
 		var appOpts []app.Opt
 		if gen := localRt.TitleGenerator(spawnCtx); gen != nil {
@@ -1408,9 +1403,15 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 		if ctrl != nil {
 			appOpts = append(appOpts, app.WithSnapshotController(ctrl))
 		}
-		coordinatorOpt := f.recallCoordinatorOpt(spawnCtx, localRt, newSess)
+		coordinatorOpt, detachRuntime := f.recallCoordinatorOpt(spawnCtx, localRt, newSess)
 		if coordinatorOpt != nil {
 			appOpts = append(appOpts, coordinatorOpt)
+		}
+
+		// Create cleanup function
+		cleanup := func() {
+			detachRuntime()
+			stopToolSets(spawnCtx, t)
 		}
 
 		a := app.New(spawnCtx, localRt, newSess, appOpts...)
