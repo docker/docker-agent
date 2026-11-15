@@ -16,6 +16,7 @@ import (
 // detach can assert the handler was unregistered.
 type recallRuntime struct {
 	*fakeRuntime
+
 	handler runtime.RecallHandler
 }
 
