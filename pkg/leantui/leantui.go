@@ -398,14 +398,11 @@ func (m *model) renderFinal() {
 }
 
 func (m *model) commitWelcome() {
-	banner := m.banner
-	if len(banner) == 0 {
-		banner = bannerLines
-	}
-	if m.hideBanner {
-		banner = nil
-	}
 	m.screen.Transcript.AddBlock(func(int) []string {
+		var banner []string
+		if !m.hideBanner {
+			banner = renderBanner(m.banner)
+		}
 		lines := make([]string, 0, bannerTopPadding+len(banner)+2)
 		for range bannerTopPadding {
 			lines = append(lines, "")
@@ -413,7 +410,7 @@ func (m *model) commitWelcome() {
 
 		leftPad := strings.Repeat(" ", bannerLeftPadding)
 		for _, l := range banner {
-			lines = append(lines, ui.StAccent().Render(leftPad+l))
+			lines = append(lines, leftPad+l)
 		}
 		lines = append(lines,
 			"",

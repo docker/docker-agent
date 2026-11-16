@@ -27,7 +27,7 @@ func TestCommitWelcomePadsBanner(t *testing.T) {
 	leftPad := strings.Repeat(" ", bannerLeftPadding)
 	firstBannerLine := ansi.Strip(lines[bannerTopPadding])
 	assert.True(t, strings.HasPrefix(firstBannerLine, leftPad))
-	assert.Equal(t, leftPad+bannerLines[0], firstBannerLine)
+	assert.Equal(t, leftPad+bannerLines[0], strings.TrimRight(firstBannerLine, " "))
 
 	helpLine := ansi.Strip(lines[len(lines)-1])
 	assert.True(t, strings.HasPrefix(helpLine, leftPad))
