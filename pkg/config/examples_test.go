@@ -35,8 +35,6 @@ var modelsDevAbsentProviders = map[string]bool{
 	"atlascloud":            true, // Atlas Cloud model IDs come from its own /v1/models endpoint, not models.dev.
 	"popnow":                true, // PopNow model IDs come from its own /v1/models endpoint, not models.dev.
 	"cloudgpu":              true, // CloudGPU model IDs come from its own /v1/models endpoint, not models.dev.
-	"runcrate":              true, // Runcrate model IDs come from its own /v1/models endpoint, not models.dev.
-	"obscurify":             true, // Obscurify.ai model IDs come from its own /v1/models endpoint, not models.dev.
 	"hopbase":               true, // HopBase model IDs come from its own /v1/models endpoint, not models.dev.
 	"dmr":                   true, // Docker Model Runner (local, not in catalog)
 	"cloudflare-workers-ai": true, // example uses an @cf/... model id not present in the models.dev snapshot (only variant ids like -fp8 are listed)
