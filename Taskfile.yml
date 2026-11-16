@@ -153,6 +153,12 @@ tasks:
     cmds:
       - go test -race -shuffle=on ./...
 
+  test-race-ci:
+    desc: Run Linux CI race tests with the generator isolated
+    dotenv: [.env.test]
+    cmds:
+      - bash ./scripts/test-race-ci.sh
+
   test-wasm-providers:
     desc: Test explicit provider registration in the WASM demo (requires Node)
     cmds:
