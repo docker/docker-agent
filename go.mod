@@ -53,7 +53,7 @@ require (
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/junegunn/fzf v0.75.0
 	github.com/k3a/html2text v1.5.1
-	github.com/labstack/echo/v4 v4.16.3
+	github.com/labstack/echo/v4 v4.16.5
 	github.com/mattn/go-isatty v0.0.24
 	github.com/mattn/go-runewidth v0.0.31
 	github.com/modelcontextprotocol/go-sdk v1.7.0
