@@ -507,6 +507,7 @@ func (m *model) resumeSession(ctx context.Context, sessionID string) {
 	m.app.ReplaceSession(ctx, sess)
 	m.resetConversation()
 	m.screen.Transcript = ui.NewTranscript()
+	m.screen.Transcript.SetMarkdownDisplay(m.markdown)
 	m.sessionState = service.NewSessionState(sess)
 	m.loadSessionTranscript(sess)
 	m.refreshCommands(ctx)
@@ -571,6 +572,8 @@ func (m *model) loadSessionTranscript(sess *session.Session) {
 			}
 		}
 	}
+	// Restored replies are complete; one pass keeps loading linear.
+	m.screen.Transcript.CompleteStream()
 }
 
 func modelCommands(models []modelcatalog.ModelChoice) []ui.Command {
@@ -800,6 +803,7 @@ func (m *model) resetConversation() {
 	m.ignoredUsers = nil
 	m.busy = false
 	m.streamDepth = 0
+	m.sessionStreams.Reset()
 	m.streamStartTime = time.Time{}
 	m.cancelMarkerPending = false
 	m.screen.Confirm = nil

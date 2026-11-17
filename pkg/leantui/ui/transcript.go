@@ -4,7 +4,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/markdowntransform"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/streamcontent"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
@@ -38,6 +40,25 @@ type pendingBlock struct {
 	kind     blockKind
 	identity streamcontent.Identity
 	text     strings.Builder
+	markdown *assistantMarkdown
+}
+
+// assistantMarkdown is the display-transform state of one assistant block. It
+// moves from the pending block to the archived block, so a segment flushed at
+// a tool boundary keeps its result and stays streaming until its message ends.
+type assistantMarkdown struct {
+	surface   markdowntransform.Surface
+	version   uint64
+	streaming bool
+}
+
+func (s *assistantMarkdown) refresh(display *markdowntransform.Display) bool {
+	version := display.Version(&s.surface)
+	if version == s.version {
+		return false
+	}
+	s.version = version
+	return true
 }
 
 // block is a finalized piece of the conversation. Its lines are rendered lazily
@@ -48,9 +69,17 @@ type block struct {
 	identity streamcontent.Identity
 	kind     blockKind
 	text     string
+	markdown *assistantMarkdown
 	cacheW   int
 	cache    []string
 	cached   bool
+}
+
+func (b *block) complete() {
+	if b.markdown != nil && b.markdown.streaming {
+		b.markdown.streaming = false
+		b.cached = false
+	}
 }
 
 func (b *block) lines(width int) []string {
@@ -67,6 +96,8 @@ func (b *block) lines(width int) []string {
 // blocks are immutable scrollback; the pending block and tool calls are the
 // live region that changes each frame until they finalize into blocks.
 type Transcript struct {
+	markdownDisplay *markdowntransform.Display
+	settled         bool
 	fullFilePreview bool
 	blocks          []*block
 	pending         *pendingBlock
@@ -100,6 +131,9 @@ func (t *Transcript) appendPending(kind blockKind, identity streamcontent.Identi
 	if t.pending == nil || t.pending.kind != kind || t.pending.identity != identity {
 		t.FlushPending()
 		t.pending = &pendingBlock{kind: kind, identity: identity}
+		if kind == blockAssistant {
+			t.pending.markdown = &assistantMarkdown{streaming: true}
+		}
 	}
 	t.pending.text.WriteString(content)
 }
@@ -122,18 +156,113 @@ func (t *Transcript) FlushPending() {
 	text := t.pending.text.String()
 	kind := t.pending.kind
 	identity := t.pending.identity
+	state := t.pending.markdown
 	t.pending = nil
 
-	t.blocks = append(t.blocks, textBlock(kind, identity, text))
+	t.blocks = append(t.blocks, t.textBlock(kind, identity, text, state))
 }
 
-func textBlock(kind blockKind, identity streamcontent.Identity, text string) *block {
-	b := &block{kind: kind, identity: identity, text: text}
+// CompleteMessage ends streaming for every segment of a logical message,
+// including segments archived at tool and reasoning boundaries.
+func (t *Transcript) CompleteMessage(identity streamcontent.Identity) {
+	t.complete(func(id streamcontent.Identity) bool { return id == identity })
+}
+
+// CompleteSession ends streaming for the messages of a session whose stream
+// stopped, so a nested stream's replies complete while the parent's stay live.
+func (t *Transcript) CompleteSession(sessionID string) {
+	t.complete(func(id streamcontent.Identity) bool { return id.SessionID == sessionID })
+}
+
+// complete marks matching messages complete without flushing the pending
+// block, so chunk boundaries are the same with or without transformers.
+func (t *Transcript) complete(match func(streamcontent.Identity) bool) {
+	if t.pending != nil && t.pending.markdown != nil && match(t.pending.identity) {
+		t.pending.markdown.streaming = false
+	}
+	for _, b := range t.blocks {
+		if match(b.identity) {
+			b.complete()
+		}
+	}
+}
+
+// CompleteStream ends streaming for every segment, including legacy streams
+// and cancelled turns that never receive their canonical message.
+func (t *Transcript) CompleteStream() {
+	t.FlushPending()
+	for _, b := range t.blocks {
+		b.complete()
+	}
+}
+
+// SetMarkdownDisplay rewrites assistant Markdown before rendering.
+func (t *Transcript) SetMarkdownDisplay(display *markdowntransform.Display) {
+	t.markdownDisplay = display
+}
+
+// RefreshMarkdown reports whether any transformed Markdown changed since the
+// last call, invalidating the affected blocks.
+func (t *Transcript) RefreshMarkdown() bool {
+	changed := false
+	for _, b := range t.blocks {
+		if b.markdown != nil && b.markdown.refresh(t.markdownDisplay) {
+			b.cached = false
+			changed = true
+		}
+	}
+	if t.pending != nil && t.pending.markdown != nil && t.pending.markdown.refresh(t.markdownDisplay) {
+		changed = true
+	}
+	return changed
+}
+
+func (t *Transcript) assistantLines(state *assistantMarkdown, identity streamcontent.Identity, text string, width int) []string {
+	in := markdownInput(state, identity, text, width)
+	if t.markdownDisplay == nil || (t.settled && !t.markdownDisplay.Current(&state.surface, in)) {
+		return RenderAssistantLines(text, width)
+	}
+	return renderTransformedLines(t.markdownDisplay.Markdown(&state.surface, in), width)
+}
+
+// SettleMarkdown makes rendering exact for the final frame, which nothing
+// redraws: a reply shows its latest result, or its source when its latest
+// snapshot has no result yet, never an older, possibly truncated result.
+func (t *Transcript) SettleMarkdown() {
+	t.settled = true
+	for _, b := range t.blocks {
+		if b.markdown == nil {
+			continue
+		}
+		// A result can land after the block cached an older one but before the
+		// batched refresh picks it up.
+		refreshed := b.markdown.refresh(t.markdownDisplay)
+		if refreshed || (b.cached && !t.markdownDisplay.Current(&b.markdown.surface, markdownInput(b.markdown, b.identity, b.text, b.cacheW))) {
+			b.cached = false
+		}
+	}
+}
+
+func markdownInput(state *assistantMarkdown, identity streamcontent.Identity, text string, width int) markdowntransform.Input {
+	// Transformers receive the reply without terminal controls, so only their
+	// own styling is trusted.
+	return markdowntransform.Input{
+		Markdown:       markdown.StripTerminalControls(text),
+		MessageType:    "assistant",
+		IsStreaming:    state.streaming,
+		AvailableWidth: max(width, 1),
+		SessionID:      identity.SessionID,
+		MessageID:      identity.MessageID,
+	}
+}
+
+func (t *Transcript) textBlock(kind blockKind, identity streamcontent.Identity, text string, state *assistantMarkdown) *block {
+	b := &block{kind: kind, identity: identity, text: text, markdown: state}
 	b.render = func(w int) []string {
 		if kind == blockReasoning {
 			return RenderReasoningLines(b.text, w)
 		}
-		return RenderAssistantLines(b.text, w)
+		return t.assistantLines(b.markdown, b.identity, b.text, w)
 	}
 	return b
 }
@@ -296,7 +425,7 @@ func (t *Transcript) pendingLines(width int) []string {
 	case blockReasoning:
 		return RenderReasoningLines(text, width)
 	case blockAssistant:
-		return RenderAssistantLines(text, width)
+		return t.assistantLines(t.pending.markdown, t.pending.identity, text, width)
 	default:
 		return nil
 	}
