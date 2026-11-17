@@ -16,6 +16,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/markdowntransform"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
@@ -237,6 +238,7 @@ type chatPage struct {
 	streamStartTime  time.Time
 	contentSessionID string
 	contentIdentity  streamcontent.Tracker
+	sessionStreams   streamcontent.Streams // active streams per session, for reply completion
 	mediaKeys        map[string]uint64
 
 	// routingID is the tab identity this page's routed UI timers are
@@ -433,6 +435,12 @@ func WithToolRenderers(registry *tool.Registry) PageOption {
 			p.messages.SetToolRenderers(registry)
 		}
 	}
+}
+
+// WithMarkdownDisplay rewrites assistant Markdown before rendering. The
+// display is shared by every page so transformers run once per program.
+func WithMarkdownDisplay(display *markdowntransform.Display) PageOption {
+	return func(p *chatPage) { p.messages.SetMarkdownDisplay(display) }
 }
 
 // WithRunLifecycle observes accepted foreground work on the UI loop.
@@ -1008,6 +1016,7 @@ func (p *chatPage) cancelStream(showCancelMessage bool) tea.Cmd {
 	p.streamCancelled = true
 	p.streamDepth = 0
 	p.agentStack = nil
+	p.sessionStreams.Reset()
 	p.waitingForDoubleTap = false
 	p.setPendingResponse(false)
 	// Send StreamCancelledMsg to all components to handle cleanup
@@ -1489,6 +1498,7 @@ func (p *chatPage) processMessage(msg msgtypes.SendMsg) tea.Cmd {
 
 	p.streamDepth = 0
 	p.agentStack = nil
+	p.sessionStreams.Reset()
 	p.sidebar.ResetStreamTracking()
 
 	ctx, cancel := context.WithCancel(p.ctx())
@@ -1541,6 +1551,7 @@ func (p *chatPage) handleRetry() (layout.Model, tea.Cmd) {
 
 	p.streamDepth = 0
 	p.agentStack = nil
+	p.sessionStreams.Reset()
 	p.sidebar.ResetStreamTracking()
 
 	var ctx context.Context

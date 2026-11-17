@@ -96,6 +96,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		}
 		p.streamDepth = 0
 		p.agentStack = nil
+		p.sessionStreams.Reset()
 		p.msgCancel = nil
 		p.streamCancelled = false
 		p.contentIdentity.Finish(p.contentSession(msg.SessionID))
@@ -338,6 +339,7 @@ func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
 func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent) tea.Cmd {
 	slog.Debug("handleStreamStarted called", "agent", msg.AgentName, "session_id", msg.SessionID)
 	p.contentIdentity.Finish(p.contentSession(msg.SessionID))
+	p.sessionStreams.Start(p.contentSession(msg.SessionID))
 	if p.contentSessionID == p.contentSession(msg.SessionID) {
 		p.messages.BreakMessageGroup()
 	}
@@ -429,6 +431,13 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		"stream_depth", p.streamDepth)
 
 	p.contentIdentity.Finish(p.contentSession(msg.SessionID))
+	// A session's replies complete when its last stream stops, so a nested
+	// stream completes its own replies while the parent's stay live. This
+	// also covers remote sessions, whose saved messages are not sent.
+	var completeCmd tea.Cmd
+	if p.sessionStreams.Stop(p.contentSession(msg.SessionID)) {
+		completeCmd = p.messages.CompleteSession(p.contentSession(msg.SessionID))
+	}
 	if p.contentSessionID == p.contentSession(msg.SessionID) {
 		p.messages.BreakMessageGroup()
 	}
@@ -453,7 +462,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	// updated delegation state.
 	if p.streamDepth > 0 {
 		p.setPendingResponse(false)
-		return tea.Batch(p.messages.ScrollToBottom(), sidebarCmd, p.setPendingResponse(true))
+		return tea.Batch(completeCmd, p.messages.ScrollToBottom(), sidebarCmd, p.setPendingResponse(true))
 	}
 
 	// Outermost stream stopped — fully clean up. This is the exact-content
@@ -491,7 +500,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		}))
 	}
 
-	return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, queueCmd, exitCmd)
+	return tea.Batch(completeCmd, finalizeCmd, p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, queueCmd, exitCmd)
 }
 
 // handlePartialToolCall processes partial tool call events by rendering each

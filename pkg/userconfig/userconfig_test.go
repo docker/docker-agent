@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/markdowntransform"
 	"github.com/docker/docker-agent/pkg/paths"
 )
 
@@ -1317,6 +1318,18 @@ func TestConfig_HooksRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(reloaded), "session_start:")
 	assert.Contains(t, string(reloaded), "pre_compact:")
+}
+
+func TestConfig_MarkdownTransformersRoundTrip(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	configs := []markdowntransform.Config{{Command: "python3 emphasis.py", TimeoutMS: 250, WorkingDir: "/tmp", Env: map[string]string{"STYLE": "color"}}}
+	original := &Config{Settings: &Settings{MarkdownTransformers: configs}}
+	require.NoError(t, original.saveTo(path))
+	loaded, err := loadFrom(path, "")
+	require.NoError(t, err)
+	require.NotNil(t, loaded.Settings)
+	assert.Equal(t, configs, loaded.Settings.MarkdownTransformers)
 }
 
 func TestConfig_Settings_HooksEmpty(t *testing.T) {

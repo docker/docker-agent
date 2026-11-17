@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/markdowntransform"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
@@ -38,6 +39,14 @@ type Model interface {
 	// are preserved; calling View() afterwards still produces correct output
 	// without retaining a per-view render cache or IncrementalRenderer.
 	Finalize()
+	// SetStreaming marks whether the logical reply is still being received;
+	// display transforms see it as is_streaming. Finalize does not change it:
+	// releasing render caches at a tool-call boundary is not completion.
+	SetStreaming(streaming bool)
+	Streaming() bool
+	// RefreshMarkdown reports whether the transformed Markdown changed since
+	// the last render, invalidating cached output when it did.
+	RefreshMarkdown() bool
 	// HasLiveRenderState reports whether this view currently retains a
 	// populated renderCache or an IncrementalRenderer instance. Used by tests
 	// to assert that finalized views have actually released their per-message
@@ -60,8 +69,12 @@ type AssistantSegments struct {
 
 // messageModel implements Model
 type messageModel struct {
-	message  *types.Message
-	previous *types.Message
+	markdown        *markdowntransform.Display
+	surface         markdowntransform.Surface
+	markdownVersion uint64
+	streaming       bool
+	message         *types.Message
+	previous        *types.Message
 
 	width    int
 	height   int
@@ -144,14 +157,22 @@ type renderCache struct {
 	imageID   int
 }
 
-// New creates a new message view
-func New(ar *animation.Runtime, msg, previous *types.Message) *messageModel {
+// Option configures a message view.
+type Option func(*messageModel)
+
+// WithMarkdownDisplay rewrites assistant Markdown before rendering.
+func WithMarkdownDisplay(display *markdowntransform.Display) Option {
+	return func(m *messageModel) { m.markdown = display }
+}
+
+// New creates a new message view.
+func New(ar *animation.Runtime, msg, previous *types.Message, opts ...Option) *messageModel {
 	imageScanOffset := -1
 	if msg != nil && msg.Type == types.MessageTypeAssistant {
 		refs := tuiimage.MarkdownReferences(msg.Content)
 		imageScanOffset = nextUnresolvedImageOpener(msg.Content, 0, refs)
 	}
-	return &messageModel{
+	mv := &messageModel{
 		message:         msg,
 		previous:        previous,
 		width:           80, // Default width
@@ -160,6 +181,10 @@ func New(ar *animation.Runtime, msg, previous *types.Message) *messageModel {
 		imageScanOffset: imageScanOffset,
 		spinner:         spinner.New(ar, spinner.ModeBoth, styles.SpinnerDotsAccentStyle),
 	}
+	for _, opt := range opts {
+		opt(mv)
+	}
+	return mv
 }
 
 // Bubble Tea Model methods
@@ -212,6 +237,7 @@ func (mv *messageModel) AppendContent(content string) tea.Cmd {
 	if mv.contentBuf.Len() == 0 && mv.message.Content != "" {
 		mv.contentBuf.WriteString(mv.message.Content)
 	}
+	mv.streaming = true
 	oldLen := mv.contentBuf.Len()
 	mv.contentBuf.WriteString(content)
 	mv.message.Content = mv.contentBuf.String()
@@ -369,13 +395,16 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 	messageStyle := styles.AssistantMessageStyle
 	innerWidth := width - messageStyle.GetHorizontalFrameSize()
 	if mv.mdRenderer == nil {
-		mv.mdRenderer = markdown.NewIncrementalRenderer(innerWidth)
+		mv.mdRenderer = mv.newMarkdownRenderer(innerWidth)
 	} else {
 		mv.mdRenderer.SetWidth(innerWidth)
 	}
-	parts, err := mv.mdRenderer.RenderParts(msg.Content)
+	parts, err := mv.mdRenderer.RenderParts(mv.displayMarkdown(innerWidth))
 	if err != nil {
 		return AssistantSegments{}, false
+	}
+	if mv.markdown != nil {
+		parts.CodeBlocks = nil
 	}
 	cache := &mv.streamLines
 	widthChanged := cache.width != width
@@ -559,7 +588,7 @@ func (mv *messageModel) render(width int) string {
 		}
 
 		innerRenderWidth := width - messageStyle.GetHorizontalFrameSize()
-		content, imagePlaceholders := mv.markdownImagePlaceholders(msg.Content, innerRenderWidth)
+		content, imagePlaceholders := mv.markdownImagePlaceholders(mv.displayMarkdown(innerRenderWidth), innerRenderWidth)
 		rendered, codeBlocks, err := mv.renderAssistantMarkdown(content, innerRenderWidth)
 		if err != nil {
 			rendered = content
@@ -794,16 +823,32 @@ func assistantMediaLines(media types.AssistantMedia, width int) []string {
 // that callers can map clicks on the per-block copy affordance back to the
 // underlying raw code.
 func (mv *messageModel) renderAssistantMarkdown(content string, width int) (string, []markdown.CodeBlock, error) {
-	if mv.finalized {
-		r := markdown.NewIncrementalRenderer(width)
-		return r.RenderWithCodeBlocks(content)
+	r := mv.mdRenderer
+	switch {
+	case mv.finalized:
+		r = mv.newMarkdownRenderer(width)
+	case r == nil:
+		r = mv.newMarkdownRenderer(width)
+		mv.mdRenderer = r
+	default:
+		r.SetWidth(width)
 	}
-	if mv.mdRenderer == nil {
-		mv.mdRenderer = markdown.NewIncrementalRenderer(width)
-	} else {
-		mv.mdRenderer.SetWidth(width)
+	rendered, blocks, err := r.RenderWithCodeBlocks(content)
+	if mv.markdown != nil {
+		blocks = nil
 	}
-	return mv.mdRenderer.RenderWithCodeBlocks(content)
+	return rendered, blocks, err
+}
+
+// newMarkdownRenderer renders transformed replies with the transformer's
+// styling and without code-block copy targets, because rewritten fences
+// cannot be mapped back to the source code.
+func (mv *messageModel) newMarkdownRenderer(width int) *markdown.IncrementalRenderer {
+	r := markdown.NewIncrementalRenderer(width)
+	if mv.markdown != nil {
+		r.HideCopyIcon().AllowSGR()
+	}
+	return r
 }
 
 // actionRow builds the right-aligned row of click affordances (edit, copy)
@@ -940,6 +985,42 @@ func (mv *messageModel) Finalize() {
 		mv.mdRenderer = nil
 	}
 	mv.finalized = true
+}
+
+func (mv *messageModel) Streaming() bool { return mv.streaming }
+
+func (mv *messageModel) SetStreaming(streaming bool) {
+	if mv.streaming != streaming {
+		mv.renderCache.valid = false
+	}
+	mv.streaming = streaming
+}
+
+func (mv *messageModel) RefreshMarkdown() bool {
+	version := mv.markdown.Version(&mv.surface)
+	if version == mv.markdownVersion {
+		return false
+	}
+	mv.markdownVersion = version
+	mv.renderCache.valid = false
+	return true
+}
+
+// displayMarkdown returns the Markdown to render. Transformers receive the
+// reply without terminal controls, so only their own styling is trusted.
+func (mv *messageModel) displayMarkdown(width int) string {
+	msg := mv.message
+	if mv.markdown == nil {
+		return msg.Content
+	}
+	return mv.markdown.Markdown(&mv.surface, markdowntransform.Input{
+		Markdown:       markdown.StripTerminalControls(msg.Content),
+		MessageType:    "assistant",
+		IsStreaming:    mv.streaming,
+		AvailableWidth: max(width, 1),
+		SessionID:      msg.SessionID,
+		MessageID:      msg.MessageID,
+	})
 }
 
 // HasLiveRenderState reports whether this view still retains per-message
