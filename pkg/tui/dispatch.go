@@ -23,6 +23,27 @@ import (
 //     This avoids the gocritic evalOrder warning that fires on
 //     `return m, m.updateX(msg)` because m is mutated by the call.
 
+// updateAllChatsCmd forwards a message to every tab's chat page. Only the
+// active page's visible effects are kept; hidden pages still update state.
+func (m *appModel) updateAllChatsCmd(msg tea.Msg) tea.Cmd {
+	var cmds []tea.Cmd
+	activeUpdated := false
+	for _, tab := range m.tabs {
+		if tab.chatPage == nil {
+			continue
+		}
+		updated, effects := tab.chatPage.UpdateEffects(msg)
+		tab.chatPage = updated
+		visible := tab == m.activeTab
+		activeUpdated = activeUpdated || visible
+		cmds = append(cmds, effects.Cmd(visible))
+	}
+	if !activeUpdated && m.activeTab != nil && m.activeTab.chatPage != nil {
+		cmds = append(cmds, m.updateChatCmd(msg))
+	}
+	return tea.Batch(cmds...)
+}
+
 // updateChatCmd forwards a message to the chat page and returns its cmd.
 func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 	updated, effects := m.activeTab.chatPage.UpdateEffects(msg)
