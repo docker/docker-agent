@@ -72,13 +72,23 @@ func RenderReasoningLines(text string, width int) []string {
 // line is guaranteed to fit within width so the differential renderer's row
 // accounting stays correct.
 func RenderAssistantLines(text string, width int) []string {
+	return renderAssistantLines(markdown.NewRendererWithoutCopyIcon(width), text, width)
+}
+
+// renderTransformedLines renders display-transformer output, keeping the
+// transformer's SGR styling.
+func renderTransformedLines(text string, width int) []string {
+	return renderAssistantLines(markdown.NewFastRenderer(width).HideCopyIcon().AllowSGR(), text, width)
+}
+
+func renderAssistantLines(renderer markdown.Renderer, text string, width int) []string {
 	text = strings.TrimRight(text, "\n")
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
 
 	// No copy icon: leantui does not hit-test clicks on code blocks.
-	rendered, err := markdown.NewRendererWithoutCopyIcon(width).Render(text)
+	rendered, err := renderer.Render(text)
 	if err != nil {
 		return WrapANSI(text, width)
 	}
