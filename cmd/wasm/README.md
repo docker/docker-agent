@@ -152,7 +152,7 @@ node cmd/wasm/smoke_test.js
 # JS bridge tests against the default build: session handles, chat(), failure modes.
 node --test cmd/wasm/node/bridge_test.js
 
-# Build and test the default, RAG-enabled and small JavaScript APIs.
+# Build and test both default and RAG-enabled JavaScript APIs.
 task test-wasm-bridge
 ```
 
@@ -527,6 +527,6 @@ GOOS=js GOARCH=wasm go build -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
 # Runtime bridge tests under Node's Go/WASM runner, with mocked models.
 task test-wasm-js
 
-# JS surface against the default, RAG-enabled and small binaries.
+# JS surface against both default and RAG-enabled binaries.
 task test-wasm-bridge
 ```
