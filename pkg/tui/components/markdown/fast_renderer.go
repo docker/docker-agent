@@ -2853,25 +2853,6 @@ func breakWord(word string, maxWidth int) []string {
 }
 
 // buildStylePrimitive converts an ansi.StylePrimitive to a lipgloss.Style.
-// sanitizeReplacer is a package-level replacer to avoid rebuilding it on every call.
-// This is critical for performance - building a replacer is expensive.
-var sanitizeReplacer = strings.NewReplacer(
-	"\r", "",
-	"\b", "",
-	"\f", "",
-	"\v", "",
-)
-
-func sanitizeForTerminal(s string) string {
-	if s == "" {
-		return s
-	}
-
-	// Strip control chars that change cursor position / layout.
-	// Keep \n and \t (tab will be expanded later).
-	return sanitizeReplacer.Replace(s)
-}
-
 func buildStylePrimitive(sp ansi.StylePrimitive) lipgloss.Style {
 	style := lipgloss.NewStyle()
 
