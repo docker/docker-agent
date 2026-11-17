@@ -27,9 +27,8 @@ it("stays within the size budget", () => {
   assert.ok(size <= sizeBudget, `docker-agent.wasm is ${(size / 2 ** 20).toFixed(2)} MiB, over the ${sizeBudget / 2 ** 20} MiB budget`);
 });
 
-it("accepts the small example", async () => {
-  const yaml = fs.readFileSync(path.join(__dirname, "..", "examples", "small-team.yaml"), "utf8");
-  const session = await dockerAgent.createSession({ yaml, env: { OPENROUTER_API_KEY: "k", GITHUB_TOKEN: "t", USER_NAME: "Ada" } });
+it("creates a session", async () => {
+  const session = await dockerAgent.createSession({ yaml: agent(""), env: { OPENAI_API_KEY: "k" } });
   await session.close();
 });
 

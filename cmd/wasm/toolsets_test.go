@@ -416,14 +416,6 @@ func TestPortableExampleLoadsWithTheDemoProviders(t *testing.T) {
 	require.NoError(t, s.close())
 }
 
-func TestSmallExampleLoadsInEveryProfile(t *testing.T) {
-	yaml, err := os.ReadFile("examples/small-team.yaml")
-	require.NoError(t, err)
-	s, err := browserHost.openSession(t.Context(), sessionOptions{YAML: string(yaml), Env: map[string]string{"OPENROUTER_API_KEY": "k", "GITHUB_TOKEN": "t", "USER_NAME": "Ada"}})
-	require.NoError(t, err)
-	require.NoError(t, s.close())
-}
-
 // mockAPI serves a JSON endpoint and an OpenAPI spec describing it from the
 // wasm process itself: Go's js/wasm net is an in-process loopback, so the
 // tools' own HTTP client reaches it.

@@ -119,8 +119,7 @@ go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
 A config that asks for what is left out is rejected when the session is
 created, like everything else in *Limits*; only JavaScript expressions are
 not detected, and reach the model as text. The JavaScript API is unchanged.
-`examples/small-team.yaml` runs in both profiles. RAG can be added with
-`docker_agent_wasm_rag`; the cloud providers cannot.
+RAG can be added with `docker_agent_wasm_rag`; the cloud providers cannot.
 
 Sizes with Go 1.27.4; they move with the toolchain and the dependencies:
 
