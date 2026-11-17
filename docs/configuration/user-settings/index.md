@@ -62,6 +62,39 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `keybindings` | array | _unset_ | Remap TUI keyboard shortcuts. See [Custom Keybindings](../../features/tui/index.md#custom-keybindings) for the full list of actions and syntax. |
 | `layout` | object | _unset_ | Sidebar position and section visibility. See [Layout Settings](#layout-settings) below. |
 
+## Markdown Transformers
+
+`markdown_transformers` rewrites assistant Markdown before the TUI renders it, like Pi's `registerMarkdownTransformer`. Results are display-only: stored messages, model context, and exports keep the original Markdown. User messages, thinking blocks, and tool results are not transformed. Transformers run on the machine showing the TUI, including when it is attached to a remote agent.
+
+```yaml
+settings:
+  markdown_transformers:
+    - command: python3 /absolute/path/to/emphasis.py
+      timeout_ms: 1000
+```
+
+Each `command` starts once, under your shell, and serves newline-delimited [JSON-RPC 2.0](https://www.jsonrpc.org/specification) on stdin and stdout. The TUI sends one `markdown/transform` request per Markdown snapshot: on streaming updates, completion, session restore, and width changes.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"markdown/transform","params":{"markdown":"[[Done]] Tests passed.","message_type":"assistant","is_streaming":false,"available_width":78,"session_id":"session-id","message_id":"message-id"}}
+```
+
+`available_width` is the number of terminal columns for the rendered Markdown. `session_id` and `message_id` are omitted when unknown. Reply with the same `id`:
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{"markdown":"✓ Tests passed."}}
+```
+
+Each request carries the complete Markdown, so transformers can stay stateless. While a reply streams, it is transformed at most once every 50 ms, with its latest snapshot; its first and completed snapshots are sent without delay. Requests are sent one at a time; lines with other IDs, such as notifications, are ignored. Write diagnostics to stderr, which goes to the debug log. Exit when stdin closes: on restart or shutdown the TUI closes stdin and stops the started process, but not processes it spawned.
+
+Transformers run in list order, each receiving the previous output. A transformer that fails a request is skipped for that request. Error replies and results without a `markdown` string keep the process running; malformed JSON, no reply within `timeout_ms` (default 1000), or process exit restart it on a later request, at most once per second. Transformers never block the TUI: a message shows its source until its first result arrives, then its latest result. The most recently rendered messages are transformed first, so live replies are not delayed by a restored transcript.
+
+The returned Markdown may contain ANSI SGR styling, for example `\u001b[32mDone\u001b[39m`; other escape sequences, such as cursor movement, screen clearing, or OSC, are removed. Assistant replies themselves never reach the terminal or a transformer with escape sequences: all of them, including styling, are removed first. Keep each styled span self-contained within the text it decorates, and end it with selective resets such as `39` (foreground), `49` (background), `22` (bold), or `27` (reverse): a full reset (`0`) also ends surrounding Markdown styling, such as bold. Do not style Markdown delimiters, code, or image references.
+
+The copy-message action copies the original reply; selecting text with the mouse copies what is displayed. Per-code-block copy buttons are hidden while transformers are configured, because rewritten fences cannot be mapped back to the source code. Restart the TUI after changing this setting.
+
+See [`examples/markdown-transform`](https://github.com/docker/docker-agent/tree/main/examples/markdown-transform) for a Python transformer that draws status pills. To encourage that syntax, add instructions such as “Use `[[Done]]`, `[[Failed]]`, or `[[Needs you]]` for status” to your agent's instruction or `AGENTS.md`.
+
 ## Layout Settings
 
 `layout` customizes the TUI's sidebar. The zero value (an omitted `layout:` block, or any field left out) is the default: sidebar on the right, all sections except **Plans** visible, normal spacing.

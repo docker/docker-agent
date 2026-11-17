@@ -1,0 +1,5 @@
+# Merge into ~/.config/cagent/config.yaml and replace the script path.
+settings:
+  markdown_transformers:
+    - command: python3 /absolute/path/to/emphasis.py
+      timeout_ms: 1000
