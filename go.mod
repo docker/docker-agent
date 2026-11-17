@@ -1,8 +1,6 @@
 module github.com/docker/docker-agent
 
-go 1.27
-
-toolchain go1.27.4
+go 1.27.4
 
 require (
 	charm.land/bubbles/v2 v2.2.1
@@ -37,7 +35,7 @@ require (
 	github.com/docker/aijson v0.1.0
 	github.com/docker/cli v29.10.0+incompatible
 	github.com/docker/go-units v0.5.0
-	github.com/docker/portcullis v1.1.4
+	github.com/docker/portcullis v1.1.5
 	github.com/docker/secrets-engine/client v0.2.2
 	github.com/docker/secrets-engine/x v0.8.5
 	github.com/dop251/goja v0.0.0-20261031103838-cf2ff0ec0b31

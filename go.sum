@@ -180,8 +180,8 @@ github.com/docker/go-metrics v0.0.1 h1:AgB/0SvBxihN0X8OR4SjsblXkbMvalQ8cjmtKQ2rQ
 github.com/docker/go-metrics v0.0.1/go.mod h1:cG1hvH2utMXtqgqqYE9plW6lDxS3/5ayHzueweSI3Vw=
 github.com/docker/go-units v0.5.0 h1:69rxXcBk27SvSaaxTtLh/8llcHD8vYHT7WSdRZ/jvr4=
 github.com/docker/go-units v0.5.0/go.mod h1:fgPhTUdO+D/Jk86RDLlptpiXQzgHJF7gydDDbaIK4Dk=
-github.com/docker/portcullis v1.1.4 h1:G5ymYDpbqu4Gh1gN+AnpWbXlU6Mlc76bjJhH7SjwMhY=
-github.com/docker/portcullis v1.1.4/go.mod h1:/l8LJh6B+/yHnLcaMoD7B+pTXDeh3yoEmPbT2w/EzcY=
+github.com/docker/portcullis v1.1.5 h1:fOX322uvwMh3oEmdK4nb6J7Bg49xS8ooJUgCVR/dHcs=
+github.com/docker/portcullis v1.1.5/go.mod h1:Jg8lmnF9cqI22koA/IASXmJN+SKqEPZokvXOJMozVAU=
 github.com/docker/secrets-engine/client v0.2.2 h1:aPvmlzsxNA+C+xgp2F+WiiDbCSAXHC591HscFFOvPOE=
 github.com/docker/secrets-engine/client v0.2.2/go.mod h1:c3l/N+fA0kiy9S8BE3kKrO5hOZu4+SLYZK9Jx+jc2cw=
 github.com/docker/secrets-engine/x v0.8.5 h1:P7D/YESMjpX18S4ratBgoeJkAFIxgsPxe093uFmgiGc=
