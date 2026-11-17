@@ -7,9 +7,10 @@ import (
 
 // sanitizeForTerminal removes escape sequences and control characters other
 // than newline and tab, so rendered text cannot move the cursor, clear the
-// screen, set the title, or write the clipboard. Renderer-generated controls,
-// such as hyperlinks, are added after this runs.
-func sanitizeForTerminal(s string) string {
+// screen, set the title, or write the clipboard. SGR styling is kept only
+// when allowed. Renderer-generated controls, such as hyperlinks, are added
+// after this runs.
+func sanitizeForTerminal(s string, allowSGR bool) string {
 	if s == "" {
 		return s
 	}
@@ -17,17 +18,17 @@ func sanitizeForTerminal(s string) string {
 		s = normalizeC1(s)
 	}
 	// Escapes go first: BEL can terminate an OSC sequence.
-	return stripControlChars(stripEscapes(s))
+	return stripControlChars(stripEscapes(s, allowSGR))
 }
 
 // StripTerminalControls removes escape sequences and control characters
 // other than newline and tab, leaving text that is safe to write to the
 // terminal.
 func StripTerminalControls(s string) string {
-	return sanitizeForTerminal(s)
+	return sanitizeForTerminal(s, false)
 }
 
-func stripEscapes(s string) string {
+func stripEscapes(s string, allowSGR bool) string {
 	if strings.IndexByte(s, '\x1b') < 0 {
 		return s
 	}
@@ -40,7 +41,12 @@ func stripEscapes(s string) string {
 			break
 		}
 		b.WriteString(s[i : i+j])
-		i = escapeEnd(s, i+j)
+		i += j
+		end := escapeEnd(s, i)
+		if _, ok := sgrParams(s[i:end]); allowSGR && ok {
+			b.WriteString(s[i:end])
+		}
+		i = end
 	}
 	return b.String()
 }
