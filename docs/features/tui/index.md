@@ -13,7 +13,7 @@ _Docker Agent's default interface is a rich, interactive terminal UI with file a
 
 ## Launching the TUI
 
-Both the full TUI and the lean TUI display a centered ASCII art Docker Agent banner on startup when the chat is empty. The banner is automatically hidden once the agent starts responding or when a custom welcome message is configured. You can disable the banner entirely from the **Appearance** tab of `/settings`, or by setting `show_banner: false` in your [user settings](../../configuration/user-settings/index.md).
+Both the full TUI and the lean TUI display a centered braille-dot “docker agent” wordmark banner (colored with a gradient from your theme’s accent to info color) on startup when the chat is empty. The banner is automatically hidden once the agent starts responding or when a custom welcome message is configured. You can disable the banner entirely from the **Appearance** tab of `/settings`, or by setting `show_banner: false` in your [user settings](../../configuration/user-settings/index.md).
 
 ```bash
 # Launch with a config
