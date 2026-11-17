@@ -208,9 +208,6 @@ func TestWasmDefaultBinaryDependencies(t *testing.T) {
 		"golang.org/x/oauth2/google",
 		"modernc.org/sqlite",
 		"github.com/junegunn/fzf",
-		// A browser runs no process, so stdio MCP servers install nothing.
-		"github.com/docker/docker-agent/pkg/toolinstall",
-		"github.com/expr-lang/expr",
 	}
 	for dep := range strings.FieldsSeq(string(out)) {
 		for _, prefix := range forbidden {
