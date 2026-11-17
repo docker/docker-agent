@@ -96,7 +96,7 @@ require (
 	google.golang.org/adk/v2 v2.4.0
 	google.golang.org/genai v1.77.0
 	google.golang.org/protobuf v1.36.12
-	gopkg.in/dnaeon/go-vcr.v4 v4.0.7
+	gopkg.in/dnaeon/go-vcr.v4 v4.0.8
 	gotest.tools/v3 v3.5.2
 	modernc.org/sqlite v1.62.0
 )
@@ -223,7 +223,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.40.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
+	go.yaml.in/yaml/v4 v4.0.0 // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
