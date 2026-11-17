@@ -94,7 +94,9 @@ See `examples/cloud-bedrock.yaml` and `examples/cloud-vertex.yaml`.
 ### Small profile
 
 Most of the default binary is what it links, not the runtime. The small
-profile keeps the shared runtime and trades features for size:
+profile keeps the shared runtime and trades features for size: about 36 MiB
+(Go 1.27.4), against 162 MiB for the default build with the same `go build`
+flags.
 
 ```sh
 task build-wasm-small
@@ -121,50 +123,22 @@ created, like everything else in *Limits*; only JavaScript expressions are
 not detected, and reach the model as text. The JavaScript API is unchanged.
 RAG can be added with `docker_agent_wasm_rag`; the cloud providers cannot.
 
-Sizes with Go 1.27.4; they move with the toolchain and the dependencies:
+The tags go together. goja, `text/template` and expr look methods up by
+reflection, which makes the Go linker keep every exported method of every
+reachable type: linking one of them brings back the unused parts of every
+SDK. `docker_agent_no_js_expansion` and `docker_agent_no_hook_templates`
+swap goja and `text/template` out, and `small_tags.go` refuses to build the
+profile without them. `nethttpomithttp2` drops net/http's HTTP/2 client,
+unused because requests go through `fetch`.
 
-| Build | Size | Brotli |
-| --- | --- | --- |
-| default, plain `go build` | 174 MiB | |
-| default, `-trimpath -ldflags="-s -w"` | 162 MiB | 17 MiB |
-| small, the `go build` above | 42 MiB | |
-| small, after `wasmpack` (`task build-wasm-small`) | 36 MiB | 6.2 MiB |
-| small, after `wasm-opt -Oz` as well | 30 MiB | 6.3 MiB |
-
-Where the size goes:
-
-- **Reflective method lookups.** A call to `reflect.Value.Method`, or to
-  `MethodByName` with a name the compiler cannot see, makes the Go linker
-  keep every exported method of every reachable type. goja, `text/template`
-  and expr each do that, and one is enough to bring back the unused parts of
-  every SDK. The profile links none of them: the two `docker_agent_no_*`
-  tags swap goja and `text/template` out, and `small_tags.go` refuses to
-  build the profile without them.
-- **Provider SDKs.** Their generated types register themselves at init, so
-  they are linked whether or not they are used. The OpenAI provider and its
-  SDK are about 13 MiB of the 42.
-- **`runtime.findfunctab`.** The linker gives each wasm function 64 KiB of
-  PC space, which costs this lookup table 320 bytes per function: 7 MiB
-  here, 37 MiB in the default build. `scripts/wasmpack` removes it and adds
-  a start function that writes it back at instantiation; it only does so
-  when memory ends up byte for byte the same. It works on any Go js/wasm
-  binary, the default build included (162 MiB to 125 MiB).
-- **`nethttpomithttp2`** drops net/http's HTTP/2 client, which is never used
-  because requests go through `fetch`.
-
-[Binaryen](https://github.com/WebAssembly/binaryen)'s `wasm-opt` shrinks the
-code further. It is not part of the task: it needs Binaryen and takes half a
-minute.
-
-```sh
-wasm-opt cmd/wasm/web/docker-agent.wasm -Oz \
-  --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals \
-  -o cmd/wasm/web/docker-agent.wasm
-```
+`scripts/wasmpack` then takes 7 MiB off the linked binary. On wasm the
+linker's `runtime.findfunctab` costs 320 bytes per function, all of them
+predictable: the tool removes the table and adds a start function that
+writes it back at instantiation, which leaves memory byte for byte the same.
+It works on any Go js/wasm binary.
 
 `e2e/dependencies_test.go` guards the profile's dependency closure and
-`node/small_test.js` its size, so a dependency that undoes any of this
-fails CI.
+`node/small_test.js` its size.
 
 ## Run (Node)
 
