@@ -246,15 +246,6 @@ func (c *collectingEmitter) find(kind string) []map[string]any {
 	return out
 }
 
-// needsDefaultProfile skips a test of what the small profile leaves out;
-// small_test.go covers how that profile rejects it.
-func needsDefaultProfile(t *testing.T) {
-	t.Helper()
-	if smallProfile {
-		t.Skip("not in the small profile")
-	}
-}
-
 func openTestSession(t *testing.T, h host, opts sessionOptions) *chatSession {
 	t.Helper()
 	s, err := h.openSession(t.Context(), opts)

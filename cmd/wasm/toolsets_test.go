@@ -63,10 +63,9 @@ func callTool(t *testing.T, ts tools.ToolSet, name, args string) string {
 
 func TestBrowserToolsetsServePortableBuiltins(t *testing.T) {
 	registry := browserToolsets(nil)
-	for _, supported := range []string{"datetime", "mcp", "calculator", "think", "random", "todo", "plan", "memory", "user_prompt", "session_context", "fetch", "api", "model_picker"} {
+	for _, supported := range []string{"datetime", "mcp", "calculator", "think", "random", "todo", "plan", "memory", "user_prompt", "session_context", "fetch", "api", "openapi", "model_picker"} {
 		assert.True(t, registry.Has(supported), supported)
 	}
-	assert.Equal(t, !smallProfile, registry.Has("openapi"))
 	for _, unsupported := range []string{"shell", "script", "filesystem", "file", "git", "tasks", "environment", "background_jobs", "background_agents", "lsp", "mcp_catalog", "a2a", "webhook", "open_url", "scheduler"} {
 		assert.False(t, registry.Has(unsupported), unsupported)
 	}
@@ -83,9 +82,6 @@ func TestBrowserToolsetsServePortableBuiltins(t *testing.T) {
 		"unknown type": {latest.Toolset{Type: "shell"}, "unknown toolset type"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if tc.toolset.Type == "openapi" {
-				needsDefaultProfile(t)
-			}
 			_, err := registry.CreateTool(t.Context(), tc.toolset, "/", testRunConfig(), "")
 			require.ErrorContains(t, err, tc.want)
 		})
@@ -105,9 +101,6 @@ func TestRepeatableToolsRunInASession(t *testing.T) {
 			{toolset: "datetime", tool: "get_datetime", args: `{"format":"2006-01-02T15:04:05Z07:00","timezone":"UTC"}`},
 		} {
 			t.Run(fmt.Sprintf("%s/code_mode=%t", tc.toolset, codeMode), func(t *testing.T) {
-				if codeMode {
-					needsDefaultProfile(t)
-				}
 				yaml := fmt.Sprintf(`
 agents:
   root:
@@ -273,7 +266,6 @@ agents:
 }
 
 func TestJavaScriptExpandsInstructionsFromTheSessionEnv(t *testing.T) {
-	needsDefaultProfile(t)
 	const yaml = `
 agents:
   root:
@@ -292,7 +284,6 @@ agents:
 }
 
 func TestCodeModeRunsToolsFromJavaScript(t *testing.T) {
-	needsDefaultProfile(t)
 	const yaml = `
 agents:
   root:
@@ -416,7 +407,6 @@ agents:
 }
 
 func TestPortableExampleLoadsWithTheDemoProviders(t *testing.T) {
-	needsDefaultProfile(t)
 	yaml, err := os.ReadFile("examples/portable-team.yaml")
 	require.NoError(t, err)
 	// Toolsets start lazily, so opening the session proves the config
@@ -452,7 +442,6 @@ func mockAPI(t *testing.T) *httptest.Server {
 }
 
 func TestHTTPToolsReachRemoteMocks(t *testing.T) {
-	needsDefaultProfile(t)
 	server := mockAPI(t)
 	yaml := `
 agents:

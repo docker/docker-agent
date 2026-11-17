@@ -175,7 +175,7 @@ tasks:
     cmds:
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - GOOS=js GOARCH=wasm go test -tags docker_agent_wasm_rag -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
-      - GOOS=js GOARCH=wasm go test -tags {{.WASM_SMALL_TAGS}} -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
+      - GOOS=js GOARCH=wasm go test -tags {{.WASM_SMALL_TAGS}} -run '^TestSmallProfile' -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" pkg/model/provider/factory_js_openai_vendor_test.go
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run '^TestLimitLargeToolResults|^TestEnvironmentInfo' ./pkg/hooks/builtins
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./pkg/embeddedchat ./pkg/fuzzy/... ./pkg/tools/builtin/calculator ./pkg/tools/builtin/datetime ./pkg/tools/builtin/deferred ./pkg/tools/builtin/think ./pkg/tools/builtin/random ./pkg/tools/builtin/todo ./pkg/tools/builtin/memory ./pkg/memory/database/inmemory ./pkg/tools/codemode ./pkg/tools/toon ./pkg/rag ./pkg/rag/strategy

@@ -14,8 +14,6 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 )
 
-const smallProfile = true
-
 func TestSmallProfileRejectsOtherProviders(t *testing.T) {
 	for _, model := range []string{"anthropic/claude-sonnet-4-6", "google/gemini-2.5-flash", "amazon-bedrock/anthropic.claude-sonnet-4-6"} {
 		t.Run(model, func(t *testing.T) {
