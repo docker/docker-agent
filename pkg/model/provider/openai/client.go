@@ -293,13 +293,13 @@ func shouldMergeConsecutiveMessages(cfg *latest.ModelConfig) bool {
 	return catalog.Lookup(cfg.Provider).MergeConsecutiveMessages
 }
 
-// contextLimit returns this model's context window in tokens, preferring an
-// explicit provider_opts.context_size (authoritative for self-hosted
-// endpoints) and falling back to the models.dev catalogue. It returns 0 when
-// the window cannot be determined, in which case [clampMaxTokens] leaves
-// max_tokens untouched.
+// contextLimit returns this model's context window in tokens, preferring the
+// declared model-level context_window (authoritative for self-hosted endpoints)
+// and falling back to the models.dev catalogue. It returns 0 when the window
+// cannot be determined, in which case [clampMaxTokens] leaves max_tokens
+// untouched.
 func (c *Client) contextLimit(ctx context.Context) int64 {
-	if n := latest.ContextSizeFromProviderOpts(c.ModelConfig.ProviderOpts); n > 0 {
+	if n := c.ModelConfig.DeclaredContextWindow(); n > 0 {
 		return n
 	}
 	return modelinfo.ContextLimit(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), 0)

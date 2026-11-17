@@ -99,7 +99,7 @@ Use only flags your Model Runner backend allows (see `docker model configure --h
 
 ## Context size
 
-`max_tokens` controls the **maximum output tokens** per chat completion request. To set the engine's **total context window**, use `provider_opts.context_size`:
+`max_tokens` controls the **maximum output tokens** per chat completion request. To set the engine's **total context window**, use `provider_opts.context_size`. This is the only setting that reconfigures the engine; the model-level [`context_window`](../../configuration/models/index.md#context-window) is metadata for docker-agent's accounting and never changes the engine:
 
 ```yaml
 models:
@@ -108,25 +108,30 @@ models:
     model: ai/qwen3
     max_tokens: 4096            # max output tokens (per-request)
     provider_opts:
-      context_size: 32768       # total context window (sent via _configure)
+      context_size: 32768        # total context window (sent via _configure)
 ```
 
-If `context_size` is omitted, Docker Agent queries the runner's completion
+If `provider_opts.context_size` is omitted, Docker Agent queries the runner's completion
 configuration, then falls back to the packaged model's context window. This
 read-only discovery is cached briefly and drives context usage and automatic
-compaction. An explicit `context_size` always takes precedence; `max_tokens` is
+compaction. An explicit `provider_opts.context_size` always takes precedence over discovery, and a model-level `context_window` takes precedence over both; `max_tokens` is
 **not** used as the context window.
 
 Discovery is best-effort. Older or unreachable runners, gateways, and runtime
 flags that override context allocation may leave the window unknown. In those
-cases, set `context_size` explicitly. Arbitrary `raw_runtime_flags` also disable
+cases, set `provider_opts.context_size` explicitly. Arbitrary `raw_runtime_flags` also disable
 automatic context discovery.
+
+A model-level `context_window` also works for DMR models. docker-agent then plans
+compaction and context usage against that window and leaves the engine's
+allocation untouched. Set `provider_opts.context_size` too, to the same value,
+when the engine should be sized to match; the two must agree.
 
 The model picker displays DMR's reported architecture, parameter count,
 quantization, size, and packaged context window when available. The packaged
 window can differ from a running model's configured context size.
 
-Docker Agent's auto-compaction scales its summary and keep-tail token budgets proportionally to `context_size`.
+Docker Agent's auto-compaction scales its summary and keep-tail token budgets proportionally to the context window.
 
 ## Thinking / reasoning budget
 

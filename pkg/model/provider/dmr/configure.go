@@ -277,7 +277,9 @@ func parseInt64Value(v any) (int64, bool) {
 }
 
 // parseContextSize extracts context_size from provider_opts.
-// Returns nil when unset, letting model-runner use its default.
+// Returns nil when unset, letting model-runner use its default. The model-level
+// context_size is deliberately not read: it is accounting metadata and must
+// never reconfigure the engine.
 func parseContextSize(opts map[string]any) *int64 {
 	if len(opts) == 0 {
 		return nil

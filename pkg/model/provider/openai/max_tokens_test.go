@@ -21,26 +21,26 @@ import (
 // set max_tokens equal to the model's context window (262144). vLLM requires
 // prompt_tokens + max_tokens to fit the window, so reserving the whole window
 // for output leaves no room for the prompt and even a "hello" is rejected with
-// a "maximum context length" error. When the window is known (here via
-// provider_opts.context_size) the client must clamp max_tokens to leave
-// headroom for the prompt.
+// a "maximum context length" error. When the window is known (here via the
+// model-level context_window) the client must clamp max_tokens to leave headroom
+// for the prompt.
 func TestChatCompletions_ClampsMaxTokensToContextWindow(t *testing.T) {
 	t.Parallel()
 
-	got, ok := requestMaxTokens(t, 262144, map[string]any{"context_size": 262144})
+	got, ok := requestMaxTokens(t, 262144, 262144)
 	require.True(t, ok, "max_tokens must be present in the request")
 	assert.Equal(t, int64(262144-1024), got, "max_tokens must be clamped to leave prompt headroom (see #3387)")
 }
 
 // TestChatCompletions_DoesNotClampWhenWindowUnknown documents the reporter's
-// actual state: the model is not in models.dev and no context_size is set, so
+// actual state: the model is not in models.dev and no context_window is set, so
 // the window is unknown at request time. The client must NOT fabricate a window
 // and must forward max_tokens verbatim; surfacing the misconfiguration is left
-// to the load-time warning and the user setting provider_opts.context_size.
+// to the load-time warning and the user setting context_window.
 func TestChatCompletions_DoesNotClampWhenWindowUnknown(t *testing.T) {
 	t.Parallel()
 
-	got, ok := requestMaxTokens(t, 262144, nil)
+	got, ok := requestMaxTokens(t, 262144, 0)
 	require.True(t, ok)
 	assert.Equal(t, int64(262144), got, "with no discoverable context window, max_tokens must be sent verbatim")
 }
@@ -50,7 +50,7 @@ func TestChatCompletions_DoesNotClampWhenWindowUnknown(t *testing.T) {
 func TestChatCompletions_DoesNotClampMaxTokensBelowWindow(t *testing.T) {
 	t.Parallel()
 
-	got, ok := requestMaxTokens(t, 4096, map[string]any{"context_size": 262144})
+	got, ok := requestMaxTokens(t, 4096, 262144)
 	require.True(t, ok)
 	assert.Equal(t, int64(4096), got, "a reasonable max_tokens must pass through unchanged")
 }
@@ -83,7 +83,7 @@ func TestClampMaxTokens(t *testing.T) {
 // for a self-hosted openai-compatible model configured with the given
 // max_tokens and provider_opts, and returns the max_tokens field observed in
 // the request body (and whether it was present at all).
-func requestMaxTokens(t *testing.T, maxTokens int64, providerOpts map[string]any) (int64, bool) {
+func requestMaxTokens(t *testing.T, maxTokens, contextWindow int64) (int64, bool) {
 	t.Helper()
 
 	var (
@@ -100,12 +100,14 @@ func requestMaxTokens(t *testing.T, maxTokens int64, providerOpts map[string]any
 	defer server.Close()
 
 	requestCfg := latest.ModelConfig{
-		Provider:     "openai",
-		Model:        "Qwen/Qwen3.6-35B",
-		TokenKey:     "MY_TOKEN",
-		BaseURL:      server.URL,
-		MaxTokens:    &maxTokens,
-		ProviderOpts: providerOpts,
+		Provider:  "openai",
+		Model:     "Qwen/Qwen3.6-35B",
+		TokenKey:  "MY_TOKEN",
+		BaseURL:   server.URL,
+		MaxTokens: &maxTokens,
+	}
+	if contextWindow > 0 {
+		requestCfg.ContextWindow = &contextWindow
 	}
 	env := environment.NewMapEnvProvider(map[string]string{"MY_TOKEN": "secret"})
 

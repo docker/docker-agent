@@ -323,3 +323,58 @@ func TestConfiguredContextIntegerBounds(t *testing.T) {
 		})
 	}
 }
+
+// A model-level context_window sets the picker's window for a configured model,
+// with no provider_opts involved.
+func TestConfiguredContextFromModelLevelContextWindow(t *testing.T) {
+	t.Parallel()
+	size := int64(4096)
+	r := dmrRuntime(func(context.Context) ([]string, error) { return nil, errors.New("unavailable") }, stubStore{}, map[string]latest.ModelConfig{
+		"local": {Provider: "dmr", Model: "ai/qwen3", ContextWindow: &size},
+	})
+	choices := r.AvailableModels(t.Context(), "")
+	require.Len(t, choices, 1)
+	assert.Equal(t, 4096, choices[0].ContextLimit)
+}
+
+func TestConfiguredContextFromProviderAlias(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		modelOpts    map[string]any
+		providerOpts map[string]any
+		want         int
+	}{
+		{name: "model context", modelOpts: map[string]any{"context_size": 8192}, want: 8192},
+		{name: "inherited context", providerOpts: map[string]any{"context_size": 4096}, want: 4096},
+		{name: "model overrides inherited context", modelOpts: map[string]any{"context_size": 8192}, providerOpts: map[string]any{"context_size": 4096}, want: 8192},
+		{name: "inherited api type is not dmr", providerOpts: map[string]any{"api_type": "openai_chatcompletions", "context_size": 4096}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := dmrRuntime(func(context.Context) ([]string, error) { return nil, errors.New("unavailable") }, stubStore{}, map[string]latest.ModelConfig{
+				"local": {Provider: "local", Model: "custom", ProviderOpts: tc.modelOpts},
+			})
+			r.Config.Providers = map[string]latest.ProviderConfig{"local": {Provider: "dmr", ProviderOpts: tc.providerOpts}}
+			choices := r.AvailableModels(t.Context(), "")
+			require.Len(t, choices, 1)
+			assert.Equal(t, tc.want, choices[0].ContextLimit)
+			assert.Equal(t, tc.modelOpts, r.Config.Models["local"].ProviderOpts)
+			assert.Equal(t, tc.providerOpts, r.Config.Providers["local"].ProviderOpts)
+		})
+	}
+}
+
+func TestInheritedContextSurvivesDMRMetadata(t *testing.T) {
+	t.Parallel()
+	r := dmrRuntime(func(context.Context) ([]string, error) { return []string{"ai/qwen3"}, nil }, stubStore{}, map[string]latest.ModelConfig{
+		"local": {Provider: "dmr", Model: "ai/qwen3"},
+	})
+	r.Config.Providers = map[string]latest.ProviderConfig{"dmr": {Provider: "dmr", ProviderOpts: map[string]any{"context_size": 8192}}}
+	r.ListDMR = func(context.Context) ([]dmrmodels.Model, error) {
+		return []dmrmodels.Model{{ID: "ai/qwen3", Metadata: &dmrmodels.Metadata{ContextWindow: 32768}}}, nil
+	}
+	choices := r.AvailableModels(t.Context(), "")
+	require.Len(t, choices, 1)
+	assert.Equal(t, 8192, choices[0].ContextLimit)
+}

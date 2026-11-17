@@ -673,4 +673,5 @@ export interface WarningEvent {
   timestamp: string;
   type: 'warning';
   message: string;
+  session_id?: string;
 }

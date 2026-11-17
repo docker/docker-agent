@@ -70,6 +70,13 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, p.messages.AddErrorMessage(msg.Error)
 
 	case *runtime.WarningEvent:
+		if p.isSubSessionEvent(msg.SessionID) {
+			label := msg.AgentName
+			if label == "" {
+				label = "sub-agent"
+			}
+			return true, notification.WarningCmd(fmt.Sprintf("%s: %s", label, msg.Message))
+		}
 		return true, notification.WarningCmd(msg.Message)
 
 	case *runtime.ModelFallbackEvent:
