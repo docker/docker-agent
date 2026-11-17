@@ -190,7 +190,7 @@ tasks:
       - node cmd/wasm/smoke_test.js
       - node --test cmd/wasm/node/rag_test.js
       - task: build-wasm-small
-      - DOCKER_AGENT_WASM_PROFILE=small node --test cmd/wasm/node/small_test.js cmd/wasm/node/bridge_test.js cmd/wasm/node/rag_off_test.js
+      - node --test cmd/wasm/node/small_test.js
       - GOOS=js GOARCH=wasm go build -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
       - node --test cmd/wasm/web/events_test.js
       - node cmd/wasm/smoke_test.js

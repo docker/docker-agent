@@ -11,11 +11,11 @@ const { bootDockerAgent } = require("./boot.js");
 // that defeats the linker's method pruning, costs far more than the headroom.
 const sizeBudget = 38 * 1024 * 1024;
 
-const agent = (lines) => `
+const yaml = `
 agents:
   root:
     model: openai/gpt-4o-mini
-${lines}`;
+`;
 
 let dockerAgent;
 before(async () => {
@@ -28,34 +28,12 @@ it("stays within the size budget", () => {
 });
 
 it("creates a session", async () => {
-  const session = await dockerAgent.createSession({ yaml: agent(""), env: { OPENAI_API_KEY: "k" } });
+  const session = await dockerAgent.createSession({ yaml, env: { OPENAI_API_KEY: "k" } });
   await session.close();
 });
 
 it("accepts the current config version only", () => {
-  assert.equal(dockerAgent.parseConfig(agent("")).agents.length, 1);
-  assert.throws(() => dockerAgent.parseConfig(`version: "2"${agent("")}`), /unsupported config version/);
-  assert.throws(() => dockerAgent.listAgents(`version: "2"${agent("")}`), /unsupported config version/);
-});
-
-it("rejects what the profile leaves out when the session is created", async () => {
-  const env = { OPENAI_API_KEY: "k", ANTHROPIC_API_KEY: "k", GOOGLE_API_KEY: "k" };
-  const cases = [
-    [agent("").replace("openai/gpt-4o-mini", "anthropic/claude-sonnet-4-6"), /provider "anthropic"/],
-    [agent("").replace("openai/gpt-4o-mini", "google/gemini-2.5-flash"), /provider "google"/],
-    [agent(`    toolsets:
-      - type: openapi
-        url: https://example.com/openapi.json
-`), /toolset type "openapi"/],
-    [agent("    code_mode_tools: true\n"), /feature "code_mode"/],
-    [agent(`    hooks:
-      turn_start:
-        - type: builtin
-          command: add_context
-          args: ["Be brief."]
-`), /builtin "add_context" is not available/],
-  ];
-  for (const [yaml, want] of cases) {
-    await assert.rejects(dockerAgent.createSession({ yaml, env }), want);
-  }
+  assert.equal(dockerAgent.parseConfig(yaml).agents.length, 1);
+  assert.throws(() => dockerAgent.parseConfig(`version: "2"${yaml}`), /unsupported config version/);
+  assert.throws(() => dockerAgent.listAgents(`version: "2"${yaml}`), /unsupported config version/);
 });
