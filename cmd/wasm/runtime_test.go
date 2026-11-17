@@ -363,6 +363,8 @@ func TestOpenSessionRejectsUnsupportedConfig(t *testing.T) {
 		yaml string
 		opts sessionOptions
 		want string
+		// defaultProfile marks checks of a toolset the small profile leaves out.
+		defaultProfile bool
 	}{
 		"unknown agent": {yaml: echoAgentYAML, opts: sessionOptions{AgentName: "nope"}, want: `agent "nope" not found`},
 		"stdio mcp": {want: "stdio MCP servers need a host process", yaml: `
@@ -432,7 +434,7 @@ agents:
       - type: memory
         path: ./memory.db
 `},
-		"local openapi spec": {want: `openapi url "./openapi.yaml"`, yaml: `
+		"local openapi spec": {defaultProfile: true, want: `openapi url "./openapi.yaml"`, yaml: `
 agents:
   root:
     model: mock/root
@@ -440,7 +442,7 @@ agents:
       - type: openapi
         url: ./openapi.yaml
 `},
-		"local openapi spec from env": {want: `openapi url "file:///spec.yaml"`, opts: sessionOptions{Env: map[string]string{"SPEC": "file:///spec.yaml"}}, yaml: `
+		"local openapi spec from env": {defaultProfile: true, want: `openapi url "file:///spec.yaml"`, opts: sessionOptions{Env: map[string]string{"SPEC": "file:///spec.yaml"}}, yaml: `
 agents:
   root:
     model: mock/root
@@ -467,6 +469,9 @@ agents:
 `},
 	} {
 		t.Run(name, func(t *testing.T) {
+			if tc.defaultProfile {
+				needsDefaultProfile(t)
+			}
 			opts := tc.opts
 			opts.YAML = tc.yaml
 			_, err := h.openSession(t.Context(), opts)
@@ -476,6 +481,7 @@ agents:
 }
 
 func TestOpenSessionAcceptsRemoteMCPAndBuiltinHooks(t *testing.T) {
+	needsDefaultProfile(t)
 	const yaml = `
 agents:
   root:
@@ -500,6 +506,7 @@ agents:
 }
 
 func TestBuiltinHookRuns(t *testing.T) {
+	needsDefaultProfile(t)
 	const yaml = `
 agents:
   root:

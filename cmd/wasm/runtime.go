@@ -7,25 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sync"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
-	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/embeddedchat"
 	"github.com/docker/docker-agent/pkg/environment"
-	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/model/provider"
-	"github.com/docker/docker-agent/pkg/modelsdev"
-	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
-	"github.com/docker/docker-agent/pkg/tools/codemode"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/tools/toon"
 )
@@ -64,28 +58,6 @@ type host struct {
 
 var browserHost = host{providers: demoProviders, newToolsets: browserToolsets}
 
-// browserFeatures are the optional loader features the browser enables;
-// strict loading rejects configs that need any other.
-var browserFeatures = []config.Feature{config.FeatureHooks, config.FeatureCodeMode, config.FeatureToon, config.FeatureDeferredTools}
-
-// browserBuiltinHooks are the builtin hooks that neither run a process nor
-// touch the filesystem or git; add_environment_info has a browser build that
-// reports no shell or git and reads nothing from the process env.
-var browserBuiltinHooks = []string{
-	builtins.AddContext,
-	builtins.AddDate,
-	builtins.AddEnvironmentInfo,
-	builtins.LimitLargeToolResults,
-	builtins.MaxIterations,
-	builtins.RedactSecrets,
-}
-
-// modelsStore is the models.dev catalog baked into the binary: the browser
-// has no cache directory to refresh a live copy into.
-var modelsStore = sync.OnceValue(func() *modelsdev.Store {
-	return modelsdev.NewDatabaseStore(embedded.Snapshot())
-})
-
 // browserWorkingDir is the session's working directory. There is no
 // filesystem behind it; it is what relative paths in the config resolve
 // against, RAG docs included.
@@ -113,7 +85,7 @@ func lifetimeContext(parent context.Context, toolProxy string) (context.Context,
 // skipped with a warning at load time.
 func (h host) newSession(ctx context.Context, opts sessionOptions) (*embeddedchat.Session, error) {
 	source := config.NewBytesSource("config.yaml", []byte(opts.YAML))
-	cfg, err := config.Load(ctx, source, config.WithVersions(legacy.Register))
+	cfg, err := config.Load(ctx, source, config.WithVersions(configVersions))
 	if err != nil {
 		return nil, err
 	}
@@ -155,18 +127,17 @@ func (h host) newSession(ctx context.Context, opts sessionOptions) (*embeddedcha
 	return embeddedchat.New(ctx, embeddedchat.Config{
 		AgentSource:   source,
 		RuntimeConfig: runConfig,
-		LoadOpts: []teamloader.Opt{
+		LoadOpts: append([]teamloader.Opt{
 			teamloader.WithProviderRegistry(h.providers),
-			teamloader.WithConfigVersions(legacy.Register),
+			teamloader.WithConfigVersions(configVersions),
 			teamloader.WithToolsetRegistry(h.newToolsets(opts.Documents)),
-			// ${...} in instructions is plain JavaScript over the session
-			// env: goja has no I/O, so nothing reaches the host.
+			// ${...} in instructions only sees the session env. Where it is
+			// JavaScript, goja has no I/O, so nothing reaches the host.
 			teamloader.WithExpander(js.NewJsExpander),
-			teamloader.WithCodeMode(codemode.Wrap),
 			teamloader.WithToon(toon.Wrap),
 			teamloader.WithDeferredTools(deferred.New),
 			teamloader.WithStrict(browserFeatures...),
-		},
+		}, profileLoadOpts...),
 		RuntimeOptions:     runtimeOpts,
 		SessionOptions:     sessionOpts,
 		InitialSession:     initial,

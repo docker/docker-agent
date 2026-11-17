@@ -5,8 +5,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
-	"net/url"
 	"strings"
 	"sync"
 
@@ -23,7 +21,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
 	"github.com/docker/docker-agent/pkg/tools/builtin/memory"
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
-	"github.com/docker/docker-agent/pkg/tools/builtin/openapi"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 	"github.com/docker/docker-agent/pkg/tools/builtin/random"
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
@@ -79,9 +76,9 @@ func browserToolsetCreators(documents map[string][]byte) map[string]teamloader.T
 		"session_context": teamloader.Creator(sessioncontext.CreateToolSet),
 		"fetch":           fetch.Creator,
 		"api":             client.Creator(js.NewJsExpander),
-		"openapi":         openapiCreator,
 		"model_picker":    teamloader.CreatorFromToolset(modelpicker.CreateToolSet),
 	}
+	registerOpenAPI(creators)
 	registerRAG(creators, documents)
 	return creators
 }
@@ -104,13 +101,6 @@ func mcpCreator(ctx context.Context, toolset latest.Toolset, parentDir string, r
 		return nil, err
 	}
 	return mcptools.Creator(ctx, toolset, parentDir, runConfig, configName)
-}
-
-func openapiCreator(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
-	if err := checkOpenAPI(ctx, toolset, runConfig.EnvProvider()); err != nil {
-		return nil, err
-	}
-	return openapi.Creator(ctx, toolset, parentDir, runConfig, configName)
 }
 
 // checkBrowserToolset rejects toolset declarations the browser build cannot
@@ -150,17 +140,6 @@ func checkRemoteMCP(ts latest.Toolset) error {
 func checkMemory(ts latest.Toolset) error {
 	if ts.Path != "" {
 		return errors.New("memory path: local files are not available in the browser; memories are kept in memory for the session")
-	}
-	return nil
-}
-
-// checkOpenAPI accepts only specs fetched over HTTP(S). The URL is expanded
-// with the session env first, like the toolset itself does.
-func checkOpenAPI(ctx context.Context, ts latest.Toolset, env environment.Provider) error {
-	spec := js.NewJsExpander(env).Expand(ctx, ts.URL, nil)
-	u, err := url.Parse(spec)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("openapi url %q: only http(s) specs can be fetched in the browser", spec)
 	}
 	return nil
 }

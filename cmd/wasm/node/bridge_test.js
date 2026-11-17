@@ -25,6 +25,10 @@ agents:
     instruction: hi
 `;
 
+// Set for a build with the small profile, whose own limits are covered by
+// small_test.js.
+const small = process.env.DOCKER_AGENT_WASM_PROFILE === "small";
+
 let dockerAgent;
 before(async () => {
   dockerAgent = await bootDockerAgent();
@@ -96,14 +100,14 @@ agents:
     toolsets:
       - type: openapi
         url: ./openapi.yaml
-`, /only http\(s\) specs/],
+`, small ? /toolset type "openapi"/ : /only http\(s\) specs/],
     ];
     for (const [yaml, want] of cases) {
       await assert.rejects(dockerAgent.createSession({ yaml, env: { OPENAI_API_KEY: "k" } }), want);
     }
   });
 
-  it("accepts the portable example with its builtin toolsets and features", async () => {
+  it("accepts the portable example with its builtin toolsets and features", { skip: small && "needs the default profile" }, async () => {
     const yaml = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "examples", "portable-team.yaml"), "utf8");
     const session = await dockerAgent.createSession({ yaml, env: { OPENROUTER_API_KEY: "k", GITHUB_TOKEN: "t" } });
     await session.close();

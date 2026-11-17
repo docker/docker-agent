@@ -12,13 +12,18 @@ import (
 )
 
 func TestDemoProviderRegistry(t *testing.T) {
-	for _, name := range []string{"openai", "openai_chatcompletions", "openai_responses", "anthropic", "google"} {
+	for _, name := range []string{"openai", "openai_chatcompletions", "openai_responses"} {
 		assert.True(t, demoProviders.Has(name), name)
+		assert.False(t, provider.EmptyRegistry().Has(name), "demo registration must not affect the empty core registry")
+	}
+	for _, name := range []string{"anthropic", "google"} {
+		assert.Equal(t, !smallProfile, demoProviders.Has(name), name)
 		assert.False(t, provider.EmptyRegistry().Has(name), "demo registration must not affect the empty core registry")
 	}
 }
 
 func TestBrowserHostBuildsDemoProvidersWithSessionEnv(t *testing.T) {
+	needsDefaultProfile(t)
 	const yaml = `
 models:
   primary:
