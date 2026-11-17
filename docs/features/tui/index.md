@@ -15,7 +15,7 @@ _Docker Agent's default interface is a rich, interactive terminal UI with file a
 
 Both the full TUI and the lean TUI display a braille-dot “docker agent” wordmark banner on startup, colored with a gradient from your theme’s accent to info color.
 
-- **Full TUI:** the banner is centered in the empty chat pane. It is not drawn if the pane is narrower than 76 columns or shorter than 6 rows, and it disappears once the agent starts responding.
+- **Full TUI:** the banner is centered in the empty chat pane. It is not drawn if the pane is narrower than 76 columns or shorter than 6 rows, and it disappears as soon as the conversation has content: when you send a message, when the agent starts responding, or when the agent's `welcome_message` is shown (which replaces the banner as soon as the agent info arrives).
 - **Lean TUI:** the banner is printed left-aligned at the start of the transcript, above the resumed session if any, and stays in the scrollback as messages arrive.
 
 You can disable the banner entirely from the **Appearance** tab of `/settings`, or by setting `show_banner: false` in your [user settings](../../configuration/user-settings/index.md).

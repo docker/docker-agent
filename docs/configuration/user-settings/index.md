@@ -38,7 +38,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `expand_thinking` | boolean | `false` | Start new sessions with thinking/tool blocks expanded instead of collapsed. |
 | `split_diff_view` | boolean | `true` | Render file-edit diffs side-by-side instead of unified. |
 | `render_images` | boolean | `true` | Render images in the TUI using the Kitty graphics protocol. Applies to both tool-result images and Markdown images in agent responses. Automatically disabled when the terminal does not support Kitty. |
-| `show_banner` | boolean | `true` | Show the braille wordmark startup banner on an empty conversation. Applies to both the full TUI and the [lean TUI](../../features/tui/index.md#lean-tui). Managed from the **Appearance** tab of `/settings`. |
+| `show_banner` | boolean | `true` | Show the braille wordmark startup banner. In the full TUI it appears on an empty conversation; in the [lean TUI](../../features/tui/index.md#lean-tui) it is printed at the start of the transcript, before any resumed session. Managed from the **Appearance** tab of `/settings` in the full TUI; the lean TUI's `/settings` panel has a *Show startup banner* toggle that takes effect on next launch. |
 | `theme` | string | `default` | Theme name, loaded from a built-in theme or `~/.cagent/themes/<name>.yaml`. The special value `auto` follows the terminal's light/dark background. See [Theming](../../features/tui/index.md#theming). |
 | `theme_dark` | string | `default` | Theme applied when `theme: auto` and the terminal background is dark. |
 | `theme_light` | string | `default-light` | Theme applied when `theme: auto` and the terminal background is light. |
