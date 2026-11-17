@@ -69,7 +69,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 
 ## Markdown Transformers
 
-`markdown_transformers` rewrites assistant Markdown before the TUI renders it, like Pi's `registerMarkdownTransformer`. Results are display-only: stored messages, model context, and exports keep the original Markdown. User messages, thinking blocks, and tool results are not transformed. Transformers run on the machine showing the TUI, including when it is attached to a remote agent.
+`markdown_transformers` rewrites assistant Markdown before the full or lean TUI renders it, like Pi's `registerMarkdownTransformer`. Results are display-only: stored messages, model context, and exports keep the original Markdown. User messages, thinking blocks, and tool results are not transformed. Transformers run on the machine showing the TUI, including when it is attached to a remote agent.
 
 ```yaml
 settings:
@@ -96,7 +96,7 @@ Transformers run in list order, each receiving the previous output. A transforme
 
 The returned Markdown may contain ANSI SGR styling, for example `\u001b[32mDone\u001b[39m`; other escape sequences, such as cursor movement, screen clearing, or OSC, are removed. Assistant replies themselves never reach the terminal or a transformer with escape sequences: all of them, including styling, are removed first. Keep each styled span self-contained within the text it decorates, and end it with selective resets such as `39` (foreground), `49` (background), `22` (bold), or `27` (reverse): a full reset (`0`) also ends surrounding Markdown styling, such as bold. Do not style Markdown delimiters, code, or image references.
 
-The copy-message action copies the original reply; selecting text with the mouse copies what is displayed. Per-code-block copy buttons are hidden while transformers are configured, because rewritten fences cannot be mapped back to the source code. Restart the TUI after changing this setting.
+The copy-message action copies the original reply; selecting text with the mouse copies what is displayed. Per-code-block copy buttons are hidden while transformers are configured, because rewritten fences cannot be mapped back to the source code. In the lean TUI, rows already in terminal scrollback cannot be edited. A result that changes such rows never clears scrollback: changed text is written again below it, as with other late Markdown updates, and styling-only changes are skipped. Restart the TUI after changing this setting.
 
 See [`examples/markdown-transform`](https://github.com/docker/docker-agent/tree/main/examples/markdown-transform) for a Python transformer that draws status pills. To encourage that syntax, add instructions such as “Use `[[Done]]`, `[[Failed]]`, or `[[Needs you]]` for status” to your agent's instruction or `AGENTS.md`.
 
