@@ -40,6 +40,11 @@ type IncrementalRenderer struct {
 	// fallback is used for the actual rendering work; it is reused across calls
 	// so its parser pool (and chroma caches) stay warm.
 	fallback *FastRenderer
+
+	// hideCopyIcon and allowSGR are reapplied when width changes rebuild
+	// the fallback.
+	hideCopyIcon bool
+	allowSGR     bool
 }
 
 // NewIncrementalRenderer creates a new incremental renderer with the given
@@ -153,7 +158,24 @@ func (r *IncrementalRenderer) SetWidth(width int) {
 	}
 	r.width = width
 	r.fallback = NewFastRenderer(width)
+	r.fallback.hideCopyIcon, r.fallback.allowSGR = r.hideCopyIcon, r.allowSGR
 	r.Reset()
+}
+
+// HideCopyIcon disables the per-code-block copy affordance and returns r.
+func (r *IncrementalRenderer) HideCopyIcon() *IncrementalRenderer {
+	r.hideCopyIcon = true
+	r.fallback.HideCopyIcon()
+	r.Reset()
+	return r
+}
+
+// AllowSGR keeps SGR styling embedded in trusted input and returns r.
+func (r *IncrementalRenderer) AllowSGR() *IncrementalRenderer {
+	r.allowSGR = true
+	r.fallback.AllowSGR()
+	r.Reset()
+	return r
 }
 
 // Reset drops the cached prefix without changing the width. Use when the
