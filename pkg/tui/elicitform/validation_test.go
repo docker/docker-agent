@@ -1,4 +1,4 @@
-package dialog
+package elicitform
 
 import (
 	"testing"
@@ -53,19 +53,19 @@ func TestValidateStringField(t *testing.T) {
 	tests := []struct {
 		name     string
 		value    string
-		field    ElicitationField
+		field    Field
 		expected bool
 	}{
 		{
 			name:     "valid string no constraints",
 			value:    "hello",
-			field:    ElicitationField{Type: "string"},
+			field:    Field{Type: "string"},
 			expected: true,
 		},
 		{
 			name:  "minLength fails",
 			value: "hi",
-			field: ElicitationField{
+			field: Field{
 				Type:      "string",
 				MinLength: 5,
 			},
@@ -74,16 +74,34 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "minLength passes",
 			value: "hello world",
-			field: ElicitationField{
+			field: Field{
 				Type:      "string",
 				MinLength: 5,
 			},
 			expected: true,
 		},
 		{
+			name:     "maxLength fails",
+			value:    "abcd",
+			field:    Field{Type: "string", MaxLength: 3},
+			expected: false,
+		},
+		{
+			name:     "maxLength passes",
+			value:    "abc",
+			field:    Field{Type: "string", MaxLength: 3},
+			expected: true,
+		},
+		{
+			name:     "lengths count characters not bytes",
+			value:    "héé",
+			field:    Field{Type: "string", MinLength: 3, MaxLength: 3},
+			expected: true,
+		},
+		{
 			name:  "invalid email format",
 			value: "not-an-email",
-			field: ElicitationField{
+			field: Field{
 				Type:   "string",
 				Format: "email",
 			},
@@ -92,7 +110,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "valid email format",
 			value: "test@example.com",
-			field: ElicitationField{
+			field: Field{
 				Type:   "string",
 				Format: "email",
 			},
@@ -101,7 +119,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "invalid uri format",
 			value: "not-a-url",
-			field: ElicitationField{
+			field: Field{
 				Type:   "string",
 				Format: "uri",
 			},
@@ -110,7 +128,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "valid uri format",
 			value: "https://example.com/path",
-			field: ElicitationField{
+			field: Field{
 				Type:   "string",
 				Format: "uri",
 			},
@@ -119,7 +137,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "invalid date format",
 			value: "2024/01/15",
-			field: ElicitationField{
+			field: Field{
 				Type:   "string",
 				Format: "date",
 			},
@@ -128,7 +146,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "valid date format",
 			value: "2024-01-15",
-			field: ElicitationField{
+			field: Field{
 				Type:   "string",
 				Format: "date",
 			},
@@ -137,7 +155,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "invalid date-time format",
 			value: "2024-01-15",
-			field: ElicitationField{
+			field: Field{
 				Type:   "string",
 				Format: "date-time",
 			},
@@ -146,7 +164,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "valid date-time format",
 			value: "2024-01-15T10:30:00Z",
-			field: ElicitationField{
+			field: Field{
 				Type:   "string",
 				Format: "date-time",
 			},
@@ -155,7 +173,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "unknown format is permissive",
 			value: "anything",
-			field: ElicitationField{
+			field: Field{
 				Type:   "string",
 				Format: "custom-unknown-format",
 			},
@@ -164,7 +182,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "pattern fails",
 			value: "abc123",
-			field: ElicitationField{
+			field: Field{
 				Type:    "string",
 				Pattern: "^[A-Z]+$",
 			},
@@ -173,7 +191,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "pattern passes",
 			value: "ABC",
-			field: ElicitationField{
+			field: Field{
 				Type:    "string",
 				Pattern: "^[A-Z]+$",
 			},
@@ -182,7 +200,7 @@ func TestValidateStringField(t *testing.T) {
 		{
 			name:  "invalid pattern returns false",
 			value: "test",
-			field: ElicitationField{
+			field: Field{
 				Type:    "string",
 				Pattern: "[invalid(regex",
 			},
@@ -193,7 +211,7 @@ func TestValidateStringField(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := validateStringFieldWithMessage(tt.value, tt.field) == ""
+			result := validateString(tt.value, tt.field) == ""
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -205,19 +223,19 @@ func TestValidateNumberField(t *testing.T) {
 	tests := []struct {
 		name     string
 		value    float64
-		field    ElicitationField
+		field    Field
 		expected bool
 	}{
 		{
 			name:     "valid number no constraints",
 			value:    42.5,
-			field:    ElicitationField{Type: "number"},
+			field:    Field{Type: "number"},
 			expected: true,
 		},
 		{
 			name:  "minimum fails",
 			value: 5,
-			field: ElicitationField{
+			field: Field{
 				Type:       "number",
 				Minimum:    10,
 				HasMinimum: true,
@@ -227,7 +245,7 @@ func TestValidateNumberField(t *testing.T) {
 		{
 			name:  "minimum passes",
 			value: 15,
-			field: ElicitationField{
+			field: Field{
 				Type:       "number",
 				Minimum:    10,
 				HasMinimum: true,
@@ -237,7 +255,7 @@ func TestValidateNumberField(t *testing.T) {
 		{
 			name:  "maximum fails",
 			value: 150,
-			field: ElicitationField{
+			field: Field{
 				Type:       "number",
 				Maximum:    100,
 				HasMaximum: true,
@@ -247,7 +265,7 @@ func TestValidateNumberField(t *testing.T) {
 		{
 			name:  "maximum passes",
 			value: 50,
-			field: ElicitationField{
+			field: Field{
 				Type:       "number",
 				Maximum:    100,
 				HasMaximum: true,
@@ -257,7 +275,7 @@ func TestValidateNumberField(t *testing.T) {
 		{
 			name:  "within range",
 			value: 50,
-			field: ElicitationField{
+			field: Field{
 				Type:       "number",
 				Minimum:    10,
 				Maximum:    100,
@@ -269,7 +287,7 @@ func TestValidateNumberField(t *testing.T) {
 		{
 			name:  "outside range - below",
 			value: 5,
-			field: ElicitationField{
+			field: Field{
 				Type:       "number",
 				Minimum:    10,
 				Maximum:    100,
@@ -281,7 +299,7 @@ func TestValidateNumberField(t *testing.T) {
 		{
 			name:  "outside range - above",
 			value: 150,
-			field: ElicitationField{
+			field: Field{
 				Type:       "number",
 				Minimum:    10,
 				Maximum:    100,
@@ -293,7 +311,7 @@ func TestValidateNumberField(t *testing.T) {
 		{
 			name:  "boundary - exact minimum",
 			value: 10,
-			field: ElicitationField{
+			field: Field{
 				Type:       "number",
 				Minimum:    10,
 				HasMinimum: true,
@@ -303,7 +321,7 @@ func TestValidateNumberField(t *testing.T) {
 		{
 			name:  "boundary - exact maximum",
 			value: 100,
-			field: ElicitationField{
+			field: Field{
 				Type:       "number",
 				Maximum:    100,
 				HasMaximum: true,
@@ -315,7 +333,7 @@ func TestValidateNumberField(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := validateNumberFieldWithMessage(tt.value, tt.field) == ""
+			result := validateNumber(tt.value, tt.field) == ""
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -345,7 +363,7 @@ func TestValidateFormat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := validateFormatWithMessage(tt.value, tt.format) == ""
+			result := validateFormat(tt.value, tt.format) == ""
 			assert.Equal(t, tt.expected, result)
 		})
 	}

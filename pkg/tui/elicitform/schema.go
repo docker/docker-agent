@@ -1,4 +1,4 @@
-package dialog
+package elicitform
 
 import (
 	"cmp"
@@ -6,9 +6,9 @@ import (
 	"slices"
 )
 
-// parseElicitationSchema extracts fields from a JSON schema.
+// ParseSchema extracts fields from a JSON schema.
 // Supports both object schemas with properties and primitive type schemas.
-func parseElicitationSchema(schema any) []ElicitationField {
+func ParseSchema(schema any) []Field {
 	schemaMap := toMap(schema)
 	if schemaMap == nil {
 		return nil
@@ -20,10 +20,10 @@ func parseElicitationSchema(schema any) []ElicitationField {
 	return parsePrimitiveSchema(schemaMap)
 }
 
-func parseObjectSchema(schemaMap, properties map[string]any) []ElicitationField {
+func parseObjectSchema(schemaMap, properties map[string]any) []Field {
 	requiredSet := toStringSet(schemaMap["required"])
 
-	var fields []ElicitationField
+	var fields []Field
 	for name, propValue := range properties {
 		if prop, ok := propValue.(map[string]any); ok {
 			fields = append(fields, parseField(name, prop, requiredSet[name]))
@@ -31,7 +31,7 @@ func parseObjectSchema(schemaMap, properties map[string]any) []ElicitationField 
 	}
 
 	// Sort: required first, then alphabetically
-	slices.SortFunc(fields, func(a, b ElicitationField) int {
+	slices.SortFunc(fields, func(a, b Field) int {
 		if a.Required != b.Required {
 			if a.Required {
 				return -1
@@ -44,7 +44,7 @@ func parseObjectSchema(schemaMap, properties map[string]any) []ElicitationField 
 	return fields
 }
 
-func parsePrimitiveSchema(schemaMap map[string]any) []ElicitationField {
+func parsePrimitiveSchema(schemaMap map[string]any) []Field {
 	schemaType, _ := schemaMap["type"].(string)
 	if schemaType == "" || schemaType == "object" {
 		return nil
@@ -55,11 +55,11 @@ func parsePrimitiveSchema(schemaMap map[string]any) []ElicitationField {
 		name = title
 	}
 
-	return []ElicitationField{parseField(name, schemaMap, true)}
+	return []Field{parseField(name, schemaMap, true)}
 }
 
-func parseField(name string, prop map[string]any, required bool) ElicitationField {
-	field := ElicitationField{
+func parseField(name string, prop map[string]any, required bool) Field {
+	field := Field{
 		Name:     name,
 		Type:     getString(prop, "type", "string"),
 		Required: required,
@@ -125,7 +125,7 @@ func parseField(name string, prop map[string]any, required bool) ElicitationFiel
 
 // parseChoices reads titled choices ({const, title, description}) into the
 // field's values, labels and descriptions, and reports whether any were found.
-func parseChoices(field *ElicitationField, v any) bool {
+func parseChoices(field *Field, v any) bool {
 	choices, _ := v.([]any)
 	for _, c := range choices {
 		choice, ok := c.(map[string]any)
