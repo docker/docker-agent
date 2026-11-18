@@ -1,7 +1,7 @@
 package banner
 
 import (
-	"strconv"
+	"image/color"
 	"strings"
 	"testing"
 
@@ -12,6 +12,9 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
+
+// sunsetHex is the unadjusted gradient: violet, hot pink and apricot stops at rows 0, 2 and 5.
+var sunsetHex = []string{"#b28aff", "#d981d5", "#ff78aa", "#ff8c95", "#ffa080", "#ffb46b"}
 
 func TestRenderPreservesArt(t *testing.T) {
 	t.Parallel()
@@ -37,19 +40,56 @@ func TestRenderKeepsRowsAlignedWhenCentered(t *testing.T) {
 	}
 }
 
-func TestRenderUsesThemeGradient(t *testing.T) {
+func TestRenderUsesSunsetGradientWithDefaultTheme(t *testing.T) {
 	t.Parallel()
 
-	start := styles.EnsureContrast(styles.Accent, styles.Background)
-	end := styles.EnsureContrast(styles.Info, styles.Background)
-	r0, g0, b0 := styles.ColorToRGB(start)
-	r1, g1, b1 := styles.ColorToRGB(end)
 	lines := Render()
-	for y, line := range Lines {
-		t.Run(strconv.Itoa(y), func(t *testing.T) {
-			fraction := float64(y) / float64(Height-1)
-			fg := styles.RGBToColor(r0+(r1-r0)*fraction, g0+(g1-g0)*fraction, b0+(b1-b0)*fraction)
-			assert.Equal(t, lipgloss.NewStyle().Width(Width).Foreground(fg).Render(line), lines[y])
+	require.Len(t, lines, Height)
+	for y, rowHex := range sunsetHex {
+		want := lipgloss.NewStyle().Width(Width).Foreground(lipgloss.Color(rowHex)).Render(Lines[y])
+		assert.Equal(t, want, lines[y], "row %d", y)
+	}
+}
+
+func TestRowColorsStayReadableOnThemes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		theme string
+		light bool
+	}{
+		{theme: "default"},
+		{theme: "solarized-dark"},
+		{theme: "default-light", light: true},
+		{theme: "gruvbox-light", light: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.theme, func(t *testing.T) {
+			t.Parallel()
+
+			theme, err := styles.LoadTheme(tt.theme)
+			require.NoError(t, err)
+			bg := lipgloss.Color(theme.Colors.Background)
+			colors := rowColors(bg)
+			require.Len(t, colors, Height)
+
+			got := make([]string, len(colors))
+			for y, c := range colors {
+				got[y] = hex(c)
+				// EnsureContrast leaves a color unchanged once it meets the minimum contrast.
+				assert.Equal(t, got[y], hex(styles.EnsureContrast(c, bg)), "row %d is readable", y)
+			}
+			if !tt.light {
+				assert.Equal(t, sunsetHex, got, "dark themes show the gradient unchanged")
+				return
+			}
+			for y := 1; y < len(got); y++ {
+				assert.NotEqual(t, got[y-1], got[y], "rows %d and %d stay distinct", y-1, y)
+			}
 		})
 	}
+}
+
+func hex(c color.Color) string {
+	return styles.RGBToHex(styles.ColorToRGB(c))
 }
