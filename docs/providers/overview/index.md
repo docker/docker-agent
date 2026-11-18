@@ -20,6 +20,7 @@ _Docker Agent supports multiple AI model providers. Choose the right one for you
 - [**Docker Model Runner**](../dmr/index.md) — run models locally with Docker. No API keys, no costs.
 - [**Local Models**](../local/index.md) — run Ollama, vLLM, or LocalAI locally. No API key required.
 - [**Nativ**](../nativ/index.md) — run MLX models locally on Apple Silicon through a custom provider.
+- [**Rapid-MLX**](../rapid-mlx/index.md) — serve MLX models locally on Apple Silicon through a custom provider.
 - [**Provider Definitions**](../custom/index.md) — define reusable provider configurations with shared defaults for any provider type.
 
 ## Quick Comparison
