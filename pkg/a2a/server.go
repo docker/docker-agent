@@ -12,6 +12,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/push"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -22,6 +23,7 @@ import (
 	adka2a "google.golang.org/adk/v2/server/adka2a/v2"
 	adksession "google.golang.org/adk/v2/session"
 
+	"github.com/docker/docker-agent/pkg/a2a/pushstore"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/httpsec"
@@ -53,6 +55,11 @@ type RunOptions struct {
 	OnSafetyPolicy func(servesafety.Resolved)
 	AuthToken      string
 	CORSOrigin     string
+	// PushAllowPrivateNetworks disables the SSRF guard on the push-notification
+	// sender so webhooks resolving to loopback/private addresses are allowed.
+	// Off by default (guard on) per A2A spec §13.2; enable only for trusted
+	// internal deployments or local testing.
+	PushAllowPrivateNetworks bool
 }
 
 func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runConfig *config.RuntimeConfig, ln net.Listener, options RunOptions) error {
@@ -99,6 +106,19 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 		}
 	}()
 
+	// Persist push-notification configs in a sibling database so webhooks
+	// registered via tasks/pushNotificationConfig/set survive a restart.
+	pushDBPath := filepath.Join(filepath.Dir(expandedSessionDB), "a2a-push.db")
+	pushStore, err := pushstore.New(ctx, pushDBPath)
+	if err != nil {
+		return fmt.Errorf("failed to open push notification store: %w", err)
+	}
+	defer func() {
+		if err := pushStore.Close(); err != nil {
+			slog.ErrorContext(ctx, "Failed to close push notification store", "error", err)
+		}
+	}()
+
 	baseURL := &url.URL{Scheme: "http", Host: routableAddr(ln.Addr().String())}
 	slog.DebugContext(ctx, "A2A server listening", "url", baseURL.String())
 
@@ -107,7 +127,7 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 		return err
 	}
 
-	e, err := newServer(t, agentFilename, agentName, sessStore, resolvedSafety, workingDir, ln.Addr().String(), options)
+	e, err := newServer(t, agentFilename, agentName, sessStore, pushStore, resolvedSafety, workingDir, ln.Addr().String(), options)
 	if err != nil {
 		return fmt.Errorf("failed to create A2A server: %w", err)
 	}
@@ -127,7 +147,7 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	return nil
 }
 
-func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
+func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, pushStore push.ConfigStore, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
 	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir)
 	if err != nil {
 		return nil, err
@@ -148,7 +168,7 @@ func newServer(t *team.Team, agentFilename, agentName string, sessStore session.
 			Tags:        []string{"llm", "docker agent"},
 		}},
 		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(invokeURL, a2a.TransportProtocolJSONRPC)},
-		Capabilities:        a2a.AgentCapabilities{Streaming: true},
+		Capabilities:        a2a.AgentCapabilities{Streaming: true, PushNotifications: true},
 		Version:             version.Version,
 		DefaultInputModes:   []string{},
 		DefaultOutputModes:  []string{},
@@ -193,8 +213,19 @@ func newServer(t *team.Team, agentFilename, agentName string, sessStore session.
 		a2asrv.NewStaticAgentCardHandler(agentCard),
 		"a2a.agent_card",
 	)
+	// Push notifications let clients register a webhook (via
+	// tasks/pushNotificationConfig/set) that the SDK's processor POSTs task
+	// status/artifact updates to as the agent runs. The HTTP sender is
+	// SSRF-hardened by default (rejects loopback/private/metadata targets);
+	// PushAllowPrivateNetworks opts out for trusted or local deployments.
+	pushSender := push.NewHTTPPushSender(&push.HTTPSenderConfig{
+		AllowPrivateNetworks: options.PushAllowPrivateNetworks,
+	})
 	jsonrpcHandler := otelhttp.NewHandler(
-		a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor)),
+		a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor,
+			a2asrv.WithPushNotifications(pushStore, pushSender),
+			a2asrv.WithCapabilityChecks(&agentCard.Capabilities),
+		)),
 		"a2a.message",
 	)
 	e.GET(a2asrv.WellKnownAgentCardPath, echo.WrapHandler(cardHandler))

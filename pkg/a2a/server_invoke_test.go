@@ -4,14 +4,17 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/push"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/a2a/pushstore"
 	dagent "github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
@@ -157,12 +160,75 @@ func TestServer_RejectsNonA2AContextCollision(t *testing.T) {
 	require.Equal(t, "private", stored.Title)
 }
 
+// TestServer_PushNotificationConfigRoundTrip exercises the full push-notification
+// wiring through the JSON-RPC endpoint: a client registers a webhook against a
+// live task and reads it back, and we confirm it was persisted through the real
+// SQLite-backed pushstore (not the in-memory default).
+func TestServer_PushNotificationConfigRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	provider := &sequentialMockProvider{
+		id:      modelsdev.NewID("test", "mock-model"),
+		streams: []chat.MessageStream{stopStream()},
+	}
+	root := dagent.New("root", "You are a test agent", dagent.WithModel(provider))
+
+	pushStore, err := pushstore.New(t.Context(), filepath.Join(t.TempDir(), "push.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pushStore.Close()) })
+
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	e, err := newServer(team.New(team.WithAgents(root)), "test.yaml", "root",
+		session.NewInMemorySessionStore(), pushStore,
+		servesafety.Resolved{Policy: session.SafetyPolicyAutonomous},
+		testWorkspaceRoot, ln.Addr().String(), RunOptions{})
+	require.NoError(t, err)
+	go func() { _ = e.Server.Serve(ln) }()
+	t.Cleanup(func() { require.NoError(t, e.Server.Close()) })
+
+	client, err := a2aclient.NewFromEndpoints(t.Context(), []*a2a.AgentInterface{
+		a2a.NewAgentInterface(fmt.Sprintf("http://%s/invoke", ln.Addr().String()), a2a.TransportProtocolJSONRPC),
+	})
+	require.NoError(t, err)
+
+	// A task must exist before a push config can be attached to it.
+	result, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello")),
+	})
+	require.NoError(t, err)
+	task, ok := result.(*a2a.Task)
+	require.True(t, ok, "autonomous run should return a Task")
+
+	// Register a webhook through the JSON-RPC endpoint.
+	saved, err := client.CreateTaskPushConfig(t.Context(), &a2a.PushConfig{
+		TaskID: task.ID,
+		URL:    "https://hook.example/callback",
+		Token:  "sekret",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, saved.ID, "the store should assign a config ID")
+
+	// Read it back through the server.
+	got, err := client.GetTaskPushConfig(t.Context(), &a2a.GetTaskPushConfigRequest{
+		TaskID: task.ID,
+		ID:     saved.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://hook.example/callback", got.URL)
+
+	// Confirm it actually landed in the persistent SQLite store.
+	stored, err := pushStore.Get(t.Context(), task.ID, saved.ID)
+	require.NoError(t, err)
+	require.Equal(t, "sekret", stored.Token)
+}
+
 func startInvokeServer(t *testing.T, tm *team.Team, store session.Store, safety servesafety.Resolved) net.Listener {
 	t.Helper()
 
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	e, err := newServer(tm, "test.yaml", "root", store, safety, testWorkspaceRoot, ln.Addr().String(), RunOptions{})
+	e, err := newServer(tm, "test.yaml", "root", store, push.NewInMemoryStore(), safety, testWorkspaceRoot, ln.Addr().String(), RunOptions{})
 	require.NoError(t, err)
 	go func() { _ = e.Server.Serve(ln) }()
 	t.Cleanup(func() { require.NoError(t, e.Server.Close()) })

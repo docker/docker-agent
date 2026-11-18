@@ -19,15 +19,16 @@ import (
 )
 
 type a2aFlags struct {
-	agentName      string
-	listenAddr     string
-	sessionDB      string
-	safety         string
-	authToken      string
-	corsOrigin     string
-	insecureNoAuth bool
-	stdout         io.Writer
-	runConfig      config.RuntimeConfig
+	agentName        string
+	listenAddr       string
+	sessionDB        string
+	safety           string
+	authToken        string
+	corsOrigin       string
+	insecureNoAuth   bool
+	pushAllowPrivate bool
+	stdout           io.Writer
+	runConfig        config.RuntimeConfig
 }
 
 func newA2ACmd() *cobra.Command {
@@ -50,6 +51,7 @@ func newA2ACmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for all A2A requests")
 	cmd.PersistentFlags().StringVar(&flags.corsOrigin, "cors-origin", "", "Allowed browser origin(s), comma-separated; empty disables CORS")
 	cmd.PersistentFlags().BoolVar(&flags.insecureNoAuth, "insecure-no-auth", false, "Allow unauthenticated non-loopback binding (insecure)")
+	cmd.PersistentFlags().BoolVar(&flags.pushAllowPrivate, "push-allow-private", false, "Allow push-notification webhooks to loopback/private addresses (disables SSRF guard)")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
 	return cmd
@@ -88,9 +90,10 @@ func (f *a2aFlags) runA2ACommand(cmd *cobra.Command, args []string) (commandErr 
 
 	out.Println("Listening on", ln.Addr().String())
 	return a2a.Run(ctx, agentFilename, f.agentName, sessionDBPath(f.sessionDB), &f.runConfig, ln, a2a.RunOptions{
-		CLISafety:  session.SafetyPolicy(f.safety),
-		AuthToken:  f.authToken,
-		CORSOrigin: f.corsOrigin,
+		CLISafety:                session.SafetyPolicy(f.safety),
+		AuthToken:                f.authToken,
+		CORSOrigin:               f.corsOrigin,
+		PushAllowPrivateNetworks: f.pushAllowPrivate,
 		OnSafetyPolicy: func(resolved servesafety.Resolved) {
 			out.Printf("Tool safety policy: %s (source: %s)\n", resolved.Policy, resolved.Source)
 		},
