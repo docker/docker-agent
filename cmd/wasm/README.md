@@ -23,7 +23,8 @@ cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" cmd/wasm/web/wasm_exec.js
 The output is a large `.wasm` (the runtime, the YAML parser, three LLM
 provider clients and the MCP client). Size depends on the toolchain
 and enabled features; compression and `-ldflags="-s -w"` can reduce transfer
-size. No size-reduction ratio is guaranteed.
+size. No size-reduction ratio is guaranteed. The *Small profile* below is
+about a fifth of the size.
 
 ### Selecting YAML history and catalog data
 
@@ -89,6 +90,55 @@ GOOS=js GOARCH=wasm go build -tags docker_agent_wasm_cloud \
 These providers still require CORS-enabled endpoints or a provider proxy;
 `toolProxy` only routes SSRF-guarded tool traffic, not model requests.
 See `examples/cloud-bedrock.yaml` and `examples/cloud-vertex.yaml`.
+
+### Small profile
+
+Most of the default binary is what it links, not the runtime. The small
+profile keeps the shared runtime and trades features for size: about 36 MiB
+(Go 1.27.4), against 162 MiB for the default build with the same `go build`
+flags.
+
+```sh
+task build-wasm-small
+
+# which runs:
+GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" \
+  -tags docker_agent_wasm_small,docker_agent_no_hook_templates,docker_agent_no_js_expansion,nethttpomithttp2 \
+  -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
+go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
+```
+
+| | Default | Small |
+| --- | --- | --- |
+| Providers | OpenAI, Anthropic, Google | OpenAI and anything OpenAI-compatible (custom `providers:` entries such as OpenRouter) |
+| Toolsets | see *Limits* | the same, without `openapi` |
+| `${...}` | JavaScript | `${env.NAME}` and bound `${name}` placeholders; any other expression stays as text |
+| `code_mode_tools` | yes | no |
+| Builtin hooks | see *Limits* | the same, without `add_context` |
+| Config versions | all | the current one |
+| models.dev catalog | embedded | none: context limits, costs and capabilities are unknown |
+
+A config that asks for what is left out is rejected when the session is
+created, like everything else in *Limits*; only JavaScript expressions are
+not detected, and reach the model as text. The JavaScript API is unchanged.
+RAG can be added with `docker_agent_wasm_rag`; the cloud providers cannot.
+
+The tags go together. goja, `text/template` and expr look methods up by
+reflection, which makes the Go linker keep every exported method of every
+reachable type: linking one of them brings back the unused parts of every
+SDK. `docker_agent_no_js_expansion` and `docker_agent_no_hook_templates`
+swap goja and `text/template` out, and `small_tags.go` refuses to build the
+profile without them. `nethttpomithttp2` drops net/http's HTTP/2 client,
+unused because requests go through `fetch`.
+
+`scripts/wasmpack` then takes 7 MiB off the linked binary. On wasm the
+linker's `runtime.findfunctab` costs 320 bytes per function, all of them
+predictable: the tool removes the table and adds a start function that
+writes it back at instantiation, which leaves memory byte for byte the same.
+It works on any Go js/wasm binary.
+
+`e2e/dependencies_test.go` guards the profile's dependency closure and
+`node/small_test.js` its size.
 
 ## Run (Node)
 
@@ -424,18 +474,21 @@ documents is rejected when the session is created.
 | `runtime.go` | Builds an `embeddedchat.Session` from YAML with the browser registries and loader features; audits the config for host-only features. |
 | `toolsets.go` | The per-session toolset registry: remote MCP plus the portable builtins, build-selected RAG registration, and the per-toolset browser checks. |
 | `rag.go` / `rag_off.go` | Build-tagged RAG implementation and the no-RAG registry variant. |
+| `small.go` / `small_off.go` | What differs between the small and the default profile: providers, OpenAPI, YAML versions, catalog, code mode and hooks. `small_tags.go` checks the small profile's companion tags. |
 | `session.go` | `chatSession`: one conversation, its lifetime context, send/confirm/abort/restart/close. JS-agnostic, tested from Go. |
 | `events.go` | Projects runtime events onto the JS event shapes. |
 | `handle.go` | The JS session object and the lifetime of its callbacks. |
 | `bridge.go` | JS ⇄ Go value helpers, promises, awaiting JS callbacks. |
-| `providers.go` | Explicit demo provider registry (OpenAI / Anthropic / Google). |
+| `providers.go` | Explicit demo provider registry: OpenAI, plus the profile's providers (Anthropic / Google by default). |
 | `examples/` | Configs that run unchanged in the browser and in the CLI. |
 | `node/` | Node loader and JS bridge tests. |
 | `browser/` | Headless Chrome integration tests using real fetch and local mock services. |
 
 The shims that make the tree compile under `GOOS=js GOARCH=wasm` are
 intentionally tiny (`pkg/cache/lock_js.go`, `pkg/userconfig/lock_js.go`,
-`pkg/desktop/*_js.go`, `pkg/httpclient/egress_js.go`, ...); everything else
+`pkg/desktop/*_js.go`, `pkg/httpclient/egress_js.go`, ...); two more keep
+code no browser can run out of the binary (`pkg/tools/mcp/install_js.go`,
+`pkg/tools/mcp/oauthflow/trace_js.go`). Everything else
 compiles unchanged because the `os/exec`, sandbox, sound, audio, server,
 browser and keyring code is isolated behind packages the wasm entry does not
 import.

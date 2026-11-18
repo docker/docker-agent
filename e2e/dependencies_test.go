@@ -216,6 +216,48 @@ func TestWasmDefaultBinaryDependencies(t *testing.T) {
 	}
 }
 
+// The small browser profile links one provider SDK and none of the engines
+// whose reflective method lookups make the linker keep every exported method
+// of every reachable type. If this fails you probably added an import that
+// drags one of them back in: the binary roughly doubles when that happens.
+func TestWasmSmallBinaryDependencies(t *testing.T) {
+	t.Parallel()
+	const tags = "docker_agent_wasm_small,docker_agent_no_hook_templates,docker_agent_no_js_expansion"
+	cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "-tags", tags, "./cmd/wasm")
+	cmd.Dir = ".."
+	cmd.Env = append(os.Environ(), "GOOS=js", "GOARCH=wasm")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	forbidden := []string{
+		// Reflective method lookups.
+		"github.com/dop251/goja",
+		"github.com/expr-lang/expr",
+		"github.com/google/go-cmp",
+		"text/template",
+		"html/template",
+		"net/rpc",
+		// Left out of the profile.
+		"github.com/docker/docker-agent/pkg/model/provider/anthropic",
+		"github.com/docker/docker-agent/pkg/model/provider/gemini",
+		"github.com/anthropics/anthropic-sdk-go",
+		"google.golang.org/genai",
+		"google.golang.org/grpc",
+		"google.golang.org/protobuf",
+		"cloud.google.com/go",
+		"github.com/docker/docker-agent/pkg/tools/builtin/openapi",
+		"github.com/pb33f/libopenapi",
+		"github.com/docker/docker-agent/pkg/tools/codemode",
+		"github.com/docker/docker-agent/pkg/config/legacy",
+		"github.com/docker/docker-agent/pkg/modelsdev/embedded",
+		"github.com/docker/docker-agent/pkg/toolinstall",
+	}
+	for dep := range strings.FieldsSeq(string(out)) {
+		for _, prefix := range forbidden {
+			assert.False(t, dep == prefix || strings.HasPrefix(dep, prefix+"/"), "dependency left out of the small WASM binary: %s", dep)
+		}
+	}
+}
+
 func TestWasmRAGDependencies(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -316,6 +358,31 @@ func TestNoHookTemplatesDropsTextTemplate(t *testing.T) {
 
 	cmd = exec.CommandContext(t.Context(), "go", "test", "-count=1", "-tags", tags,
 		"-run", "HookTemplatesDisabled", "./pkg/hooks", "./pkg/hooks/builtins")
+	cmd.Dir = ".."
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+}
+
+// goja exposes Go methods to scripts by reflection, with the same effect on
+// the linker as text/template. Embedders building with
+// docker_agent_no_js_expansion must get ${env.NAME} expansion without it,
+// through every package that expands placeholders with pkg/js.
+func TestNoJSExpansionDropsGoja(t *testing.T) {
+	t.Parallel()
+	const tags = "docker_agent_no_js_expansion"
+	cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "-tags", tags,
+		"./pkg/js", "./pkg/upstream", "./pkg/tools/mcp", "./pkg/tools/builtin/fetch", "./pkg/tools/builtin/api")
+	cmd.Dir = ".."
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	for dep := range strings.FieldsSeq(string(out)) {
+		assert.False(t, strings.HasPrefix(dep, "github.com/dop251/goja"), "goja dependency without JavaScript expansion: %s", dep)
+	}
+
+	// The engine-less expander has its own tests, and must keep passing
+	// those of the packages that expand placeholders through it.
+	cmd = exec.CommandContext(t.Context(), "go", "test", "-count=1", "-tags", tags,
+		"./pkg/js", "./pkg/upstream", "./pkg/tools/builtin/fetch", "./pkg/tools/builtin/api/...")
 	cmd.Dir = ".."
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, "%s", out)

@@ -7,6 +7,9 @@ vars:
   GIT_COMMIT:
     sh: echo "${GIT_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo dev)}"
 
+  # The small browser profile and the companion tags it needs; see cmd/wasm/README.md.
+  WASM_SMALL_TAGS: docker_agent_wasm_small,docker_agent_no_hook_templates,docker_agent_no_js_expansion,nethttpomithttp2
+
 env:
   GIT_TAG: "{{.GIT_TAG}}"
   GIT_COMMIT: "{{.GIT_COMMIT}}"
@@ -172,6 +175,7 @@ tasks:
     cmds:
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - GOOS=js GOARCH=wasm go test -tags docker_agent_wasm_rag -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
+      - GOOS=js GOARCH=wasm go test -tags {{.WASM_SMALL_TAGS}} -run '^TestSmallProfile' -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" pkg/model/provider/factory_js_openai_vendor_test.go
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run '^TestLimitLargeToolResults|^TestEnvironmentInfo' ./pkg/hooks/builtins
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./pkg/embeddedchat ./pkg/fuzzy/... ./pkg/tools/builtin/calculator ./pkg/tools/builtin/datetime ./pkg/tools/builtin/deferred ./pkg/tools/builtin/think ./pkg/tools/builtin/random ./pkg/tools/builtin/todo ./pkg/tools/builtin/memory ./pkg/memory/database/inmemory ./pkg/tools/codemode ./pkg/tools/toon ./pkg/rag ./pkg/rag/strategy
@@ -185,10 +189,18 @@ tasks:
       - GOOS=js GOARCH=wasm go build -tags docker_agent_wasm_rag -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
       - node cmd/wasm/smoke_test.js
       - node --test cmd/wasm/node/rag_test.js
+      - task: build-wasm-small
+      - node --test cmd/wasm/node/small_test.js
       - GOOS=js GOARCH=wasm go build -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
       - node --test cmd/wasm/web/events_test.js
       - node cmd/wasm/smoke_test.js
       - node --test cmd/wasm/node/bridge_test.js cmd/wasm/node/rag_off_test.js
+
+  build-wasm-small:
+    desc: Build the size-optimised browser binary (the cmd/wasm small profile)
+    cmds:
+      - GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
+      - go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
 
   test-wasm-browser:
     desc: Test real browser fetch, tools and RAG (requires Chrome and openssl)

@@ -28,7 +28,6 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/gateway"
 	"github.com/docker/docker-agent/pkg/js"
-	"github.com/docker/docker-agent/pkg/toolinstall"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 	"github.com/docker/docker-agent/pkg/tools/workingdir"
@@ -97,7 +96,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		return NewGatewayToolset(ctx, toolset.Name, mcpServerName, serverSpec.Secrets, toolset.Config, envProvider, cwd, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle))
 
 	case toolset.Command != "":
-		resolvedCommand, err := toolinstall.EnsureCommand(ctx, toolset.Command, toolset.Version)
+		resolvedCommand, err := ensureCommand(ctx, toolset.Command, toolset.Version)
 		if err != nil {
 			slog.WarnContext(ctx, "MCP command not yet available, will retry",
 				"command", toolset.Command, "error", err)
@@ -109,7 +108,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 			return nil, fmt.Errorf("failed to expand the tool's environment variables: %w", err)
 		}
 		env = mergeChildEnv(env)
-		env = toolinstall.PrependBinDirToEnv(env)
+		env = prependBinDirToEnv(env)
 
 		return NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, cwd, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
 
