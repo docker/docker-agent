@@ -793,6 +793,9 @@ func (a *App) sendEvent(ctx context.Context, event tea.Msg) {
 		return
 	default:
 	}
+	if a.cancelRetiredElicitation(ctx, event) {
+		return
+	}
 	select {
 	case a.events <- a.stampEvent(ctx, operationEvent(ctx, event)):
 	case <-ctx.Done():

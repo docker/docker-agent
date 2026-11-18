@@ -42,6 +42,10 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 		}
 		return
 	}
+	if m.screen.Elicitation != nil {
+		m.handleElicitationKey(ctx, k)
+		return
+	}
 
 	if m.screen.Settings != nil {
 		m.handleSettingsKey(k)
@@ -803,6 +807,8 @@ func (m *model) resetConversation() {
 	m.streamStartTime = time.Time{}
 	m.cancelMarkerPending = false
 	m.screen.Confirm = nil
+	m.elicitations = nil
+	m.screen.Elicitation = nil
 	m.usage.Reset()
 	m.status.ContextLength = 0
 	m.status.ContextLimit = 0

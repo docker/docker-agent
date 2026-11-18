@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/programstatus"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/sound"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
@@ -293,6 +294,7 @@ type model struct {
 	programStatusUnsupported bool
 	statusSession            programstatus.Session
 	confirmationEvent        tea.Msg
+	elicitations             []*runtime.ElicitationRequestEvent
 	eventGeneration          atomic.Uint64
 	app                      *app.App
 	term                     *ui.Terminal

@@ -1,4 +1,4 @@
-package dialog
+package elicitform
 
 import (
 	"fmt"
@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // patternCache caches compiled regex patterns to avoid repeated compilation.
@@ -27,10 +28,15 @@ func getCompiledPattern(pattern string) (*regexp.Regexp, error) {
 	return compiled, nil
 }
 
-// validateStringFieldWithMessage validates a string value and returns a descriptive error message.
-func validateStringFieldWithMessage(val string, field ElicitationField) string {
-	if field.MinLength > 0 && len(val) < field.MinLength {
+// validateString validates a string value and returns a descriptive error message.
+func validateString(val string, field Field) string {
+	// JSON Schema lengths count characters, not bytes.
+	n := utf8.RuneCountInString(val)
+	if field.MinLength > 0 && n < field.MinLength {
 		return fmt.Sprintf("Must be at least %d characters", field.MinLength)
+	}
+	if field.MaxLength > 0 && n > field.MaxLength {
+		return fmt.Sprintf("Must be at most %d characters", field.MaxLength)
 	}
 	if field.Pattern != "" {
 		compiled, err := getCompiledPattern(field.Pattern)
@@ -41,11 +47,11 @@ func validateStringFieldWithMessage(val string, field ElicitationField) string {
 			return "Invalid format"
 		}
 	}
-	return validateFormatWithMessage(val, field.Format)
+	return validateFormat(val, field.Format)
 }
 
-// validateNumberFieldWithMessage validates a numeric value and returns a descriptive error message.
-func validateNumberFieldWithMessage(val float64, field ElicitationField) string {
+// validateNumber validates a numeric value and returns a descriptive error message.
+func validateNumber(val float64, field Field) string {
 	if field.HasMinimum && val < field.Minimum {
 		return fmt.Sprintf("Must be at least %v", field.Minimum)
 	}
@@ -56,7 +62,7 @@ func validateNumberFieldWithMessage(val float64, field ElicitationField) string 
 }
 
 // validateSelectionCount checks a multiselect against minItems and maxItems.
-func validateSelectionCount(count int, field ElicitationField) string {
+func validateSelectionCount(count int, field Field) string {
 	if count < field.MinItems {
 		return fmt.Sprintf("Select at least %d", field.MinItems)
 	}
@@ -66,8 +72,8 @@ func validateSelectionCount(count int, field ElicitationField) string {
 	return ""
 }
 
-// validateFormatWithMessage validates a string against a JSON Schema format and returns an error message.
-func validateFormatWithMessage(val, format string) string {
+// validateFormat validates a string against a JSON Schema format and returns an error message.
+func validateFormat(val, format string) string {
 	switch format {
 	case "":
 		return ""

@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestReplacementDiscardsOldThrottledContentAndLateStop(t *testing.T) {
@@ -153,4 +154,40 @@ func TestCanceledDetachedAccountingStillDeliversWithOriginalGeneration(t *testin
 		synctest.Wait()
 		require.Len(t, got, 100)
 	})
+}
+
+type cancelingElicitationRuntime struct {
+	elicitationRequestMockRuntime
+
+	cancelAll int
+}
+
+func (m *cancelingElicitationRuntime) CancelElicitations() { m.cancelAll++ }
+
+func TestRetireEventsCancelsPendingElicitations(t *testing.T) {
+	t.Parallel()
+	rt := &cancelingElicitationRuntime{}
+	a := &App{runtime: rt, events: make(chan tea.Msg, 16)}
+
+	a.RetireEvents()
+
+	require.Equal(t, 1, rt.cancelAll)
+}
+
+func TestRetiredConversationElicitationIsCancelledNotDelivered(t *testing.T) {
+	t.Parallel()
+	rt := &cancelingElicitationRuntime{}
+	events := make(chan tea.Msg, 16)
+	a := &App{runtime: rt, events: events}
+	oldCtx := a.eventContext(t.Context())
+	a.RetireEvents()
+
+	a.sendEvent(oldCtx, runtime.ElicitationRequest("late", "form", nil, "", "old", "", "bg", nil, "worker"))
+	require.Empty(t, events)
+	require.Equal(t, []string{"old"}, rt.resumedIDs)
+	require.Equal(t, []tools.ElicitationAction{tools.ElicitationActionCancel}, rt.resumedActions)
+
+	a.sendEvent(a.eventContext(t.Context()), runtime.ElicitationRequest("fresh", "form", nil, "", "new", "", "root", nil, "root"))
+	require.Len(t, events, 1)
+	require.Equal(t, []string{"old"}, rt.resumedIDs)
 }
