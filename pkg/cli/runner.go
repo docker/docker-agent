@@ -280,12 +280,8 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 					switch result {
 					case ConfirmationApprove:
 						rt.Resume(runCtx, runtime.ResumeApprove())
-					case ConfirmationReject:
+					case ConfirmationReject, ConfirmationAbort:
 						rt.Resume(runCtx, runtime.ResumeReject(""))
-						return nil
-					case ConfirmationAbort:
-						rt.Resume(runCtx, runtime.ResumeReject(""))
-						return nil
 					}
 				}
 			case *runtime.ElicitationRequestEvent:
