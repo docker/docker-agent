@@ -1,6 +1,7 @@
 package styles
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,6 +36,7 @@ func TestContextGaugeLevelFor(t *testing.T) {
 		// compaction.ShouldCompact.
 		{"threshold above one falls back", 0.7, 1.5, ContextGaugeWarning},
 		{"negative threshold falls back", 0.9, -1, ContextGaugeCritical},
+		{"NaN threshold falls back", 0.7, math.NaN(), ContextGaugeWarning},
 	}
 
 	for _, tt := range tests {
