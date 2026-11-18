@@ -1,28 +1,39 @@
 package banner
 
 import (
+	"image/color"
+
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-// Render applies a top-to-bottom accent-to-info gradient using the current theme.
-func Render() []string {
-	start := styles.EnsureContrast(styles.Accent, styles.Background)
-	end := styles.EnsureContrast(styles.Info, styles.Background)
-	r0, g0, b0 := styles.ColorToRGB(start)
-	r1, g1, b1 := styles.ColorToRGB(end)
+// sunsetRows has violet, hot pink and apricot stops at rows 0, 2 and 5; the other rows blend their neighbors.
+var sunsetRows = [Height]color.Color{
+	lipgloss.Color("#B28AFF"),
+	lipgloss.Color("#D981D5"),
+	lipgloss.Color("#FF78AA"),
+	lipgloss.Color("#FF8C95"),
+	lipgloss.Color("#FFA080"),
+	lipgloss.Color("#FFB46B"),
+}
 
+// Render applies the top-to-bottom sunset gradient, readable on the current theme background.
+func Render() []string {
+	colors := rowColors(styles.Background)
 	lines := make([]string, len(Lines))
 	for y, line := range Lines {
-		t := float64(y) / float64(Height-1)
-		fg := styles.RGBToColor(
-			r0+(r1-r0)*t,
-			g0+(g1-g0)*t,
-			b0+(b1-b0)*t,
-		)
 		// Equal-width rows keep centering from shifting the g's descender.
-		lines[y] = lipgloss.NewStyle().Width(Width).Foreground(fg).Render(line)
+		lines[y] = lipgloss.NewStyle().Width(Width).Foreground(colors[y]).Render(line)
 	}
 	return lines
+}
+
+// rowColors adjusts only the rows that are hard to read on bg, such as on light themes.
+func rowColors(bg color.Color) []color.Color {
+	colors := make([]color.Color, len(sunsetRows))
+	for y, c := range sunsetRows {
+		colors[y] = styles.EnsureContrast(c, bg)
+	}
+	return colors
 }
