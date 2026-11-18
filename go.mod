@@ -31,7 +31,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/creack/pty v1.1.24
-	github.com/dgageot/rubocop-go v1.3.0
+	github.com/dgageot/rubocop-go v1.4.0
 	github.com/docker/aijson v0.1.0
 	github.com/docker/cli v29.10.0+incompatible
 	github.com/docker/go-units v0.5.0
@@ -87,14 +87,14 @@ require (
 	go.opentelemetry.io/proto/otlp v1.11.1
 	golang.org/x/crypto v0.59.0
 	golang.org/x/image v0.48.0
-	golang.org/x/net v0.62.0
+	golang.org/x/net v0.63.0
 	golang.org/x/oauth2 v0.38.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
-	golang.org/x/tools v0.52.0
+	golang.org/x/tools v0.53.0
 	google.golang.org/adk/v2 v2.4.0
-	google.golang.org/genai v1.77.0
+	google.golang.org/genai v1.79.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/dnaeon/go-vcr.v4 v4.0.8
 	gotest.tools/v3 v3.5.2
@@ -224,7 +224,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.40.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0 // indirect
-	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/mod v0.43.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/api v0.295.0 // indirect
