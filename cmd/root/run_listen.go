@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -68,10 +69,10 @@ func registerAppEventSource(sm *server.SessionManager, sessionID string, a *app.
 // external processes can drive the running TUI (steer, followup, resume, ...).
 // It returns an app.Opt that registers the App as the attached session owner
 // (see recallCoordinatorOpt for the stream-guard wiring shared by both paths).
-func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Printer, rt runtime.Runtime, sess *session.Session) (app.Opt, error) {
+func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Printer, rt runtime.Runtime, sess *session.Session) (app.Opt, func(), error) {
 	if f.listenAddr == "" {
-		opt, _ := f.recallCoordinatorOpt(ctx, rt, sess)
-		return opt, nil
+		opt, detach := f.recallCoordinatorOpt(ctx, rt, sess)
+		return opt, detach, nil
 	}
 
 	sm := server.NewSessionManager(ctx, nil, rt.SessionStore(), 0, &f.runConfig, server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
@@ -83,11 +84,11 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 
 	ln, err := server.Listen(ctx, f.listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", f.listenAddr, err)
+		return nil, nil, fmt.Errorf("listen %s: %w", f.listenAddr, err)
 	}
 	if err := httpsec.ValidateListenerAuth(ln.Addr(), ""); err != nil {
 		_ = ln.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	context.AfterFunc(ctx, func() { _ = ln.Close() })
 
@@ -119,5 +120,19 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 		// Route control-plane follow-ups and idle recalls into the TUI App so
 		// each starts a real turn and streams events to every subscriber.
 		sm.RegisterFollowUpInjector(sess.ID, a.InjectUserMessage)
-	}, nil
+	}, func() { sm.DetachRuntime(sess.ID) }, nil
+}
+
+// detachOnClose runs detach before cleanup, once, so a closed tab stops being
+// an attached control-plane session before its runtime is torn down. Both the
+// initial tab and the tabs the spawner creates use it (see run.go and
+// createSessionSpawner).
+func detachOnClose(cleanup, detach func()) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			detach()
+			cleanup()
+		})
+	}
 }
