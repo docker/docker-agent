@@ -3,6 +3,55 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.162.0] - 2026-11-18
+
+This release adds new providers, a redesigned startup banner, and several bug fixes including a security fix for terminal control sequences in rendered Markdown.
+
+## Breaking Changes
+- Adds `models.<name>.context_window` config field and reports unknown compaction windows; users of local models or custom providers without a catalog entry who encounter compaction will need to set this field to avoid errors
+
+## What's New
+- Adds PopNow as a built-in OpenAI-compatible provider (`popnow/`) supporting models from multiple vendors behind a single API key
+- Replaces the startup banner with a braille-dot "docker agent" wordmark colored with the active theme's accent, reducing banner height from 13 rows to 6
+- Adds `models.<name>.context_window` configuration option for specifying context window size for custom or local models
+- Adds a small browser WebAssembly profile (`task build-wasm-small`) that reduces the packed binary to 35.8 MiB versus 162 MiB for the default build
+
+## Bug Fixes
+- Fixes crash when a language server reports text-edit positions with negative values
+- Fixes agent-scoped `--model` overrides being incorrectly split on commas, which caused alloy specs like `root=gpt-5,claude-sonnet` to silently apply fragments to unintended agents
+- Restores the 20 max-iterations default for Docker Model Runner when using `docker agent new`
+- Fixes TUI edit diffs to render from recorded result metadata rather than reconstructing from current file contents, preserving diffs through session reload and remote transport
+- Fixes a race condition on the ACP connection logger
+- Fixes the Markdown renderer to strip terminal control sequences (CSI, OSC, DCS, C0/C1 controls, etc.) from rendered text, preventing model or tool output from clearing the screen, hiding the cursor, or writing the clipboard
+
+## Technical Changes
+- Isolates TypeScript generator race tests in CI with `GOMAXPROCS=1` as a temporary mitigation for a Go runtime issue
+- Refreshes the models.dev catalog snapshot (two updates: +1124/-201 and +182/-79 entries)
+### Pull Requests
+
+- [#4822](https://github.com/docker/docker-agent/pull/4822) - feat: add PopNow provider
+- [#4904](https://github.com/docker/docker-agent/pull/4904) - fix(config): don't split agent-scoped --model overrides on commas
+- [#4907](https://github.com/docker/docker-agent/pull/4907) - fix(lsp): clamp negative positions in text edits
+- [#4918](https://github.com/docker/docker-agent/pull/4918) - docs: cut redundant copy across documentation
+- [#4919](https://github.com/docker/docker-agent/pull/4919) - docs: refresh site styling and simplify reasoning guidance
+- [#4921](https://github.com/docker/docker-agent/pull/4921) - docs: update CHANGELOG.md for v1.161.0
+- [#4924](https://github.com/docker/docker-agent/pull/4924) - fix(cli): restore the DMR max-iterations default on agent new
+- [#4925](https://github.com/docker/docker-agent/pull/4925) - fix: render TUI edit diffs from recorded result metadata
+- [#4926](https://github.com/docker/docker-agent/pull/4926) - fix(acp): avoid racing on the connection logger
+- [#4927](https://github.com/docker/docker-agent/pull/4927) - ci: isolate TypeScript generator race tests
+- [#4929](https://github.com/docker/docker-agent/pull/4929) - feat(tui): replace startup banner with braille wordmark
+- [#4934](https://github.com/docker/docker-agent/pull/4934) - docs: auto-update for merged PRs (2026-11-14)
+- [#4938](https://github.com/docker/docker-agent/pull/4938) - test(runtime): add persistence observer streaming benchmarks
+- [#4939](https://github.com/docker/docker-agent/pull/4939) - chore(deps): bump the actions group across 2 directories with 6 updates
+- [#4940](https://github.com/docker/docker-agent/pull/4940) - chore: refresh models.dev snapshot (+1124 -201 ~915)
+- [#4941](https://github.com/docker/docker-agent/pull/4941) - add model level `context_window` config
+- [#4942](https://github.com/docker/docker-agent/pull/4942) - docs: update startup banner description (2026-11-17)
+- [#4944](https://github.com/docker/docker-agent/pull/4944) - Bump direct Go dependencies
+- [#4946](https://github.com/docker/docker-agent/pull/4946) - feat(wasm): add a small browser profile
+- [#4948](https://github.com/docker/docker-agent/pull/4948) - fix(markdown): strip terminal controls from rendered text
+- [#4957](https://github.com/docker/docker-agent/pull/4957) - chore: refresh models.dev snapshot (+182 -79 ~320)
+
+
 ## [v1.161.0] - 2026-11-13
 
 This release delivers bug fixes across filesystem tools, path validation, session persistence, proxy transport, and Windows compatibility, along with new features including worktree file inclusion, model stream idle timeouts, and new provider catalog entries.
@@ -7529,3 +7578,5 @@ This release improves the terminal user interface with better error handling and
 [v1.160.0]: https://github.com/docker/docker-agent/releases/tag/v1.160.0
 
 [v1.161.0]: https://github.com/docker/docker-agent/releases/tag/v1.161.0
+
+[v1.162.0]: https://github.com/docker/docker-agent/releases/tag/v1.162.0
