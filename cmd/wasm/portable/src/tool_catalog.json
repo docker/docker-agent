@@ -1,0 +1,98 @@
+{
+  "calculator": {
+    "instructions": "## Calculator\n\nUse calculate for numerical calculations instead of doing arithmetic yourself.\nPass a single expression with decimal numbers, parentheses, +, -, *, /, %, or ^.\nPowers use integer exponents and associate right-to-left; -2^2 means -(2^2).\n% is integer remainder, not a percentage: write 15 / 100 for 15%.\nScientific notation such as 1.5e3 is supported. Variables and functions are not.\nThe result field is always exact. When approximate is true, decimal is rounded\n(to 20 decimal places); use the exact fraction in result for further calculations.",
+    "tools": [
+      {
+        "function": {
+          "description": "Calculate an arithmetic expression using exact rational arithmetic, avoiding floating-point rounding and integer overflow. Supports +, -, *, /, integer remainder %, integer powers ^, parentheses, and scientific notation. No code execution or side effects. Returns an exact result plus a decimal representation, explicitly marked when rounded.",
+          "name": "calculate",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "expression": {
+                "description": "Arithmetic expression using decimal numbers (including scientific notation), parentheses, +, -, *, /, %, and ^ for integer powers. Example: (19.99 * 3) * (1 + 8.25 / 100). No variables or function calls. Maximum 8192 bytes.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "expression"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "think": {
+    "instructions": "## Think Tool\n\nUse the think tool as a scratchpad before acting. Think to:\n- Check which rules or policies apply\n- Verify you have all required information\n- Validate planned actions before executing\n- Reason through complex multi-step problems",
+    "tools": [
+      {
+        "function": {
+          "description": "Use the tool to think about something. It will not obtain new information or change external data; it appends to an internal conversation scratchpad. Use it when complex reasoning or some cache memory is needed.",
+          "name": "think",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "thought": {
+                "description": "The thought to think about",
+                "type": "string"
+              }
+            },
+            "required": [
+              "thought"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "user_prompt": {
+    "instructions": "## User Prompt Tool\n\nAsk the user a question when you need clarification, input, or a decision.\n\nOptionally provide a JSON schema to structure the response:\n- Enum: {\"type\": \"string\", \"enum\": [\"option1\", \"option2\"], \"title\": \"Select\"}\n- Object: {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"required\": [\"name\"]}\n\nResponse contains \"action\" (accept/decline/cancel) and \"content\" (user data when accepted).",
+    "tools": [
+      {
+        "function": {
+          "description": "Ask the user a question and wait for their response. Use this when you need interactive input, clarification, or confirmation from the user. Optionally provide a JSON schema to define the expected response structure.",
+          "name": "user_prompt",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "description": "The message/question to display to the user",
+                "type": "string"
+              },
+              "title": {
+                "description": "Optional title for the dialog window (defaults to 'Question')",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "description": "JSON Schema defining the expected response structure. Supports object schemas with properties or primitive type schemas.",
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "message",
+              "title",
+              "schema"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  }
+}
