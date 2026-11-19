@@ -47,6 +47,14 @@ func (a *App) eventContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, eventGenerationKey{}, a.eventGeneration.Load())
 }
 
+// ensureEventContext preserves the identity of work that was already stamped.
+func (a *App) ensureEventContext(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); ok {
+		return ctx
+	}
+	return a.eventContext(ctx)
+}
+
 func (a *App) stampEvent(ctx context.Context, event tea.Msg) tea.Msg {
 	return generationEvent{generation: a.generationOf(ctx), inner: event}
 }

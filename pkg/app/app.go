@@ -456,9 +456,7 @@ func (a *App) SkillCommandFork(_ context.Context, input string) (skillName, task
 // SKILL.md body. Companion of SkillCommandFork.
 func (a *App) RunSkillFork(ctx context.Context, cancel context.CancelFunc, skillName, task string, _ []messages.Attachment) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 	// Snapshot the session like Run does: the goroutines below outlive any
 	// concurrent ReplaceSession and must keep working against this session.
@@ -602,9 +600,7 @@ func (a *App) EmitStartupInfo(ctx context.Context, events chan<- runtime.Event) 
 // Run one agent loop
 func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 	sess := a.session
 
@@ -852,9 +848,7 @@ func mustSkipMirroredElicitation(rt runtime.Runtime) bool {
 // suppress the pre-StreamStarted re-emitted user message; Run and
 // RunWithMessage pass nil.
 func (a *App) forwardRunStreamEvents(ctx context.Context, sess *session.Session, ch <-chan runtime.Event, filter func(event runtime.Event) (forward bool)) {
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	skipMirroredElicitation := mustSkipMirroredElicitation(a.runtime)
 
 	// sawRootStop/sawRootError/agentName drive the #4136 fallback below: the
@@ -1003,9 +997,7 @@ func (a *App) processInlineAttachment(att messages.Attachment, textBuilder *stri
 // arrive after StreamStarted and are forwarded normally.
 func (a *App) Retry(ctx context.Context, cancel context.CancelFunc) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 	sess := a.session
 
@@ -1035,9 +1027,7 @@ func (a *App) Retry(ctx context.Context, cancel context.CancelFunc) {
 // This is used for special cases like image attachments.
 func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg *session.Message) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 	sess := a.session
 
@@ -1070,9 +1060,7 @@ func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg
 }
 
 func (a *App) RunBangCommand(ctx context.Context, command string) {
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	command = strings.TrimSpace(command)
 	if command == "" {
 		a.sendEvent(ctx, runtime.ShellOutput("Error: empty command"))
@@ -1443,9 +1431,7 @@ func (a *App) NewSession() {
 // reEmitStartupInfo resets and re-emits startup info (agent, team, tools)
 // through the events channel so the sidebar updates.
 func (a *App) reEmitStartupInfo(ctx context.Context) {
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.runtime.ResetStartupInfo()
 	// Snapshot before handing off to the background goroutine so a later
 	// ReplaceSession cannot race with this read.
@@ -1565,9 +1551,7 @@ type liveSessionCompactor interface {
 // runtime cannot target live sessions (e.g. remote runtimes), or the
 // runtime's rejection for unknown/finished sessions and duplicate requests.
 func (a *App) CompactLiveSession(ctx context.Context, sessionID, additionalPrompt string) error {
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	compactor, ok := a.runtime.(liveSessionCompactor)
 	if !ok {
 		return fmt.Errorf("targeted session compaction: %w", runtime.ErrUnsupported)
@@ -1849,9 +1833,7 @@ func (a *App) IsReadOnly() bool {
 
 func (a *App) CompactSession(ctx context.Context, cancel context.CancelFunc, additionalPrompt string) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 
 	sess := a.session
