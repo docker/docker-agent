@@ -1,4 +1,5 @@
-import { createMCPOAuth } from './oauth.mjs';
+import { createMCPOAuth, validateOAuthConfig } from './oauth.mjs';
+import { checkedHeaders } from './http-tools.mjs';
 import { chunks, legacySSE, maxBytes, sseEvents } from './legacy-sse.mjs';
 
 const versions = ['2025-11-25', '2025-06-18', '2025-03-26'];
@@ -123,19 +124,35 @@ function output(result) {
   return { output: parts.join('') || JSON.stringify(result.structuredContent) || 'no output', is_error: result.isError ?? false };
 }
 
-export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
+export function prepareMCP(toolset, env, toolProxy, opts = {}) {
   options(opts, ['toolFetch', 'elicit', 'oauthRedirectURI'], 'MCP host');
   const { toolFetch, oauthRedirectURI } = opts;
   if (typeof toolFetch !== 'function') throw new Error('MCP requires an injected guarded toolFetch');
   if (toolset.remote?.oauth != null && !oauthRedirectURI) throw new Error('MCP OAuth requires an explicit host oauthRedirectURI');
   if (oauthRedirectURI && (typeof opts.elicit !== 'function' || (toolset.remote.oauth?.callbackRedirectURL && toolset.remote.oauth.callbackRedirectURL !== oauthRedirectURI))) throw new Error('MCP OAuth requires a matching host redirect URI and elicitation handler');
-  const { url, requestHeaders, policy, prefix } = connection(toolset, env ?? {}, toolProxy);
+  const config = connection(toolset, env ?? {}, toolProxy);
   const isLegacy = toolset.remote.transport_type === 'sse';
-  if (isLegacy && toolset.remote.oauth) throw new Error('MCP OAuth is not supported with legacy SSE');
-  const oauth = !isLegacy && oauthRedirectURI && !requestHeaders().has('Authorization') ? createMCPOAuth({
-    serverURL: url, oauthRedirectURI, ...policy, toolFetch, elicit: opts.elicit,
-    clientId: toolset.remote.oauth?.clientId, scopes: toolset.remote.oauth?.scopes,
-  }) : null;
+  const oauthConfig = toolset.remote.oauth;
+  if (isLegacy && oauthConfig) throw new Error('MCP OAuth is not supported with legacy SSE');
+  const headers = checkedHeaders(config.requestHeaders());
+  if (oauthConfig && headers.has('Authorization')) throw new Error('MCP OAuth conflicts with an explicit Authorization header');
+  const useOAuth = !isLegacy && oauthRedirectURI && !headers.has('Authorization');
+  if (useOAuth) validateOAuthConfig(config.url, oauthRedirectURI, oauthConfig?.clientId, oauthConfig?.scopes);
+  return signal => {
+    const oauth = useOAuth ? createMCPOAuth({
+      serverURL: config.url, oauthRedirectURI, ...config.policy, toolFetch, elicit: opts.elicit,
+      clientId: oauthConfig?.clientId, scopes: oauthConfig?.scopes,
+    }) : null;
+    return connect(config, opts, isLegacy, oauth, signal);
+  };
+}
+
+export async function openMCP(toolset, env, toolProxy, signal, opts) {
+  return prepareMCP(toolset, env, toolProxy, opts)(signal);
+}
+
+async function connect({ url, requestHeaders, policy, prefix }, opts, isLegacy, oauth, signal) {
+  const { toolFetch } = opts;
   const lifetime = new AbortController(), names = new Map();
   let sessionID, version, closing, nextID = 1;
 

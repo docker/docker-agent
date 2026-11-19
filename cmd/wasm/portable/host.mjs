@@ -1,14 +1,13 @@
+import { httpTools, proxyURL, toolFetch } from './http-tools.mjs';
+import { prepareMCP } from './mcp.mjs';
+
 // Each live session has its own native resources, tool bindings, and outstanding questions.
 export function createHost(opts, onEvent, stateless) {
-  const handlers = new Map(), closers = [];
+  const profiles = new Map(), closers = [];
   const questions = new Map();
   let local, confirmation, delivering;
   const env = Object.assign(Object.create(null), opts.env);
-  const proxy = opts.toolProxy;
-  if (proxy != null && proxy !== '') {
-    const u = new URL(proxy);
-    if (u.protocol !== 'https:' || !u.hostname || u.username || u.password || u.hash || u.searchParams.has('url')) throw new Error('egress proxy must use https without userinfo, fragment or url parameter');
-  }
+  const proxy = proxyURL(opts.toolProxy)?.href;
   function dispatch(event) {
     try { return onEvent?.(event); } catch { return undefined; }
   }
@@ -32,7 +31,7 @@ export function createHost(opts, onEvent, stateless) {
     confirmation = null;
     waiter.resolve(result);
   }
-  async function approval({ name, args, id, token }, signal) {
+  async function approval({ agent, name, args, id, token }, signal) {
     signal.throwIfAborted();
     if (typeof onEvent !== 'function') return { approved:false, reason:'' };
     const { promise, resolve, reject } = Promise.withResolvers();
@@ -44,7 +43,7 @@ export function createHost(opts, onEvent, stateless) {
       signal.throwIfAborted();
       delivering = waiter;
       let reply;
-      try { reply = dispatch({ type:'tool_confirmation', id, name, args, ...(!stateless && {confirmationId:token}) }); }
+      try { reply = dispatch({ type:'tool_confirmation', id, name, args, ...(profiles.size > 1 && {agent}), ...(!stateless && {confirmationId:token}) }); }
       finally { delivering = null; }
       if (stateless) Promise.resolve(reply).then(v => {
         if (confirmation === waiter && !signal.aborted) decide(waiter, v ?? false);
@@ -77,35 +76,51 @@ export function createHost(opts, onEvent, stateless) {
     if (!['accept','decline','cancel'].includes(reply.action)) throw new Error('unknown elicitation action');
     questions.delete(reply.id); resolve(reply); return true;
   }
-  async function prepare(specs, signal, register) {
-    const sets = [], bindings = new Map(), resources = [];
-    try {
-      for (const [index, spec] of specs.entries()) {
-        signal.throwIfAborted();
+  function configure(agents) {
+    for (const [agent, { toolsets }] of Object.entries(agents)) {
+      const bindings = new Map(), sources = [];
+      for (const [index, spec] of toolsets.entries()) {
         if (spec.type === 'memory' || spec.type === 'plan') {
-          local ??= (await import('./local-tools.mjs')).localTools();
-          bindings.set(index, (...args) => local.call(...args));
+          bindings.set(index, async (...args) => {
+            local ??= (await import('./local-tools.mjs')).localTools();
+            return local.call(...args);
+          });
         } else if (spec.type === 'datetime' || spec.type === 'random') {
           bindings.set(index, async (name, args) => (await import('./clock.mjs')).clockTool(name, args));
-        } else if (['mcp','fetch','api'].includes(spec.type)) {
-          const { toolFetch, httpTools } = await import('./http-tools.mjs');
-          const clean = { ...spec };
-          for (const key of ['readonly', 'tools', 'instruction', 'model']) delete clean[key];
-          const set = spec.type === 'mcp'
-            ? await (await import('./mcp.mjs')).openMCP(clean, env, proxy, signal, { toolFetch, elicit, oauthRedirectURI:opts.oauthRedirectURI })
-            : await httpTools(clean, env, proxy);
-          if (set.close) resources.push(() => set.close());
-          if (!Array.isArray(set.tools) || set.tools.length > 256) throw new Error('invalid host tool catalog');
-          bindings.set(index, (name, args, signal) => set.call(name, args, signal));
-          sets.push({ index, tools: set.tools, instructions: set.instructions ?? '' });
+        } else if (['mcp', 'fetch', 'api'].includes(spec.type)) {
+          const { readonly, tools, instruction, model, ...config } = spec;
+          if (spec.type === 'mcp') {
+            const ask = (event, signal) => elicit({ ...event, ...(profiles.size > 1 && {agent}) }, signal);
+            sources.push([index, prepareMCP(config, env, proxy, { toolFetch, elicit: ask, oauthRedirectURI: opts.oauthRedirectURI })]);
+          } else {
+            const set = httpTools(config, env, proxy);
+            sources.push([index, () => set]);
+          }
         }
       }
+      profiles.set(agent, { bindings, sources });
+    }
+  }
+
+  async function open(agent, signal, register) {
+    const { bindings, sources } = profiles.get(agent);
+    const opened = [];
+    try {
+      for (const [index, connect] of sources) {
+        signal.throwIfAborted();
+        const set = await connect(signal);
+        opened.push([index, set]);
+        if (!Array.isArray(set.tools) || set.tools.length > 256) throw new Error('invalid host tool catalog');
+      }
       signal.throwIfAborted();
-      if (sets.length) register(sets);
-      for (const [index, fn] of bindings) handlers.set(index, fn);
-      closers.push(...resources);
+      register(opened.map(([index, set]) => ({ index, tools: set.tools, instructions: set.instructions })));
+      for (const [index, set] of opened) {
+        bindings.set(index, set.call);
+        if (set.close) closers.push(set.close);
+      }
+      sources.length = 0;
     } catch (error) {
-      await Promise.allSettled(resources.map(fn => Promise.resolve().then(fn)));
+      await Promise.allSettled(opened.map(async ([, set]) => set.close?.()));
       throw error;
     }
   }
@@ -115,7 +130,7 @@ export function createHost(opts, onEvent, stateless) {
     emit(event);
     signal.throwIfAborted();
     try {
-      const fn = handlers.get(internal.source);
+      const fn = profiles.get(internal.agent)?.bindings.get(internal.source);
       if (!fn) throw new Error(`unavailable host tool ${event.name}`);
       const result = await fn(internal.name, internal.args, signal);
       if (typeof result.output !== 'string' || typeof result.is_error !== 'boolean') throw new Error('invalid host tool result');
@@ -125,8 +140,8 @@ export function createHost(opts, onEvent, stateless) {
       return { output:e.message || String(e), is_error:true };
     }
   }
-  return { prepare, approval, execute, confirm, respond, async close() {
-    handlers.clear(); local = null;
+  return { configure, open, approval, execute, confirm, respond, async close() {
+    profiles.clear(); local = null;
     await Promise.allSettled(closers.splice(0).map(fn => Promise.resolve().then(fn)));
   } };
 }

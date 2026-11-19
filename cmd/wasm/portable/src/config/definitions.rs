@@ -56,10 +56,13 @@ struct Definition {
 
 impl Definition {
     fn new(toolset: Toolset) -> Self {
-        let cost = serde_json::to_vec(&toolset)
+        let bytes = serde_json::to_vec(&toolset)
             .expect("serializable toolset")
-            .len()
-            .max(256);
+            .len();
+        // Defer is Rust-only, so the serialized host spec doesn't account for its names.
+        let (_, names) = toolset.defer.parts();
+        let cost =
+            (bytes + size_of_val(names) + names.iter().map(String::len).sum::<usize>()).max(256);
         Self { toolset, cost }
     }
 
@@ -90,6 +93,10 @@ fn resolve_mcp(
     }
     if ts.tools.is_empty() {
         ts.tools.clone_from(&def.tools);
+    }
+    let (all, names) = ts.defer.parts();
+    if !all && names.is_empty() {
+        ts.defer.clone_from(&def.defer);
     }
     if ts.options.get("name").and_then(Value::as_str) == Some("") {
         ts.options.remove("name");

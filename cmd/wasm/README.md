@@ -141,8 +141,9 @@ It works on any Go js/wasm binary.
 `node/small_test.js` its size.
 
 For a **Go-runtime-free** alternative, the [portable Rust/Wasm agent](portable/README.md)
-ports streaming Chat Completions and Responses, multi-turn sessions and the
-`think`, `calculator`, `todo` and `user_prompt` tools. It builds separately;
+ports streaming Chat Completions and Responses, multi-agent sessions, approvals,
+remote MCP, and the small profile’s browser tools. The portable guide lists the
+remaining protocol and configuration limits. It builds separately;
 `task test-wasm-parity` compares provider requests and JS events with Go small.
 
 ## Run (Node)

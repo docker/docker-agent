@@ -41,8 +41,8 @@ Nothing is installed on `globalThis` unless the host chooses to do so.
 |---|---|---|
 | Config | Current schema: named agents/models, reusable `toolsets` / `use_toolsets`, named remote `mcps`, filters and instruction overrides, redaction, date/environment flags and supported builtin hooks. | Historical versions and filesystem-backed config sources are not part of the Go small target. Unknown options are errors. |
 | Providers | Streamed OpenAI Chat Completions and Responses, native JSON-schema output, token caps/penalties, service tier, media history, static and selected parameterized endpoints from the Go provider catalog. Azure, Copilot, Cloudflare and session-supplied Codex credentials have separate transport handling. | No ambient login or token storage, realtime/audio generation, encrypted reasoning replay or server-hosted Responses tools. |
-| Sessions | Multi-turn send, abort/restart/close, stateless chat, same-model foreground compaction using a declared `context_window`, and live selection between compatible models. | No disk persistence, compaction window discovery or provider-native compaction. |
-| Tools | `datetime`, `random`, `think`, `calculator`, `todo`, `plan`, `memory`, `model_picker`, `session_context`, `user_prompt`, `fetch`, `api` and remote MCP. In-memory stores survive restart but are isolated by handle. | No stdio, process or file tools. `openapi` and opt-in RAG are not part of Go small. |
+| Sessions | Multi-turn send, local transfers/handoffs, ordered fallbacks, abort/restart/close, stateless chat, same-model foreground compaction using a declared `context_window`, and live selection between compatible models. | No disk persistence, compaction window discovery or provider-native compaction. |
+| Tools | `datetime`, `random`, `think`, `calculator`, `todo`, `plan`, `memory`, `model_picker`, `session_context`, `user_prompt`, `fetch`, `api` and remote MCP, including deferred discovery, TOON and approvals. In-memory stores survive restart but are isolated by handle. | No stdio, process or file tools. `openapi` and opt-in RAG are not part of Go small. |
 
 For example, a custom provider can set `api_type: openai_responses` (or
 `openai_chatcompletions`). The supported sampling fields are `temperature`,
@@ -74,7 +74,10 @@ or cookies, and refuse redirects. Tool calls are a separate trust boundary.
 - MCP tool catalogs are obtained over guarded HTTP. Treat server instructions
   and tool output as untrusted. The streamable HTTP client supports JSON and
   SSE replies, pagination and session teardown; it does not replay a failed tool
-  invocation on a transport error.
+  invocation on a transport error. `remote.transport_type: sse` selects the
+  legacy transport; it pins a same-origin POST endpoint, uses configured headers
+  and does not perform OAuth or reconnect. HTML conversion in `fetch` is offline:
+  no DOM or subresource requests, and unsupported markup is reported explicitly.
 - For MCP OAuth set `oauthRedirectURI` to an exact, trusted HTTPS callback.
   Public clients use authorization code + PKCE S256 with resource and issuer
   binding. The host must verify the popup/message source and origin and return
@@ -119,6 +122,37 @@ messages: [
   Use an ASCII basename, a MIME type without parameters, and at most 5 MiB per
   attachment and 16 MiB total per history (including text-envelope overhead),
   1,024 parts and 4,096 messages. HTTPS image URLs are limited to 8 KiB.
+
+### Routing and tool policy
+
+Local `sub_agents` run `transfer_task` with fresh history and return their
+final answer to the caller. A `handoff` keeps history and switches the acting
+agent, its instructions and tools. `force_handoff` routes on natural completion
+without advertising a switch tool; missing targets and cycles are errors.
+`fallback.models` can name other providers. The host binds each attempt's
+body to that model's transport and credentials. It retries only before visible
+output; it never retries a completed tool action to recover a model stream.
+`session_compaction` uses a foreground summary when a declared `context_window`
+and threshold warrant it. Provider-native and alternate-model compaction are
+not implemented. Picker/toolset model overrides must be transport-compatible.
+
+The tool registry applies `tools`, `readonly`, and explicit denials before
+exposing a tool. `defer` provides `search_tool`/`add_tool`; activation takes
+effect on the next model call. Selective `toon` encoding is applied to tool
+results, not to credentials or wire protocol messages. Within an admitted
+batch, every call (including Rust builtins) goes through a permission decision
+before a side effect. The portable policy accepts bounded ASCII name globs and
+string-argument conditions; explicit asks remain mandatory even with
+`autoApprove`, and unsupported checks deny rather than allow. An untrusted MCP
+server cannot self-authorize a write by declaring its tool read-only.
+
+Supported builtin hooks are `add_date`, `add_environment_info`, `max_iterations`,
+`limit_large_tool_results` and `redact_secrets`. Secret redaction defaults on;
+there is no process environment lookup and no hook can run a command. The
+scanner catalog is regenerated from the pinned Go dependency with
+`sh cmd/wasm/portable/gen/redaction/generate.sh`. Resource limits and matcher
+syntax are intentionally bounded. As in Go, raw model stream deltas are not a
+redaction boundary; avoid logging untrusted stream data.
 
 ## Keeping up with docker-agent
 
