@@ -223,6 +223,12 @@ impl Session {
                 } else {
                     "model failed"
                 };
+                // Close suspended transfer calls without copying a child's provider diagnostics
+                // into its caller's history or rolling back already-completed caller tools.
+                while let Some(mut parent) = self.parents.pop() {
+                    parent.complete_switch("transfer_task", "Delegated task failed".into(), true);
+                    self.conversation = parent;
+                }
                 self.conversation.fail();
                 return Err(format!("{prefix}: {reason}"));
             }

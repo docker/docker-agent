@@ -82,6 +82,9 @@ async function run() {
   tests.plain = await replay(api, 'plain', config, [answer, answer], turns);
   const team = config.replace('model: local/test', 'model: local/test, sub_agents: [helper], handoffs: [helper]') + '  helper: {model: local/worker, description: Helps, instruction: Be precise}\n';
   tests.transfer = await replay(api, 'transfer', team, [tool('transfer_task', { agent: 'helper', task: 'count', expected_output: 'numbers' }), answer, answer, answer], turns);
+  const teamFallback = team.replace('model: local/worker', 'model: local/worker, fallback: {models: [local/worker-backup]}');
+  tests.transferFallback = await replay(api, 'transferFallback', teamFallback, [tool('transfer_task', { agent: 'helper', task: 'count' }),
+    [{ error: { message: 'worker unavailable' } }], answer, answer], single);
   tests.handoff = await replay(api, 'handoff', team, [tool('handoff', { agent: 'helper' }), answer, answer], turns);
   tests.think = await replay(api, 'think', config.replace('model: local/test', 'toolsets: [{type: think}], model: local/test'),
     [tool('think', { thought: 'a plan' }), answer, answer], turns);
@@ -156,10 +159,14 @@ async function run() {
   });
   tests.readonly = await replay(api, 'readonly', config.replace('model: local/test', 'readonly: true, toolsets: [{type: memory, tools: [add_memory,get_memories], instruction: "Scoped"}], model: local/test'), [answer], single);
   const apiTool = config.replace('model: local/test', 'toolsets: [{type: api, allow_private_ips: true, api_config: {name: greet, instruction: Return a greeting, method: GET, endpoint: "https://tool.invalid/greet"}}], model: local/test');
-  tests.apiTool = await replay(api, 'apiTool', apiTool,[tool('greet',{}),answer], single,'/v1/chat/completions', req => {
+  function greet(req) {
     if (req.url !== 'https://tool.invalid/greet' || req.method !== 'GET') throw new Error('unexpected API request');
     return new Response('hi');
-  });
+  }
+  tests.apiTool = await replay(api, 'apiTool', apiTool, [tool('greet', {}), answer], single, '/v1/chat/completions', greet);
+  const apiFallback = apiTool.replace('model: local/test', 'model: local/test, fallback: {models: [local/backup]}');
+  tests.fallbackHost = await replay(api, 'fallbackHost', apiFallback, [[{ error: { message: 'primary unavailable' } }], tool('greet', {}), answer], single,
+    '/v1/chat/completions', greet);
   const mcp = config.replace('model: local/test', 'toolsets: [{type: mcp, allow_private_ips: true, remote: {transport_type: streamable, url: "https://tool.invalid/mcp"}}], model: local/test');
   tests.mcp = await replay(api, 'mcp', mcp,[tool('echo',{text:'from MCP'}),answer], async ({api,options,record,trace}) => {
     const s=await api.createSession({...options, autoApprove:true}, record);
