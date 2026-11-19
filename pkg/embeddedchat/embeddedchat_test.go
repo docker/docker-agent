@@ -308,7 +308,7 @@ func TestSessionForwardsElicitationAndRespondResumesRuntime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rt := newFakeRuntime()
 		s := newTestSession(rt)
-		s.cfg.ForwardElicitation = true
+		s.forwardElicitation = true
 
 		out, err := s.Send(t.Context(), "authorize")
 		require.NoError(t, err)
@@ -350,7 +350,7 @@ func TestSessionDeclinesForwardedElicitationAfterError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rt := newFakeRuntime()
 		s := newTestSession(rt)
-		s.cfg.ForwardElicitation = true
+		s.forwardElicitation = true
 
 		out, err := s.Send(t.Context(), "hi")
 		require.NoError(t, err)
@@ -370,7 +370,7 @@ func TestSessionDoesNotForwardElicitationAfterCancel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rt := newFakeRuntime()
 		s := newTestSession(rt)
-		s.cfg.ForwardElicitation = true
+		s.forwardElicitation = true
 
 		ctx, cancel := context.WithCancel(t.Context())
 		out, err := s.Send(ctx, "hi")
@@ -391,7 +391,7 @@ func TestSessionForwardAllEventsDeliversUnprojectedEvents(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rt := newFakeRuntime()
 		s := newTestSession(rt)
-		s.cfg.ForwardAllEvents = true
+		s.forwardAllEvents = true
 
 		out, err := s.Send(t.Context(), "hi")
 		require.NoError(t, err)
