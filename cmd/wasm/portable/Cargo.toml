@@ -14,8 +14,9 @@ dashu-base = "0.4"
 dashu-int = { version = "0.4", default-features = false }
 dashu-ratio = { version = "0.4", default-features = false }
 indexmap = { version = "2", features = ["serde"] }
+regex = { version = "1", default-features = false, features = ["std", "unicode-case"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml_ng = "0.10"
 
 [profile.release]
