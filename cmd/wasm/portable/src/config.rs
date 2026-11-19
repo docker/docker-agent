@@ -21,6 +21,9 @@ struct Config {
 #[serde(deny_unknown_fields)]
 struct Agent {
     model: String,
+    session_compaction: Option<bool>,
+    redact_secrets: Option<bool>,
+    compaction_threshold: Option<f64>,
     #[serde(default)]
     description: String,
     #[serde(default)]
@@ -176,6 +179,8 @@ impl Toolset {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Model {
+    context_window: Option<u32>,
+    compaction_threshold: Option<f64>,
     provider: String,
     model: String,
     #[serde(default)]
@@ -215,6 +220,7 @@ struct ModelRequest<'a> {
 
 pub struct Selected {
     pub picker: crate::model_picker::Picker,
+    pub compaction: crate::compaction::Policy,
     pub model_params: Map<String, Value>,
     pub endpoint: String,
     pub token: String,
@@ -243,6 +249,7 @@ fn load(yaml: &str) -> Result<Config, String> {
         if name.trim().is_empty() {
             return Err("empty agent name".into());
         }
+        validate_threshold(a.compaction_threshold)?;
         for ts in &a.toolsets {
             ts.validate()?;
         }
@@ -268,6 +275,10 @@ fn load(yaml: &str) -> Result<Config, String> {
         }
     }
     for model in cfg.models.values() {
+        validate_threshold(model.compaction_threshold)?;
+        if model.context_window == Some(0) {
+            return Err("context_window must be greater than 0".into());
+        }
         if model.model.trim().is_empty() || model.provider.trim().is_empty() {
             return Err("model and provider must be set".into());
         }
@@ -284,6 +295,13 @@ fn inline_model(name: &str) -> Option<Model> {
         model: model.into(),
         ..Model::default()
     })
+}
+
+fn validate_threshold(value: Option<f64>) -> Result<(), String> {
+    if value.is_some_and(|v| !(v > 0.0 && v <= 1.0)) {
+        return Err("compaction_threshold must be greater than 0 and at most 1".into());
+    }
+    Ok(())
 }
 
 fn agent_list(cfg: &Config, full: bool) -> Vec<Value> {
@@ -422,11 +440,20 @@ fn supports_responses_api(id: &str) -> bool {
         && major.parse::<u8>().is_ok_and(|n| n >= 6)
 }
 
+pub fn cap_key(model: &str) -> &'static str {
+    if supports_responses_api(model) {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }
+}
+
 fn model_params(
     id: String,
     m: &Model,
     p: &Provider,
     tools: bool,
+    policy: crate::compaction::Policy,
 ) -> Result<Map<String, Value>, String> {
     let mut params = Map::new();
     for (key, model, provider) in [
@@ -448,13 +475,7 @@ fn model_params(
         if cap > (1_i64 << 53) - 1 {
             return Err("max_tokens exceeds the JavaScript safe integer range".into());
         }
-        // No catalog or context_window declarations in this profile: no known window to clamp to.
-        let key = if supports_responses_api(&id) {
-            "max_completion_tokens"
-        } else {
-            "max_tokens"
-        };
-        params.insert(key.into(), cap.into());
+        params.insert(cap_key(&id).into(), policy.clamp(cap).into());
     }
     if tools {
         params.insert("tool_choice".into(), "auto".into());
@@ -470,9 +491,29 @@ fn first_nonempty(values: [&str; 3]) -> &str {
     values.into_iter().find(|s| !s.is_empty()).unwrap_or("")
 }
 
+fn compaction_policy(a: &Agent, m: &Model) -> Result<crate::compaction::Policy, String> {
+    if a.redact_secrets == Some(true) {
+        return Err("redact_secrets is not supported in portable sessions".into());
+    }
+    // Go enables redaction by default. Don't replay history to an auxiliary
+    // model request unless the caller explicitly elected to run without it.
+    if m.context_window.is_some()
+        && a.session_compaction != Some(false)
+        && a.redact_secrets != Some(false)
+    {
+        return Err("portable compaction requires explicit redact_secrets: false; the Go redaction hooks are not ported".into());
+    }
+    crate::compaction::Policy::new(
+        m.context_window,
+        a.session_compaction,
+        m.compaction_threshold.or(a.compaction_threshold),
+    )
+}
+
 pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
     let cfg = load(yaml)?;
     for (name, a) in &cfg.agents {
+        compaction_policy(a, &cfg.models[&a.model])?;
         for (enabled, field) in [
             (!a.sub_agents.is_empty(), "sub_agents"),
             (!a.handoffs.is_empty(), "handoffs"),
@@ -552,6 +593,11 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
                 &inline
             };
             // Do not reuse the open handle's Authorization header at a new destination.
+            if m.context_window != primary.context_window
+                || m.compaction_threshold != primary.compaction_threshold
+            {
+                return Err("model_picker cannot change compaction policy".into());
+            }
             if m.provider != primary.provider {
                 return Err("model_picker cannot switch providers".into());
             }
@@ -577,6 +623,7 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             .clone()
     };
     Ok(Selected {
+        compaction: compaction_policy(a, primary)?,
         picker,
         model_params: request.model_params,
         endpoint: request.endpoint,
@@ -642,7 +689,13 @@ fn resolve_model<'a>(
         "chat/completions"
     };
     Ok(ModelRequest {
-        model_params: model_params(id, m, p, tools)?,
+        model_params: model_params(
+            id,
+            m,
+            p,
+            tools,
+            crate::compaction::Policy::new(m.context_window, Some(false), None)?,
+        )?,
         endpoint: format!("{}/{route}", base.trim_end_matches('/')),
         responses,
         merge_messages,
@@ -809,7 +862,7 @@ agents:
             "max_tokens: 1.5",
             "parallel_tool_calls: 1",
             "top_p: 1, top_p: 0",
-            "context_window: 8192",
+            "context_window: 0",
             "provider_opts: {}",
             "thinking_budget: low",
             "max_completion_tokens: 42",

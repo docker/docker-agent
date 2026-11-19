@@ -1,4 +1,5 @@
 mod calculator;
+mod compaction;
 mod config;
 mod go_json;
 mod model_picker;
@@ -137,7 +138,7 @@ impl Core {
                     .iter()
                     .any(|ts| ts.kind == "session_context")
                     .then(|| session_context::Archive::new(stamp));
-                let conv = Conversation::configured(
+                let mut conv = Conversation::configured(
                     spec.model_params,
                     spec.instruction,
                     spec.toolsets,
@@ -146,6 +147,7 @@ impl Core {
                     spec.picker,
                     archive,
                 )?;
+                conv.compaction.policy = spec.compaction;
                 self.next_id = self
                     .next_id
                     .checked_add(1)

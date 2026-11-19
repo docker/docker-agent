@@ -62,7 +62,8 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
 
     function settle(next) {
       for (const event of next.events) emit(event);
-      if (!next.waiting) batch.resolve(next.request);
+      if (next.error) batch.reject(new Error(next.error));
+      else if (!next.waiting) batch.resolve(next.request);
     }
     async function elicit(events, signal) {
       const replies = new Promise((resolve, reject) => { batch = { resolve, reject }; });
@@ -133,6 +134,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             continue;
           }
           for (const event of next.events) emit(event);
+          if (next.error) throw new Error(next.error);
           if (next.result) return next.result;
           signal.throwIfAborted();
           body = next.request;
