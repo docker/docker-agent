@@ -5,7 +5,7 @@ const (
 	Height = 6
 )
 
-// Lines is an italic wordmark sampled into 2×4 braille cells for smooth edges.
+// Lines is the italic wordmark in 2×4 braille cells.
 var Lines = []string{
 	`      ⣿⡿               ⣸⣿⠁                                               ⣤⡶`,
 	` ⢠⣶⡿⢷⣶⣿⡇⢀⣴⣾⠿⢷⣦⡀ ⣠⣶⠿⢷⣦⡀⢀⣿⡟⣠⣶⠶⠂⢠⣶⡾⢿⣶⡄ ⣴⣶⣴⡿⠂   ⣠⣶⠿⢷⣦ ⢀⣴⣾⠿⣦⣶⡶ ⣠⣶⠿⢷⣦⡀ ⣶⣶⡶⢾⣷⡆⠠⢾⣿⡷⠆`,
