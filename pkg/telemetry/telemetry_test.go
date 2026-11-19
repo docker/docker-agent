@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -155,70 +154,13 @@ func TestSessionTracking(t *testing.T) {
 	}
 }
 
-func TestCommandTracking(t *testing.T) {
+func TestClientContext(t *testing.T) {
 	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	mockHTTP := NewMockHTTPClient()
-	client := newClient(t.Context(), logger, true, true, "test-version", mockHTTP.Client)
 
-	client.endpoint = "https://test-command-tracking.com/api"
-	client.apiKey = "test-command-key"
-	client.header = "test-header"
-
-	executed := false
-	cmdInfo := CommandInfo{
-		Action: "test-command",
-		Args:   []string{},
-		Flags:  []string{},
-	}
-	err := client.TrackCommand(t.Context(), cmdInfo, func(ctx context.Context) error {
-		executed = true
-		return nil
-	})
-	require.NoError(t, err)
-	assert.True(t, executed)
-
-	require.Eventually(t, func() bool {
-		return mockHTTP.GetRequestCount() > 0
-	}, time.Second, 5*time.Millisecond, "Expected HTTP requests to be made for command tracking")
-
-	requestCount := mockHTTP.GetRequestCount()
-	t.Logf("Command tracking HTTP requests captured: %d", requestCount)
-
-	requests := mockHTTP.GetRequests()
-	for i, req := range requests {
-		assert.Equal(t, "test-command-key", req.Header.Get("test-header"), "Request %d: Expected test-header test-command-key", i)
-	}
-}
-
-func TestCommandTrackingWithError(t *testing.T) {
-	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	mockHTTP := NewMockHTTPClient()
-	client := newClient(t.Context(), logger, true, true, "test-version", mockHTTP.Client)
-
-	client.endpoint = "https://test-command-error.com/api"
-	client.apiKey = "test-command-error-key"
-	client.header = "test-header"
-
-	testErr := &testError{}
-	cmdInfo := CommandInfo{
-		Action: "failing-command",
-		Args:   []string{},
-		Flags:  []string{},
-	}
-	err := client.TrackCommand(t.Context(), cmdInfo, func(ctx context.Context) error {
-		return testErr
-	})
-
-	assert.Equal(t, testErr, err)
-
-	require.Eventually(t, func() bool {
-		return mockHTTP.GetRequestCount() > 0
-	}, time.Second, 5*time.Millisecond, "Expected HTTP requests to be made for command error tracking")
-
-	requestCount := mockHTTP.GetRequestCount()
-	t.Logf("Command error tracking HTTP requests captured: %d", requestCount)
+	ctx := t.Context()
+	client := new(Client)
+	assert.Nil(t, FromContext(ctx))
+	assert.Same(t, client, FromContext(WithClient(ctx, client)))
 }
 
 func TestStructuredEvent(t *testing.T) {
@@ -274,53 +216,6 @@ type testError struct{}
 
 func (e *testError) Error() string {
 	return "test error"
-}
-
-// Test-only methods - these wrap command execution with telemetry for testing purposes
-
-// TrackCommand wraps command execution with telemetry (test-only method)
-func (tc *Client) TrackCommand(ctx context.Context, commandInfo CommandInfo, fn func(context.Context) error) error {
-	if !tc.enabled {
-		return fn(ctx)
-	}
-
-	ctx = WithClient(ctx, tc)
-
-	// Send telemetry event immediately (optimistic approach)
-	commandEvent := CommandEvent{
-		Action:  commandInfo.Action,
-		Args:    commandInfo.Args,
-		Success: true, // Assume success - we're tracking user intent, not outcome
-	}
-
-	// Send the telemetry event immediately
-	tc.Track(ctx, &commandEvent)
-
-	// Now run the command function
-	return fn(ctx)
-}
-
-// TrackServerStart immediately sends telemetry for server startup, then runs the server function (test-only method)
-// This is for long-running commands that may never exit (api, mcp, etc.)
-func (tc *Client) TrackServerStart(ctx context.Context, commandInfo CommandInfo, fn func(context.Context) error) error {
-	if !tc.enabled {
-		return fn(ctx)
-	}
-
-	ctx = WithClient(ctx, tc)
-
-	// Send startup event immediately
-	startupEvent := CommandEvent{
-		Action:  commandInfo.Action,
-		Args:    commandInfo.Args,
-		Success: true, // We assume startup succeeds if we reach this point
-	}
-
-	// Send the startup telemetry event immediately
-	tc.Track(ctx, &startupEvent)
-
-	// Now run the server function (which may run indefinitely)
-	return fn(ctx)
 }
 
 // TestAllEventTypes tests all possible telemetry events with mock HTTP client
@@ -542,26 +437,6 @@ func TestAllEventTypes(t *testing.T) {
 		_, ok = record["properties"].(map[string]any)
 		assert.True(t, ok, "Request %d: Expected properties object in event", i)
 	}
-}
-
-// TestTrackServerStart tests long-running server command tracking
-func TestTrackServerStart(t *testing.T) {
-	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	client := newClient(t.Context(), logger, true, true, "test-version")
-
-	executed := false
-	cmdInfo := CommandInfo{
-		Action: "mcp",
-		Args:   []string{},
-		Flags:  []string{},
-	}
-	err := client.TrackServerStart(t.Context(), cmdInfo, func(ctx context.Context) error {
-		executed = true
-		return nil
-	})
-	require.NoError(t, err)
-	assert.True(t, executed)
 }
 
 // TestGlobalTelemetryFunctions tests the global telemetry convenience functions
