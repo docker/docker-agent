@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_TOOL_ROUNDS: usize = 8;
@@ -8,7 +8,7 @@ const MAX_PARALLEL_CALLS: u64 = 16;
 const MAX_SCRATCHPAD_BYTES: usize = 64 * 1024;
 
 pub struct Conversation {
-    model: String,
+    model_params: Map<String, Value>,
     think: bool,
     messages: Vec<Value>,
     scratchpad: String,
@@ -51,7 +51,7 @@ struct Call {
 
 impl Conversation {
     pub fn new(
-        model: String,
+        model_params: Map<String, Value>,
         instruction: String,
         think: bool,
         mut history: Vec<Value>,
@@ -61,7 +61,7 @@ impl Conversation {
             history.insert(0, json!({"role":"system", "content":instruction}));
         }
         Ok(Self {
-            model,
+            model_params,
             think,
             messages: history,
             scratchpad: "Thoughts:".into(),
@@ -91,12 +91,10 @@ impl Conversation {
     }
 
     fn request(&self) -> Value {
-        let mut body = json!({
-            "model": self.model,
-            "messages": self.messages,
-            "stream": true,
-            "stream_options": {"include_usage": true}
-        });
+        let mut body = Value::Object(self.model_params.clone());
+        body["messages"] = json!(self.messages);
+        body["stream"] = true.into();
+        body["stream_options"] = json!({"include_usage": true});
         if self.think {
             body["tools"] = json!([{"type":"function", "function":{
                 "name":"think", "description":"Append a thought to the conversation scratchpad. This obtains no new information and changes no external data.",
@@ -404,8 +402,12 @@ fn validate_history(history: &[Value]) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn model(name: &str) -> Map<String, Value> {
+        Map::from_iter([("model".into(), name.into())])
+    }
+
     fn conversation(think: bool) -> Conversation {
-        Conversation::new("model".into(), "be concise".into(), think, vec![]).unwrap()
+        Conversation::new(model("model"), "be concise".into(), think, vec![]).unwrap()
     }
 
     fn chunk(delta: Value, reason: Option<&str>) -> Value {
@@ -437,7 +439,7 @@ mod tests {
             json!({"role":"assistant", "tool_calls":[{"id":"old", "type":"function", "function":{"name":"old-tool", "arguments":"{}"}}]}),
             json!({"role":"tool", "tool_call_id":"old", "content":"prior output"}),
         ];
-        let mut c = Conversation::new("test".into(), "sys".into(), false, history.clone()).unwrap();
+        let mut c = Conversation::new(model("test"), "sys".into(), false, history.clone()).unwrap();
         let request = c.begin("hello", "turn-id").unwrap();
         assert_eq!(
             request["messages"][0],
@@ -482,7 +484,7 @@ mod tests {
             vec![assistant.clone()],
             vec![assistant, tool.clone(), tool],
         ] {
-            assert!(Conversation::new("model".into(), String::new(), true, history).is_err());
+            assert!(Conversation::new(model("model"), String::new(), true, history).is_err());
         }
     }
 

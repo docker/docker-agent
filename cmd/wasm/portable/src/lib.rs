@@ -65,7 +65,8 @@ impl Core {
                 history,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
-                let conv = Conversation::new(spec.model, spec.instruction, spec.think, history)?;
+                let conv =
+                    Conversation::new(spec.model_params, spec.instruction, spec.think, history)?;
                 self.next_id = self
                     .next_id
                     .checked_add(1)

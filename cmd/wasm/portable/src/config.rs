@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Number, Value};
 use std::collections::BTreeMap;
 
 const VERSION: &str = "16";
@@ -36,7 +36,7 @@ struct Toolset {
     kind: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Model {
     provider: String,
@@ -45,6 +45,12 @@ struct Model {
     base_url: String,
     #[serde(default)]
     token_key: String,
+    temperature: Option<Number>,
+    top_p: Option<Number>,
+    frequency_penalty: Option<Number>,
+    presence_penalty: Option<Number>,
+    max_tokens: Option<i64>,
+    parallel_tool_calls: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -54,10 +60,16 @@ struct Provider {
     base_url: String,
     token_key: String,
     api_type: String,
+    temperature: Option<Number>,
+    top_p: Option<Number>,
+    frequency_penalty: Option<Number>,
+    presence_penalty: Option<Number>,
+    max_tokens: Option<i64>,
+    parallel_tool_calls: Option<bool>,
 }
 
 pub struct Selected {
-    pub model: String,
+    pub model_params: Map<String, Value>,
     pub endpoint: String,
     pub token: String,
     pub instruction: String,
@@ -101,8 +113,7 @@ fn load(yaml: &str) -> Result<Config, String> {
                 Model {
                     provider: provider.into(),
                     model: model.into(),
-                    base_url: String::new(),
-                    token_key: String::new(),
+                    ..Model::default()
                 },
             );
         }
@@ -169,12 +180,7 @@ fn instruction(text: &str, env: &BTreeMap<String, String>) -> String {
             return out;
         };
         let expr = &tail[..end];
-        let var = expr.trim().strip_prefix("env.").filter(|v| {
-            !v.is_empty()
-                && !v.as_bytes()[0].is_ascii_digit()
-                && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        });
-        if let Some(key) = var {
+        if let Some(key) = js_env_name(expr.trim()) {
             if let Some(value) = env.get(key) {
                 out.push_str(value);
             }
@@ -187,6 +193,121 @@ fn instruction(text: &str, env: &BTreeMap<String, String>) -> String {
     }
     out.push_str(rest);
     out
+}
+
+fn js_env_name(expr: &str) -> Option<&str> {
+    expr.strip_prefix("env.").filter(|v| {
+        !v.is_empty()
+            && !v.as_bytes()[0].is_ascii_digit()
+            && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    })
+}
+
+// ModelConfig.ExpandEnv uses shell references, unlike instruction expansion.
+fn expand_model_field(mut text: &str, env: &BTreeMap<String, String>) -> Result<String, String> {
+    let mut out = String::with_capacity(text.len());
+    while let Some((before, tail)) = text.split_once('$') {
+        out.push_str(before);
+        let (name, rest) = if let Some(braced) = tail.strip_prefix('{') {
+            let (name, rest) = braced
+                .split_once('}')
+                .ok_or("unclosed environment reference")?;
+            if name.is_empty() {
+                return Err("empty environment reference".into());
+            }
+            (js_env_name(name.trim_ascii()).unwrap_or(name), rest)
+        } else {
+            let n = match tail.as_bytes().first() {
+                Some(b'0'..=b'9' | b'*' | b'#' | b'$' | b'@' | b'!' | b'?' | b'-') => 1,
+                _ => tail
+                    .bytes()
+                    .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                    .count(),
+            };
+            if n == 0 {
+                out.push('$');
+                text = tail;
+                continue;
+            }
+            tail.split_at(n)
+        };
+        out.push_str(
+            env.get(name)
+                .ok_or_else(|| format!("environment variable {name:?} not set"))?,
+        );
+        text = rest;
+    }
+    out.push_str(text);
+    Ok(out)
+}
+
+// Keep in sync with modelinfo.SupportsResponsesAPI (also used for forced Chat Completions).
+fn supports_responses_api(id: &str) -> bool {
+    let name = id.trim().rsplit('/').next().unwrap().to_ascii_lowercase();
+    if ["gpt-4.1", "gpt-5", "o1", "o3", "o4", "codex"]
+        .iter()
+        .any(|p| name.starts_with(p))
+        || name.contains("-codex")
+    {
+        return true;
+    }
+    let Some(gpt) = name.strip_prefix("gpt-") else {
+        return false;
+    };
+    let version = gpt.split('-').next().unwrap();
+    let (major, minor) = version.split_once('.').unwrap_or((version, "0"));
+    [major, minor]
+        .iter()
+        .all(|s| (1..=2).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit()))
+        && major.parse::<u8>().is_ok_and(|n| n >= 6)
+}
+
+fn model_params(
+    id: String,
+    m: &Model,
+    p: &Provider,
+    tools: bool,
+) -> Result<Map<String, Value>, String> {
+    let mut params = Map::new();
+    for (key, model, provider) in [
+        ("temperature", &m.temperature, &p.temperature),
+        ("top_p", &m.top_p, &p.top_p),
+        (
+            "frequency_penalty",
+            &m.frequency_penalty,
+            &p.frequency_penalty,
+        ),
+        ("presence_penalty", &m.presence_penalty, &p.presence_penalty),
+    ] {
+        if let Some(n) = model.as_ref().or(provider.as_ref()) {
+            params.insert(key.into(), Value::Number(n.clone()));
+        }
+    }
+    if let Some(cap) = m.max_tokens.or(p.max_tokens).filter(|&n| n > 0) {
+        // The JS host parses and re-encodes this request before fetch.
+        if cap > (1_i64 << 53) - 1 {
+            return Err("max_tokens exceeds the JavaScript safe integer range".into());
+        }
+        // No catalog or context_window declarations in this profile: no known window to clamp to.
+        let key = if supports_responses_api(&id) {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        params.insert(key.into(), cap.into());
+    }
+    if tools {
+        params.insert("tool_choice".into(), "auto".into());
+        if let Some(parallel) = m.parallel_tool_calls.or(p.parallel_tool_calls) {
+            params.insert("parallel_tool_calls".into(), parallel.into());
+        }
+    }
+    params.insert("model".into(), Value::String(id));
+    Ok(params)
+}
+
+fn first_nonempty(values: [&str; 3]) -> &str {
+    values.into_iter().find(|s| !s.is_empty()).unwrap_or("")
 }
 
 pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
@@ -220,38 +341,48 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         (None, _) => ("https://api.openai.com/v1", "OPENAI_API_KEY"),
         (Some(_), _) => ("https://api.openai.com/v1", ""),
     };
-    let first = |values: [&str; 3]| {
-        values
-            .into_iter()
-            .find(|s| !s.is_empty())
-            .unwrap_or("")
-            .to_owned()
+    // Go picks a custom provider's default API before model expansion. The built-in
+    // OpenAI client auto-selects its API per request, using the expanded ID instead.
+    let id = expand_model_field(&m.model, env)?;
+    let responses = match p {
+        Some(p) => p.api_type.is_empty() && supports_responses_api(&m.model),
+        None => m.provider == "openai" && supports_responses_api(&id),
     };
-    let key = first([&m.token_key, p.map_or("", |p| &p.token_key), default_key]);
-    let base = first([&m.base_url, p.map_or("", |p| &p.base_url), default_base]);
-    if base.contains('$') || m.model.contains('$') {
-        return Err("placeholders in model names or endpoints are not supported".into());
+    if responses {
+        return Err("the selected model uses the unsupported Responses API".into());
+    }
+    let default_provider = Provider::default();
+    let p = p.unwrap_or(&default_provider);
+    let key = first_nonempty([&m.token_key, &p.token_key, default_key]);
+    let base = expand_model_field(
+        first_nonempty([&m.base_url, &p.base_url, default_base]),
+        env,
+    )?;
+    if id.trim().is_empty() || base.trim().is_empty() {
+        return Err("model and endpoint must not expand to an empty string".into());
     }
     let token = if key.is_empty() {
         String::new()
     } else {
-        env.get(&key)
+        env.get(key)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| format!("{key} environment variable is required"))?
             .clone()
     };
+    let think = !a.toolsets.is_empty();
     Ok(Selected {
-        model: m.model.clone(),
+        model_params: model_params(id, m, p, think)?,
         endpoint: format!("{}/chat/completions", base.trim_end_matches('/')),
         token,
         instruction: instruction(&a.instruction, env),
-        think: !a.toolsets.is_empty(),
+        think,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn strict_loader() {
         for yaml in [
@@ -264,6 +395,180 @@ mod tests {
             assert!(parse(yaml).is_err(), "{yaml}");
         }
     }
+
+    const CONFIG: &str = "
+providers:
+  local:
+    api_type: openai_chatcompletions
+    temperature: 0.75
+    top_p: 0.5
+    frequency_penalty: -0.5
+    presence_penalty: 0.25
+    parallel_tool_calls: true
+    max_tokens: 500000
+models:
+  custom:
+    provider: local
+    model: 'openai/${env.MODEL}'
+    temperature: 0
+    top_p: null
+    frequency_penalty: 0
+    parallel_tool_calls: false
+agents:
+  root: {model: custom, toolsets: [{type: think}]}
+  no_tools: {model: custom}
+  inherited: {model: local/gpt-4o-mini, toolsets: [{type: think}]}
+";
+
+    #[test]
+    fn model_options_override_provider_defaults_field_by_field() {
+        let env = BTreeMap::from([("MODEL".into(), "gpt-5".into())]);
+        let select_params = |name| Value::Object(select(CONFIG, name, &env).unwrap().model_params);
+        assert_eq!(
+            select_params("root"),
+            json!({"model":"openai/gpt-5", "temperature":0,
+            "top_p":0.5, "frequency_penalty":0, "presence_penalty":0.25,
+            "max_completion_tokens":500000, "tool_choice":"auto", "parallel_tool_calls":false})
+        );
+        assert_eq!(
+            select_params("inherited"),
+            json!({"model":"gpt-4o-mini", "temperature":0.75,
+            "top_p":0.5, "frequency_penalty":-0.5, "presence_penalty":0.25,
+            "max_tokens":500000, "tool_choice":"auto", "parallel_tool_calls":true})
+        );
+        let no_tools = select_params("no_tools");
+        assert!(no_tools.get("parallel_tool_calls").is_none());
+        assert!(no_tools.get("tool_choice").is_none());
+        assert_eq!(
+            parse(CONFIG).unwrap()["models"]["custom"],
+            json!({"provider":"local", "model":"openai/${env.MODEL}", "base_url":""})
+        );
+    }
+
+    #[test]
+    fn openrouter_stays_on_chat_completions_for_newer_models() {
+        let cfg = "models: {m: {provider: openrouter, model: openai/gpt-4.1-mini, max_tokens: 12}}\nagents: {root: {model: m}}";
+        let env = BTreeMap::from([("OPENROUTER_API_KEY".into(), "key".into())]);
+        let params = Value::Object(select(cfg, "", &env).unwrap().model_params);
+        assert_eq!(
+            params,
+            json!({"model":"openai/gpt-4.1-mini", "max_completion_tokens":12})
+        );
+    }
+
+    #[test]
+    fn omitted_and_nonpositive_token_caps_are_not_sent() {
+        let yaml = "providers: {local: {}}\nagents: {root: {model: local/test}}";
+        let params =
+            |cfg: &str| Value::Object(select(cfg, "", &BTreeMap::new()).unwrap().model_params);
+        assert_eq!(params(yaml), json!({"model":"test"}));
+        for cap in [0, -1] {
+            let cfg = format!("providers: {{local: {{max_tokens: 42}}}}\nmodels: {{m: {{provider: local, model: test, max_tokens: {cap}}}}}\nagents: {{root: {{model: m}}}}");
+            assert_eq!(params(&cfg), json!({"model":"test"}));
+        }
+    }
+
+    #[test]
+    fn token_budget_wire_key_matches_go_model_families() {
+        for (name, expected) in [
+            ("gpt-4o-mini", false),
+            ("org/test", false),
+            ("openrouter/openai/GPT-4.1-mini", true),
+            ("gpt-5-chat-latest", true),
+            (" o3-mini ", true),
+            ("o1-preview", true),
+            ("o4-mini", true),
+            ("codex-mini", true),
+            ("x-codex", true),
+            ("gpt-6", true),
+            ("gpt-10.2-mini", true),
+            ("gpt-6.20260709", false),
+            ("gpt-6foo", false),
+            ("gpt-100-astra", false),
+        ] {
+            assert_eq!(supports_responses_api(name), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn expands_selected_fields_only_once_after_provider_defaults() {
+        let cfg = "
+providers:
+  local: {base_url: '${env.HOST}/$VERSION/', token_key: '${TOKEN_KEY}'}
+models:
+  override: {provider: local, model: '${ MODEL }', base_url: '${BASE}/v2'}
+agents:
+  root: {model: 'local/org/${ env.MODEL }'}
+  other: {model: override}
+";
+        let mut env = BTreeMap::from([
+            ("HOST".into(), "http://localhost:8080".into()),
+            ("VERSION".into(), "v1".into()),
+            ("MODEL".into(), "$LITERAL".into()),
+            ("${TOKEN_KEY}".into(), "secret".into()),
+        ]);
+        let s = select(cfg, "root", &env).unwrap();
+        assert_eq!(s.endpoint, "http://localhost:8080/v1/chat/completions");
+        assert_eq!(s.model_params["model"], "org/$LITERAL");
+        assert_eq!(s.token, "secret"); // token_key is a name, not a template.
+        env.remove("HOST");
+        assert!(select(cfg, "root", &env).err().unwrap().contains("HOST"));
+        env.insert(" MODEL ".into(), "other".into());
+        env.insert("BASE".into(), "https://example.invalid".into());
+        let s = select(cfg, "other", &env).unwrap();
+        assert_eq!(s.model_params["model"], "other");
+        assert_eq!(s.endpoint, "https://example.invalid/v2/chat/completions");
+        assert!(expand_model_field("${env.PATH}", &env)
+            .unwrap_err()
+            .contains("PATH"));
+        env.insert("MODEL".into(), String::new());
+        assert_eq!(
+            expand_model_field("pre${MODEL}post", &env).unwrap(),
+            "prepost"
+        );
+        env.insert("BASE".into(), String::new());
+        assert!(select(&cfg.replace("${BASE}/v2", "${BASE}"), "other", &env).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_options_and_does_not_emulate_responses() {
+        for option in [
+            "temperature: .nan",
+            "top_p: nope",
+            "max_tokens: 1.5",
+            "parallel_tool_calls: 1",
+            "top_p: 1, top_p: 0",
+            "context_window: 8192",
+            "provider_opts: {}",
+            "thinking_budget: low",
+            "max_completion_tokens: 42",
+        ] {
+            let provider =
+                format!("providers: {{p: {{{option}}}}}\nagents: {{root: {{model: p/test}}}}");
+            let model = format!("models: {{m: {{provider: openai, model: test, {option}}}}}\nagents: {{root: {{model: m}}}}");
+            for cfg in [provider, model] {
+                assert!(parse(&cfg).is_err(), "{cfg}");
+            }
+        }
+        let env = BTreeMap::from([("OPENAI_API_KEY".into(), "key".into())]);
+        for cfg in [
+            "agents: {root: {model: openai/gpt-5}}",
+            "providers: {local: {}}\nagents: {root: {model: local/gpt-4.1-mini}}",
+            "providers: {local: {api_type: openai_responses}}\nagents: {root: {model: local/test}}",
+        ] {
+            let err = select(cfg, "", &env).err().unwrap();
+            assert!(
+                err.contains("Responses API") || err.contains("must use OpenAI Chat Completions"),
+                "{err}"
+            );
+        }
+        let cfg = "providers: {local: {max_tokens: 9007199254740993}}\nagents: {root: {model: local/test}}";
+        assert!(select(cfg, "", &BTreeMap::new())
+            .err()
+            .unwrap()
+            .contains("safe integer"));
+    }
+
     #[test]
     fn selects_root_before_first_and_does_not_leak_keys_to_custom_endpoint() {
         let env = BTreeMap::from([
@@ -272,7 +577,7 @@ mod tests {
         ]);
         let cfg = "version: 16\nproviders: {local: {base_url: 'http://localhost:8001/v1'}}\nagents:\n  helper: {model: openai/other}\n  root: {model: local/org/name, instruction: '${env.WHO} ${x} ${wrap(${env.WHO})} ${env.ABSENT}'}";
         let s = select(cfg, "", &env).unwrap();
-        assert_eq!(s.model, "org/name");
+        assert_eq!(s.model_params["model"], "org/name");
         assert_eq!(s.token, "");
         assert_eq!(s.instruction, "Ada ${x} ${wrap(${env.WHO})} ");
         assert_eq!(select(cfg, "helper", &env).unwrap().token, "secret");
