@@ -27,7 +27,7 @@ func TestNewDockerAgentAdapter(t *testing.T) {
 		require.NoError(t, team.StopToolSets(t.Context()))
 	}()
 
-	adapter, err := newDockerAgentAdapter(team, "root", nil, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, "/srv/a2a-workspace")
+	adapter, err := newDockerAgentAdapter(team, "root", nil, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, "/srv/a2a-workspace", testApprovals(t.Context()))
 
 	require.NoError(t, err)
 	assert.Equal(t, "root", adapter.Name())
@@ -46,7 +46,7 @@ func TestNewCAgentAdapter_NonExistent(t *testing.T) {
 		require.NoError(t, team.StopToolSets(t.Context()))
 	}()
 
-	_, err = newDockerAgentAdapter(team, "nonexistent", nil, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, "/srv/a2a-workspace")
+	_, err = newDockerAgentAdapter(team, "nonexistent", nil, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, "/srv/a2a-workspace", testApprovals(t.Context()))
 
 	assert.Contains(t, err.Error(), "failed to get agent")
 }

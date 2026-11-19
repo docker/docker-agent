@@ -325,6 +325,16 @@ type Session struct {
 	// in interactive TUI sessions when a user approves all tools.
 	NonInteractive bool `json:"non_interactive,omitempty"`
 
+	// ToolApproval opts a NonInteractive session into out-of-band tool
+	// confirmation: instead of denying a call that reaches askUser, the
+	// runtime emits a ToolCallConfirmationEvent and parks on Resume, letting
+	// an embedder approve or reject the call across a request boundary (the
+	// A2A TASK_STATE_INPUT_REQUIRED flow). It is deliberately narrow — read
+	// only in [toolexec] askUser — and is never inherited by sub-sessions
+	// (background agents, transfer_task), which keep denying. Without this
+	// flag a NonInteractive session denies, as before.
+	ToolApproval bool `json:"tool_approval,omitempty"`
+
 	// HideToolResults is a flag to indicate if tool results should be hidden
 	HideToolResults bool `json:"hide_tool_results"`
 
@@ -1628,6 +1638,14 @@ func WithSafetyPolicy(policy SafetyPolicy) Opt {
 func WithNonInteractive(nonInteractive bool) Opt {
 	return func(s *Session) {
 		s.NonInteractive = nonInteractive
+	}
+}
+
+// WithToolApproval opts a NonInteractive session into out-of-band tool
+// confirmation. See [Session.ToolApproval].
+func WithToolApproval(toolApproval bool) Opt {
+	return func(s *Session) {
+		s.ToolApproval = toolApproval
 	}
 }
 

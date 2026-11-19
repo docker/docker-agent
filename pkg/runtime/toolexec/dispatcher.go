@@ -831,7 +831,13 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 	// to approve, and an auto-Allow here would bypass whatever rule
 	// routed the call to askUser in the first place (a checker
 	// ForceAsk, a preempt-yolo Ask, or the default Ask).
-	if c.sess.NonInteractive {
+	//
+	// ToolApproval is the narrow exception: a NonInteractive session that
+	// opted into out-of-band confirmation (the A2A INPUT_REQUIRED flow) does
+	// have a Resume listener across request boundaries, so it falls through
+	// to the confirmation path below. Sub-sessions never set ToolApproval, so
+	// background agents and transfer_task keep denying.
+	if c.sess.NonInteractive && !c.sess.ToolApproval {
 		slog.DebugContext(ctx, "Tool denied: non-interactive session reached askUser", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
 		c.notifyApproval(ctx, ApprovalDecisionDeny, ApprovalSourceNonInteractiveDeny)
 		c.errorResponse(ctx, fmt.Sprintf("Tool '%s' requires user confirmation but the session is non-interactive.", c.tc.Function.Name))

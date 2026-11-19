@@ -89,6 +89,7 @@ func (s *Session) Clone() *Session {
 		SafetyPolicy:            s.SafetyPolicy,
 		PriorSafetyPolicy:       s.PriorSafetyPolicy,
 		NonInteractive:          s.NonInteractive,
+		ToolApproval:            s.ToolApproval,
 		HideToolResults:         s.HideToolResults,
 		WorkingDir:              s.WorkingDir,
 		SendUserMessage:         s.SendUserMessage,

@@ -161,7 +161,7 @@ func TestA2ARuntimeConfig_StartupProviderRetainsResolvedConfiguration(t *testing
 			store := session.NewInMemorySessionStore()
 			t.Cleanup(func() { require.NoError(t, store.Close()) })
 			var final string
-			for event, err := range runDockerAgent(newFakeInvocationContext(t.Context(), "workspace", "workspace"), tm, ag.Name(), ag, store, servesafety.Resolved{Policy: session.SafetyPolicyBalanced}, rc.WorkingDir) {
+			for event, err := range runDockerAgent(newFakeInvocationContext(t.Context(), "workspace", "workspace"), tm, ag.Name(), ag, store, servesafety.Resolved{Policy: session.SafetyPolicyBalanced}, rc.WorkingDir, testApprovals(t.Context())) {
 				require.NoError(t, err)
 				if event.TurnComplete {
 					final = eventText(t, event)
@@ -185,7 +185,7 @@ func TestA2ARuntimeConfig_ContextLifetimeAndCurrentOmissions(t *testing.T) {
 	assert.Equal(t, session.SafetyPolicyBalanced, safety.Policy)
 	store := newRecordingStore()
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	adapter, err := newDockerAgentAdapter(tm, "analyst", store, safety, rc.WorkingDir)
+	adapter, err := newDockerAgentAdapter(tm, "analyst", store, safety, rc.WorkingDir, testApprovals(t.Context()))
 	require.NoError(t, err)
 
 	for i, contextID := range []string{"conversation", "conversation", "separate"} {

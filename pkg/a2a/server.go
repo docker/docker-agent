@@ -53,6 +53,11 @@ type RunOptions struct {
 	OnSafetyPolicy func(servesafety.Resolved)
 	AuthToken      string
 	CORSOrigin     string
+	// ToolApproval opts the server into out-of-band tool confirmation: a tool
+	// call that would otherwise be denied in the non-interactive A2A session
+	// instead parks the task in TASK_STATE_INPUT_REQUIRED until the client
+	// replies with an approve/reject decision. Off by default.
+	ToolApproval bool
 }
 
 func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runConfig *config.RuntimeConfig, ln net.Listener, options RunOptions) error {
@@ -107,7 +112,7 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 		return err
 	}
 
-	e, err := newServer(t, agentFilename, agentName, sessStore, resolvedSafety, workingDir, ln.Addr().String(), options)
+	e, err := newServer(ctx, t, agentFilename, agentName, sessStore, resolvedSafety, workingDir, ln.Addr().String(), options)
 	if err != nil {
 		return fmt.Errorf("failed to create A2A server: %w", err)
 	}
@@ -127,8 +132,13 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	return nil
 }
 
-func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
-	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir)
+func newServer(ctx context.Context, t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
+	// The registry keeps runtimes alive between the request that parks on a
+	// tool confirmation and the request that answers it. ctx is the server
+	// lifetime: cancelling it (shutdown) cancels every parked run.
+	approvals := newApprovalRegistry(ctx, options.ToolApproval)
+
+	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir, approvals)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +170,7 @@ func newServer(t *team.Team, agentFilename, agentName string, sessStore session.
 			Agent:          adkAgent,
 			SessionService: adksession.InMemoryService(),
 		},
-	})
+	}, approvals)
 
 	// Start server
 	e := echo.New()

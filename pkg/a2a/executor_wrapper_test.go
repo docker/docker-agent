@@ -145,7 +145,7 @@ func TestFixArtifactEvents_StopsSourceWhenConsumerStops(t *testing.T) {
 func TestExecutorWrapper_Cancel(t *testing.T) {
 	t.Parallel()
 
-	wrapper := newExecutorWrapper(adka2a.ExecutorConfig{})
+	wrapper := newExecutorWrapper(adka2a.ExecutorConfig{}, testApprovals(t.Context()))
 	execCtx := &a2asrv.ExecutorContext{
 		TaskID:    "test-task",
 		ContextID: "test-context",
