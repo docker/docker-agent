@@ -1,62 +1,93 @@
-// One helper per MCP endpoint per session. Attach accessToken() only to that exact
-// endpoint. On 401, authorize(header, signal) replaces the token; retry only once.
-// Abort outstanding work and drop this helper on close. Nothing goes into storage.
+import { chunks, maxBytes } from './legacy-sse.mjs';
+
+const maxGrantWaiters = 32;
+
+// A grant and its pinned public client, issuer and endpoints belong to one MCP session.
 export function createMCPOAuth({ serverURL, oauthRedirectURI, clientId, clientSecret, scopes,
   toolFetch, toolProxy, allowPrivateIPs = false, elicit }) {
-  let token, registration, busy = false;
   const policy = { toolProxy, allowPrivateIPs };
+  let binding, token, pending, closed = false;
 
-  async function exchange(wwwAuthenticate, signal) {
+  async function request(url, signal, init = {}) {
     signal.throwIfAborted();
-    validateOAuthConfig(serverURL, oauthRedirectURI, clientId, scopes);
-    if (clientSecret) throw new Error('MCP OAuth requires a public client');
-    if (typeof toolFetch !== 'function' || typeof elicit !== 'function') throw new Error('MCP OAuth requires guarded toolFetch and URL elicitation');
-
-    async function request(url, init = {}, status = 200, allowMissing = false) {
-      signal.throwIfAborted();
-      const res = await toolFetch(url, {
+    try {
+      return await toolFetch(url, {
         redirect: 'error', credentials: 'omit', ...init,
         headers: { Accept: 'application/json', ...init.headers },
       }, policy, signal);
-      if (res.redirected || res.status !== status) {
-        await res.body?.cancel();
-        if (!res.redirected && allowMissing && res.status === 404) return;
-        throw new Error(`MCP OAuth request failed: HTTP ${res.status}`);
-      }
-      return readJSON(res, signal);
+    } catch {
+      signal.throwIfAborted();
+      throw new Error('MCP OAuth transport request failed');
     }
-    async function discover(urls) {
-      for (const url of new Set(urls)) {
-        const doc = await request(url, {}, 200, urls.length > 1);
-        if (doc) return doc;
-      }
-      throw new Error('MCP OAuth metadata not found');
-    }
+  }
 
-    const challenge = bearerChallenge(wwwAuthenticate);
-    const resource = await resourceMetadata(serverURL, challenge.get('resource_metadata'), discover);
+  async function discover(urls, signal) {
+    for (const url of new Set(urls)) {
+      const res = await request(url, signal);
+      if (!res.redirected && res.status === 404 && urls.length > 1) {
+        res.body?.cancel().catch(() => {});
+        continue;
+      }
+      return responseJSON(res, signal);
+    }
+    throw new Error('MCP OAuth metadata not found');
+  }
+
+  async function bind(challenge, signal) {
+    validateOAuthConfig(serverURL, oauthRedirectURI, clientId, scopes);
+    if (clientSecret) throw new Error('MCP OAuth requires a public client');
+    if (typeof toolFetch !== 'function' || typeof elicit !== 'function') throw new Error('MCP OAuth requires guarded toolFetch and URL elicitation');
+    const lookup = urls => discover(urls, signal);
+    const resource = await resourceMetadata(serverURL, challenge.get('resource_metadata'), lookup);
     const issuer = resource.authorization_servers[0];
-    const as = await authorizationMetadata(issuer, discover);
-    const authURL = httpsURL(as.authorization_endpoint, 'authorization endpoint');
-    const tokenURL = httpsURL(as.token_endpoint, 'token endpoint');
-
+    const as = await authorizationMetadata(issuer, lookup);
+    const authorizationURL = httpsURL(as.authorization_endpoint, 'authorization endpoint').href;
+    const tokenURL = httpsURL(as.token_endpoint, 'token endpoint').href;
     const scope = scopeString(scopes) || scopeString(challenge.get('scope')?.split(' ')) || scopeString(resource.scopes_supported);
     let id = clientId;
     if (!id) {
       if (!as.registration_endpoint) throw new Error('MCP OAuth requires a clientId or dynamic client registration');
       const registerURL = httpsURL(as.registration_endpoint, 'registration endpoint');
-      if (registration?.issuer !== issuer || registration.scope !== scope) {
-        const reg = await request(registerURL.href, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ client_name: 'docker-agent', redirect_uris: [oauthRedirectURI],
-            grant_types: ['authorization_code'], response_types: ['code'], token_endpoint_auth_method: 'none', ...(scope && { scope }) }),
-        }, 201);
-        if (!validID(reg.client_id) || reg.client_secret !== undefined || reg.token_endpoint_auth_method !== 'none' ||
-            !Array.isArray(reg.redirect_uris) || reg.redirect_uris.length !== 1 || reg.redirect_uris[0] !== oauthRedirectURI) throw new Error('invalid MCP OAuth public client registration');
-        registration = { issuer, scope, id: reg.client_id };
-      }
-      id = registration.id;
+      const grantTypes = ['authorization_code'];
+      if (!as.grant_types_supported || supports(as.grant_types_supported, 'refresh_token')) grantTypes.push('refresh_token');
+      const res = await request(registerURL.href, signal, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_name: 'docker-agent', redirect_uris: [oauthRedirectURI],
+          grant_types: grantTypes, response_types: ['code'], token_endpoint_auth_method: 'none', ...(scope && { scope }) }),
+      });
+      const reg = await responseJSON(res, signal, 201);
+      if (!validID(reg.client_id) || reg.client_secret !== undefined || reg.token_endpoint_auth_method !== 'none' ||
+          !Array.isArray(reg.redirect_uris) || reg.redirect_uris.length !== 1 || reg.redirect_uris[0] !== oauthRedirectURI) throw new Error('invalid MCP OAuth public client registration');
+      id = reg.client_id;
     }
+    return { id, scope, issuer, authorizationURL, tokenURL, as, resource };
+  }
 
+  async function grant(params, signal) {
+    const res = await request(binding.tokenURL, signal, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ ...params, client_id: binding.id, resource: serverURL }).toString(),
+    });
+    if (!res.redirected && res.status === 400 && params.grant_type === 'refresh_token') {
+      if ((await readJSON(res, signal)).error === 'invalid_grant') return null;
+      throw new Error('MCP OAuth refresh failed: HTTP 400');
+    }
+    const received = Date.now();
+    const result = await responseJSON(res, signal);
+    if ('error' in result || typeof result.access_token !== 'string' || !/^[A-Za-z0-9._~+/-]+=*$/.test(result.access_token) ||
+        typeof result.token_type !== 'string' || result.token_type.toLowerCase() !== 'bearer') throw new Error('invalid MCP OAuth bearer token');
+    if (result.refresh_token !== undefined && (typeof result.refresh_token !== 'string' || !/^[\x20-\x7e]+$/.test(result.refresh_token))) {
+      throw new Error('invalid MCP OAuth refresh token');
+    }
+    if (result.expires_in !== undefined && (!Number.isSafeInteger(result.expires_in) || result.expires_in <= 0)) throw new Error('invalid MCP OAuth token lifetime');
+    const lifetime = (result.expires_in ?? Infinity) * 1000;
+    const expires = received + lifetime;
+    if (Date.now() >= expires) throw new Error('MCP OAuth token already expired');
+    return { value: result.access_token, refresh: result.refresh_token ?? params.refresh_token, expires,
+      refreshAt: expires - Math.min(30000, lifetime / 2) };
+  }
+
+  async function exchange(signal) {
+    const { authorizationURL, id, scope, issuer, as, resource } = binding;
+    const authURL = new URL(authorizationURL);
     const verifier = randomValue(), state = randomValue();
     const challengeBytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
     authURL.search = new URLSearchParams({ response_type: 'code', client_id: id, redirect_uri: oauthRedirectURI,
@@ -69,36 +100,95 @@ export function createMCPOAuth({ serverURL, oauthRedirectURI, clientId, clientSe
     }, signal);
     signal.throwIfAborted();
     const code = callbackCode(reply, oauthRedirectURI, state, issuer);
-    const result = await request(tokenURL.href, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ grant_type: 'authorization_code', client_id: id, redirect_uri: oauthRedirectURI,
-        code, code_verifier: verifier, resource: serverURL }).toString(),
-    });
-    signal.throwIfAborted();
-    if (typeof result.access_token !== 'string' || !/^[A-Za-z0-9._~+/-]+=*$/.test(result.access_token) ||
-        typeof result.token_type !== 'string' || result.token_type.toLowerCase() !== 'bearer') throw new Error('invalid MCP OAuth bearer token');
-    if (result.expires_in !== undefined && (!Number.isSafeInteger(result.expires_in) || result.expires_in <= 0)) throw new Error('invalid MCP OAuth token lifetime');
-    return { value: result.access_token, expires: Date.now() + (result.expires_in ?? Infinity) * 1000 };
+    return grant({ grant_type: 'authorization_code', redirect_uri: oauthRedirectURI, code, code_verifier: verifier }, signal);
   }
 
-  async function authorize(wwwAuthenticate, signal) {
-    if (busy) throw new Error('MCP OAuth authorization is already in progress');
-    busy = true;
-    token = undefined;
-    try {
-      const result = await exchange(wwwAuthenticate, signal);
+  async function renew(challenge, signal) {
+    signal.throwIfAborted();
+    if (!binding) {
+      const discovered = await bind(challenge, signal);
       signal.throwIfAborted();
-      token = result;
-      return token.value;
-    } finally { busy = false; }
+      binding = discovered;
+    }
+    let next;
+    if (token?.refresh) {
+      next = await grant({ grant_type: 'refresh_token', refresh_token: token.refresh }, signal);
+      signal.throwIfAborted();
+      if (!next) token = undefined; // Explicit invalid_grant, not a transport or parsing failure.
+    }
+    if (!next) next = await exchange(signal);
+    signal.throwIfAborted();
+    token = next;
+    return token.value;
   }
+
+  async function acquire(challenge, signal) {
+    signal.throwIfAborted();
+    if (closed) throw new Error('MCP OAuth session is closed');
+    if (!pending) {
+      pending = { controller: new AbortController(), waiters: new Set() };
+      const flight = pending;
+      const notify = (method, result) => {
+        pending = undefined;
+        for (const waiter of flight.waiters) waiter[method](result);
+      };
+      Promise.resolve().then(() => renew(challenge, flight.controller.signal)).then(
+        value => notify('resolve', value), error => notify('reject', error),
+      );
+    }
+    const flight = pending;
+    if (flight.controller.signal.aborted) throw new Error('MCP OAuth cancellation in progress');
+    if (flight.waiters.size >= maxGrantWaiters) throw new Error('too many concurrent MCP OAuth requests');
+    const waiter = Promise.withResolvers();
+    flight.waiters.add(waiter);
+    const waiting = AbortSignal.any([signal, flight.controller.signal]);
+    const abort = () => {
+      waiter.reject(waiting.reason);
+      flight.waiters.delete(waiter);
+      if (!flight.waiters.size) flight.controller.abort();
+    };
+    waiting.addEventListener('abort', abort, { once: true });
+    try {
+      const value = await waiter.promise;
+      waiting.throwIfAborted();
+      return value;
+    } finally { waiting.removeEventListener('abort', abort); }
+  }
+
+  function accessToken() { return token && Date.now() < token.expires ? token.value : undefined; }
   return {
-    authorize,
-    accessToken() {
-      if (token && Date.now() >= token.expires) token = undefined;
-      return token?.value;
+    accessToken,
+    async beforeRequest(signal) {
+      signal.throwIfAborted();
+      if (closed) throw new Error('MCP OAuth session is closed');
+      const value = accessToken();
+      if (pending || (binding && (!value || (token.refresh && Date.now() >= token.refreshAt)))) return acquire(null, signal);
+      return value;
     },
-    invalidate() { token = undefined; },
+    async authorize(wwwAuthenticate, signal, rejectedToken) {
+      signal.throwIfAborted();
+      const challenge = bearerChallenge(wwwAuthenticate);
+      if (rejectedToken && challenge.get('error') !== 'invalid_token') throw new Error('MCP authorization failed (HTTP 401); bearer was not rejected as invalid_token');
+      // A slower 401 may arrive after a concurrent request already replaced this token.
+      const current = accessToken();
+      if (current && current !== rejectedToken) return current;
+      if (token) token.value = undefined;
+      return acquire(challenge, signal);
+    },
+    close() {
+      closed = true;
+      pending?.controller.abort();
+      binding = token = undefined;
+    },
   };
+}
+
+async function responseJSON(res, signal, status = 200) {
+  if (res.redirected || res.status !== status) {
+    res.body?.cancel().catch(() => {});
+    throw new Error(`MCP OAuth request failed: HTTP ${res.status}`);
+  }
+  return readJSON(res, signal);
 }
 
 export function validateOAuthConfig(serverURL, redirectURI, clientId, scopes) {
@@ -202,27 +292,19 @@ function bearerChallenge(header) {
 
 async function readJSON(res, signal) {
   if (!/^application\/json(?:\s*;|$)/i.test(res.headers.get('Content-Type') ?? '') || !res.body) {
-    await res.body?.cancel();
+    res.body?.cancel().catch(() => {});
     throw new Error('expected MCP OAuth JSON response');
   }
-  const reader = res.body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
   let text = '', bytes = 0;
-  try {
-    for (;;) {
-      signal.throwIfAborted();
-      const { value, done } = await reader.read();
-      if (done) break;
-      bytes += value.byteLength;
-      if (bytes > 1024 * 1024) throw new Error('MCP OAuth response too large');
-      text += decoder.decode(value, { stream: true });
-    }
-    let doc;
-    try { doc = JSON.parse(text + decoder.decode()); }
-    catch { throw new Error('invalid MCP OAuth JSON object'); } // Don't echo token responses.
-    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error('invalid MCP OAuth JSON object');
-    return doc;
-  } finally {
-    try { await reader.cancel(); } finally { reader.releaseLock(); }
+  for await (const chunk of chunks(res.body, signal)) {
+    bytes += chunk.byteLength;
+    if (bytes > maxBytes) throw new Error('MCP OAuth response too large');
+    text += decoder.decode(chunk, { stream: true });
   }
+  let doc;
+  try { doc = JSON.parse(text + decoder.decode()); }
+  catch { throw new Error('invalid MCP OAuth JSON object'); } // Don't echo token responses.
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error('invalid MCP OAuth JSON object');
+  return doc;
 }

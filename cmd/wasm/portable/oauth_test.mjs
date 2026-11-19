@@ -23,10 +23,10 @@ function callback(event) {
 function fixture(options = {}) {
   const resource = { resource: serverURL, authorization_servers: [issuer], scopes_supported: ['read'] };
   const as = { issuer, authorization_endpoint: authEndpoint, token_endpoint: tokenURL, registration_endpoint: regURL,
-    code_challenge_methods_supported: ['S256'], response_types_supported: ['code'], grant_types_supported: ['authorization_code'],
+    code_challenge_methods_supported: ['S256'], response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'],
     authorization_response_iss_parameter_supported: true, token_endpoint_auth_methods_supported: ['none'] };
   const registration = { client_id: 'registered', token_endpoint_auth_method: 'none', redirect_uris: [oauthRedirectURI] };
-  const token = { token_type: 'Bearer', access_token: 'temporary', expires_in: 60, refresh_token: 'unused' };
+  const token = { token_type: 'Bearer', access_token: 'temporary', expires_in: 60, refresh_token: 'private +%& token' };
   const requests = [], events = [];
   const routes = new Map([[challengedURL, resource], [prmURL, resource], [asmURL, as], [regURL, registration], [tokenURL, token]]);
   const controller = new AbortController(), signal = controller.signal;
@@ -34,17 +34,20 @@ function fixture(options = {}) {
     headers: { Authorization: 'server-only', 'X-Private': 'server-only' }, // never propagated
     toolFetch(url, init, policy, s) {
       assert.deepEqual(policy, { toolProxy, allowPrivateIPs: options.allowPrivateIPs ?? false });
-      assert.equal(s, signal);
+      assert.ok(s instanceof AbortSignal);
+      s.throwIfAborted();
       assert.equal(init.redirect, 'error');
       assert.equal(init.credentials, 'omit');
       assert.deepEqual(Object.keys(init.headers).sort(), init.body ? ['Accept', 'Content-Type'] : ['Accept']);
-      requests.push({ url, init });
+      requests.push({ url, init, signal: s });
       assert.ok(routes.has(url), `unexpected request to ${url}`);
       const value = routes.get(url);
+      if (typeof value === 'function') return value(init, s);
       return value instanceof Response ? value : Response.json(value, { status: url === regURL ? 201 : 200 });
     },
     elicit(event, s) {
-      assert.equal(s, signal);
+      assert.ok(s instanceof AbortSignal);
+      s.throwIfAborted();
       events.push(event);
       return callback(event);
     }, ...options });
@@ -61,7 +64,7 @@ test('guarded discovery, public registration, URL elicitation, and one PKCE code
   const [reg, exchange] = f.requests.slice(-2).map(r => r.init);
   assert.equal(reg.method, 'POST');
   assert.equal(reg.headers['Content-Type'], 'application/json');
-  assert.deepEqual(JSON.parse(reg.body), { client_name: 'docker-agent', redirect_uris: [oauthRedirectURI], grant_types: ['authorization_code'],
+  assert.deepEqual(JSON.parse(reg.body), { client_name: 'docker-agent', redirect_uris: [oauthRedirectURI], grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'], token_endpoint_auth_method: 'none', scope: 'read write' });
   assert.equal(exchange.headers['Content-Type'], 'application/x-www-form-urlencoded');
   assert.equal(exchange.method, 'POST');
@@ -81,11 +84,9 @@ test('guarded discovery, public registration, URL elicitation, and one PKCE code
       'docker-agent/authorize_url': url.href, 'docker-agent/state': state, auth_server: issuer, auth_server_metadata: f.as, resource_metadata: f.resource } });
   assert.ok(!JSON.stringify(event).includes(code_verifier));
   assert.equal(fixture().oauth.accessToken(), undefined);
-  await f.run();
-  assert.notEqual(f.events[1].meta['docker-agent/state'], state);
-  assert.deepEqual(f.requests.slice(4).map(r => r.url), [challengedURL, asmURL, tokenURL]);
-  f.oauth.invalidate();
+  f.oauth.close();
   assert.equal(f.oauth.accessToken(), undefined);
+  await assert.rejects(f.oauth.beforeRequest(f.signal), /closed/);
 });
 
 test('well-known path then root, OIDC discovery with issuer path, configured client and scope precedence', async () => {
@@ -198,28 +199,99 @@ test('limits untrusted response bodies, redacts errors, and never accepts malfor
   }
 });
 
-test('aborted/overlapping authorizations cannot cache a stale result', async () => {
+test('aborted waiters release a shared authorization; a late callback cannot install a token', async () => {
   const prompt = Promise.withResolvers(), reply = Promise.withResolvers();
-  const f = fixture({ elicit: event => { prompt.resolve(event); return reply.promise; } });
-  const first = f.run();
-  const event = await prompt.promise;
-  await assert.rejects(f.run(), /already in progress/);
+  const f = fixture({ elicit: (event, signal) => { prompt.resolve({ event, signal }); return reply.promise; } });
+  const first = f.run(), second = f.run();
+  const { event, signal } = await prompt.promise;
   f.controller.abort();
+  await Promise.all([first, second].map(p => assert.rejects(p, /abort/i)));
+  assert.equal(signal.aborted, true);
   reply.resolve(callback(event));
-  await assert.rejects(first, /abort/i);
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.requests.at(-1).url, regURL);
   assert.equal(f.oauth.accessToken(), undefined);
 });
 
-test('expiry and a failed reauthorization drop the previous access token', async t => {
-  const now = t.mock.method(Date, 'now', () => 0);
+test('refresh uses the pinned resource, token endpoint and registered client; only explicit invalid_grant reopens PKCE', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
   const f = fixture();
   await f.run();
-  now.mock.mockImplementation(() => 60000);
-  assert.equal(f.oauth.accessToken(), undefined);
+  // Reauthorization must not rediscover or switch to different endpoints.
+  f.as.token_endpoint = 'https://other.example/token';
+  f.resource.authorization_servers = ['https://other.example'];
+  now = 30001;
+  f.routes.set(tokenURL, init => new URLSearchParams(init.body).get('grant_type') === 'refresh_token'
+    ? Response.json({ error: 'invalid_grant' }, { status: 400 }) : Response.json({ token_type: 'Bearer', access_token: 'new' }));
+  assert.equal(await f.oauth.beforeRequest(f.signal), 'new');
+  assert.equal(f.events.length, 2);
+  assert.notEqual(f.events[0].meta['docker-agent/state'], f.events[1].meta['docker-agent/state']);
+  assert.deepEqual(f.requests.slice(4).map(r => r.url), [tokenURL, tokenURL]);
+  const [refresh, exchange] = f.requests.slice(-2).map(r => new URLSearchParams(r.init.body));
+  assert.deepEqual(Object.fromEntries(refresh), { client_id: 'registered', grant_type: 'refresh_token', resource: serverURL, refresh_token: f.token.refresh_token });
+  assert.equal(exchange.get('grant_type'), 'authorization_code');
+  assert.equal(exchange.has('refresh_token'), false);
+  assert.ok(!JSON.stringify(f.events).includes(f.token.refresh_token));
+});
+
+test('no refresh or new lifetime is inferred from a failed or malformed token response', async t => {
+  let now;
+  t.mock.method(Date, 'now', () => now);
+  for (const bad of [Response.json({ error: 'invalid_grant' }, { status: 502 }), new Response('invalid_grant', { status: 400 }),
+    Response.json({ error: 'invalid_client', error_description: 'private-value invalid_grant' }, { status: 400 }),
+    Response.json({ access_token: 'private-value', token_type: 'Bearer', refresh_token: null }),
+    Response.json({ access_token: 'private-value', token_type: 'Bearer', expires_in: 0 }),
+    Response.json({ error: 'invalid_grant', access_token: 'private-value', token_type: 'Bearer' }),
+  ]) {
+    now = 0;
+    const f = fixture();
+    await f.run();
+    now = 60000;
+    assert.equal(f.oauth.accessToken(), undefined);
+    f.routes.set(tokenURL, bad);
+    await assert.rejects(f.oauth.beforeRequest(f.signal), e => !e.message.includes('private-value') && /MCP OAuth/.test(e.message));
+    assert.equal(f.oauth.accessToken(), undefined);
+    assert.equal(f.events.length, 1);
+    f.routes.set(tokenURL, { access_token: 'recovered', token_type: 'bearer' });
+    assert.equal(await f.oauth.beforeRequest(f.signal), 'recovered');
+    assert.equal(new URLSearchParams(f.requests.at(-1).init.body).get('refresh_token'), f.token.refresh_token);
+    now += 86400000;
+    assert.equal(await f.oauth.beforeRequest(f.signal), 'recovered');
+    assert.equal(f.requests.length, 6, 'omitted expires_in must not inherit the previous access token expiry');
+  }
+});
+
+test('cancellation releases a stalled OAuth response reader and bounds simultaneous waiters', async t => {
+  t.mock.method(Date, 'now', () => 0);
+  const f = fixture();
   await f.run();
-  assert.equal(f.oauth.accessToken(), 'temporary');
-  f.routes.set(tokenURL, new Response(null, { status: 400 }));
-  await assert.rejects(f.run(), /HTTP 400/);
+  const reading = Promise.withResolvers(), cancelled = Promise.withResolvers();
+  f.routes.set(tokenURL, new Response(new ReadableStream({
+    pull() { reading.resolve(); }, cancel() { cancelled.resolve(); },
+  }, { highWaterMark: 0 }), { headers: { 'Content-Type': 'application/json' } }));
+  const controller = new AbortController();
+  const first = f.oauth.authorize('Bearer error="invalid_token"', controller.signal, 'temporary');
+  await reading.promise;
+  const others = Array.from({ length: 31 }, () => f.oauth.beforeRequest(controller.signal));
+  await assert.rejects(f.oauth.beforeRequest(f.signal), /too many concurrent/);
+  assert.equal(f.requests.length, 5);
+  controller.abort();
+  await Promise.all([first, ...others].map(p => assert.rejects(p, /abort/i)));
+  await cancelled.promise;
+  assert.equal(f.events.length, 1);
+  assert.equal(f.oauth.accessToken(), undefined);
+});
+
+test('an access token that expires while its response streams is never installed', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const f = fixture();
+  f.routes.set(tokenURL, new Response(new ReadableStream({ pull(controller) {
+    now = 1000;
+    controller.enqueue(new TextEncoder().encode(JSON.stringify({ ...f.token, expires_in: 1 })));
+    controller.close();
+  } }, { highWaterMark: 0 }), { headers: { 'Content-Type': 'application/json' } }));
+  await assert.rejects(f.run(), /already expired/);
   assert.equal(f.oauth.accessToken(), undefined);
 });
