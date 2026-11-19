@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -13,8 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 )
 
-// The browser wrapper doesn't pass the three session options. Set them on the
-// Go session to pin the runtime behavior implemented by portable sessions.
+// Pin the browser session defaults with the same fixture as the portable runtime.
 func TestSmallProfileSessionLimitsReference(t *testing.T) {
 	var fixture struct {
 		Source               string `json:"source"`
@@ -30,9 +30,9 @@ func TestSmallProfileSessionLimitsReference(t *testing.T) {
 	args, err := json.Marshal(map[string]string{"text": strings.TrimPrefix(fixture.Source, "echo: ")})
 	require.NoError(t, err)
 	model := newScriptedModel("mock/root", toolTurn("echo", string(args)), textTurn("done"))
-	s := openTestSession(t, testHost(&echoToolSet{}, map[string]provider.Provider{"root": model}), sessionOptions{YAML: echoAgentYAML, AutoApprove: true})
+	s := openTestSession(t, testHost(&echoToolSet{}, map[string]provider.Provider{"root": model}), sessionOptions{YAML: echoAgentYAML + fmt.Sprintf("    max_iterations: 1\n    max_tool_result_tokens: %d\n    max_old_tool_call_tokens: %d\n", fixture.MaxToolResultTokens, fixture.MaxOldToolCallTokens), AutoApprove: true})
 	sess := s.chat.Conversation()
-	sess.MaxIterations, sess.MaxToolResultTokens, sess.MaxOldToolCallTokens = 1, fixture.MaxToolResultTokens, fixture.MaxOldToolCallTokens
+	require.Equal(t, 1, sess.MaxIterations)
 
 	var c collectingEmitter
 	result, err := s.send("first", c.emit)

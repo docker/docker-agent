@@ -10,6 +10,7 @@ pub const MAX_TOOL_ROUNDS: usize = 8;
 #[serde(default)]
 pub struct Limits {
     pub max_iterations: u32,
+    max_consecutive_tool_calls: u32,
     num_history_items: u32,
     max_tool_result_tokens: i32,
     max_old_tool_call_tokens: i32,
@@ -32,6 +33,13 @@ impl Limits {
         Ok(())
     }
 
+    pub fn repetition_limit(self) -> u32 {
+        if self.max_consecutive_tool_calls == 0 {
+            5
+        } else {
+            self.max_consecutive_tool_calls
+        }
+    }
     pub fn limits_history(&self) -> bool {
         self.num_history_items > 0
             || self.max_old_tool_call_tokens > 0

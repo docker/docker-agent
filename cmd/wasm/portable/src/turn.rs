@@ -74,6 +74,10 @@ pub struct Conversation {
 }
 
 struct Turn {
+    current_calls: Vec<(String, String)>,
+    previous_calls: Vec<(String, String)>,
+    consecutive: u32,
+    exempt_batch: bool,
     run_number: u64,
     tool_model_source: Option<usize>,
     context_before: u64,
@@ -408,6 +412,10 @@ impl Conversation {
             .checked_add(1)
             .ok_or("turn counter exhausted")?;
         self.active = Some(Turn {
+            current_calls: Vec::new(),
+            previous_calls: Vec::new(),
+            consecutive: 0,
+            exempt_batch: false,
             run_number: self.run_number,
             queue: VecDeque::new(),
             confirmation: None,
@@ -713,6 +721,21 @@ impl Conversation {
         message["tool_calls"] = wire_calls.into();
         self.messages.push(message);
         let turn = self.active.as_mut().expect("active tool round");
+        turn.current_calls = calls
+            .values()
+            .map(|call| {
+                let args = serde_json::from_str::<Value>(&call.arguments)
+                    .map(|mut value| {
+                        value.sort_all_objects();
+                        value.to_string()
+                    })
+                    .unwrap_or_else(|_| call.arguments.clone());
+                (call.name.clone(), args)
+            })
+            .collect();
+        turn.exempt_batch = calls
+            .values()
+            .all(|c| matches!(c.name.as_str(), "random_int" | "get_datetime"));
         turn.tool_model_source = None;
         turn.selection = self.profile.spec.picker.active.get();
         for call in calls.into_values() {
@@ -799,6 +822,7 @@ impl Conversation {
     }
 
     fn reject(&mut self, op: Invocation, reason: String, events: &mut Vec<Value>) {
+        self.active.as_mut().unwrap().exempt_batch = false;
         events.push(tool_result(&op.call.id, &op.call.name, &reason, true));
         self.messages[op.index]["content"] = reason.into();
     }
@@ -943,6 +967,9 @@ impl Conversation {
                 Ok(o) => (o, is_error),
                 Err(e) => (e, true),
             };
+        if is_error {
+            self.active.as_mut().unwrap().exempt_batch = false;
+        }
         let message = &mut self.messages[reply.index];
         let event = tool_result(
             message["tool_call_id"].as_str().unwrap(),
@@ -992,6 +1019,20 @@ impl Conversation {
         if self.active.as_ref().is_some_and(Turn::waiting) {
             json!({"events":events, "waiting":true})
         } else {
+            let turn = self.active.as_mut().unwrap();
+            if !turn.exempt_batch && !turn.current_calls.is_empty() {
+                turn.consecutive = if turn.previous_calls == turn.current_calls {
+                    turn.consecutive + 1
+                } else {
+                    1
+                };
+                turn.previous_calls = std::mem::take(&mut turn.current_calls);
+                if turn.consecutive >= self.profile.spec.limits.repetition_limit() {
+                    let reason=format!("Agent terminated: detected {} consecutive identical calls to {}. This indicates a degenerate loop where the model is not making progress.",turn.consecutive,turn.previous_calls[0].0);
+                    self.active = None;
+                    return json!({"events":events,"error":reason});
+                }
+            }
             let t = self.active.as_ref().expect("active tool round");
             let max = self.profile.spec.limits.max_iterations;
             if max > 0 && t.tool_rounds >= max as usize {
@@ -1667,8 +1708,8 @@ mod tests {
     fn repeated_tools_cannot_loop_forever_or_exhaust_the_scratchpad() {
         let mut c = conversation(&["think"]);
         c.begin("loop", "loop").unwrap();
-        for _ in 0..MAX_TOOL_ROUNDS {
-            think_once(&mut c, "");
+        for i in 0..MAX_TOOL_ROUNDS {
+            think_once(&mut c, &i.to_string());
         }
         c.chunk(chunk(
             json!({"tool_calls":[call(0,"a","think",r#"{"thought":""}"#)]}),

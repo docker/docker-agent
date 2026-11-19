@@ -75,7 +75,7 @@ test('a missing credential, unsafe target route, ambiguous todo scope or unsuppo
     [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, permissions: {deny: [think]}}') }, /permissions/],
     [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, toolsets: [{type: fetch}]}') }, /host toolsets/],
     [{ ...opts, yaml: opts.yaml.replace('sub_agents:', 'toolsets: [{type: plan}], sub_agents:') }, /host toolsets/],
-    [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, force_handoff: root}') }, /force_handoff/],
+    [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, force_handoff: missing}') }, /force_handoff/],
     [{ ...opts, yaml: opts.yaml.replace('[helper]', '[docker.io/remote]') }, /external agent/],
   ]) await assert.rejects(api.createSession(o), error);
   assert.equal(fetch.mock.callCount(), 0);

@@ -100,6 +100,8 @@ async function run() {
     { choices: [], usage: { prompt_tokens: 1022, completion_tokens: 2, total_tokens: 1024 } }];
   tests.compactAfterTools = await replay(api, 'compactAfterTools', compact, [toolAtBoundary,
     [piece({ content: 'finished the plan' }, 'stop'), usage], answer, answer], turns);
+  const limits = config.replace('model: local/test','model: local/test, max_iterations: 1, max_tool_result_tokens: 4, toolsets: [{type: think}]');
+  tests.sessionLimits = await replay(api,'sessionLimits',limits,[tool('think',{thought:'0123456789abcdefghijklmnopqrstuvwxyz'}),answer],turns);
   tests.plain = await replay(api, 'plain', config, [answer, answer], turns);
   const team = config.replace('model: local/test', 'model: local/test, sub_agents: [helper], handoffs: [helper]') + '  helper: {model: local/worker, description: Helps, instruction: Be precise}\n';
   tests.transfer = await replay(api, 'transfer', team, [tool('transfer_task', { agent: 'helper', task: 'count', expected_output: 'numbers' }), answer, answer, answer], turns);
@@ -111,6 +113,11 @@ async function run() {
   tests.handoff = await replay(api, 'handoff', team, [tool('handoff', { agent: 'helper' }), answer, answer], turns);
   tests.think = await replay(api, 'think', config.replace('model: local/test', 'toolsets: [{type: think}], model: local/test'),
     [tool('think', { thought: 'a plan' }), answer, answer], turns);
+  tests.loopGuard = await replay(api,'loopGuard', config.replace('model: local/test','max_consecutive_tool_calls: 2, toolsets: [{type: think}], model: local/test'),
+    [tool('think',{thought:'repeat'}),tool('think',{thought:'repeat'}),answer],async ({api,options,record,trace})=>{
+      const s=await api.createSession(options,record);
+      try {await s.send('loop').then(()=>{throw new Error('expected termination');},e=>trace.results.push(e.message));trace.results.push(await s.send('recover'));}finally{await s.close();}
+    });
   tests.truncatedTool = await replay(api, 'truncatedTool', config.replace('model: local/test', 'toolsets: [{type: think}], model: local/test'),
     [[piece({ content: 'Partial result' }), piece({ tool_calls: [{ id: 'cut', index: 0, type: 'function', function: { name: 'think', arguments: '{' } }] }, 'length'), usage], answer], turns);
   tests.abortRestart = await replay(api, 'abortRestart', config, [answer, answer], async ({ api, options, record, trace }) => {
