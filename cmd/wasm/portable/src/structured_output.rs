@@ -1,14 +1,16 @@
 //! Validate the internal tool against the configured schema, not OpenAI's normalized copy.
-//! Each schema node has one explicit type and an exhaustive keyword allowlist; there is no resolver.
+//! Only bare JSON Pointer references to entries in the root `$defs` are supported.
 use serde_json::{json, Value};
 use serde_yaml_ng::Value as Instance;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const NAME: &str = "__structured_output__";
 pub const REMINDER: &str = "Reminder: this conversation requires structured output. Do not answer in plain text. Call the __structured_output__ tool with your final answer as arguments matching its JSON schema; a valid call ends the turn.";
 const MAX_REMINDERS: usize = 2;
 pub const MAX_ARGS: usize = 64 * 1024;
 const MAX_SCHEMA_NODES: usize = 128;
+const MAX_DEPTH: usize = 16;
+const MAX_EXPANDED_NODES: usize = 512;
 const NON_EXCLUSIVE: &str = "Structured output rejected: __structured_output__ must be the only tool call in the response. Finish any other tool use first, then call __structured_output__ alone with the final answer.";
 
 fn safe_integer(n: i64) -> bool {
@@ -46,7 +48,7 @@ pub fn stop_error(model: &str, reminders: usize) -> Option<String> {
 
 pub struct OutputTool {
     name: String,
-    schema: Value,
+    schema: Schema,
     pub definition: Value,
     pub strict: bool,
 }
@@ -69,7 +71,7 @@ impl OutputTool {
         }
         Ok(Self {
             name: name.into(),
-            schema: schema.clone(),
+            schema: Schema::link(schema)?,
             strict,
             definition: json!({"type":"function", "function":{"name":NAME,"description":text,"parameters":parameters}}),
         })
@@ -97,12 +99,14 @@ impl OutputTool {
                 format!("arguments are not valid JSON: {e}")
             }
         })?;
-        validate(&self.schema, &value).map_err(|e| {
-            format!(
-                "arguments do not match the {:?} schema: validating root: {e}",
-                self.name
-            )
-        })?;
+        self.schema
+            .validate(&self.schema.root, &value, "")
+            .map_err(|e| {
+                format!(
+                    "arguments do not match the {:?} schema: validating root: {e}",
+                    self.name
+                )
+            })?;
         // Like json.Compact, retain key order, string escapes and number spelling.
         let (mut quoted, mut escaped) = (false, false);
         Ok(raw
@@ -128,10 +132,31 @@ fn parameters(
     left: &mut usize,
     strict: &mut bool,
 ) -> Result<Value, String> {
-    if depth > 16 || *left == 0 {
+    if depth > MAX_DEPTH || *left == 0 {
         return Err("tool schema exceeds depth or node limit".into());
     }
     *left -= 1;
+    if let Some(reference) = s.get("$ref") {
+        if s.as_object().unwrap().len() != 1 {
+            return Err("tool schema $ref siblings are unsupported".into());
+        }
+        let pointer = reference.as_str().ok_or("$ref must be a string")?;
+        if !pointer.starts_with('#') {
+            return Err("non-local $ref: only same-document pointers are supported".into());
+        }
+        let token = pointer
+            .strip_prefix("#/$defs/")
+            .ok_or("$ref must point to a root $defs entry")?;
+        // Go's validator URI-decodes fragments; its OpenAI walker does not.
+        if token.len() > 256
+            || token.contains(['/', '%'])
+            || token.chars().any(char::is_control)
+            || token.split('~').skip(1).any(|s| !s.starts_with(['0', '1']))
+        {
+            return Err("invalid or unsupported $ref pointer token".into());
+        }
+        return Ok(s.clone());
+    }
     let ty = s["type"]
         .as_str()
         .ok_or("tool schema nodes require a single explicit type")?;
@@ -143,6 +168,16 @@ fn parameters(
     }
     let mut wire = json!({});
     for (k, v) in s.as_object().unwrap() {
+        if k == "$defs" && depth == 0 {
+            let defs = v.as_object().ok_or("tool schema $defs must be an object")?;
+            let mut normalized = serde_json::Map::new();
+            for (key, child) in defs {
+                check_name(key)?;
+                normalized.insert(key.clone(), parameters(child, depth + 1, left, strict)?);
+            }
+            wire[k] = normalized.into();
+            continue;
+        }
         let valid = match (k.as_str(), ty) {
             ("type", _) => true,
             ("description" | "title", _) => v.as_str().is_some_and(|d| d.len() <= 1024),
@@ -193,9 +228,7 @@ fn parameters(
         wire["required"] = props.keys().cloned().collect();
         let mut normalized = serde_json::Map::new();
         for (key, child) in props {
-            if key.len() > 128 || matches!(key.as_str(), "$ref" | "x-docker-agent-property-order") {
-                return Err("unsupported tool schema property name".into());
-            }
+            check_name(key)?;
             let mut prop = parameters(child, depth + 1, left, strict)?;
             if !required.contains(key.as_str()) {
                 if child["type"] == "null" {
@@ -203,6 +236,7 @@ fn parameters(
                 }
                 if matches!(child["type"].as_str(), Some("array" | "object"))
                     || child.get("enum").is_some()
+                    || child.get("$ref").is_some()
                 {
                     prop = json!({"anyOf":[prop,{"type":"null"}]});
                 } else {
@@ -216,75 +250,160 @@ fn parameters(
     Ok(wire)
 }
 
-fn validate(s: &Value, v: &Instance) -> Result<(), String> {
-    let ty = s["type"].as_str().unwrap();
-    let bounds = |n: usize, min: &str, max: &str| {
-        if s[min].as_u64().is_some_and(|v| (n as u64) < v) {
-            Err(format!("{min}: length {n} is less than {}", s[min]))
-        } else if s[max].as_u64().is_some_and(|v| n as u64 > v) {
-            Err(format!("{max}: length {n} is greater than {}", s[max]))
-        } else {
-            Ok(())
-        }
-    };
-    match (ty, v) {
-        ("object", Instance::Mapping(m)) => {
-            for (key, value) in m {
-                let key = key.as_str().expect("JSON key");
-                if let Some(child) = s["properties"].get(key) {
-                    validate(child, value).map_err(|e| format!("property {key:?}: {e}"))?;
-                } else if s["additionalProperties"] == false {
-                    return Err(format!("unexpected additional properties [{key:?}]"));
-                }
-            }
-            let missing: Vec<_> = s["required"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .filter(|k| !m.contains_key(*k))
-                .map(|s| format!("{s:?}"))
-                .collect();
-            if !missing.is_empty() {
-                return Err(format!(
-                    "required: missing properties: [{}]",
-                    missing.join(" ")
-                ));
-            }
-        }
-        ("array", Instance::Sequence(a)) => {
-            bounds(a.len(), "minItems", "maxItems")?;
-            for (i, item) in a.iter().enumerate() {
-                validate(&s["items"], item).map_err(|e| format!("item {i}: {e}"))?;
-            }
-        }
-        ("string", Instance::String(text)) => {
-            if s["enum"]
-                .as_array()
-                .is_some_and(|a| !a.iter().any(|v| v == text.as_str()))
-            {
-                return Err("string is not a member of enum".into());
-            }
-            bounds(text.chars().count(), "minLength", "maxLength")?;
-        }
-        ("null", Instance::Null)
-        | ("boolean", Instance::Bool(_))
-        | ("number", Instance::Number(_)) => (),
-        ("integer", Instance::Number(n)) => {
-            let n = n
-                .as_i64()
-                .filter(|&n| safe_integer(n))
-                .ok_or("expected a safe integer literal")?;
-            if s["minimum"].as_i64().is_some_and(|m| n < m) {
-                return Err(format!("minimum: {n} is less than {}", s["minimum"]));
-            }
-            if s["maximum"].as_i64().is_some_and(|m| n > m) {
-                return Err(format!("maximum: {n} is greater than {}", s["maximum"]));
-            }
-        }
-        _ => return Err(format!("expected type {ty:?}")),
+fn check_name(key: &str) -> Result<(), String> {
+    if key.len() > 128 || matches!(key, "$ref" | "x-docker-agent-property-order") {
+        return Err("unsupported tool schema property or definition name".into());
     }
     Ok(())
+}
+
+fn pointer_token(key: &str) -> String {
+    key.replace('~', "~0").replace('/', "~1")
+}
+
+struct Schema {
+    root: Value,
+    // Key by the escaped pointer so tool calls never parse URIs or copy a referenced schema.
+    defs: BTreeMap<String, Value>,
+}
+
+impl Schema {
+    fn link(schema: &Value) -> Result<Self, String> {
+        let mut root = schema.clone();
+        let mut defs = BTreeMap::new();
+        if let Some(Value::Object(entries)) = root.as_object_mut().unwrap().remove("$defs") {
+            for (key, value) in entries {
+                defs.insert(format!("#/$defs/{}", pointer_token(&key)), value);
+            }
+        }
+        let doc = Self { root, defs };
+        let mut left = MAX_EXPANDED_NODES;
+        let mut stack = Vec::new();
+        for node in std::iter::once(&doc.root).chain(doc.defs.values()) {
+            doc.check_graph(node, 0, &mut stack, &mut left)?;
+        }
+        Ok(doc)
+    }
+
+    // Charge each edge traversal, including repeated uses, without building an expanded tree.
+    fn check_graph<'a>(
+        &'a self,
+        s: &'a Value,
+        depth: usize,
+        stack: &mut Vec<&'a str>,
+        left: &mut usize,
+    ) -> Result<(), String> {
+        if depth > MAX_DEPTH {
+            return Err("expanded tool schema exceeds depth limit".into());
+        }
+        if *left == 0 {
+            return Err("tool schema exceeds $ref expansion budget".into());
+        }
+        *left -= 1;
+        if let Some(pointer) = s["$ref"].as_str() {
+            if stack.contains(&pointer) {
+                return Err(format!("cyclic $ref {pointer:?}"));
+            }
+            let target = self
+                .defs
+                .get(pointer)
+                .ok_or_else(|| format!("unresolved $ref {pointer:?}"))?;
+            stack.push(pointer);
+            self.check_graph(target, depth + 1, stack, left)?;
+            stack.pop();
+        } else {
+            for child in s["properties"]
+                .as_object()
+                .into_iter()
+                .flat_map(|p| p.values())
+                .chain(s.get("items"))
+            {
+                self.check_graph(child, depth + 1, stack, left)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self, s: &Value, v: &Instance, path: &str) -> Result<(), String> {
+        if let Some(pointer) = s["$ref"].as_str() {
+            let path = &pointer[1..];
+            return self
+                .validate(&self.defs[pointer], v, path)
+                .map_err(|e| format!("validating {path}: {e}"));
+        }
+        let ty = s["type"].as_str().unwrap();
+        let bounds = |n: usize, min: &str, max: &str| {
+            if s[min].as_u64().is_some_and(|v| (n as u64) < v) {
+                Err(format!("{min}: length {n} is less than {}", s[min]))
+            } else if s[max].as_u64().is_some_and(|v| n as u64 > v) {
+                Err(format!("{max}: length {n} is greater than {}", s[max]))
+            } else {
+                Ok(())
+            }
+        };
+        match (ty, v) {
+            ("object", Instance::Mapping(m)) => {
+                for (key, value) in m {
+                    let key = key.as_str().expect("JSON key");
+                    if let Some(child) = s["properties"].get(key) {
+                        let path = format!("{path}/properties/{}", pointer_token(key));
+                        self.validate(child, value, &path)
+                            .map_err(|e| format!("validating {path}: {e}"))?;
+                    } else if s["additionalProperties"] == false {
+                        return Err(format!("unexpected additional properties [{key:?}]"));
+                    }
+                }
+                let missing: Vec<_> = s["required"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter(|k| !m.contains_key(*k))
+                    .map(|s| format!("{s:?}"))
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(format!(
+                        "required: missing properties: [{}]",
+                        missing.join(" ")
+                    ));
+                }
+            }
+            ("array", Instance::Sequence(a)) => {
+                bounds(a.len(), "minItems", "maxItems")?;
+                let path = format!("{path}/items");
+                for item in a {
+                    self.validate(&s["items"], item, &path)
+                        .map_err(|e| format!("validating {path}: {e}"))?;
+                }
+            }
+            ("string", Instance::String(text)) => {
+                if s["enum"]
+                    .as_array()
+                    .is_some_and(|a| !a.iter().any(|v| v == text.as_str()))
+                {
+                    return Err("string is not a member of enum".into());
+                }
+                bounds(text.chars().count(), "minLength", "maxLength")?;
+            }
+            ("null", Instance::Null)
+            | ("boolean", Instance::Bool(_))
+            | ("number", Instance::Number(_)) => (),
+            ("integer", Instance::Number(n)) => {
+                let n = n
+                    .as_i64()
+                    .filter(|&n| safe_integer(n))
+                    .ok_or("expected a safe integer literal")?;
+                if s["minimum"].as_i64().is_some_and(|m| n < m) {
+                    return Err(format!("minimum: {n} is less than {}", s["minimum"]));
+                }
+                if s["maximum"].as_i64().is_some_and(|m| n > m) {
+                    return Err(format!("maximum: {n} is greater than {}", s["maximum"]));
+                }
+            }
+            _ => return Err(format!("expected type {ty:?}")),
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -421,6 +540,105 @@ mod tests {
         ] {
             assert!(tool(&object(child.clone())).is_err(), "{child}");
         }
+    }
+
+    #[test]
+    fn refs_are_not_inlined_or_made_nullable_during_validation() {
+        let leaf = json!({"$ref":"#/$defs/~01~1~0"});
+        let alias = json!({"$ref":"#/$defs/Alias"});
+        let mut schema = object(alias.clone());
+        schema["properties"]["y"] = alias.clone();
+        schema["$defs"] = json!({"Alias":leaf, "~1/~": {"type":"object", "properties":{"tag":{"type":"string", "enum":["ok"]}}}});
+        let t = tool(&schema).unwrap();
+        let wire = &t.definition["function"]["parameters"];
+        assert!(t.strict);
+        assert_eq!(wire["required"], json!(["x", "y"]));
+        assert_eq!(wire["properties"]["x"], alias);
+        assert_eq!(
+            wire["properties"]["y"],
+            json!({"anyOf":[alias,{"type":"null"}]})
+        );
+        assert_eq!(wire["$defs"]["Alias"], leaf);
+        assert_eq!(
+            wire["$defs"]["~1/~"],
+            json!({"type":"object", "properties":{"tag":{"anyOf":[{"type":"string", "enum":["ok"]},{"type":"null"}]}}, "required":["tag"], "additionalProperties":false})
+        );
+        for valid in [r#"{"x":{}}"#, r#"{"x":{"extra":true},"y":{"tag":"ok"}}"#] {
+            assert_eq!(t.call(valid, true).unwrap(), valid);
+        }
+        for invalid in [r#"{}"#, r#"{"x":{},"y":null}"#, r#"{"x":{"tag":"wrong"}}"#] {
+            assert!(t.call(invalid, true).is_err(), "{invalid}");
+        }
+        schema["$defs"]["unused"] =
+            json!({"type":"object", "properties":{}, "additionalProperties":true});
+        assert!(!tool(&schema).unwrap().strict);
+    }
+
+    #[test]
+    fn rejects_invalid_refs_including_in_unused_definitions() {
+        for (bad, message) in [
+            (json!({"$ref":null}), "must be a string"),
+            (
+                json!({"$ref":"https://schema.invalid/#/$defs/s"}),
+                "non-local",
+            ),
+            (json!({"$ref":"file:///tmp/schema"}), "non-local"),
+            (json!({"$ref":"other.json#/$defs/s"}), "non-local"),
+            (json!({"$ref":"#anchor"}), "root $defs entry"),
+            (json!({"$ref":"#/properties/x"}), "root $defs entry"),
+            (json!({"$ref":"#/$defs/missing"}), "unresolved"),
+            (json!({"$ref":"#/$defs/s/type"}), "pointer token"),
+            (json!({"$ref":"#/$defs/a%2Fb"}), "pointer token"),
+            (json!({"$ref":"#/$defs/~2"}), "pointer token"),
+            (json!({"$ref":"#/$defs/s~"}), "pointer token"),
+            (
+                json!({"$ref":"#/$defs/s", "description":"a sibling"}),
+                "siblings",
+            ),
+            (json!({"$ref":"#/$defs/s", "minimum":2}), "siblings"),
+            (json!({"type":"string", "pattern":"^a"}), "pattern"),
+            (json!({"type":"string", "$defs":{}}), "$defs"),
+        ] {
+            let mut schema = object(json!({"type":"string"}));
+            schema["$defs"] = json!({"s":{"type":"string"}, "unused":{"type":"array","items":bad}});
+            assert!(tool(&schema).err().unwrap().contains(message), "{bad}");
+        }
+        for bad_defs in [
+            json!(null),
+            json!([]),
+            json!({"s":true}),
+            json!({"$ref":{"type":"string"}}),
+        ] {
+            let mut schema = object(json!({"type":"string"}));
+            schema["$defs"] = bad_defs;
+            assert!(tool(&schema).is_err());
+        }
+    }
+
+    #[test]
+    fn bounds_ref_graph_before_tool_calls_or_serialization() {
+        let mut schema = object(json!({"$ref":"#/$defs/0"}));
+        schema["$defs"] = json!({"0":{"$ref":"#/$defs/0"}});
+        assert!(tool(&schema).err().unwrap().contains("cyclic"));
+        schema["$defs"]["0"] = json!({"type":"string"});
+        schema["$defs"]["a"] = object(json!({"$ref":"#/$defs/b"}));
+        schema["$defs"]["b"] = json!({"type":"array", "items":{"$ref":"#/$defs/a"}});
+        assert!(tool(&schema).err().unwrap().contains("cyclic"));
+
+        schema["$defs"] = json!({});
+        for i in 0..MAX_DEPTH {
+            schema["$defs"][i.to_string()] = json!({"$ref":format!("#/$defs/{}", i+1)});
+        }
+        schema["$defs"][MAX_DEPTH.to_string()] = json!({"type":"string"});
+        assert!(tool(&schema).err().unwrap().contains("depth"));
+
+        // Just four levels of fan-out, well under the source node and depth limits.
+        schema["$defs"] = json!({"4":{"type":"string"}});
+        for i in 0..4 {
+            let child = json!({"$ref":format!("#/$defs/{}", i+1)});
+            schema["$defs"][i.to_string()] = json!({"type":"object", "properties":{"a":child,"b":child,"c":child,"d":child,"e":child}});
+        }
+        assert!(tool(&schema).err().unwrap().contains("expansion budget"));
     }
 
     #[test]

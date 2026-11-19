@@ -373,8 +373,10 @@ test('reserved output name cannot be reintroduced through host discovery', async
 
 test('unsupported tool schemas fail before fetch even on unselected agents', async t => {
   const fetch = t.mock.method(globalThis, 'fetch', () => assert.fail('schema or model fetch'));
-  for (const child of [{$ref:'https://schema.invalid'}, {$ref:'#'}, {type:'string',pattern:'x{99999999}'}, {type:'string',format:'uri'}]) {
-    const schema = {type:'object', properties:{nested:{type:'array',items:child}}};
+  const nested = items => ({type:'object', properties:{nested:{type:'array',items}}});
+  for (const schema of [nested({$ref:'https://schema.invalid'}), nested({$ref:'#'}), nested({type:'string',pattern:'x{99999999}'}),
+    nested({type:'string', format:'uri'}), {...nested({type:'string'}), $defs:{unused:{$ref:'file:///schema'}}},
+    {...nested({$ref:'#/$defs/loop'}), $defs:{loop:{$ref:'#/$defs/loop'}}}]) {
     const agents = {root:{model:'local/test'}, nested:{model:'local/test', structured_output:{...output, schema}}};
     await assert.rejects(api.createSession({yaml:config([], {agents})}), /structured_output/);
   }

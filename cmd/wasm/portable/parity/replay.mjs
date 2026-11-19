@@ -338,12 +338,18 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
     [tool(output, {}), tool(output, {}), final], toolFailure);
   const outputFn = { ...fn, name: output };
   const raw = '{ "colors" : [ "blue" ] }';
-  const responseOutput = [{ type: 'response.output_item.added', output_index: 0, item: outputFn },
-    { type: 'response.function_call_arguments.delta', output_index: 0, item_id: fn.id, delta: raw },
-    fin([{ ...outputFn, arguments: raw, status: 'completed' }])];
+  const deliver = args => [{ type: 'response.output_item.added', output_index: 0, item: outputFn },
+    { type: 'response.function_call_arguments.delta', output_index: 0, item_id: fn.id, delta: args },
+    fin([{ ...outputFn, arguments: args, status: 'completed' }])];
+  const rowsSchema = { type: 'object', properties: { rows: { type: 'array', items: { $ref: '#/$defs/Row' } },
+    featured: { $ref: '#/$defs/Row' } }, required: ['rows'], $defs: { Row: { $ref: '#/$defs/a~1~0b' },
+    'a/~b': { type: 'object', properties: { value: { type: 'string' }, rank: { type: 'integer' } },
+      required: ['value'], additionalProperties: true } } };
+  tests.outputRefs = await replay(api, 'outputRefs', withSchema(responses, { mode: 'tool', schema: rowsSchema }),
+    [deliver('{"rows":[{}]}'), deliver('{"rows":[{"value":"ok","extra":true}]}')], single, '/v1/responses');
   tests.outputResponses = await replay(api, 'outputResponses', withSchema(responses, { mode: 'tool',
     schema: { ...schema, properties: { ...schema.properties, note: { type: 'string', enum: ['extra'] } }, additionalProperties: true } }),
-    [responseTool, responseOutput, responseOutput], turns, '/v1/responses');
+    [responseTool, deliver(raw), deliver(raw)], turns, '/v1/responses');
   const mediaConfig = config.replace('agents:', `models:
   capable: {provider: local, model: test, capabilities: {image: true, pdf: true, audio: true}}
 agents:`)
