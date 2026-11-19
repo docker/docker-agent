@@ -129,6 +129,10 @@ impl Session {
         {
             return Err("cannot replay named or reasoning history with Responses".into());
         }
+        profile
+            .spec
+            .limits
+            .check_seed(&history, !profile.spec.tool_models.is_empty())?;
         let history = media::history(
             history,
             primary.capabilities,

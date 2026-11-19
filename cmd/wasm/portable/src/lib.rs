@@ -5,6 +5,7 @@ mod discovery;
 mod fallback;
 mod go_json;
 mod hooks;
+mod limits;
 mod media;
 mod model_picker;
 mod permission;

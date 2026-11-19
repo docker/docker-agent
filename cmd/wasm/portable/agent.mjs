@@ -63,9 +63,11 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     }
 
     function settle(next) {
+      // A terminal delta and finish must follow every other event in this batch.
+      if (next.result) { batch.resolve(next); return; }
       for (const event of next.events) emit(event);
       if (next.error) batch.reject(new Error(next.error));
-      else if (!next.waiting) batch.resolve(next.request);
+      else if (!next.waiting) batch.resolve({ request: next.request, events: [] });
     }
     async function elicit(events, signal) {
       const replies = new Promise((resolve, reject) => { batch = { resolve, reject }; });
@@ -85,7 +87,8 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           const next = call('confirm', {now:performance.now(),session:handle.session, token:event.token, ...answer});
           await deliver(next.events, signal);
           if (next.error) batch.reject(new Error(next.error));
-          else if (!next.waiting) batch.resolve(next.request);
+          else if (next.result) batch.resolve({...next,events:[]});
+          else if (!next.waiting) batch.resolve({request:next.request,events:[]});
         } else if (event.type === 'host_call') {
           const result = await host.execute(event, signal, emit);
           signal.throwIfAborted();
@@ -157,11 +160,10 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             request = outcome.request;
             continue;
           }
-          const next = call('end', { session, now: performance.now() });
+          let next = call('end', { session, now: performance.now() });
           if (next.waiting) {
-            request = await elicit(next.events, signal);
+            next = await elicit(next.events, signal);
             signal.throwIfAborted();
-            continue;
           }
           for (const event of next.events) {
             signal.throwIfAborted();

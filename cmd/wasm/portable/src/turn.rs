@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::LazyLock;
 
-const MAX_TOOL_ROUNDS: usize = 8;
+use crate::limits::MAX_TOOL_ROUNDS;
 const MAX_PARALLEL_CALLS: u64 = 16;
 // Every think result repeats the scratchpad and becomes part of the next request.
 const MAX_SCRATCHPAD_BYTES: usize = 64 * 1024;
@@ -38,6 +38,7 @@ pub fn response_strict(name: &str) -> bool {
 struct Target {
     host: Option<usize>,
     safe: bool,
+    source: Option<usize>,
 }
 
 type Tools = IndexMap<String, Tool<Target>>;
@@ -74,6 +75,7 @@ pub struct Conversation {
 
 struct Turn {
     run_number: u64,
+    tool_model_source: Option<usize>,
     context_before: u64,
     summarizing: Option<Prefix>,
     original: Option<Undo>,
@@ -255,6 +257,7 @@ impl Profile {
                     Target {
                         host: hosted.then_some(index),
                         safe,
+                        source: Some(index),
                     },
                 ));
             }
@@ -284,6 +287,7 @@ impl Profile {
                             target: Target {
                                 host: None,
                                 safe: helpers.read_only[name],
+                                source: None,
                             },
                             toon: false,
                         },
@@ -398,6 +402,7 @@ impl Conversation {
             queue: VecDeque::new(),
             confirmation: None,
             selection: self.profile.spec.picker.active.get(),
+            tool_model_source: None,
             summarizing: None,
             original: None,
             context_before: self.compaction.context_tokens,
@@ -485,8 +490,20 @@ impl Conversation {
             }
         }
         messages.extend_from_slice(&self.messages);
-        self.profile.spec.hooks.rewrite_messages(&mut messages)?;
-        let mut body = Value::Object(self.params().clone());
+        self.profile
+            .spec
+            .limits
+            .project(&mut messages, &self.profile.spec.hooks)?;
+        let params = turn
+            .tool_model_source
+            .and_then(|i| {
+                self.profile
+                    .spec
+                    .tool_models
+                    .get(&self.profile.spec.toolsets[i].model)
+            })
+            .unwrap_or_else(|| self.params());
+        let mut body = Value::Object(params.clone());
         body["messages"] = messages.into();
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});
@@ -682,6 +699,7 @@ impl Conversation {
         message["tool_calls"] = wire_calls.into();
         self.messages.push(message);
         let turn = self.active.as_mut().expect("active tool round");
+        turn.tool_model_source = None;
         turn.selection = self.profile.spec.picker.active.get();
         for call in calls.into_values() {
             let index = self.messages.len();
@@ -774,6 +792,13 @@ impl Conversation {
     fn dispatch(&mut self, op: Invocation, events: &mut Vec<Value>) -> Result<(), String> {
         let call = op.call;
         let tool = &self.tools[&call.name];
+        let turn = self.active.as_mut().unwrap();
+        if turn.tool_model_source.is_none() {
+            turn.tool_model_source = tool
+                .target
+                .source
+                .filter(|i| !self.profile.spec.toolsets[*i].model.is_empty());
+        }
         let reply = Reply {
             index: op.index,
             name: call.name.clone(),
@@ -875,11 +900,11 @@ impl Conversation {
             _ => return Err("missing or invalid tool name".into()),
         };
         let is_error = result.is_err();
-        events.push(self.complete(reply, result.unwrap_or_else(|e| e), is_error));
+        events.push(self.complete(reply, result.unwrap_or_else(|e| e), is_error)?);
         Ok(())
     }
 
-    fn complete(&mut self, reply: Reply, output: String, is_error: bool) -> Value {
+    fn complete(&mut self, reply: Reply, output: String, is_error: bool) -> Result<Value, String> {
         let (output, is_error) = if reply.toon {
             match discovery::render_toon(output) {
                 Ok(text) => (text, is_error),
@@ -911,8 +936,12 @@ impl Conversation {
             &output,
             is_error,
         );
-        message["content"] = output.into();
-        event
+        message["content"] = self
+            .profile
+            .spec
+            .limits
+            .stored_content(output, &self.profile.spec.hooks)?;
+        Ok(event)
     }
 
     pub fn include_usage(&mut self, usage: &Value) {
@@ -942,13 +971,30 @@ impl Conversation {
         Ok(event)
     }
 
-    fn after_tools(&mut self, events: Vec<Value>) -> Value {
+    fn after_tools(&mut self, mut events: Vec<Value>) -> Value {
         if self.switch.is_some() {
             return json!({"events":events});
         }
         if self.active.as_ref().is_some_and(Turn::waiting) {
             json!({"events":events, "waiting":true})
         } else {
+            let t = self.active.as_ref().expect("active tool round");
+            let max = self.profile.spec.limits.max_iterations;
+            if max > 0 && t.tool_rounds >= max as usize {
+                let text = format!(
+                    "Execution stopped after reaching the configured max_iterations limit ({max})."
+                );
+                events.push(json!({"type":"delta","content":text,"message_id":t.message_id}));
+                let message = json!({"role":"assistant","content":text});
+                self.messages.push(message.clone());
+                let mut result = json!({"message":message});
+                if t.input + t.output > 0 {
+                    result["usage"] = json!({"input_tokens":t.input,"output_tokens":t.output});
+                }
+                events.push(json!({"type":"finish","reason":"stop"}));
+                self.active = None;
+                return json!({"events":events,"result":result});
+            }
             if let Some(limit) = self.profile.spec.hooks.max_calls.filter(|&n| {
                 self.active
                     .as_ref()
@@ -975,7 +1021,7 @@ impl Conversation {
         }
         let turn = self.active.as_mut().ok_or("no active turn")?;
         let reply = turn.host_pending.remove(token).ok_or("unknown host call")?;
-        let event = self.complete(reply, output, is_error);
+        let event = self.complete(reply, output, is_error)?;
         Ok(self.after_tools(vec![event]))
     }
 
@@ -1001,7 +1047,7 @@ impl Conversation {
             .pending
             .remove(id)
             .ok_or("no pending elicitation with that ID")?;
-        let event = self.complete(reply, output, action != "accept");
+        let event = self.complete(reply, output, action != "accept")?;
         Ok(self.after_tools(vec![event]))
     }
 }

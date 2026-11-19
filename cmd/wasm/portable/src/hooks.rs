@@ -180,6 +180,16 @@ impl Hooks {
         Ok(changed)
     }
 
+    pub fn check_before_truncation(&self, text: &str) -> Result<(), String> {
+        // Truncating first could split a secret; redacting first could expose text outside the cap.
+        if self.redact_messages && redaction::redact(text)?.is_some() {
+            return Err(
+                "cannot safely truncate a tool result containing unredacted secrets".into(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn rewrite_messages(&self, messages: &mut [Value]) -> Result<(), String> {
         if self.redact_messages {
             for msg in messages {

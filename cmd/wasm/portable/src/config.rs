@@ -47,6 +47,8 @@ fn runtime_defaults<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Runtime, D
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Agent {
+    #[serde(flatten)]
+    limits: crate::limits::Limits,
     model: String,
     session_compaction: Option<bool>,
     redact_secrets: Option<bool>,
@@ -216,6 +218,8 @@ fn load_instruction<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error>
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Toolset {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
     #[serde(default, rename = "type")]
     pub kind: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -436,6 +440,8 @@ pub struct Selected {
     pub sub_agents: Vec<String>,
     pub handoffs: Vec<String>,
     pub shared_todo: bool,
+    pub limits: crate::limits::Limits,
+    pub tool_models: BTreeMap<String, Map<String, Value>>,
     pub hooks: crate::hooks::Hooks,
     pub picker: crate::model_picker::Picker,
     pub models: Vec<Target>,
@@ -487,6 +493,7 @@ fn load(yaml: &str) -> Result<Config, String> {
         if name.trim().is_empty() {
             return Err("empty agent name".into());
         }
+        a.limits.validate()?;
         validate_threshold(a.compaction_threshold)?;
         for (kind, targets) in [("sub-agent", &a.sub_agents), ("handoff agent", &a.handoffs)] {
             for target in targets {
@@ -750,7 +757,21 @@ pub fn team(
 ) -> Result<(String, Vec<Selected>), String> {
     let cfg = load(yaml)?;
     for (name, a) in &cfg.agents {
-        compaction_policy(a, &cfg.models[&a.model])?;
+        let primary = &cfg.models[&a.model];
+        compaction_policy(a, primary)?;
+        a.limits.check_round_limit()?;
+        let overrides = a.toolsets.iter().any(|ts| !ts.model.is_empty());
+        if a.limits.limits_history() || a.limits.max_iterations > 0 || overrides {
+            if primary.context_window.is_some() && a.session_compaction != Some(false) {
+                return Err("history/iteration limits and tool model overrides require session_compaction: false when a context_window is declared".into());
+            }
+            if a.model.contains(',') || primary.model.contains(',') {
+                return Err("history/iteration limits and tool model overrides require a single primary model".into());
+            }
+        }
+        if a.limits.limits_history() && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
+            return Err("history limits are not supported with session_context".into());
+        }
         if let Some(output) = &a.structured_output {
             output
                 .check_session(&cfg.models[&a.model].model, env)
@@ -886,9 +907,64 @@ fn resolve(
     }
     let primary = &cfg.models[&a.model];
     let chain = !a.fallback.models.is_empty();
+    if (chain || team)
+        && (a.limits.limits_history()
+            || a.limits.max_iterations > 0
+            || a.toolsets.iter().any(|ts| !ts.model.is_empty()))
+    {
+        return Err(
+            "history limits and toolset model overrides with teams or fallback are not supported"
+                .into(),
+        );
+    }
     let resolve_target =
         |m: &Model| resolve_model(cfg, m, a, env, !toolsets.is_empty(), chain || team);
     let request = resolve_target(primary)?;
+    let compatible = |name: &str, feature: &str| -> Result<Target, String> {
+        let inline;
+        let m = if let Some(m) = cfg.models.get(name) {
+            m
+        } else {
+            inline = inline_model(name)
+                .filter(|_| !name.contains(','))
+                .ok_or_else(|| format!("unsupported {feature} model {name:?}"))?;
+            &inline
+        };
+        // Do not reuse the open handle's Authorization header at a new destination.
+        if m.context_window != primary.context_window
+            || m.compaction_threshold != primary.compaction_threshold
+        {
+            return Err(format!("{feature} cannot change compaction policy"));
+        }
+        if m.provider != primary.provider {
+            return Err(format!("{feature} cannot switch providers"));
+        }
+        let target = resolve_target(m)?;
+        if target.media_projection() != request.media_projection() {
+            return Err(format!("{feature} cannot change media capabilities"));
+        }
+        if target.key_base != request.key_base
+            || target.transport != request.transport
+            || target.responses != request.responses
+            || target.merge_messages != request.merge_messages
+        {
+            return Err(format!(
+                "{feature} cannot change the model endpoint, API or credential"
+            ));
+        }
+        Ok(target)
+    };
+    let mut tool_models = BTreeMap::new();
+    for ts in &a.toolsets {
+        let name = &ts.model;
+        if name.is_empty() || tool_models.contains_key(name) {
+            continue;
+        }
+        if name.contains(',') || cfg.models.get(name).is_some_and(|m| m.model.contains(',')) {
+            return Err("toolset model overrides cannot use multi-model references".into());
+        }
+        tool_models.insert(name.clone(), compatible(name, "toolset")?.model_params);
+    }
     let mut picker = crate::model_picker::Picker::default();
     for ts in a.toolsets.iter().filter(|ts| ts.kind == "model_picker") {
         if chain {
@@ -903,37 +979,7 @@ fn resolve(
             if picker.choices.contains_key(name) {
                 return Err(format!("duplicate model_picker choice {name:?}"));
             }
-            let inline;
-            let m = if let Some(m) = cfg.models.get(name) {
-                m
-            } else {
-                inline = inline_model(name)
-                    .filter(|_| !name.contains(','))
-                    .ok_or_else(|| format!("unsupported model_picker model {name:?}"))?;
-                &inline
-            };
-            // Do not reuse the open handle's Authorization header at a new destination.
-            if m.context_window != primary.context_window
-                || m.compaction_threshold != primary.compaction_threshold
-            {
-                return Err("model_picker cannot change compaction policy".into());
-            }
-            if m.provider != primary.provider {
-                return Err("model_picker cannot switch providers".into());
-            }
-            let target = resolve_target(m)?;
-            if target.media_projection() != request.media_projection() {
-                return Err("model_picker cannot change media capabilities".into());
-            }
-            if target.transport != request.transport
-                || target.key_base != request.key_base
-                || target.responses != request.responses
-                || target.merge_messages != request.merge_messages
-            {
-                return Err(
-                    "model_picker cannot change the model endpoint, API or credential".into(),
-                );
-            }
+            let target = compatible(name, "model_picker")?;
             picker.choices.insert(name.clone(), target.model_params);
         }
     }
@@ -950,6 +996,8 @@ fn resolve(
         models.push(resolve_target(m)?);
     }
     Ok(Selected {
+        limits: a.limits,
+        tool_models,
         hooks: a.hooks.clone().with_defaults(
             a.redact_secrets.unwrap_or(true),
             a.add_date,
