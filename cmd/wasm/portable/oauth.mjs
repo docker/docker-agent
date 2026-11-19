@@ -8,8 +8,8 @@ export function createMCPOAuth({ serverURL, oauthRedirectURI, clientId, clientSe
 
   async function exchange(wwwAuthenticate, signal) {
     signal.throwIfAborted();
-    httpsURL(oauthRedirectURI, 'OAuth redirect URI');
-    if (clientSecret || (clientId != null && !validID(clientId))) throw new Error('MCP OAuth requires a public client');
+    validateOAuthConfig(serverURL, oauthRedirectURI, clientId, scopes);
+    if (clientSecret) throw new Error('MCP OAuth requires a public client');
     if (typeof toolFetch !== 'function' || typeof elicit !== 'function') throw new Error('MCP OAuth requires guarded toolFetch and URL elicitation');
 
     async function request(url, init = {}, status = 200, allowMissing = false) {
@@ -99,6 +99,13 @@ export function createMCPOAuth({ serverURL, oauthRedirectURI, clientId, clientSe
     },
     invalidate() { token = undefined; },
   };
+}
+
+export function validateOAuthConfig(serverURL, redirectURI, clientId, scopes) {
+  httpsURL(serverURL, 'MCP server');
+  httpsURL(redirectURI, 'OAuth redirect URI');
+  if (clientId != null && !validID(clientId)) throw new Error('MCP OAuth requires a public client');
+  scopeString(scopes);
 }
 
 async function resourceMetadata(serverURL, challengedURL, discover) {

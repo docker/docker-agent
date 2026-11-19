@@ -51,10 +51,16 @@ pub struct HostSet {
 
 pub struct Profile {
     pub spec: Selected,
+    catalog: RefCell<Catalog>,
+    grants: RefCell<BTreeSet<String>>,
+    todos: Rc<RefCell<crate::todo::Todos>>,
+}
+
+struct Catalog {
     tools: Tools,
     discovery: Discovery<Target>,
     instructions: Vec<Value>,
-    todos: Rc<RefCell<crate::todo::Todos>>,
+    needs_host: bool,
 }
 
 pub struct Conversation {
@@ -65,10 +71,7 @@ pub struct Conversation {
     messages: Vec<Value>,
     scratchpads: BTreeMap<String, String>,
     pub switch: Option<Switch>,
-    discovery: Discovery<Target>,
-    tools: Tools,
     run_number: u64,
-    grants: BTreeSet<String>,
     active: Option<Turn>,
 }
 
@@ -150,49 +153,75 @@ struct Call {
 
 impl Profile {
     pub fn new(spec: Selected, todos: Rc<RefCell<crate::todo::Todos>>) -> Result<Self, String> {
-        let mut profile = Self {
+        Ok(Self {
+            catalog: RefCell::new(Catalog::build(&spec, None)?),
+            grants: Default::default(),
             spec,
             todos,
-            instructions: vec![],
-            tools: Tools::new(),
-            discovery: Default::default(),
-        };
-        profile.configure_tools(&[])?;
-        Ok(profile)
+        })
     }
 
-    fn configure_tools(&mut self, external: &[HostSet]) -> Result<(), String> {
+    pub fn clear_grants(&self) {
+        self.grants.borrow_mut().clear();
+    }
+
+    pub fn needs_host(&self) -> bool {
+        self.catalog.borrow().needs_host
+    }
+
+    pub fn register(&self, sets: &[HostSet]) -> Result<(), String> {
+        if !self.needs_host() {
+            return Err("host catalog already registered".into());
+        }
+        *self.catalog.borrow_mut() = Catalog::build(&self.spec, Some(sets))?;
+        Ok(())
+    }
+}
+
+impl Catalog {
+    fn build(agent: &Selected, external: Option<&[HostSet]>) -> Result<Self, String> {
+        let mut needs_host = false;
         let mut tools = Tools::new();
         let mut discovery = Discovery::default();
         let mut registered = BTreeMap::new();
         let mut seen = BTreeMap::new();
-        for set in external {
-            if set.index >= self.spec.toolsets.len() || registered.insert(set.index, set).is_some()
-            {
+        for set in external.unwrap_or_default() {
+            if set.index >= agent.toolsets.len() || registered.insert(set.index, set).is_some() {
                 return Err("invalid or duplicate host toolset index".into());
             }
         }
-        let mut instructions = self.spec.team_prompts.clone();
-        if !self.spec.instruction.is_empty() {
-            instructions.push(self.spec.instruction.clone());
+        let mut instructions = agent.team_prompts.clone();
+        if !agent.instruction.is_empty() {
+            instructions.push(agent.instruction.clone());
         }
-        for (index, spec) in self.spec.toolsets.iter().enumerate() {
+        for (index, spec) in agent.toolsets.iter().enumerate() {
             let def = CATALOG.get(&spec.kind);
             let ext = registered.get(&index);
             let dynamic = matches!(spec.kind.as_str(), "api" | "mcp" | "fetch");
             if ext.is_some() && !dynamic {
                 return Err("unexpected host tool registration".into());
             }
+            if dynamic && ext.is_none() {
+                if external.is_some() {
+                    return Err("missing host tool registration".into());
+                }
+                needs_host = true;
+            }
             let picker_metadata;
+            let api_definition;
             let (original, defs) = if let Some(e) = ext {
                 (e.instructions.as_str(), e.tools.as_slice())
             } else if let Some(d) = def {
                 if spec.kind == "model_picker" {
-                    picker_metadata = self.spec.picker.metadata(&d.instructions, &d.tools);
+                    picker_metadata = agent.picker.metadata(&d.instructions, &d.tools);
                     (picker_metadata.0.as_str(), picker_metadata.1.as_slice())
                 } else {
                     (d.instructions.as_str(), d.tools.as_slice())
                 }
+            } else if spec.kind == "api" {
+                // Its name is known before host registration: catch reserved names and collisions at open.
+                api_definition = [json!({"function":{"name":spec.options["api_config"]["name"]}})];
+                ("", api_definition.as_slice())
             } else if dynamic {
                 continue;
             } else {
@@ -237,7 +266,7 @@ impl Profile {
                 };
                 if spec.readonly && !safe
                     || !spec.tools.is_empty() && !spec.tools.iter().any(|n| n == name)
-                    || !self.spec.tool_policy.visible(name, safe)?
+                    || !agent.tool_policy.visible(name, safe)?
                 {
                     withheld = true;
                     continue;
@@ -276,7 +305,7 @@ impl Profile {
             let mut all_visible = true;
             for definition in &helpers.tools {
                 let name = definition["function"]["name"].as_str().unwrap();
-                if self.spec.tool_policy.visible(name, true)? {
+                if agent.tool_policy.visible(name, true)? {
                     tools.insert(
                         name.into(),
                         Tool {
@@ -296,23 +325,22 @@ impl Profile {
                 instructions.push(helpers.instructions.clone());
             }
         }
-        self.instructions = instructions
-            .into_iter()
-            .map(|text| json!({"role":"system","content":text}))
-            .collect();
-        self.tools = tools;
-        self.discovery = discovery;
-        Ok(())
+        Ok(Self {
+            instructions: instructions
+                .into_iter()
+                .map(|text| json!({"role":"system","content":text}))
+                .collect(),
+            tools,
+            discovery,
+            needs_host,
+        })
     }
 }
 
 impl Conversation {
     pub fn open(profile: Rc<Profile>, messages: Vec<Value>) -> Self {
         Self {
-            tools: profile.tools.clone(),
-            discovery: profile.discovery.clone(),
             run_number: 0,
-            grants: BTreeSet::new(),
             profile,
             attempt: Default::default(),
             archive: None,
@@ -352,29 +380,11 @@ impl Conversation {
         ))
     }
 
-    pub fn register(&mut self, sets: &[HostSet]) -> Result<(), String> {
-        if self.active.is_some() {
-            return Err("cannot change tools during a turn".into());
-        }
-        Rc::get_mut(&mut self.profile)
-            .ok_or("cannot register shared host tools")?
-            .configure_tools(sets)?;
-        self.change_profile(self.profile.clone());
-        Ok(())
-    }
-
-    pub fn change_profile(&mut self, profile: Rc<Profile>) {
-        self.grants.clear();
-        self.tools = profile.tools.clone();
-        self.discovery = profile.discovery.clone();
-        self.profile = profile;
-    }
     pub fn restart(&mut self, stamp: crate::session_context::Stamp) -> Result<(), String> {
         self.cancel();
         if let Some(archive) = &mut self.archive {
             archive.restart(stamp, &self.messages)?;
         }
-        self.grants.clear();
         self.messages.clear();
         self.scratchpads.clear();
         self.compaction.truncate(0);
@@ -456,7 +466,10 @@ impl Conversation {
     }
 
     pub fn request(&self) -> Result<Value, String> {
-        if self.profile.spec.hooks.add_date || self.profile.spec.hooks.add_environment_info {
+        if self.profile.needs_host()
+            || self.profile.spec.hooks.add_date
+            || self.profile.spec.hooks.add_environment_info
+        {
             // The host samples context only when it is actually about to fetch.
             return Ok(Value::Null);
         }
@@ -472,7 +485,11 @@ impl Conversation {
         if turn.waiting() {
             return Err("waiting for elicitation".into());
         }
-        let mut messages = self.profile.instructions.clone();
+        let catalog = self.profile.catalog.borrow();
+        if catalog.needs_host {
+            return Err("host catalog not registered".into());
+        }
+        let mut messages = catalog.instructions.clone();
         for (enabled, text) in [
             (self.profile.spec.hooks.add_environment_info, environment),
             (self.profile.spec.hooks.add_date, date),
@@ -490,12 +507,16 @@ impl Conversation {
         body["messages"] = messages.into();
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});
-        if !self.tools.is_empty() {
+        if !catalog.tools.is_empty() {
             body["tool_choice"] = "auto".into();
-            body["tools"] =
-                Value::Array(self.tools.values().map(|t| t.definition.clone()).collect());
-        }
-        if self.tools.is_empty() {
+            body["tools"] = Value::Array(
+                catalog
+                    .tools
+                    .values()
+                    .map(|t| t.definition.clone())
+                    .collect(),
+            );
+        } else {
             body.as_object_mut().unwrap().remove("parallel_tool_calls");
             body.as_object_mut().unwrap().remove("tool_choice");
         }
@@ -515,7 +536,11 @@ impl Conversation {
                 .chunk(chunk, &turn.message_id, &Tools::new())
                 .map(|_| Vec::new())
         } else {
-            turn.step.chunk(chunk, &turn.message_id, &self.tools)
+            let catalog = self.profile.catalog.borrow();
+            if catalog.needs_host {
+                return Err("host catalog not registered".into());
+            }
+            turn.step.chunk(chunk, &turn.message_id, &catalog.tools)
         };
         if result.is_err() {
             self.cancel();
@@ -540,9 +565,7 @@ impl Conversation {
             self.compaction.truncate(turn.messages_before);
             self.compaction.context_tokens = turn.context_before;
             self.messages.truncate(turn.messages_before);
-            if !Rc::ptr_eq(&self.profile, &turn.profile_before) {
-                self.change_profile(turn.profile_before);
-            }
+            self.profile = turn.profile_before;
             self.attempt = Default::default();
             self.scratchpads
                 .retain(|name, pad| match turn.scratchpads_before.get(name) {
@@ -674,7 +697,7 @@ impl Conversation {
             if *key != index as u64 || call.id.is_empty() || !ids.insert(&call.id) {
                 return Err("missing or duplicate tool call ID or index".into());
             }
-            if !self.tools.contains_key(&call.name) {
+            if !self.profile.catalog.borrow().tools.contains_key(&call.name) {
                 return Err("missing or invalid tool name".into());
             }
             wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
@@ -704,25 +727,25 @@ impl Conversation {
                 events.push(json!({"type":"warning", "message":format!("redact_secrets: redacted secret material from arguments of tool {:?}", op.call.name)}));
             }
             let call = &op.call;
-            let tool = &self.tools[&call.name];
+            let safe = self.profile.catalog.borrow().tools[&call.name].target.safe;
             match self.profile.spec.tool_policy.rules.verdict(
                 self.profile.spec.tool_policy.safety,
                 &call.name,
                 &call.arguments,
-                tool.target.safe,
+                safe,
             ) {
                 Verdict::Allow => self.dispatch(op, events)?,
                 Verdict::Deny(reason) => self.reject(op, reason, events),
                 Verdict::Ask
                     if self.profile.spec.tool_policy.grantable()
-                        && self.grants.contains(&call.name) =>
+                        && self.profile.grants.borrow().contains(&call.name) =>
                 {
                     self.dispatch(op, events)?
                 }
                 Verdict::Ask => {
                     let turn = self.active.as_mut().unwrap();
                     let token = turn.token("confirm", op.index);
-                    events.push(json!({"type":"approval", "id":call.id, "name":call.name, "args":call.arguments, "token":token}));
+                    events.push(json!({"type":"approval", "agent":self.profile.spec.name, "id":call.id, "name":call.name, "args":call.arguments, "token":token}));
                     turn.confirmation = Some((token, op));
                     return Ok(());
                 }
@@ -751,7 +774,10 @@ impl Conversation {
         let mut events = Vec::new();
         if approved {
             if remember && self.profile.spec.tool_policy.grantable() {
-                self.grants.insert(op.call.name.clone());
+                self.profile
+                    .grants
+                    .borrow_mut()
+                    .insert(op.call.name.clone());
             }
             self.dispatch(op, &mut events)?;
         } else {
@@ -773,16 +799,20 @@ impl Conversation {
 
     fn dispatch(&mut self, op: Invocation, events: &mut Vec<Value>) -> Result<(), String> {
         let call = op.call;
-        let tool = &self.tools[&call.name];
+        let (source, toon) = {
+            let catalog = self.profile.catalog.borrow();
+            let tool = &catalog.tools[&call.name];
+            (tool.target.host, tool.toon)
+        };
         let reply = Reply {
             index: op.index,
             name: call.name.clone(),
-            toon: tool.toon,
+            toon,
         };
         let turn = self.active.as_mut().unwrap();
-        if let Some(source) = tool.target.host {
+        if let Some(source) = source {
             let token = turn.token("host", op.index);
-            events.push(json!({"type":"host_call", "id":call.id, "name":call.name, "args":call.arguments, "source":source, "token":token}));
+            events.push(json!({"type":"host_call", "agent":self.profile.spec.name, "id":call.id, "name":call.name, "args":call.arguments, "source":source, "token":token}));
             turn.host_pending.insert(token, reply);
             return Ok(());
         }
@@ -835,12 +865,15 @@ impl Conversation {
                     crate::go_json::read_string,
                 );
                 arg.and_then(|arg| {
+                    let Catalog {
+                        discovery, tools, ..
+                    } = &mut *self.profile.catalog.borrow_mut();
                     if search {
-                        self.discovery.search(&arg)
+                        discovery.search(&arg)
                     } else {
-                        let (output, activated) = self.discovery.add(&arg)?;
+                        let (output, activated) = discovery.add(&arg)?;
                         if let Some(tool) = activated {
-                            self.tools.insert(arg, tool.clone());
+                            tools.insert(arg, tool.clone());
                         }
                         Ok(output)
                     }
@@ -889,6 +922,9 @@ impl Conversation {
             (output, is_error)
         };
         let category = self
+            .profile
+            .catalog
+            .borrow()
             .tools
             .get(&reply.name)
             .and_then(|t| t.target.host)

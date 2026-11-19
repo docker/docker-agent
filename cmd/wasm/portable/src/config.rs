@@ -277,20 +277,6 @@ impl Defer {
 }
 
 impl Toolset {
-    pub fn hosted(&self) -> bool {
-        !matches!(
-            self.kind.as_str(),
-            "calculator"
-                | "think"
-                | "todo"
-                | "user_prompt"
-                | "transfer_task"
-                | "handoff"
-                | "model_picker"
-                | "session_context"
-        )
-    }
-
     fn validate(&self) -> Result<(), String> {
         if self.shared && self.kind != "todo" {
             return Err("shared can only be used with type 'todo'".into());
@@ -845,9 +831,6 @@ fn resolve(
     }
     if (team || !a.fallback.models.is_empty()) && a.hooks.max_calls.is_some() {
         return Err("max_iterations with fallback or local teams is not supported".into());
-    }
-    if team && a.toolsets.iter().any(Toolset::hosted) {
-        return Err("host toolsets with local delegation or handoff are not supported".into());
     }
     if team && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
         return Err("session_context with local delegation or handoff is not supported".into());

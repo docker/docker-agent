@@ -73,6 +73,7 @@ impl Switch {
 pub struct Session {
     pub conversation: Conversation,
     agents: BTreeMap<String, Rc<Profile>>,
+    team: bool,
     /// A suspended caller always has exactly one unresolved transfer tool message.
     parents: Vec<Conversation>,
     responses: Option<responses::Stream>,
@@ -102,18 +103,15 @@ impl Session {
             };
             agents.insert(spec.name.clone(), Rc::new(Profile::new(spec, todos)?));
         }
-        let profile = if !agents[&entry].spec.team_prompts.is_empty() {
-            agents[&entry].clone()
-        } else {
-            agents.remove(&entry).unwrap()
-        };
+        let profile = agents[&entry].clone();
         let context = profile
             .spec
             .toolsets
             .iter()
             .any(|ts| ts.kind == "session_context");
         let primary = &profile.spec.models[0];
-        let routing = !agents.is_empty() || profile.spec.models.len() > 1;
+        let team = !profile.spec.team_prompts.is_empty();
+        let routing = team || profile.spec.models.len() > 1;
         if routing
             && history
                 .iter()
@@ -141,6 +139,7 @@ impl Session {
         Ok(Self {
             conversation,
             agents,
+            team,
             parents: vec![],
             responses: None,
             replayable: false,
@@ -149,31 +148,31 @@ impl Session {
         })
     }
 
-    pub fn targets(&self) -> Value {
-        let profiles = self
-            .agents
-            .values()
-            .chain(std::iter::once(&self.conversation.profile).filter(|_| self.agents.is_empty()));
+    pub fn profiles(&self) -> Value {
         Value::Object(
-            profiles
-                .map(|p| {
-                    let targets = p
+            self.agents
+                .iter()
+                .map(|(name, p)| {
+                    let targets: Vec<_> = p
                         .spec
                         .models
                         .iter()
-                        .map(|t| json!({"transport": t.transport, "keyBase": t.key_base}))
+                        .map(|t| json!({"transport":t.transport,"keyBase":t.key_base}))
                         .collect();
-                    (p.spec.name.clone(), Value::Array(targets))
+                    (
+                        name.clone(),
+                        json!({"targets":targets,"toolsets":p.spec.toolsets}),
+                    )
                 })
                 .collect(),
         )
     }
 
-    pub fn register(&mut self, sets: &[crate::turn::HostSet]) -> Result<(), String> {
-        if !self.agents.is_empty() {
-            return Err("host toolsets are not supported in local teams".into());
+    pub fn active(&mut self, agent: &str) -> Result<&mut Conversation, String> {
+        if self.conversation.profile.spec.name != agent {
+            return Err("tool operation does not match active agent".into());
         }
-        self.conversation.register(sets)
+        Ok(&mut self.conversation)
     }
 
     pub fn begin(&mut self, prompt: &str, id: &str, now: f64) -> Result<Value, String> {
@@ -189,15 +188,17 @@ impl Session {
     pub fn request(&mut self, mut body: Value) -> Result<Value, String> {
         let spec = &self.conversation.profile.spec;
         if body.is_null() {
-            return Ok(
-                json!({"dynamic": {"addEnvironmentInfo":spec.hooks.add_environment_info,"addDate":spec.hooks.add_date}}),
-            );
+            let mut next = json!({"dynamic": {"addEnvironmentInfo":spec.hooks.add_environment_info,"addDate":spec.hooks.add_date}});
+            if self.conversation.profile.needs_host() {
+                next["openTools"] = json!(spec.name);
+            }
+            return Ok(next);
         }
         let index = self.conversation.attempt.current;
         let target = &spec.models[index];
         self.responses = target.responses.then(responses::Stream::default);
         if target.responses {
-            if spec.models.len() > 1 || !self.agents.is_empty() {
+            if spec.models.len() > 1 || self.team {
                 fallback::check_responses_history(&body)?;
             }
             body = responses::request(body)?;
@@ -379,7 +380,7 @@ impl Session {
                     events.push(switched);
                     self.conversation.attempt = profile.spec.policy.begin(now);
                 }
-                self.conversation.change_profile(profile);
+                self.conversation.profile = profile;
                 self.conversation.request()
             }
             Switch::Transfer(task) => {
@@ -410,6 +411,15 @@ impl Session {
             *body = self.request(body.take())?;
         }
         Ok(next)
+    }
+
+    pub fn restart(&mut self, stamp: session_context::Stamp) -> Result<(), String> {
+        self.cancel();
+        self.conversation.restart(stamp)?;
+        for profile in self.agents.values() {
+            profile.clear_grants();
+        }
+        Ok(())
     }
 
     pub fn cancel(&mut self) {

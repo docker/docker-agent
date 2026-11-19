@@ -28,17 +28,15 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     if (typeof opts?.yaml !== 'string') throw new Error('options.yaml must be a string');
     if ('safety' in opts || 'permissions' in opts) throw new Error('portable safety and permissions must be configured in YAML');
     validateDocuments(opts.documents);
-    const host = createHost(opts, onEvent, stateless);
+    let host = createHost(opts, onEvent, stateless);
     let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, auto_approve: opts.autoApprove === true, history: history ?? [], stamp: sessionStamp() });
     try {
-      for (const targets of Object.values(handle.targets)) {
+      for (const { targets } of Object.values(handle.profiles)) {
         for (const { transport, keyBase } of targets) prepareModelTransport(transport, keyBase);
       }
+      host.configure(handle.profiles);
     } catch (e) { call('close', { session: handle.session }); throw e; }
-    let active, batch, restarting = false, closing, ready;
-    async function prepare(signal) {
-      await host.prepare(handle.toolsets, signal, sets => call('registerTools', {session:handle.session, sets}));
-    }
+    let active, batch, restarting = false, closing;
     const pending = new Set();
 
     function emit(event) {
@@ -82,14 +80,14 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         if (event.type === 'approval') {
           const answer = await host.approval(event, signal);
           signal.throwIfAborted();
-          const next = call('confirm', {now:performance.now(),session:handle.session, token:event.token, ...answer});
+          const next = call('confirm', {now:performance.now(),session:handle.session, agent:event.agent, token:event.token, ...answer});
           await deliver(next.events, signal);
           if (next.error) batch.reject(new Error(next.error));
           else if (!next.waiting) batch.resolve(next.request);
         } else if (event.type === 'host_call') {
           const result = await host.execute(event, signal, emit);
           signal.throwIfAborted();
-          settle(call('hostResult', {session:handle.session, token:event.token, ...result}));
+          settle(call('hostResult', {session:handle.session, agent:event.agent, token:event.token, ...result}));
         } else if (event.type === 'elicitation') {
           const id = event.id;
           pending.add(id);
@@ -117,16 +115,18 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       const session = handle.session;
       try {
         signal.throwIfAborted();
-        if (!ready) { ready = prepare(signal).catch(e => { ready = undefined; throw e; }); }
-        await ready;
-        signal.throwIfAborted();
         let request = call('begin', { session, prompt, id: crypto.randomUUID(), now: performance.now() });
         for (;;) {
           signal.throwIfAborted();
-          if (request.dynamic) {
-            const { dynamicPrompt } = await import('./clock.mjs');
+          if (request.openTools !== undefined) {
+            const agent = request.openTools;
+            await host.open(agent, signal, sets => call('registerTools', {session, agent, sets}));
             signal.throwIfAborted();
+          }
+          if (request.dynamic) {
             const { addEnvironmentInfo, addDate } = request.dynamic;
+            const { dynamicPrompt } = addEnvironmentInfo || addDate ? await import('./clock.mjs') : {};
+            signal.throwIfAborted();
             request = call('prepare', { session,
               environment: addEnvironmentInfo ? dynamicPrompt({ add_environment_info: true })[0] : undefined,
               date: addDate ? dynamicPrompt({ add_date: true })[0] : undefined,
@@ -134,7 +134,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           }
           let outcome;
           try {
-            const { transport } = handle.targets[request.agent][request.target];
+            const { transport } = handle.profiles[request.agent].targets[request.target];
             const response = await modelFetch(transport, request.body, signal);
             for await (const chunk of sse(response, request.responses)) {
               signal.throwIfAborted();
@@ -206,11 +206,14 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         return closing ??= stop().then(async () => {
           await host.close();
           call('close', { session: handle.session });
-          handle = onEvent = null;
+          handle = host = onEvent = null;
         });
       },
       async confirm(reply, reason) { if (closing) throw new Error('session is closed'); host.confirm(reply, reason); },
-      async respondToElicitation(reply) { if (!host.respond(reply)) answer(reply); },
+      async respondToElicitation(reply) {
+        if (closing) throw new Error('session is closed');
+        if (!host.respond(reply)) answer(reply);
+      },
     };
   }
 

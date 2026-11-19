@@ -73,8 +73,8 @@ test('a missing credential, unsafe target route, ambiguous todo scope or unsuppo
     [{ ...opts, yaml: opts.yaml.replace('https://child.invalid', 'http://child.invalid') }, /model endpoint/],
     [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, toolsets: [{type: todo}, {type: todo, shared: true}]}') }, /todo/],
     [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, permissions: {deny: [think]}}') }, /permissions/],
-    [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, toolsets: [{type: fetch}]}') }, /host toolsets/],
-    [{ ...opts, yaml: opts.yaml.replace('sub_agents:', 'toolsets: [{type: plan}], sub_agents:') }, /host toolsets/],
+    [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, toolsets: [{type: fetch, allowed_domains: ["10.0.0.0/8"]}]}') }, /domain pattern/],
+    [{ ...opts, yaml: opts.yaml.replace('sub_agents:', 'readonly: true, toolsets: [{type: plan}], sub_agents:') }, /readonly/],
     [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, force_handoff: root}') }, /force_handoff/],
     [{ ...opts, yaml: opts.yaml.replace('[helper]', '[docker.io/remote]') }, /external agent/],
   ]) await assert.rejects(api.createSession(o), error);
@@ -195,4 +195,40 @@ test('the global switch budget stops repeated nested fan-out and the session rec
   assert.equal((await s.send('retry')).message.content, 'recovered');
   assert.equal(req.at(-1).model, 'root');
   assert.doesNotMatch(JSON.stringify(req.at(-1).messages), /fan out/);
+});
+
+test('agents share plan and memory storage, but not tool visibility or mandatory approvals', {timeout:5000}, async t => {
+  const opts = options(`  root: {model: local/parent, sub_agents: [helper], toolsets: [{type: plan}, {type: memory}]}
+  helper: {model: local/worker, readonly: true, toolsets: [{type: memory}, {type: plan}]}
+permissions: {ask: [write_plan], allow: ['*']}`, {autoApprove:true});
+  const write = calls(tool('write_plan', {name:'scope', content:'shared plan'}));
+  const read = calls(tool('read_plan', {name:'scope'}), tool('get_memories', {}, 1));
+  const req = model(t, write, write, calls(tool('add_memory', {memory:'shared memory'})), transfer('helper'), read,
+    text('read both'), text('done'), transfer('helper'), read, text('read again'), text('done'), read, text('empty'));
+  let prompts = 0;
+  const s = await api.createSession(opts, e => {
+    if (e.type === 'tool_confirmation') {
+      assert.equal(e.name, 'write_plan');
+      return s.confirm({confirmationId:e.confirmationId, decision:++prompts === 1 ? 'reject' : 'approve'});
+    }
+  });
+  t.after(() => s.close());
+  await s.send('store');
+  assert.equal(prompts, 2);
+  assert.match(req[1].messages.at(-1).content, /rejected/);
+  await s.restart();
+  await s.send('read again');
+  for (const i of [4, 8]) {
+    const names = req[i].tools.map(t => t.function.name);
+    assert.ok(!names.includes('add_memory') && !names.includes('write_plan'));
+    const [plan, memories] = req[i + 1].messages.slice(-2).map(m => JSON.parse(m.content));
+    assert.equal(plan.content, 'shared plan');
+    assert.equal(plan.revision, 1);
+    assert.equal(memories[0].memory, 'shared memory');
+  }
+  const other = await api.createSession({...opts, agentName:'helper'});
+  t.after(() => other.close());
+  await other.send('isolated');
+  assert.match(req.at(-1).messages.at(-2).content, /not found/);
+  assert.equal(req.at(-1).messages.at(-1).content, 'null');
 });

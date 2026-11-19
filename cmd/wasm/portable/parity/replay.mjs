@@ -183,6 +183,10 @@ async function run() {
   const apiFallback = apiTool.replace('model: local/test', 'model: local/test, fallback: {models: [local/backup]}');
   tests.fallbackHost = await replay(api, 'fallbackHost', apiFallback, [[{ error: { message: 'primary unavailable' } }], tool('greet', {}), answer], single,
     '/v1/chat/completions', greet);
+  const workerAPI = teamFallback.replace('model: local/worker,', 'use_toolsets: [greeting], model: local/worker,')
+    + 'toolsets: {greeting: {type: api, allow_private_ips: true, api_config: {name: greet, instruction: Return a greeting, method: GET, endpoint: "https://tool.invalid/greet"}}}';
+  tests.transferHostFallback = await replay(api, 'transferHostFallback', workerAPI, [tool('transfer_task', {agent:'helper', task:'greet'}),
+    [{error:{message:'worker unavailable'}}], tool('greet', {}), answer, answer], single, '/v1/chat/completions', greet);
   const mcp = config.replace('agents:', `mcps:
   remote: {name: default, allow_private_ips: true, remote: {transport_type: streamable, url: 'https://tool.invalid/mcp', headers: {X-Agent: '\${env.WHO}'}}}
 toolsets:

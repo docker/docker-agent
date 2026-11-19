@@ -64,10 +64,12 @@ enum Command {
         now: f64,
     },
     RegisterTools {
+        agent: String,
         session: u32,
         sets: Vec<turn::HostSet>,
     },
     Confirm {
+        agent: String,
         now: f64,
         session: u32,
         token: String,
@@ -77,6 +79,7 @@ enum Command {
         reason: String,
     },
     HostResult {
+        agent: String,
         session: u32,
         token: String,
         output: String,
@@ -132,8 +135,7 @@ impl Core {
                     .ok_or("session ID space exhausted")?;
                 let handle = json!({
                     "session": self.next_id,
-                    "targets": session.targets(),
-                    "toolsets": session.conversation.profile.spec.toolsets,
+                    "profiles": session.profiles(),
                 });
                 self.sessions.insert(self.next_id, session);
                 Ok(handle)
@@ -163,11 +165,19 @@ impl Core {
                 self.session(session)?.failure(reason, transient)
             }
             Command::End { session, now } => self.session(session)?.end(now),
-            Command::RegisterTools { session, sets } => {
-                self.session(session)?.register(&sets)?;
+            Command::RegisterTools {
+                session,
+                agent,
+                sets,
+            } => {
+                self.session(session)?
+                    .active(&agent)?
+                    .profile
+                    .register(&sets)?;
                 Ok(Value::Null)
             }
             Command::Confirm {
+                agent,
                 now,
                 session,
                 token,
@@ -177,18 +187,19 @@ impl Core {
             } => {
                 let s = self.session(session)?;
                 let next = s
-                    .conversation
+                    .active(&agent)?
                     .confirm(&token, approved, remember, &reason)?;
                 s.confirmed(next, now)
             }
             Command::HostResult {
+                agent,
                 session,
                 token,
                 output,
                 is_error,
             } => {
                 let s = self.session(session)?;
-                let n = s.conversation.host_result(&token, output, is_error)?;
+                let n = s.active(&agent)?.host_result(&token, output, is_error)?;
                 s.next(n)
             }
             Command::AnswerElicitation {
@@ -206,9 +217,7 @@ impl Core {
                 Ok(Value::Null)
             }
             Command::Restart { session, stamp } => {
-                let s = self.session(session)?;
-                s.cancel();
-                s.conversation.restart(stamp)?;
+                self.session(session)?.restart(stamp)?;
                 Ok(Value::Null)
             }
             Command::Close { session } => {

@@ -196,3 +196,140 @@ test('a guessed filtered or unconditionally denied builtin cannot run, even unde
   assert.ok(requests.every(body => !names(body).includes('create_todo')));
   assert.ok(events.every(e => !['tool_call','tool_confirmation','tool_result'].includes(e.type)));
 });
+
+test('same-name MCP tools keep their profile’s discovery, grants, transport and credentials across switches', {timeout:5000}, async t => {
+  const proxy = 'https://guard.invalid/';
+  const mcp = agent => ({defer:true, tools:['record'], allow_private_ips:agent === 'root',
+    remote:{url:`https://${agent}.invalid/rpc`, headers:{Authorization:`Bearer \${env.${agent}}`}}});
+  const agent = name => ({model:`local/${name}`, toolsets:[{type:'mcp',ref:name}]});
+  const mcps = Object.fromEntries(['root','child','idle'].map(name => [name,mcp(name)]));
+  const yaml = config([], {mcps, agents:{root:{...agent('root'), handoffs:['child','idle']},
+    child:{...agent('child'), sub_agents:['root']}, idle:agent('idle')}});
+  const env = {root:'root-only', child:'child-only', idle:'unused'};
+  const secret = 'dckr_pat_' + 'A'.repeat(27);
+  const write = [call('record',{note:secret})], add = [call('add_tool',{name:'record'})];
+  const steps = [add, write, [call('handoff',{agent:'child'})], [call('search_tool',{query:''})], add, write, write,
+    [call('transfer_task',{agent:'root', task:'write'})], write, null, null,
+    write, [call('transfer_task',{agent:'root', task:'try again'})], write, null, null];
+  const rpc = [], records = [], closed = [];
+  const req = replay(t, steps, async request => {
+    const url = new URL(request.url);
+    const who = url.origin === 'https://root.invalid' ? 'root' : 'child';
+    if (who === 'child') {
+      assert.equal(url.origin + '/', proxy);
+      assert.equal(url.searchParams.get('url'), 'https://child.invalid/rpc');
+    } else assert.equal(request.url, 'https://root.invalid/rpc');
+    assert.equal(request.headers.get('Authorization'), 'Bearer ' + env[who]);
+    const session = request.headers.get('Mcp-Session-Id');
+    if (request.method === 'DELETE') {
+      closed.push([who, session]);
+      return new Response(null,{status:204});
+    }
+    const msg = await request.json();
+    rpc.push([who, msg.method]);
+    assert.equal(session, msg.method === 'initialize' ? null : who + '-session');
+    if (msg.method === 'notifications/initialized') return new Response(null,{status:202});
+    let result;
+    if (msg.method === 'initialize') {
+      result = {protocolVersion:'2025-06-18', capabilities:{tools:{}}, serverInfo:{name:who,version:'1'}};
+    } else if (msg.method === 'tools/list') {
+      result = {tools:['record','hidden'].map(name => ({name, description:who+' '+name, inputSchema:{type:'object'}}))};
+    } else {
+      assert.equal(msg.method, 'tools/call');
+      assert.deepEqual(msg.params, {name:'record', arguments:{note:'[REDACTED]'}});
+      records.push(who);
+      result = {content:[{type:'text',text:secret}]};
+    }
+    return Response.json({jsonrpc:'2.0', id:msg.id, result}, {headers:{'Mcp-Session-Id':who+'-session'}});
+  });
+  let prompt = Promise.withResolvers();
+  const s = await api.createSession({yaml, env, toolProxy:proxy}, e => {
+    if (e.type === 'tool_confirmation') prompt.resolve(e);
+  });
+  t.after(() => s.close());
+  async function decide(who, decision, stale) {
+    const e = await prompt.promise;
+    prompt = Promise.withResolvers();
+    assert.equal(e.agent, who);
+    assert.equal(e.id, 'call-0');
+    assert.deepEqual(JSON.parse(e.args), {note:'[REDACTED]'});
+    if (stale) await assert.rejects(s.confirm({confirmationId:stale, decision:'approve'}), /match/);
+    await s.confirm({confirmationId:e.confirmationId, decision, toolName:'record'});
+    return e.confirmationId;
+  }
+  assert.deepEqual(rpc, []);
+  const run = s.send('switch');
+  const first = await decide('root','approve_tool');
+  assert.ok(rpc.every(([who]) => who === 'root'));
+  // The child has to discover, activate and approve its own record despite the parent's grant.
+  const rejected = await decide('child','reject',first);
+  assert.deepEqual(records, ['root']);
+  const granted = await decide('child','approve_tool',rejected);
+  await run;
+  assert.deepEqual(records, ['root','child','root']);
+  assert.deepEqual(names(req[0]), ['handoff','search_tool','add_tool']);
+  assert.deepEqual(names(req[3]), ['transfer_task','search_tool','add_tool']);
+  assert.deepEqual(JSON.parse(lastOutput(req[4]).split('\n')[1]), [{name:'record',description:'child record'}]);
+  assert.match(lastOutput(req[6]), /rejected/);
+  assert.equal(lastOutput(req[7]), '[REDACTED]');
+  for (const r of req) {
+    const descriptions = (r.tools ?? []).filter(t => t.function.name === 'record').map(t => t.function.description);
+    if (descriptions.length) assert.deepEqual(descriptions, [r.model+' record']);
+    assert.ok(!JSON.stringify(r).includes(secret));
+    assert.doesNotMatch(JSON.stringify(r), /root-only|child-only/);
+  }
+  await s.restart();
+  const restarted = s.send('fresh');
+  const again = await decide('child','reject',granted);
+  await decide('root','reject',again);
+  await restarted;
+  assert.deepEqual(records, ['root','child','root']);
+  assert.equal(req[11].model, 'child');
+  assert.doesNotMatch(JSON.stringify(req[11].messages), /handed off|The user rejected/);
+  assert.deepEqual(rpc.filter(([,m]) => m === 'initialize'), [['root','initialize'],['child','initialize']]);
+  await s.close();
+  assert.deepEqual(closed.sort(), [['child','child-session'],['root','root-session']]);
+});
+
+test('restart during child MCP discovery closes the partial session and retries from the parent', {timeout:5000}, async t => {
+  const transfer = [call('transfer_task', {agent:'child',task:'list'})];
+  const yaml = config([], {agents:{root:{model:'local/root',sub_agents:['child']},
+    child:{model:'local/child',toolsets:[{type:'mcp',allow_private_ips:true,remote:{url:'https://child.invalid/rpc'}}]}}});
+  const listing = Promise.withResolvers(), closed = [];
+  let generation = 0;
+  const requests = replay(t, [transfer, transfer, null, null], async req => {
+    assert.equal(req.url,'https://child.invalid/rpc');
+    const session = req.headers.get('Mcp-Session-Id');
+    if (req.method === 'DELETE') {
+      closed.push(session);
+      return new Response(null,{status:204});
+    }
+    const msg = await req.json();
+    if (msg.method === 'initialize') {
+      assert.equal(session,null);
+      return Response.json({jsonrpc:'2.0',id:msg.id,result:{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'test',version:'1'}}},
+        {headers:{'Mcp-Session-Id':String(++generation)}});
+    }
+    assert.equal(session,String(generation));
+    if (msg.method === 'notifications/initialized') return new Response(null,{status:202});
+    assert.equal(msg.method,'tools/list');
+    if (generation === 1) {
+      listing.resolve();
+      return new Promise((_, reject) => req.signal.addEventListener('abort', () => reject(req.signal.reason), {once:true}));
+    }
+    return Response.json({jsonrpc:'2.0',id:msg.id,result:{tools:[{name:'fresh',inputSchema:{type:'object'}}]}});
+  });
+  const s = await api.createSession({yaml});
+  t.after(() => s.close());
+  const abandoned = assert.rejects(s.send('abandoned'), /aborted/);
+  await listing.promise;
+  await s.restart();
+  await abandoned;
+  assert.deepEqual(closed,['1']);
+  await s.send('retry');
+  assert.deepEqual(requests.map(r => r.model), ['root','root','child','root']);
+  assert.deepEqual(names(requests[2]), ['fresh']);
+  assert.doesNotMatch(JSON.stringify(requests[1].messages), /abandoned/);
+  await s.close();
+  assert.deepEqual(closed,['1','2']);
+});

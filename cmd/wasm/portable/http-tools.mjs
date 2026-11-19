@@ -26,7 +26,7 @@ function webURL(raw) {
   return url;
 }
 
-function proxyURL(raw) {
+export function proxyURL(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
   const url = webURL(raw);
   if (url.protocol !== 'https:' || url.href.includes('#') || url.searchParams.has('url') || /%(?![0-9a-f]{2})/i.test(url.href)) {
@@ -41,7 +41,7 @@ const forbiddenHeaders = new Set([
   'transfer-encoding', 'upgrade', 'via', 'x-http-method', 'x-http-method-override', 'x-method-override',
 ]);
 
-function checkedHeaders(init) {
+export function checkedHeaders(init) {
   let headers;
   try { headers = new Headers(init); } catch { throw new Error('invalid HTTP header'); }
   // Browsers own these headers; Node fetch and fetch mocks need not police them.

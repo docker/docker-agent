@@ -50,7 +50,8 @@ test('child retries only its first request; each frame resumes its own pinned ta
   const root = await endpoint(t, 401);
   const rootBackup = await endpoint(t, transfer, text('done'), transfer, text('again'));
   const helper = await endpoint(t, 403);
-  const helperBackup = await endpoint(t, responseCall('user_prompt', { message: 'Which?' }), responseText('three'), responseText('four'));
+  const helperBackup = await endpoint(t, responseCall('user_prompt', { message: 'Which?' }), responseCall('record', {}), responseText('three'), responseText('four'));
+  const service = await endpoint(t, 'recorded');
   const yaml = `providers:
   p: {base_url: ${root.url}, token_key: A}
   q: {base_url: ${rootBackup.url}, token_key: B}
@@ -58,21 +59,27 @@ test('child retries only its first request; each frame resumes its own pinned ta
   b: {base_url: ${helperBackup.url}, api_type: openai_responses}
 agents:
   root: {model: p/root, fallback: {models: [q/r-backup]}, sub_agents: [helper], instruction: private-parent-rule}
-  helper: {model: h/worker, fallback: {models: [b/h-backup]}, toolsets: [{type: user_prompt}]}`;
+  helper: {model: h/worker, fallback: {models: [b/h-backup]}, toolsets: [{type: user_prompt},
+    {type: api, allow_private_ips: true, api_config: {name: record, method: POST, endpoint: '${service.url}/record', headers: {Authorization: 'Bearer \${env.SERVICE}'}}}]}
+permissions: {ask: [record]}`;
   const events = [];
-  const s = await api.createSession({ yaml, env: { A: 'a', B: 'b', C: 'c' } }, e => {
+  const s = await api.createSession({ yaml, env: { A: 'a', B: 'b', C: 'c', SERVICE:'service-key' } }, e => {
     events.push(e);
     if (e.type === 'elicitation') return s.respondToElicitation({ id: e.id, action: 'accept', content: { number: 3 } });
+    if (e.type === 'tool_confirmation') return s.confirm({confirmationId:e.confirmationId, decision:'approve'});
   });
   t.after(() => s.close());
   assert.equal((await s.send('private-parent-question')).message.content, 'done');
   assert.equal((await s.send('second question')).message.content, 'again');
-  assert.deepEqual([root, rootBackup, helper, helperBackup].map(x => x.requests.length), [1, 4, 1, 3]);
+  assert.deepEqual([root, rootBackup, helper, helperBackup].map(x => x.requests.length), [1, 4, 1, 4]);
   checkRoute(root, 'root', 'a');
   checkRoute(rootBackup, 'r-backup', 'b');
   checkRoute(helper, 'worker', 'c');
   checkRoute(helperBackup, 'h-backup', undefined, true);
-  assert.deepEqual(helperBackup.requests[0].body.tools.map(t => t.name), ['user_prompt']);
+  assert.deepEqual(helperBackup.requests[0].body.tools.map(t => t.name), ['user_prompt', 'record']);
+  assert.equal(helperBackup.requests[2].body.input.at(-1).output, 'recorded');
+  assert.deepEqual(service.requests, [{path:'/record', method:'POST', auth:'Bearer service-key', body:{}}]);
+  assert.deepEqual(events.filter(e => e.type === 'tool_confirmation').map(e => e.agent), ['helper']);
   assert.doesNotMatch(JSON.stringify(helperBackup.requests), /private-parent/);
   assert.deepEqual(JSON.parse(helperBackup.requests[1].body.input.at(-1).output), { action: 'accept', content: { number: 3 } });
   assert.deepEqual([1, 3].map(i => rootBackup.requests[i].body.messages.at(-1).content), ['three', 'four']);
@@ -146,7 +153,9 @@ agents:
   helper: {model: p/two, handoffs: [leaf]}
   leaf: `;
   const configs = [
-    [base + `{model: p/three, toolsets: [{type: mcp, allow_private_ips: true, remote: {url: '${trap.url}/mcp'}}]}`, /host toolsets/],
+    [base + `{model: p/three, toolsets: [{type: mcp, remote: {url: '${trap.url}/mcp'}}]}`, /requires a trusted toolProxy/],
+    [base + `{model: p/three, toolsets: [{type: mcp, allow_private_ips: true, remote: {url: '${trap.url}/mcp', headers: {Authorization: 'Bearer \${env.MISSING}'}}}]}`, /missing MCP env value/],
+    [base + `{model: p/three, toolsets: [{type: mcp, allow_private_ips: true, remote: {url: '${trap.url}/mcp', oauth: {}}}]}`, /oauthRedirectURI/],
     [base + `{model: p/three, toolsets: [{type: session_context}]}`, /session_context/],
     [base + `{model: p/three, toolsets: [{type: model_picker, models: [p/pick]}], fallback: {models: [p/backup]}}`, /model_picker with fallback/],
     [base + `{model: p/three, fallback: {models: [bad]}}\nmodels: {bad: {provider: p, model: wrong, base_url: 'https://elsewhere.invalid'}}`, /cross-origin/],
@@ -238,7 +247,7 @@ test('rejects unsupported policy and media combinations before tool discovery or
     [yaml.replace('p/child}', 'small}'), /compaction/],
     [yaml.replace('p/child}', 'p/child, toolsets: [{type: model_picker, models: [image]}]}').replace('small: {', 'image: {provider: p, model: other, capabilities: {image: true}}, small: {'), /media capabilities/],
     [yaml.replace('handoffs: [helper]', 'fallback: {models: [small]}'), /compaction/],
-    [yaml.replace('p/child}', 'p/child, use_toolsets: [web]}') + '\ntoolsets: {web: {type: fetch}}', /host toolsets/],
+    [yaml.replace('p/child}', 'p/child, use_toolsets: [web]}') + '\ntoolsets: {web: {type: api, api_config: {name: test, method: PATCH, endpoint: https://tool.invalid}}}', /api_config.method/],
   ]) await assert.rejects(api.createSession({ yaml: cfg }), reason);
   await assert.rejects(api.chat({ yaml, messages: [{ role: 'user', multi_content: [{ type: 'text', text: 'first' }] }, { role: 'user', content: 'go' }] }), /multipart/);
 });
