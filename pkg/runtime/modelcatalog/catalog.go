@@ -238,13 +238,7 @@ func (r *Catalog) AvailableModels(ctx context.Context, agentName string) []Model
 			choice.CacheReadCost = cfg.Cost.CacheRead
 			choice.CacheWriteCost = cfg.Cost.CacheWrite
 		}
-		if n := r.configuredContextWindow(cfg); n > 0 {
-			if n > math.MaxInt {
-				choice.ContextLimit = math.MaxInt
-			} else {
-				choice.ContextLimit = int(n)
-			}
-		}
+		r.applyConfiguredContextWindow(&choice, cfg)
 		choices = append(choices, choice)
 	}
 	configuredDuration := time.Since(configuredStart)
@@ -502,7 +496,7 @@ func modelHasAnthropicAuth(m latest.ModelConfig, providers map[string]latest.Pro
 		latest.EffectiveAuth(m, providers) != nil
 }
 
-func (r *Catalog) configuredContextWindow(cfg latest.ModelConfig) int64 {
+func (r *Catalog) applyConfiguredContextWindow(choice *ModelChoice, cfg latest.ModelConfig) {
 	resolved := cfg
 	resolved.Provider = provider.ResolveType(&cfg, r.Config.Providers)
 	resolved.ProviderOpts = maps.Clone(cfg.ProviderOpts)
@@ -514,5 +508,7 @@ func (r *Catalog) configuredContextWindow(cfg latest.ModelConfig) int64 {
 			resolved.ProviderOpts["context_size"] = size
 		}
 	}
-	return resolved.EffectiveContextWindow()
+	if n := resolved.EffectiveContextWindow(); n > 0 {
+		choice.ContextLimit = int(min(n, math.MaxInt))
+	}
 }

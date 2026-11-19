@@ -3,7 +3,6 @@ package modelcatalog
 import (
 	"context"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
@@ -139,12 +138,6 @@ func (r *Catalog) populateDMRChoices(ctx context.Context, choices []ModelChoice)
 			meta = metadata[cfg.Model+":latest"]
 		}
 		applyDMRMetadata(choice, meta)
-		if n := r.configuredContextWindow(cfg); n > 0 {
-			if n > math.MaxInt {
-				choice.ContextLimit = math.MaxInt
-			} else {
-				choice.ContextLimit = int(n)
-			}
-		}
+		r.applyConfiguredContextWindow(choice, cfg)
 	}
 }
