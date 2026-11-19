@@ -71,7 +71,7 @@ it("session loading checks capabilities even on an unselected agent", async t =>
   const fetch = t.mock.method(globalThis, "fetch", () => { throw new Error("unexpected fetch"); });
   for (const field of [
     "sub_agents: [root]", "handoffs: [root]", "add_date: true", "add_environment_info: true",
-    "toolsets: [{type: todo, shared: true}]", "toolsets: [{type: fetch}]", "toolsets: [{type: plan}]",
+    "toolsets: [{type: datetime}]", "toolsets: [{type: fetch}]", "toolsets: [{type: plan}]",
   ]) {
     const yaml = withHelper(field);
     assert.equal(api.parseConfig(yaml).agents.length, 2);

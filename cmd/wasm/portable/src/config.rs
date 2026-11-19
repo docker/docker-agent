@@ -365,7 +365,10 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             }
         }
         for ts in &a.toolsets {
-            if !matches!(ts.kind.as_str(), "think" | "user_prompt") {
+            if !matches!(
+                ts.kind.as_str(),
+                "think" | "user_prompt" | "calculator" | "todo"
+            ) {
                 return Err(format!("unsupported toolset type {:?}", ts.kind));
             }
         }

@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/calculator"
 	"github.com/docker/docker-agent/pkg/tools/builtin/think"
+	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
 	"github.com/docker/docker-agent/pkg/tools/builtin/userprompt"
 )
 
@@ -29,21 +30,23 @@ func generate(ctx context.Context, w io.Writer) error {
 	}
 	type entry struct {
 		Instructions string           `json:"instructions"`
+		Strict       map[string]bool  `json:"strict"`
 		Tools        []map[string]any `json:"tools"`
 	}
 	catalog := make(map[string]entry)
-	for key, ts := range map[string]toolset{"calculator": calculator.New(), "think": think.New(), "user_prompt": userprompt.New()} {
+	for key, ts := range map[string]toolset{"calculator": calculator.New(), "think": think.New(), "todo": todo.New(), "user_prompt": userprompt.New()} {
 		defs, err := ts.Tools(ctx)
 		if err != nil {
 			return err
 		}
-		e := entry{Instructions: ts.Instructions()}
+		e := entry{Instructions: ts.Instructions(), Strict: make(map[string]bool)}
 		for _, t := range defs {
-			schema, _, err := openai.ConvertParametersToSchema(t.Parameters)
+			schema, strict, err := openai.ConvertParametersToSchema(t.Parameters)
 			if err != nil {
 				return fmt.Errorf("%s: %w", t.Name, err)
 			}
 			tools.OrderedSchemaProperties(schema)
+			e.Strict[t.Name] = strict
 			e.Tools = append(e.Tools, map[string]any{"type": "function", "function": map[string]any{
 				"name": t.Name, "description": t.Description, "parameters": schema,
 			}})

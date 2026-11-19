@@ -11,7 +11,9 @@ agents:
     model: openrouter/openai/gpt-4o-mini
     instruction: Answer briefly.
     toolsets:
-      - type: think</textarea></label><br>
+      - type: think
+      - type: calculator
+      - type: user_prompt</textarea></label><br>
 <label>OpenRouter key <input id="key" type="password" autocomplete="off"></label>
 <button id="start" disabled>Start session</button>
 <form id="chat"><label>Message <input id="prompt" required></label>
@@ -33,6 +35,18 @@ try {
       session = await api.createSession({ yaml: $('yaml').value, env: { OPENROUTER_API_KEY: $('key').value } }, ev => {
         if (ev.type === 'delta' && ev.content) log(ev.content);
         if (ev.type === 'tool_call') log(`\n[${ev.name}]\n`);
+        if (ev.type === 'elicitation') {
+          const text = window.prompt(`${ev.message}\nEnter a JSON object, or Cancel to decline.`);
+          let reply = { action: 'decline' };
+          if (text !== null) {
+            try {
+              const content = JSON.parse(text);
+              if (!content || typeof content !== 'object' || Array.isArray(content)) throw new Error('expected a JSON object');
+              reply = { action: 'accept', content };
+            } catch (e) { log(`\nInvalid answer: ${e.message}; declined.\n`); }
+          }
+          return session.respondToElicitation({ id: ev.id, ...reply });
+        }
       });
       $('transcript').textContent = 'Session ready.\n';
       $('send').disabled = false;

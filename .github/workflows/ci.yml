@@ -243,6 +243,7 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           task test-wasm-portable
+          task test-wasm-parity
 
   # The TypeScript SDK is generated from Go types: fail when it is stale.
   typescript:

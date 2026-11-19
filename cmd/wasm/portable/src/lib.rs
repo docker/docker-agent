@@ -1,6 +1,8 @@
+mod calculator;
 mod config;
 mod providers;
 mod responses;
+mod todo;
 mod turn;
 mod wire;
 
@@ -43,6 +45,9 @@ enum Command {
         content: Option<serde_json::Map<String, Value>>,
     },
     Cancel {
+        session: u32,
+    },
+    Restart {
         session: u32,
     },
     Close {
@@ -158,6 +163,10 @@ impl Core {
             }
             Command::Cancel { session } => {
                 self.session(session)?.conversation.cancel();
+                Ok(Value::Null)
+            }
+            Command::Restart { session } => {
+                self.session(session)?.conversation.restart();
                 Ok(Value::Null)
             }
             Command::Close { session } => {

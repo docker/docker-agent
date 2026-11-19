@@ -13,12 +13,19 @@ const MAX_ELICITATION_BYTES: usize = 64 * 1024;
 #[derive(Deserialize)]
 struct ToolsetDefinition {
     instructions: String,
+    strict: BTreeMap<String, bool>,
     tools: Vec<Value>,
 }
 
 static CATALOG: LazyLock<BTreeMap<String, ToolsetDefinition>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("tool_catalog.json")).expect("generated tool catalog")
 });
+pub fn response_strict(name: &str) -> Result<bool, String> {
+    CATALOG
+        .values()
+        .find_map(|set| set.strict.get(name).copied())
+        .ok_or_else(|| format!("no response schema for tool {name:?}"))
+}
 type Tools = IndexMap<&'static str, &'static Value>;
 
 pub struct Conversation {
@@ -26,6 +33,8 @@ pub struct Conversation {
     tools: Tools,
     merge_messages: bool,
     messages: Vec<Value>,
+    instruction_count: usize,
+    todos: crate::todo::Todos,
     scratchpad: String,
     active: Option<Turn>,
 }
@@ -107,6 +116,7 @@ impl Conversation {
                 tools.entry(name).or_insert(tool);
             }
         }
+        let instruction_count = instructions.len();
         history.splice(
             0..0,
             instructions
@@ -118,9 +128,18 @@ impl Conversation {
             merge_messages,
             tools,
             messages: history,
+            instruction_count,
+            todos: crate::todo::Todos::default(),
             scratchpad: "Thoughts:".into(),
             active: None,
         })
+    }
+
+    pub fn restart(&mut self) {
+        self.cancel();
+        self.messages.truncate(self.instruction_count);
+        self.scratchpad.truncate("Thoughts:".len());
+        // Go restart replaces the conversation, not the runtime's todo toolset.
     }
 
     pub fn begin(&mut self, prompt: &str, id: &str) -> Result<Value, String> {
@@ -197,8 +216,20 @@ impl Conversation {
 
     fn finish_step(&mut self) -> Result<Value, String> {
         let turn = self.active.as_mut().ok_or("no active turn")?;
-        let step = std::mem::take(&mut turn.step);
+        let mut step = std::mem::take(&mut turn.step);
         let mut events = Vec::new();
+        if matches!(
+            step.finish.as_deref(),
+            Some("length" | "content_filter" | "refusal")
+        ) {
+            // Never execute (or replay) tool calls from a truncated or refused step.
+            if !step.calls.is_empty() {
+                let ids: Vec<_> = step.calls.values().map(|c| &c.id).collect();
+                events.push(json!({"type":"tool_calls_retracted", "ids":ids}));
+                step.calls.clear();
+            }
+            step.finish = Some("stop".into());
+        }
         if let Some(usage) = step.usage {
             let input = u64::from(usage.prompt_tokens);
             let output = u64::from(usage.completion_tokens);
@@ -221,7 +252,13 @@ impl Conversation {
             Some("stop") if step.calls.is_empty() => {
                 let mut result =
                     json!({"message":{"role":"assistant", "content":message["content"]}});
-                self.messages.push(message);
+                if message["content"]
+                    .as_str()
+                    .is_some_and(|s| !s.trim().is_empty())
+                    || message.get("reasoning_content").is_some()
+                {
+                    self.messages.push(message);
+                }
                 if turn.input != 0 || turn.output != 0 {
                     result["usage"] =
                         json!({"input_tokens":turn.input, "output_tokens":turn.output});
@@ -230,7 +267,7 @@ impl Conversation {
                 self.active = None;
                 Ok(json!({"events":events, "result":result}))
             }
-            Some("tool_calls") if !step.calls.is_empty() => {
+            Some("stop" | "tool_calls") if !step.calls.is_empty() => {
                 if turn.tool_rounds >= MAX_TOOL_ROUNDS {
                     return Err("tool iteration limit reached".into());
                 }
@@ -273,6 +310,17 @@ impl Conversation {
                     self.scratchpad.push_str(&thought);
                     reply["content"] = json!(self.scratchpad);
                     events.push(tool_result(&call.id, &call.name, &self.scratchpad, false));
+                }
+                "calculate" | "create_todo" | "create_todos" | "update_todos" | "list_todos" => {
+                    let result = if call.name == "calculate" {
+                        crate::calculator::calculate(&call.arguments)
+                    } else {
+                        self.todos.call(&call.name, &call.arguments)
+                    };
+                    let is_error = result.is_err();
+                    let output = result.unwrap_or_else(|error| error);
+                    events.push(tool_result(&call.id, &call.name, &output, is_error));
+                    reply["content"] = Value::String(output);
                 }
                 "user_prompt" => {
                     if call.arguments.len() > MAX_ELICITATION_BYTES {
@@ -731,17 +779,12 @@ mod tests {
     fn rejects_broken_streams_and_rolls_back() {
         for chunks in [
             vec![chunk(json!({"content":"partial"}), None)],
-            vec![chunk(json!({"content":"partial"}), Some("length"))],
             vec![chunk(json!({}), Some("tool_calls"))],
             vec![
                 chunk(json!({}), Some("stop")),
                 chunk(json!({"content":"late"}), None),
             ],
             vec![chunk(json!({"content":3}), Some("stop"))],
-            vec![chunk(
-                json!({"tool_calls":[call(0, "a", "think", "{}")]}),
-                Some("content_filter"),
-            )],
             vec![chunk(
                 json!({"tool_calls":[call(0, "a", "think", "{}")]}),
                 Some("stop"),
@@ -800,7 +843,7 @@ mod tests {
     #[test]
     fn official_openai_keeps_system_messages_separate_and_deduplicates_advertised_tools() {
         let mut c = Conversation::new(
-            "model".into(),
+            model("model"),
             "agent".into(),
             &["user_prompt".into(), "think".into(), "user_prompt".into()],
             false,

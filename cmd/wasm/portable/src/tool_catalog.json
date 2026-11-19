@@ -1,6 +1,9 @@
 {
   "calculator": {
     "instructions": "## Calculator\n\nUse calculate for numerical calculations instead of doing arithmetic yourself.\nPass a single expression with decimal numbers, parentheses, +, -, *, /, %, or ^.\nPowers use integer exponents and associate right-to-left; -2^2 means -(2^2).\n% is integer remainder, not a percentage: write 15 / 100 for 15%.\nScientific notation such as 1.5e3 is supported. Variables and functions are not.\nThe result field is always exact. When approximate is true, decimal is rounded\n(to 20 decimal places); use the exact fraction in result for further calculations.",
+    "strict": {
+      "calculate": true
+    },
     "tools": [
       {
         "function": {
@@ -26,6 +29,9 @@
   },
   "think": {
     "instructions": "## Think Tool\n\nUse the think tool as a scratchpad before acting. Think to:\n- Check which rules or policies apply\n- Verify you have all required information\n- Validate planned actions before executing\n- Reason through complex multi-step problems",
+    "strict": {
+      "think": true
+    },
     "tools": [
       {
         "function": {
@@ -49,8 +55,116 @@
       }
     ]
   },
+  "todo": {
+    "instructions": "## Todo Tools\n\nTrack task progress with todos:\n- Create todos for each major step before starting complex work (prefer batch create_todos)\n- Update status to \"in-progress\" before starting, \"completed\" immediately after finishing\n- Every todo MUST be marked \"completed\" before your final response\n- Batch multiple updates in a single update_todos call\n- Never leave todos pending or in-progress when done",
+    "strict": {
+      "create_todo": true,
+      "create_todos": true,
+      "list_todos": true,
+      "update_todos": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Create a new todo item with a description",
+          "name": "create_todo",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "description": "Description of the todo item",
+                "type": "string"
+              }
+            },
+            "required": [
+              "description"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Create a list of new todo items with descriptions",
+          "name": "create_todos",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "descriptions": {
+                "description": "Descriptions of the todo items",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "descriptions"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Update the status of one or more todo item(s)",
+          "name": "update_todos",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "updates": {
+                "description": "List of todo updates",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "description": "ID of the todo item",
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "New status (pending, in-progress, completed)",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "updates"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "List all current todos with their status",
+          "name": "list_todos",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
   "user_prompt": {
     "instructions": "## User Prompt Tool\n\nAsk the user a question when you need clarification, input, or a decision.\n\nOptionally provide a JSON schema to structure the response:\n- Enum: {\"type\": \"string\", \"enum\": [\"option1\", \"option2\"], \"title\": \"Select\"}\n- Object: {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"required\": [\"name\"]}\n\nResponse contains \"action\" (accept/decline/cancel) and \"content\" (user data when accepted).",
+    "strict": {
+      "user_prompt": false
+    },
     "tools": [
       {
         "function": {

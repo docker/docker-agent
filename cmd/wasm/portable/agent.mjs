@@ -29,8 +29,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     for (const key of ['toolProxy', 'oauthRedirectURI']) {
       if (opts[key] != null) throw new Error(`options.${key} is not supported by the portable profile`);
     }
-    let config = { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env } };
-    let handle = call('open', { ...config, history: history ?? [] });
+    let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, history: history ?? [] });
     try { modelURL(handle.endpoint); }
     catch (e) { call('close', { session: handle.session }); throw e; }
     let active, batch, restarting = false, closing;
@@ -153,15 +152,13 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         try {
           await stop();
           if (closing) throw new Error('session is closed');
-          const next = call('open', { ...config, history: [] });
-          call('close', { session: handle.session });
-          handle = next;
+          call('restart', { session: handle.session });
         } finally { restarting = false; }
       },
       close() {
         return closing ??= stop().then(() => {
           call('close', { session: handle.session });
-          config = handle = onEvent = null;
+          handle = onEvent = null;
         });
       },
       async confirm() { throw new Error(closing ? 'session is closed' : 'no tool confirmation is pending'); },

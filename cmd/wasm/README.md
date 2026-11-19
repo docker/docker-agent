@@ -141,8 +141,9 @@ It works on any Go js/wasm binary.
 `node/small_test.js` its size.
 
 For a **Go-runtime-free** alternative, the [portable Rust/Wasm agent](portable/README.md)
-ports a subset of this profile: OpenAI-compatible streaming chat, multi-turn
-sessions and the `think` tool. It builds separately from the Go demo.
+ports streaming Chat Completions and Responses, multi-turn sessions and the
+`think`, `calculator`, `todo` and `user_prompt` tools. It builds separately;
+`task test-wasm-parity` compares provider requests and JS events with Go small.
 
 ## Run (Node)
 

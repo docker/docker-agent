@@ -103,11 +103,8 @@ pub fn request(chat: Value) -> Result<Value, String> {
         if !f["parameters"].is_object() {
             return Err(format!("missing parameters for tool {name}"));
         }
-        // The Go catalog normalizes schemas before exporting them. user_prompt's original
-        // free-form schema makes it non-strict even though its normalized form is closed.
-        let strict = f["strict"]
-            .as_bool()
-            .unwrap_or(matches!(name, "think" | "calculate"));
+        // Strictness is determined from the original Go schema, before normalization.
+        let strict = crate::turn::response_strict(name)?;
         tools.push(json!({
             "type":"function", "name":name, "description":string(f,"description")?,
             "parameters":f["parameters"], "strict":strict
