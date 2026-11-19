@@ -163,7 +163,6 @@ func Run(ctx context.Context, agentFilename string, opts Options, ln net.Listene
 	// stream duration.
 	handler := otelhttp.NewHandler(
 		newRouter(&server{
-			team:              t,
 			policy:            policy,
 			safety:            resolvedSafety.Policy,
 			conversations:     newConversationStore(opts.ConversationsMaxSessions, conversationTTL(opts)),
@@ -221,11 +220,7 @@ func serve(ctx context.Context, httpServer *http.Server, ln net.Listener) error 
 	}
 }
 
-// server is concurrent-safe: every request creates its own session and
-// runtime, so the only shared state is the team (whose toolsets are
-// independently safe to call) and the optional conversation cache.
 type server struct {
-	team              *team.Team
 	policy            agentPolicy
 	safety            session.SafetyPolicy
 	conversations     *conversationStore
