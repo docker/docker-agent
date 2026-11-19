@@ -123,8 +123,8 @@ async function run() {
       trace.results.push(await s.send('recover'));
     } finally { await s.close(); }
   });
-  const withOptions = config.replace('provider: openai,', 'provider: openai, temperature: 0.7, max_tokens: 24, parallel_tool_calls: true,')
-    .replace('agents:', 'models:\n  chosen: {provider: local, model: test, temperature: 0, top_p: 0.8, frequency_penalty: 0.1, presence_penalty: 0.2, parallel_tool_calls: false}\nagents:')
+  const withOptions = config.replace('provider: openai,', 'provider: openai, provider_opts: {service_tier: priority}, temperature: 0.7, max_tokens: 24, parallel_tool_calls: true,')
+    .replace('agents:', 'models:\n  chosen: {provider: local, model: test, provider_opts: {service_tier: flex}, temperature: 0, top_p: 0.8, frequency_penalty: 0.1, presence_penalty: 0.2, parallel_tool_calls: false}\nagents:')
     .replace('model: local/test', 'toolsets: [{type: think}], model: chosen');
   tests.sampling = await replay(api, 'sampling', withOptions, [answer, answer], turns);
   const native = 'agents: {root: {model: openai/gpt-4o-mini, instruction: hi, toolsets: [{type: think}]}}';
@@ -171,13 +171,18 @@ async function run() {
     if (req.url !== 'https://tool.invalid/greet' || req.method !== 'GET') throw new Error('unexpected API request');
     return new Response('hi');
   });
-  const mcp = config.replace('model: local/test', 'toolsets: [{type: mcp, allow_private_ips: true, remote: {transport_type: streamable, url: "https://tool.invalid/mcp"}}], model: local/test');
-  tests.mcp = await replay(api, 'mcp', mcp,[tool('echo',{text:'from MCP'}),answer], async ({api,options,record,trace}) => {
+  const mcp = config.replace('agents:', `mcps:
+  remote: {name: default, allow_private_ips: true, remote: {transport_type: streamable, url: 'https://tool.invalid/mcp', headers: {X-Agent: '\${env.WHO}'}}}
+toolsets:
+  echo: {type: mcp, ref: remote, name: named, instruction: 'Use the named MCP.', tools: [named_echo]}
+agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets: [echo], model: local/test');
+  tests.mcp = await replay(api, 'mcp', mcp,[tool('named_echo',{text:'from MCP'}),answer], async ({api,options,record,trace}) => {
     const s=await api.createSession({...options, autoApprove:true}, record);
     try {trace.results.push(await s.send('echo'));} finally {await s.close();}
   }, '/v1/chat/completions', async req => {
     if (req.url !== 'https://tool.invalid/mcp') throw new Error('unexpected MCP endpoint');
     if (req.method === 'DELETE') return new Response(null,{status:204});
+    if (req.headers.get('X-Agent') !== 'Ada') throw new Error('missing inherited MCP header');
     const m=await req.json();
     if (m.method==='notifications/initialized') return new Response(null,{status:202});
     const val = m.method==='initialize' ? {protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}
@@ -215,7 +220,7 @@ async function run() {
     fin([{ ...change, arguments: switchArgs, status: 'completed' }])];
   tests.responsesPicker = await replay(api, 'responsesPicker', picker.replace('provider: openai,', 'provider: openai, api_type: openai_responses,'),
     [switched, text, text], turns, '/v1/responses');
-  const responses = config.replace('provider: openai,', 'provider: openai, api_type: openai_responses,')
+  const responses = config.replace('provider: openai,', 'provider: openai, api_type: openai_responses, provider_opts: {service_tier: priority},')
     .replace('model: local/test', 'toolsets: [{type: think}], model: local/test');
   const combined = config.replace('model: local/test', 'toolsets: [{type: user_prompt}, {type: think}, {type: calculator}], model: local/test');
   tests.toolOrder = await replay(api, 'toolOrder', combined, [answer, answer], turns);

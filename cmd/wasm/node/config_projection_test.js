@@ -94,3 +94,42 @@ it("portable sessions do not ignore security settings on an unselected agent", {
     await assert.rejects(api.createSession({ yaml, agentName: "root", env: { OPENAI_API_KEY: "k" } }), Error, field);
   }
 });
+
+it("projects Go's reusable toolset and remote MCP fixtures without touching their endpoints", t => {
+  const fetch = t.mock.method(globalThis, "fetch", () => { throw new Error("unexpected fetch"); });
+  const readFixture = name => readFileSync(path.join(__dirname, "../../../pkg/config/testdata", name + ".yaml"), "utf8");
+  for (const [file, names] of [["shared_toolsets", ["dev", "ops"]], ["mcp_definitions_remote", ["root", "override"]]]) {
+    const yaml = readFixture(file);
+    const agents = names.map(name => ({ name, model: "model", description: "", instruction: "" }));
+    assert.deepEqual(api.listAgents(yaml), agents);
+    assert.deepEqual(api.parseConfig(yaml), {
+      version: "16", models: { model: { provider: "anthropic", model: "claude-sonnet-4-0", base_url: "" } },
+      agents: agents.map(a => ({ ...a, sub_agents: [], handoffs: [], add_date: false, add_env_info: false })),
+    });
+  }
+  for (const file of ["shared_toolsets_invalid", "shared_toolsets_missing", "mcp_definitions_invalid_ref", "mcp_definitions_multiple_sources"]) {
+    const yaml = readFixture(file);
+    assert.throws(() => api.parseConfig(yaml), Error, file);
+    assert.throws(() => api.listAgents(yaml), Error, file);
+  }
+  for (const defs of [
+    "toolsets: {a: {type: todo}, a: {type: think}}",
+    "mcps: {a: {remote: {url: x}}, a: {remote: {url: y}}}",
+    "mcps: {a: {remote: {url: x, headers: {X: a, X: b}}}}",
+  ]) {
+    assert.throws(() => api.parseConfig(`${defs}\nagents: {root: {model: openai/test}}`), Error, defs);
+  }
+  const unused = "toolsets: {unused: {type: mcp, ref: missing}}\nagents: {root: {model: openai/test}}";
+  assert.equal(api.listAgents(unused)[0].name, "root");
+  assert.throws(() => api.listAgents(unused.replace("model: openai/test", "model: openai/test, use_toolsets: [unused]")), Error);
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+it("joins instruction paragraphs but does not expose model and welcome metadata", () => {
+  const yaml = `models: {m: {provider: openai, model: test, description: Capable, provider_opts: {service_tier: default}}}
+agents: {root: {model: m, welcome_message: Welcome, instruction: [One, '', 'Two \${env.WHO}']}}`;
+  const a = { name: "root", model: "m", description: "", instruction: "One\n\n\n\nTwo ${env.WHO}" };
+  assert.deepEqual(api.listAgents(yaml), [a]);
+  assert.deepEqual(api.parseConfig(yaml).models, { m: { provider: "openai", model: "test", base_url: "" } });
+  assert.throws(() => api.parseConfig(yaml.replace("One, ''", "One, 42")), Error);
+});
