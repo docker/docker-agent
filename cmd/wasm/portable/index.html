@@ -15,6 +15,7 @@ agents:
       - type: calculator
       - type: user_prompt</textarea></label><br>
 <label>OpenRouter key <input id="key" type="password" autocomplete="off"></label>
+<label>Trusted HTTPS tool proxy (optional) <input id="proxy" type="url" placeholder="https://proxy.example/egress"></label>
 <button id="start" disabled>Start session</button>
 <form id="chat"><label>Message <input id="prompt" required></label>
 <button id="send" disabled>Send</button><button type="button" id="stop" disabled>Stop</button></form>
@@ -32,9 +33,17 @@ try {
     try {
       await session?.close();
       session = null;
-      session = await api.createSession({ yaml: $('yaml').value, env: { OPENROUTER_API_KEY: $('key').value } }, ev => {
+      session = await api.createSession({ yaml: $('yaml').value, env: { OPENROUTER_API_KEY: $('key').value }, toolProxy: $('proxy').value || undefined }, ev => {
         if (ev.type === 'delta' && ev.content) log(ev.content);
         if (ev.type === 'tool_call') log(`\n[${ev.name}]\n`);
+        if (ev.type === 'tool_confirmation') {
+          return session.confirm(window.confirm(`Allow ${ev.name}?\n${ev.args}`));
+        }
+        if (ev.type === 'elicitation' && ev.mode === 'url') {
+          // The demo has no trusted redirect receiver; an embedding host can supply one.
+          log('\nURL authorization needs an embedding host; declined.\n');
+          return session.respondToElicitation({ id: ev.id, action: 'decline' });
+        }
         if (ev.type === 'elicitation') {
           const text = window.prompt(`${ev.message}\nEnter a JSON object, or Cancel to decline.`);
           let reply = { action: 'decline' };

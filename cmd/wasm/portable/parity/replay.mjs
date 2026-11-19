@@ -191,6 +191,12 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
     if (!val) throw new Error(`unexpected MCP method ${m.method}`);
     return Response.json({jsonrpc:'2.0',id:m.id,result:val},{headers:{'Mcp-Session-Id':'replay'}});
   });
+  const redacted = 'dckr_pat_' + 'A'.repeat(27);
+  tests.hostRedaction = await replay(api,'hostRedaction',apiTool,[tool('greet',{}),answer],single,'/v1/chat/completions', req => {
+    if(req.url!=='https://tool.invalid/greet') throw new Error('unexpected URL');
+    return new Response(redacted);
+  });
+  tests.dynamicContext = await replay(api,'dynamicContext',config.replace('model: local/test','add_date: true, add_environment_info: true, model: local/test'),[answer,answer],turns);
   const question = config.replace('model: local/test', 'toolsets: [{type: user_prompt}], model: local/test');
   tests.ask = await replay(api, 'ask', question, [tool('user_prompt', { message: 'Which color?', title: 'Color', schema: { type: 'string' } }), answer],
     async ({ api, options, record, trace }) => {

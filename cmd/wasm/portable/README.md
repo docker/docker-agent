@@ -2,11 +2,11 @@
 
 An independent port of a **subset** of the [Go small profile](../README.md#small-profile).
 The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
-ES module handles `fetch`, SSE framing, cancellation and the JavaScript API.
+ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The module and its JS host together are about 830 KiB uncompressed (Rust
-1.90, release build), versus 35.8 MiB for the Go small module alone.
+CI enforces a 2 MiB uncompressed budget for the Wasm **and all runtime JS**
+(the packed Go small module alone is 35.8 MiB on the reference toolchain).
 
 ```sh
 rustup target add wasm32-unknown-unknown  # Rust 1.90+ and Cargo
@@ -16,7 +16,8 @@ python3 -m http.server --directory bin/wasm-portable 8000
 
 Open <http://localhost:8000>. The demo uses OpenRouter by default; its key stays
 in the tab and is sent to the chosen model endpoint. Only use configs and model
-endpoints you trust. To embed the same two runtime files without the demo:
+endpoints you trust. To embed it without the demo, deploy `docker-agent.wasm` and **all `.mjs`
+files** from `bin/wasm-portable/` together:
 
 ```js
 import { loadDockerAgent } from './agent.mjs';
@@ -37,10 +38,10 @@ Nothing is installed on `globalThis` unless the host chooses to do so.
 
 | Area | Ported | Not yet ported |
 |---|---|---|
-| Config | Current-version config projection and named agents/models. `parseConfig`/`listAgents` can inspect local sub-agent and handoff references without starting a session. Instructions, model names and endpoints expand against the session env. | Historical versions, general Go config loading, reusable groups, permission policies and hooks |
-| Providers | OpenAI Chat Completions **and** streamed Responses (text/function calls). Explicit `api_type` or model-based selection; sampling fields, token caps, parallel tool flag; static HTTPS API-key aliases from the Go provider catalog, e.g. Groq and OpenRouter | Realtime, encrypted reasoning state, media output, hosted tools, OAuth/dynamic provider endpoints, retries/fallbacks, cost/catalog limits |
-| Sessions | `createSession`, multi-turn `send`, `abort`, `restart`, `close`; stateless `chat` with multimodal history (below). Host documents are validated but not sent or indexed. | Executing delegations/handoffs, compaction, persistence |
-| Tools | `think`, exact rational `calculator`, session-local `todo`, and `user_prompt`. Sessions answer questions by ID with `respondToElicitation`; `chat` awaits the callback's answer. No callback means decline. | Other toolsets, remote MCP, tool approvals, OAuth elicitation and optional RAG |
+| Config | Current schema: named agents/models, reusable `toolsets` / `use_toolsets`, named remote `mcps`, filters and instruction overrides, redaction, date/environment flags and supported builtin hooks. | Historical versions and filesystem-backed config sources are not part of the Go small target. Unknown options are errors. |
+| Providers | Streamed OpenAI Chat Completions and Responses, native JSON-schema output, token caps/penalties, service tier, media history, static and selected parameterized endpoints from the Go provider catalog. Azure, Copilot, Cloudflare and session-supplied Codex credentials have separate transport handling. | No ambient login or token storage, realtime/audio generation, encrypted reasoning replay or server-hosted Responses tools. |
+| Sessions | Multi-turn send, abort/restart/close, stateless chat, same-model foreground compaction using a declared `context_window`, and live selection between compatible models. | No disk persistence, compaction window discovery or provider-native compaction. |
+| Tools | `datetime`, `random`, `think`, `calculator`, `todo`, `plan`, `memory`, `model_picker`, `session_context`, `user_prompt`, `fetch`, `api` and remote MCP. In-memory stores survive restart but are isolated by handle. | No stdio, process or file tools. `openapi` and opt-in RAG are not part of Go small. |
 
 For example, a custom provider can set `api_type: openai_responses` (or
 `openai_chatcompletions`). The supported sampling fields are `temperature`,
@@ -55,8 +56,30 @@ can be inspected with `parseConfig`. They do not silently weaken settings.
 Tool rounds are bounded (8 per turn, 16 calls per round), and scratchpads,
 answers and todo lists have portable memory limits. Parallel tool results may
 appear in a different order than Go's completion-dependent scheduling.
-There is no network/file/command tool. A model call uses the explicit session
-credentials, never ambient environment or cookies, and does not follow redirects.
+Model requests use only explicit session credentials, never ambient environment
+or cookies, and refuse redirects. Tool calls are a separate trust boundary.
+
+### Remote tools and consent
+
+- `toolProxy` is an **operator-trusted HTTPS proxy**. It receives configured
+  tool credentials and must enforce destination IP policy at dial time and never
+  follow redirects. See the [Go bridge proxy contract](../README.md#createsessionoptions-onevent---promisesession).
+  Without it, protected calls fail closed. `allow_private_ips: true` is an
+  explicit opt-in to direct browser access, not an automatic fallback.
+- In `createSession`, handle `tool_confirmation` with `session.confirm(true)` or
+  `session.confirm('reject', reason)`. A `chat` callback returns the decision.
+  Declining must not perform the call. Only enable `autoApprove` on trusted configs.
+- MCP tool catalogs are obtained over guarded HTTP. Treat server instructions
+  and tool output as untrusted. The streamable HTTP client supports JSON and
+  SSE replies, pagination and session teardown; it does not replay a failed tool
+  invocation on a transport error.
+- For MCP OAuth set `oauthRedirectURI` to an exact, trusted HTTPS callback.
+  Public clients use authorization code + PKCE S256 with resource and issuer
+  binding. The host must verify the popup/message source and origin and return
+  the **actual callback URL** in `content.callback_url` via `respondToElicitation`.
+  Never synthesize it from an untrusted code/state pair. Unsupported servers,
+  confidential clients and implicit flows are refused. Tokens are in memory only;
+  there is no background refresh. The simple demo declines URL authorization.
 
 ### Attachments in `chat` history
 
