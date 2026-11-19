@@ -10,6 +10,7 @@ const MAX_SCRATCHPAD_BYTES: usize = 64 * 1024;
 pub struct Conversation {
     model_params: Map<String, Value>,
     think: bool,
+    pub merge_messages: bool,
     messages: Vec<Value>,
     scratchpad: String,
     active: Option<Turn>,
@@ -63,6 +64,7 @@ impl Conversation {
         Ok(Self {
             model_params,
             think,
+            merge_messages: false,
             messages: history,
             scratchpad: "Thoughts:".into(),
             active: None,
@@ -101,11 +103,20 @@ impl Conversation {
                 "parameters":{"type":"object", "properties":{"thought":{"type":"string"}}, "required":["thought"], "additionalProperties":false}
             }}]);
         }
+        if self.merge_messages {
+            crate::wire::merge_text_messages(&mut body);
+        }
         body
     }
 
     pub fn chunk(&mut self, chunk: Value) -> Result<Vec<Value>, String> {
         let turn = self.active.as_mut().ok_or("no active turn")?;
+        if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
+            // Go has already admitted this user message (and completed tool steps).
+            // A provider error discards the unfinished response, not that history.
+            self.active = None;
+            return Err(format!("model failed: error receiving from stream: received error while streaming: {error}"));
+        }
         let result = turn.step.chunk(chunk, &turn.message_id, self.think);
         if result.is_err() {
             self.cancel();
@@ -211,12 +222,6 @@ impl Conversation {
 
 impl Step {
     fn chunk(&mut self, chunk: Value, id: &str, think: bool) -> Result<Vec<Value>, String> {
-        if !chunk["error"].is_null() {
-            return Err(chunk["error"]["message"]
-                .as_str()
-                .unwrap_or("model stream error")
-                .into());
-        }
         if !chunk["usage"].is_null() {
             if !chunk["usage"].is_object() {
                 return Err("invalid token usage".into());
@@ -592,7 +597,6 @@ mod tests {
                 chunk(json!({}), Some("stop")),
                 chunk(json!({"content":"late"}), None),
             ],
-            vec![json!({"error":{"message":"model failed"}})],
             vec![chunk(json!({"content":3}), Some("stop"))],
             vec![chunk(
                 json!({"tool_calls":[call(0, "a", "think", "{}")]}),

@@ -59,7 +59,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             await response.body?.cancel();
             throw new Error(`model request failed: HTTP ${response.status}`);
           }
-          for await (const chunk of sse(response)) {
+          for await (const chunk of sse(response, handle.responses)) {
             signal.throwIfAborted();
             for (const event of call('chunk', { session, chunk })) {
               signal.throwIfAborted();
@@ -165,7 +165,7 @@ function modelURL(endpoint) {
   return url;
 }
 
-async function* sse(response) {
+async function* sse(response, responses) {
   if (!response.body || !/^text\/event-stream(?:;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
     await response.body?.cancel();
     throw new Error('expected a text/event-stream model response');
@@ -188,7 +188,10 @@ async function* sse(response) {
           const record = data.join('\n');
           data = [];
           if (record === '[DONE]') return;
-          yield JSON.parse(record);
+          const chunk = JSON.parse(record);
+          yield chunk;
+          // Responses has a terminal JSON event, not a Chat Completions [DONE] sentinel.
+          if (responses && ['response.completed', 'response.done', 'response.incomplete'].includes(chunk.type)) return;
         }
       }
       if (done) throw new Error('model stream ended before [DONE]');

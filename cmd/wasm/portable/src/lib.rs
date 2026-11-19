@@ -1,5 +1,8 @@
 mod config;
+mod providers;
+mod responses;
 mod turn;
+mod wire;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -43,12 +46,47 @@ enum Command {
 
 #[derive(Default)]
 struct Core {
-    sessions: BTreeMap<u32, Conversation>,
+    sessions: BTreeMap<u32, Session>,
     next_id: u32,
 }
 
+struct Session {
+    conversation: Conversation,
+    responses: Option<responses::Stream>,
+}
+
+impl Session {
+    fn request(&mut self, body: Value) -> Result<Value, String> {
+        if let Some(stream) = &mut self.responses {
+            *stream = responses::Stream::default();
+            responses::request(body)
+        } else {
+            Ok(body)
+        }
+    }
+
+    fn next(&mut self, mut next: Value) -> Result<Value, String> {
+        if let Some(body) = next.get_mut("request") {
+            *body = self.request(body.take())?;
+        }
+        Ok(next)
+    }
+
+    fn chunk(&mut self, chunk: Value) -> Result<Value, String> {
+        let mut events = Vec::new();
+        if let Some(stream) = &mut self.responses {
+            for c in stream.push(chunk)? {
+                events.extend(self.conversation.chunk(c)?);
+            }
+        } else {
+            events = self.conversation.chunk(chunk)?;
+        }
+        Ok(Value::Array(events))
+    }
+}
+
 impl Core {
-    fn session(&mut self, id: u32) -> Result<&mut Conversation, String> {
+    fn session(&mut self, id: u32) -> Result<&mut Session, String> {
         self.sessions
             .get_mut(&id)
             .ok_or_else(|| "session is closed".into())
@@ -65,26 +103,41 @@ impl Core {
                 history,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
-                let conv =
+                let mut conv =
                     Conversation::new(spec.model_params, spec.instruction, spec.think, history)?;
+                conv.merge_messages = spec.merge_messages;
                 self.next_id = self
                     .next_id
                     .checked_add(1)
                     .ok_or("session ID space exhausted")?;
-                self.sessions.insert(self.next_id, conv);
-                Ok(json!({"session": self.next_id, "endpoint": spec.endpoint, "token": spec.token}))
+                self.sessions.insert(
+                    self.next_id,
+                    Session {
+                        conversation: conv,
+                        responses: spec.responses.then(responses::Stream::default),
+                    },
+                );
+                Ok(
+                    json!({"session": self.next_id, "endpoint": spec.endpoint, "token": spec.token, "responses":spec.responses}),
+                )
             }
             Command::Begin {
                 session,
                 prompt,
                 id,
-            } => self.session(session)?.begin(&prompt, &id),
-            Command::Chunk { session, chunk } => {
-                Ok(Value::Array(self.session(session)?.chunk(chunk)?))
+            } => {
+                let s = self.session(session)?;
+                let request = s.conversation.begin(&prompt, &id)?;
+                s.request(request)
             }
-            Command::End { session } => self.session(session)?.end(),
+            Command::Chunk { session, chunk } => self.session(session)?.chunk(chunk),
+            Command::End { session } => {
+                let s = self.session(session)?;
+                let next = s.conversation.end()?;
+                s.next(next)
+            }
             Command::Cancel { session } => {
-                self.session(session)?.cancel();
+                self.session(session)?.conversation.cancel();
                 Ok(Value::Null)
             }
             Command::Close { session } => {

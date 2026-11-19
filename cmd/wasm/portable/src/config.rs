@@ -74,6 +74,8 @@ pub struct Selected {
     pub token: String,
     pub instruction: String,
     pub think: bool,
+    pub responses: bool,
+    pub merge_messages: bool,
 }
 
 fn load(yaml: &str) -> Result<Config, String> {
@@ -314,14 +316,17 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     let cfg = load(yaml)?;
     for p in cfg.providers.values() {
         if !matches!(p.provider.as_str(), "" | "openai")
-            || !matches!(p.api_type.as_str(), "" | "openai_chatcompletions")
+            || !matches!(
+                p.api_type.as_str(),
+                "" | "openai_chatcompletions" | "openai_responses"
+            )
         {
-            return Err("portable providers must use OpenAI Chat Completions".into());
+            return Err("portable providers must use an OpenAI API".into());
         }
     }
     for m in cfg.models.values() {
         if !cfg.providers.contains_key(&m.provider)
-            && !matches!(m.provider.as_str(), "openai" | "openrouter")
+            && crate::providers::lookup(&m.provider).is_none()
         {
             return Err(format!("unsupported provider {:?}", m.provider));
         }
@@ -336,21 +341,19 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     .ok_or_else(|| format!("agent {agent:?} not found"))?;
     let m = &cfg.models[&a.model];
     let p = cfg.providers.get(&m.provider);
-    let (default_base, default_key) = match (p, m.provider.as_str()) {
-        (None, "openrouter") => ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
-        (None, _) => ("https://api.openai.com/v1", "OPENAI_API_KEY"),
-        (Some(_), _) => ("https://api.openai.com/v1", ""),
-    };
-    // Go picks a custom provider's default API before model expansion. The built-in
-    // OpenAI client auto-selects its API per request, using the expanded ID instead.
+    let builtin = crate::providers::lookup(&m.provider).filter(|_| p.is_none());
+    let default_base = builtin.map_or("https://api.openai.com/v1", |b| b.base_url.as_str());
+    let default_key = builtin.map_or("", |b| b.token_env_vars[0].as_str());
+    // Go resolves a custom provider's default protocol before expanding the model.
     let id = expand_model_field(&m.model, env)?;
     let responses = match p {
-        Some(p) => p.api_type.is_empty() && supports_responses_api(&m.model),
-        None => m.provider == "openai" && supports_responses_api(&id),
+        Some(p) => {
+            p.api_type == "openai_responses"
+                || (p.api_type.is_empty() && supports_responses_api(&m.model))
+        }
+        None => builtin.is_some_and(|b| b.auto_responses) && supports_responses_api(&id),
     };
-    if responses {
-        return Err("the selected model uses the unsupported Responses API".into());
-    }
+    let custom = p.is_some();
     let default_provider = Provider::default();
     let p = p.unwrap_or(&default_provider);
     let key = first_nonempty([&m.token_key, &p.token_key, default_key]);
@@ -369,10 +372,21 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             .ok_or_else(|| format!("{key} environment variable is required"))?
             .clone()
     };
+    let merge_messages = !responses
+        && (custom
+            || builtin.is_some_and(|b| b.merge_consecutive_messages)
+            || (m.provider == "openai" && base.trim_end_matches('/') != default_base));
+    let route = if responses {
+        "responses"
+    } else {
+        "chat/completions"
+    };
     let think = !a.toolsets.is_empty();
     Ok(Selected {
         model_params: model_params(id, m, p, think)?,
-        endpoint: format!("{}/chat/completions", base.trim_end_matches('/')),
+        endpoint: format!("{}/{route}", base.trim_end_matches('/')),
+        responses,
+        merge_messages,
         token,
         instruction: instruction(&a.instruction, env),
         think,
@@ -531,7 +545,7 @@ agents:
     }
 
     #[test]
-    fn rejects_invalid_options_and_does_not_emulate_responses() {
+    fn rejects_invalid_options_and_selects_responses_when_required() {
         for option in [
             "temperature: .nan",
             "top_p: nope",
@@ -556,11 +570,8 @@ agents:
             "providers: {local: {}}\nagents: {root: {model: local/gpt-4.1-mini}}",
             "providers: {local: {api_type: openai_responses}}\nagents: {root: {model: local/test}}",
         ] {
-            let err = select(cfg, "", &env).err().unwrap();
-            assert!(
-                err.contains("Responses API") || err.contains("must use OpenAI Chat Completions"),
-                "{err}"
-            );
+            let selected = select(cfg, "", &env).unwrap();
+            assert!(selected.responses && selected.endpoint.ends_with("/responses"));
         }
         let cfg = "providers: {local: {max_tokens: 9007199254740993}}\nagents: {root: {model: local/test}}";
         assert!(select(cfg, "", &BTreeMap::new())
