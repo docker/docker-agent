@@ -29,7 +29,7 @@ function server(overrides = {}) {
     assert.equal(init.credentials, 'omit');
     if (msg) assert.equal(msg.jsonrpc, '2.0');
     assert.ok(Object.hasOwn(handlers, method), `unexpected ${method}`);
-    return handlers[method](msg, signal);
+    return handlers[method](msg, signal, init);
   }
   return { calls, toolFetch, open: (signal, ts = config) => openMCP(ts, {}, proxy, signal, { toolFetch }) };
 }
@@ -262,40 +262,200 @@ test('deadline covers call and cleanup; no retry after timeout', async t => {
   assert.deepEqual(srv.calls.slice(3).map(c => c.method), ['tools/call', 'DELETE']);
 });
 
-test('401 during initialization prompts once and retries only the bound resource with its bearer', async () => {
-  const issuer = 'https://issuer.example', redirect = 'https://app.example/callback';
-  const attempts = [], discoveryHeaders = [];
-  let prompts = 0;
-  const toolFetch = async (url, init, policy) => {
-    assert.deepEqual(policy,{toolProxy:proxy,allowPrivateIPs:false});
-    if (url !== endpoint) {
-      discoveryHeaders.push(new Headers(init.headers));
-      if (url.endsWith('/.well-known/oauth-protected-resource/tools')) return Response.json({resource:endpoint,authorization_servers:[issuer]});
-      if (url === issuer+'/.well-known/oauth-authorization-server') return Response.json({issuer,
-        authorization_endpoint:issuer+'/auth',token_endpoint:issuer+'/token',response_types_supported:['code'],
-        authorization_response_iss_parameter_supported:true, token_endpoint_auth_methods_supported:['none'],code_challenge_methods_supported:['S256']});
-      if (url === issuer+'/token') return Response.json({access_token:'session-only',token_type:'Bearer'});
-      assert.fail('unexpected discovery or token URL');
-    }
-    attempts.push(init.headers.get('Authorization'));
-    if (!attempts.at(-1)) return new Response(null,{status:401,headers:{'WWW-Authenticate':'Bearer'}});
-    assert.equal(attempts.at(-1),'Bearer session-only');
-    assert.equal(init.headers.get('X-Private'),'resource-only');
-    const msg=JSON.parse(init.body);
-    if (msg.method === 'initialize') return result(msg,hello);
-    if (msg.method === 'notifications/initialized') return ack();
-    if (msg.method === 'tools/list') return result(msg,{tools:[]});
-    assert.fail('unexpected RPC');
-  };
-  const session = await openMCP({type:'mcp',remote:{url:endpoint,headers:{'X-Private':'resource-only'},oauth:{clientId:'public-client'}}}, {}, proxy, undefined, {
-    toolFetch, oauthRedirectURI:redirect, elicit: async event => {
-      prompts++;
-      const state=new URL(event.url).searchParams.get('state');
-      return {action:'accept',content:{callback_url:redirect+'?'+new URLSearchParams({code:'test',state,iss:issuer})}};
+
+const issuer = 'https://issuer.example', redirect = 'https://app.example/callback', tokenURL = 'https://tokens.example/token';
+const invalidBearer = 'Bearer error="invalid_token"';
+const unauthorized = challenge => new Response(null, { status: 401, headers: { 'WWW-Authenticate': challenge } });
+const bearer = (value, extra) => Response.json({ token_type: 'Bearer', access_token: value, ...extra });
+
+function protectedServer({ resource = endpoint, code, refresh, rpc } = {}) {
+  const prompts = [], grants = [], metadata = [];
+  const srv = server({ initialize: (msg, _, init) => init.headers.has('Authorization') ? withID(msg) : unauthorized('Bearer'), ...rpc });
+  const options = {
+    oauthRedirectURI: redirect,
+    elicit(event) {
+      prompts.push(event);
+      const params = new URLSearchParams({ state: new URL(event.url).searchParams.get('state'), code: 'code', iss: issuer });
+      return { action: 'accept', content: { callback_url: redirect + '?' + params } };
     },
-  });
-  await session.close();
-  assert.equal(prompts,1);
-  assert.equal(attempts.length,4);
-  assert.ok(discoveryHeaders.length >= 3 && discoveryHeaders.every(h=>!h.has('Authorization') && !h.has('X-Private')));
+    toolFetch(url, init, policy, signal) {
+      assert.deepEqual(policy, { toolProxy: proxy, allowPrivateIPs: false });
+      assert.equal(init.redirect, 'error');
+      assert.equal(init.credentials, 'omit');
+      if (url === endpoint) {
+        assert.equal(init.headers.get('X-Private'), 'resource-only');
+        return srv.toolFetch(url, init, policy, signal);
+      }
+      assert.deepEqual(Object.keys(init.headers).sort(), init.body ? ['Accept', 'Content-Type'] : ['Accept']);
+      if (!init.body) {
+        metadata.push(url);
+        if (url === 'https://mcp.example.test/.well-known/oauth-protected-resource/tools') return Response.json({ resource, authorization_servers: [issuer] });
+        assert.equal(url, issuer + '/.well-known/oauth-authorization-server');
+        return Response.json({ issuer, authorization_endpoint: issuer + '/auth', token_endpoint: tokenURL, response_types_supported: ['code'],
+          code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'], authorization_response_iss_parameter_supported: true });
+      }
+      assert.equal(url, tokenURL);
+      const form = Object.fromEntries(new URLSearchParams(init.body));
+      grants.push(form);
+      assert.equal(form.client_id, 'public-client');
+      assert.equal(form.resource, endpoint);
+      if (form.grant_type === 'authorization_code') return code?.(form) ?? bearer('old', { refresh_token: 'secret & 1', expires_in: 60 });
+      assert.deepEqual(Object.keys(form).sort(), ['client_id', 'grant_type', 'refresh_token', 'resource']);
+      assert.equal(form.grant_type, 'refresh_token');
+      return refresh(form, signal);
+    },
+  };
+  return { calls: srv.calls, prompts, grants, metadata, open: () => openMCP({ type: 'mcp', remote: {
+    url: endpoint, headers: { 'X-Private': 'resource-only' }, oauth: { clientId: 'public-client' },
+  } }, {}, proxy, undefined, options) };
+}
+
+test('guarded initialize/list/call refresh before sending, rotating and retaining the refresh token', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const replies = [bearer('second', { refresh_token: 'rotated!', expires_in: 60 }), bearer('third', { expires_in: 10 }), bearer('last')];
+  const f = protectedServer({ refresh: () => replies.shift(), rpc: { 'notifications/initialized': () => { now = 60000; return ack(); } } });
+  const s = await f.open();
+  assert.deepEqual(f.calls.map(c => [c.method, c.init.headers.get('Authorization')]), [
+    ['initialize', null], ['initialize', 'Bearer old'], ['notifications/initialized', 'Bearer old'], ['tools/list', 'Bearer second'],
+  ]);
+  for (const [time, token] of [[89999, 'second'], [90001, 'third'], [100002, 'last'], [86400000, 'last']]) {
+    now = time;
+    assert.deepEqual(await s.call('lookup', '{}'), { output: 'hi', is_error: false });
+    assert.equal(f.calls.at(-1).init.headers.get('Authorization'), 'Bearer ' + token);
+  }
+  await s.close();
+  assert.equal(f.calls.at(-1).method, 'DELETE');
+  assert.equal(f.calls.at(-1).init.headers.get('Authorization'), 'Bearer last');
+  assert.deepEqual(f.grants.slice(1).map(g => g.refresh_token), ['secret & 1', 'rotated!', 'rotated!']);
+  assert.equal(f.prompts.length, 1);
+  assert.equal(f.metadata.length, 2);
+});
+
+test('a mismatched resource cannot receive a grant or authorize replay', async () => {
+  const f = protectedServer({ resource: endpoint + '/other' });
+  await assert.rejects(f.open(), /resource identifier mismatch/);
+  assert.deepEqual(f.prompts, []);
+  assert.deepEqual(f.grants, []);
+  assert.deepEqual(f.calls.map(c => c.method), ['initialize']);
+});
+
+test('late parallel invalid_token responses reuse one refresh and replay each rejected RPC once', async () => {
+  const late = Promise.withResolvers(), started = Promise.withResolvers();
+  const f = protectedServer({ refresh: () => bearer('replaced'), rpc: {
+    'tools/call': async (msg, _, init) => {
+      if (init.headers.get('Authorization') === 'Bearer replaced') return result(msg, { content: [] });
+      if (msg.params.arguments.key === 'late') { started.resolve(); await late.promise; }
+      return unauthorized(invalidBearer + ', resource_metadata="https://other.example/discovery"');
+    },
+  } });
+  const s = await f.open();
+  const slow = s.call('lookup', '{"key":"late"}');
+  await started.promise;
+  assert.equal((await s.call('lookup', '{}')).is_error, false);
+  late.resolve();
+  assert.equal((await slow).is_error, false);
+  const calls = f.calls.filter(c => c.method === 'tools/call');
+  assert.equal(calls.length, 4);
+  assert.deepEqual(calls.map(c => c.init.headers.get('Authorization')), ['Bearer old', 'Bearer old', 'Bearer replaced', 'Bearer replaced']);
+  assert.equal(calls[0].init.body, calls[3].init.body);
+  assert.equal(calls[1].init.body, calls[2].init.body);
+  assert.equal(f.grants.length, 2);
+  assert.equal(f.prompts.length, 1);
+  await s.close();
+});
+
+test('one cancelled caller does not abort another caller’s refresh; close cancels remaining work without replay', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  for (const close of [true, false]) {
+    now = 0;
+    const started = Promise.withResolvers(), send = Promise.withResolvers();
+    const f = protectedServer({ refresh: (_, signal) => { started.resolve(signal); return send.promise; } });
+    const s = await f.open(), c = new AbortController();
+    now = 61000;
+    const first = s.call('lookup', '{}', c.signal);
+    const signal = await started.promise;
+    const second = s.call('lookup', '{}');
+    c.abort();
+    await assert.rejects(first, { name: 'AbortError' });
+    assert.equal(signal.aborted, false);
+    if (close) {
+      await s.close();
+      await assert.rejects(second, /closed/);
+      assert.equal(signal.aborted, true);
+      assert.equal(f.calls.at(-1).init.headers.has('Authorization'), false);
+    }
+    send.resolve(bearer('new'));
+    if (!close) {
+      assert.equal((await second).is_error, false);
+      assert.equal(f.calls.at(-1).init.headers.get('Authorization'), 'Bearer new');
+      await s.close();
+    }
+    assert.equal(f.grants.length, 2);
+    assert.equal(f.prompts.length, 1);
+    assert.equal(f.calls.filter(c => c.method === 'tools/call').length, close ? 0 : 1);
+    assert.equal(f.calls.filter(c => c.method === 'DELETE').length, 1);
+  }
+});
+
+test('failed refresh is not an authorization prompt or permission to replay', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  for (const expired of [true, false]) {
+    now = 0;
+    let attempts = 0;
+    const f = protectedServer({ refresh: () => {
+      if (++attempts === 1) throw new Error('request failure: secret & 1');
+      return bearer('new');
+    }, rpc: { 'tools/call': (msg, _, init) => init.headers.get('Authorization') === 'Bearer new' ? result(msg, { content: [] }) : unauthorized(invalidBearer) } });
+    const s = await f.open();
+    if (expired) now = 60000;
+    assert.deepEqual(await s.call('lookup', '{}'), { output: 'MCP OAuth transport request failed', is_error: true });
+    assert.equal(f.calls.filter(c => c.method === 'tools/call').length, expired ? 0 : 1);
+    // Only a separate caller-initiated RPC may try again.
+    assert.equal((await s.call('lookup', '{}')).is_error, false);
+    assert.equal(f.calls.filter(c => c.method === 'tools/call').length, expired ? 1 : 2);
+    assert.equal(f.grants.length, 3);
+    assert.equal(f.prompts.length, 1);
+    await s.close();
+  }
+});
+
+test('ambiguous or unauthorized tool failures never replay; a second invalid_token ends recovery', async () => {
+  for (const [response, error, count] of [
+    [() => { throw new Error('connection lost'); }, /transport/, 1],
+    [() => new Response(null, { status: 502 }), /502/, 1],
+    [() => new Response('truncated', { headers: { 'Content-Type': 'application/json' } }), /invalid MCP JSON/, 1],
+    [msg => Response.json({ jsonrpc: '2.0', id: msg.id, error: { code: -32001, message: 'invalid_token' } }), /JSON-RPC/, 1],
+    [() => new Response(null, { status: 403 }), /403/, 1],
+    [() => unauthorized('Bearer'), /401/, 1], [() => unauthorized('Bearer error="insufficient_scope"'), /401/, 1],
+    [() => unauthorized(invalidBearer), /401/, 2],
+  ]) {
+    const f = protectedServer({ refresh: () => bearer('replacement'), rpc: { 'tools/call': response } });
+    const s = await f.open();
+    const { output, is_error } = await s.call('lookup', '{}');
+    assert.equal(is_error, true);
+    assert.match(output, error);
+    assert.equal(f.calls.filter(c => c.method === 'tools/call').length, count);
+    assert.equal(f.grants.length, count);
+    assert.equal(f.prompts.length, 1);
+    await s.close();
+  }
+});
+
+test('expiry without a refresh grant does not send a tool unauthenticated; reopen starts a new session', async t => {
+  let now = 0, keys = 0;
+  t.mock.method(Date, 'now', () => now);
+  const f = protectedServer({ code: () => bearer('key' + ++keys, { expires_in: 10 }) });
+  const s = await f.open();
+  now = 10000;
+  assert.equal((await s.call('lookup', '{}')).is_error, false);
+  assert.deepEqual(f.calls.filter(c => c.method === 'tools/call').map(c => c.init.headers.get('Authorization')), ['Bearer key2']);
+  await s.close();
+  const second = await f.open();
+  assert.deepEqual(f.calls.filter(c => c.method === 'initialize').map(c => c.init.headers.get('Authorization')), [null, 'Bearer key1', null, 'Bearer key3']);
+  assert.equal(f.metadata.length, 4);
+  assert.equal(f.prompts.length, 3);
+  await second.close();
 });

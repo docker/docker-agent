@@ -159,8 +159,6 @@ async function connect({ url, requestHeaders, policy, prefix }, opts, isLegacy, 
   async function request(target, method, message, signal) {
     signal.throwIfAborted();
     const headers = requestHeaders();
-    const token = oauth?.accessToken();
-    if (token) headers.set('Authorization', `Bearer ${token}`);
     if (sessionID) headers.set('MCP-Session-Id', sessionID);
     if (!isLegacy && version) headers.set('MCP-Protocol-Version', version);
     if (method === 'GET') {
@@ -172,15 +170,28 @@ async function connect({ url, requestHeaders, policy, prefix }, opts, isLegacy, 
       init.body = JSON.stringify({ jsonrpc: '2.0', ...message });
       if (init.body.length > maxBytes) throw new Error('MCP request too large');
     }
-    // A transport error may embed the URL (including query credentials).
-    let res;
-    try { res = await toolFetch(target, init, policy, signal); }
-    catch { signal.throwIfAborted(); throw new Error('MCP transport request failed'); }
-    if (res.redirected) {
-      res.body?.cancel().catch(() => {});
-      throw new Error('unexpected MCP redirect');
+    // DELETE is best effort: never start a grant during teardown.
+    const token = oauth && (message ? await oauth.beforeRequest(signal) : oauth.accessToken());
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    const res = await send(init);
+    if (res.status !== 401 || !oauth || !message) return res;
+    res.body?.cancel().catch(() => {});
+    const replacement = await oauth.authorize(res.headers.get('WWW-Authenticate'), signal, token);
+    const retry = new Headers(headers);
+    retry.set('Authorization', `Bearer ${replacement}`);
+    return send({ ...init, headers: retry }); // Same serialized RPC and ID, exactly once.
+
+    async function send(init) {
+      signal.throwIfAborted();
+      let res;
+      try { res = await toolFetch(target, init, policy, signal); }
+      catch { signal.throwIfAborted(); throw new Error('MCP transport request failed'); }
+      if (res.redirected) {
+        res.body?.cancel().catch(() => {});
+        throw new Error('unexpected MCP redirect');
+      }
+      return res;
     }
-    return res;
   }
 
   function validateMessage(reply) {
@@ -202,7 +213,7 @@ async function connect({ url, requestHeaders, policy, prefix }, opts, isLegacy, 
     if ('id' in reply) throw new Error('server requests are not supported with MCP legacy SSE');
   } });
 
-  async function exchange(message, signal, budget, retriedAuth = false) {
+  async function exchange(message, signal, budget) {
     signal.throwIfAborted();
     if (legacy) {
       const reply = await legacy.exchange(message, signal, budget);
@@ -211,13 +222,6 @@ async function connect({ url, requestHeaders, policy, prefix }, opts, isLegacy, 
     }
     const res = await request(url, message ? 'POST' : 'DELETE', message, signal);
     try {
-      if (res.status === 401 && oauth && message && !retriedAuth) {
-        // Retry only an explicit authentication rejection, never a transport failure.
-        const challenge = res.headers.get('WWW-Authenticate');
-        await res.body?.cancel();
-        await oauth.authorize(challenge, signal);
-        return exchange(message, signal, budget, true);
-      }
       if (res.status === 401 || res.status === 403) throw new Error(`MCP authorization failed (HTTP ${res.status}); OAuth was unavailable or rejected`);
       if (!message && [404, 405].includes(res.status)) return; // Gone, or the server owns expiry.
       if (sessionID && res.status === 404) {
@@ -265,7 +269,7 @@ async function connect({ url, requestHeaders, policy, prefix }, opts, isLegacy, 
       closing = Promise.resolve().then(() => {
         if (legacy) return legacy.closed();
         if (sessionID) return bounded([], 2500, s => exchange(null, s));
-      });
+      }).finally(() => oauth?.close());
       lifetime.abort(new Error('MCP session is closed'));
     }
     return closing;
