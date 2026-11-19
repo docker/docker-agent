@@ -12,7 +12,8 @@ import (
 // executorWrapper wraps an ADK executor and fixes artifact update events
 // to ensure they have non-nil Parts slices, which is required by the A2A spec.
 type executorWrapper struct {
-	executor *adka2a.Executor
+	executor  *adka2a.Executor
+	approvals *approvalRegistry
 }
 
 var (
@@ -20,9 +21,10 @@ var (
 	_ a2asrv.AgentExecutionCleaner = (*executorWrapper)(nil)
 )
 
-func newExecutorWrapper(config adka2a.ExecutorConfig) *executorWrapper {
+func newExecutorWrapper(config adka2a.ExecutorConfig, approvals *approvalRegistry) *executorWrapper {
 	return &executorWrapper{
-		executor: adka2a.NewExecutor(config),
+		executor:  adka2a.NewExecutor(config),
+		approvals: approvals,
 	}
 }
 
@@ -31,6 +33,9 @@ func (w *executorWrapper) Execute(ctx context.Context, execCtx *a2asrv.ExecutorC
 }
 
 func (w *executorWrapper) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+	// A task waiting in INPUT_REQUIRED has a runtime parked in the registry.
+	// Cancelling the A2A task must cancel and release it so it does not leak.
+	w.approvals.cancel(execCtx.ContextID)
 	return w.executor.Cancel(ctx, execCtx)
 }
 

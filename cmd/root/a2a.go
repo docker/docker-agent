@@ -27,6 +27,7 @@ type a2aFlags struct {
 	corsOrigin       string
 	insecureNoAuth   bool
 	pushAllowPrivate bool
+	toolApproval     bool
 	stdout           io.Writer
 	runConfig        config.RuntimeConfig
 }
@@ -52,6 +53,7 @@ func newA2ACmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.corsOrigin, "cors-origin", "", "Allowed browser origin(s), comma-separated; empty disables CORS")
 	cmd.PersistentFlags().BoolVar(&flags.insecureNoAuth, "insecure-no-auth", false, "Allow unauthenticated non-loopback binding (insecure)")
 	cmd.PersistentFlags().BoolVar(&flags.pushAllowPrivate, "push-allow-private", false, "Allow push-notification webhooks to loopback/private addresses (disables SSRF guard; enables HTTP(S)_PROXY for webhooks)")
+	cmd.PersistentFlags().BoolVar(&flags.toolApproval, "tool-approval", false, "Let clients approve or reject tool calls out-of-band via the A2A input-required flow (default: deny)")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
 	return cmd
@@ -94,6 +96,7 @@ func (f *a2aFlags) runA2ACommand(cmd *cobra.Command, args []string) (commandErr 
 		AuthToken:                f.authToken,
 		CORSOrigin:               f.corsOrigin,
 		PushAllowPrivateNetworks: f.pushAllowPrivate,
+		ToolApproval:             f.toolApproval,
 		OnSafetyPolicy: func(resolved servesafety.Resolved) {
 			out.Printf("Tool safety policy: %s (source: %s)\n", resolved.Policy, resolved.Source)
 		},
