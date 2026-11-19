@@ -47,40 +47,6 @@ func TestNewSession_AllOptionsApplied(t *testing.T) {
 	assert.Equal(t, []string{"/work"}, s.AllowedDirectories())
 }
 
-// TestNewSession_ConsistencyBetweenInitialAndSpawned verifies that the
-// initial session and spawned sessions receive the same set of options.
-// This test documents the expected option set so that adding a new option
-// to one path without the other will be caught.
-func TestNewSession_ConsistencyBetweenInitialAndSpawned(t *testing.T) {
-	t.Parallel()
-	workingDir := "/projects/app"
-	autoApprove := true
-	hideToolResults := true
-	maxIterations := 25
-
-	// Simulate what createLocalRuntimeAndSession builds (initial session).
-	initial := New(
-		WithMaxIterations(maxIterations),
-		WithToolsApproved(autoApprove),
-		WithHideToolResults(hideToolResults),
-		WithWorkingDir(workingDir),
-	)
-
-	// Simulate what createSessionSpawner builds (spawned session).
-	spawned := New(
-		WithMaxIterations(maxIterations),
-		WithToolsApproved(autoApprove),
-		WithHideToolResults(hideToolResults),
-		WithWorkingDir(workingDir),
-	)
-
-	assert.Equal(t, initial.MaxIterations, spawned.MaxIterations)
-	assert.Equal(t, initial.ToolsApproved, spawned.ToolsApproved)
-	assert.Equal(t, initial.HideToolResults, spawned.HideToolResults)
-	assert.Equal(t, initial.WorkingDir, spawned.WorkingDir)
-	assert.Equal(t, initial.AllowedDirectories(), spawned.AllowedDirectories())
-}
-
 func TestAddAttachedFile(t *testing.T) {
 	t.Parallel()
 	foo := filepath.Join(t.TempDir(), "abs", "foo.go")

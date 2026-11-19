@@ -1058,12 +1058,14 @@ func TestResolveSessionID_SQLite(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "out of range")
 	})
+}
 
-	t.Run("returns non-relative ID unchanged", func(t *testing.T) {
-		id, err := ResolveSessionID(t.Context(), store, "some-uuid")
-		require.NoError(t, err)
-		assert.Equal(t, "some-uuid", id)
-	})
+func TestResolveSessionID_Absolute(t *testing.T) {
+	t.Parallel()
+
+	id, err := ResolveSessionID(t.Context(), nil, "some-uuid")
+	require.NoError(t, err)
+	assert.Equal(t, "some-uuid", id)
 }
 
 func TestResolveSessionID_ExcludesSubSessions(t *testing.T) {
@@ -1153,12 +1155,6 @@ func TestResolveSessionID_InMemory(t *testing.T) {
 		_, err := ResolveSessionID(t.Context(), store, "-4")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "out of range")
-	})
-
-	t.Run("returns non-relative ID unchanged", func(t *testing.T) {
-		id, err := ResolveSessionID(t.Context(), store, "some-uuid")
-		require.NoError(t, err)
-		assert.Equal(t, "some-uuid", id)
 	})
 }
 
