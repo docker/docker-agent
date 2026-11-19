@@ -73,6 +73,22 @@ async function run() {
       for (const prompt of ['first', 'again']) trace.results.push(await s.send(prompt));
     } finally { await s.close(); }
   }
+  const compact = config.replace('agents:', 'models:\n  small: {provider: local, model: test, context_window: 2048, compaction_threshold: 0.5}\nagents:')
+    .replace('model: local/test', 'model: small, session_compaction: true, redact_secrets: false, toolsets: [{type: think}]');
+  const highUsage = { choices: [], usage: { prompt_tokens: 1000, completion_tokens: 25, total_tokens: 1025 } };
+  tests.compact = await replay(api, 'compact', compact, [tool('think', { thought: 'remember' }),
+    [piece({ content: 'first answer' }, 'stop'), highUsage], [piece({ content: 'key facts' }, 'stop'), usage], answer],
+    async ({ api, options, record, trace }) => {
+      const s = await api.createSession(options, record);
+      try {
+        trace.results.push(await s.send('old '.repeat(500)));
+        trace.results.push(await s.send('continue'));
+      } finally { await s.close(); }
+    });
+  const toolAtBoundary = [...tool('think', { thought: 'plan' }).slice(0, -1),
+    { choices: [], usage: { prompt_tokens: 1022, completion_tokens: 2, total_tokens: 1024 } }];
+  tests.compactAfterTools = await replay(api, 'compactAfterTools', compact, [toolAtBoundary,
+    [piece({ content: 'finished the plan' }, 'stop'), usage], answer, answer], turns);
   tests.plain = await replay(api, 'plain', config, [answer, answer], turns);
   tests.think = await replay(api, 'think', config.replace('model: local/test', 'toolsets: [{type: think}], model: local/test'),
     [tool('think', { thought: 'a plan' }), answer, answer], turns);
@@ -157,6 +173,10 @@ async function run() {
   const combined = config.replace('model: local/test', 'toolsets: [{type: user_prompt}, {type: think}, {type: calculator}], model: local/test');
   tests.toolOrder = await replay(api, 'toolOrder', combined, [answer, answer], turns);
   tests.responses = await replay(api, 'responses', responses, [responseTool, text, text], turns, '/v1/responses');
+  const compactResponses = compact.replace('provider: openai,', 'provider: openai, api_type: openai_responses,');
+  const busy = structuredClone(text);
+  busy.at(-1).response.usage = { input_tokens: 1000, output_tokens: 25, total_tokens: 1025 };
+  tests.compactResponses = await replay(api, 'compactResponses', compactResponses, [busy, text, text], turns, '/v1/responses');
   tests.autoResponses = await replay(api, 'autoResponses', 'agents: {root: {model: openai/o3-mini, instruction: hi}}', [text], async ({ api, options, record, trace }) => {
     options.env = { OPENAI_API_KEY: 'fixture' };
     trace.results.push(await api.chat({ ...options, messages: [{ role: 'user', content: 'hi' }] }, record));

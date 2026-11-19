@@ -1,3 +1,4 @@
+use crate::compaction::{Compactor, Prefix, Undo, Usage};
 use indexmap::IndexMap;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Map, Value};
@@ -29,6 +30,7 @@ pub fn response_strict(name: &str) -> Result<bool, String> {
 type Tools = IndexMap<&'static str, &'static Value>;
 
 pub struct Conversation {
+    pub compaction: Compactor,
     model_params: Map<String, Value>,
     tools: Tools,
     merge_messages: bool,
@@ -40,6 +42,9 @@ pub struct Conversation {
 }
 
 struct Turn {
+    context_before: u64,
+    summarizing: Option<Prefix>,
+    original: Option<Undo>,
     messages_before: usize,
     scratchpad_before: usize,
     id: String,
@@ -72,12 +77,6 @@ struct Step {
     calls: BTreeMap<u64, Call>,
     finish: Option<String>,
     usage: Option<Usage>,
-}
-
-#[derive(Deserialize)]
-struct Usage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
 }
 
 #[derive(Default)]
@@ -124,6 +123,7 @@ impl Conversation {
                 .map(|text| json!({"role":"system", "content":text})),
         );
         Ok(Self {
+            compaction: Compactor::default(),
             model_params,
             merge_messages,
             tools,
@@ -138,6 +138,8 @@ impl Conversation {
     pub fn restart(&mut self) {
         self.cancel();
         self.messages.truncate(self.instruction_count);
+        self.compaction.truncate(0);
+        self.compaction.context_tokens = 0;
         self.scratchpad.truncate("Thoughts:".len());
         // Go restart replaces the conversation, not the runtime's todo toolset.
     }
@@ -150,6 +152,9 @@ impl Conversation {
             return Err("missing message ID".into());
         }
         self.active = Some(Turn {
+            summarizing: None,
+            original: None,
+            context_before: self.compaction.context_tokens,
             messages_before: self.messages.len(),
             scratchpad_before: self.scratchpad.len(),
             id: id.into(),
@@ -161,7 +166,19 @@ impl Conversation {
             pending: BTreeMap::new(),
         });
         self.messages.push(json!({"role":"user", "content":prompt}));
-        Ok(self.request())
+        self.prepare_request()
+    }
+
+    fn prepare_request(&mut self) -> Result<Value, String> {
+        if let Some((prefix, request)) =
+            self.compaction
+                .plan(&self.messages, &self.model_params, self.merge_messages)?
+        {
+            self.active.as_mut().expect("active turn").summarizing = Some(prefix);
+            Ok(request)
+        } else {
+            Ok(self.request())
+        }
     }
 
     fn request(&self) -> Value {
@@ -186,10 +203,20 @@ impl Conversation {
         }
         if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
             // Preserve admitted user messages and completed tools on a model error.
-            self.active = None;
+            if turn.summarizing.is_some() {
+                self.cancel();
+            } else {
+                self.active = None;
+            }
             return Err(format!("model failed: error receiving from stream: received error while streaming: {error}"));
         }
-        let result = turn.step.chunk(chunk, &turn.message_id, &self.tools);
+        let result = if turn.summarizing.is_some() {
+            turn.step
+                .chunk(chunk, &turn.message_id, &Tools::new())
+                .map(|_| Vec::new())
+        } else {
+            turn.step.chunk(chunk, &turn.message_id, &self.tools)
+        };
         if result.is_err() {
             self.cancel();
         }
@@ -198,6 +225,11 @@ impl Conversation {
 
     pub fn cancel(&mut self) {
         if let Some(turn) = self.active.take() {
+            if let Some(original) = turn.original {
+                self.compaction.undo(&mut self.messages, original);
+            }
+            self.compaction.truncate(turn.messages_before);
+            self.compaction.context_tokens = turn.context_before;
             self.messages.truncate(turn.messages_before);
             self.scratchpad.truncate(turn.scratchpad_before);
         }
@@ -217,6 +249,23 @@ impl Conversation {
     fn finish_step(&mut self) -> Result<Value, String> {
         let turn = self.active.as_mut().ok_or("no active turn")?;
         let mut step = std::mem::take(&mut turn.step);
+        if let Some(plan) = turn.summarizing.take() {
+            let summary = step.text.trim();
+            if summary.is_empty()
+                || step.finish.as_deref() != Some("stop")
+                || !step.calls.is_empty()
+            {
+                return Err("compaction: expected a complete, non-empty text summary".into());
+            }
+            let undo = self.compaction.apply(
+                &mut self.messages,
+                plan,
+                summary,
+                step.usage.map_or(0, |u| u.completion_tokens),
+            );
+            turn.original.get_or_insert(undo);
+            return Ok(json!({"events":[], "request":self.request()}));
+        }
         let mut events = Vec::new();
         if matches!(
             step.finish.as_deref(),
@@ -231,13 +280,14 @@ impl Conversation {
             step.finish = Some("stop".into());
         }
         if let Some(usage) = step.usage {
+            self.compaction.record(self.messages.len(), usage);
             let input = u64::from(usage.prompt_tokens);
             let output = u64::from(usage.completion_tokens);
             turn.input += input;
             turn.output += output;
             events.push(json!({
                 "type": "usage", "input_tokens": input, "output_tokens": output,
-                "context_length": input + output, "context_limit": 0, "cost": 0
+                "context_length": input + output, "context_limit": self.compaction.policy.window, "cost": 0
             }));
         }
         let mut message = json!({"role":"assistant"});
@@ -258,6 +308,8 @@ impl Conversation {
                     || message.get("reasoning_content").is_some()
                 {
                     self.messages.push(message);
+                } else {
+                    self.compaction.truncate(self.messages.len());
                 }
                 if turn.input != 0 || turn.output != 0 {
                     result["usage"] =
@@ -350,11 +402,14 @@ impl Conversation {
         Ok(self.after_tools(events))
     }
 
-    fn after_tools(&self, events: Vec<Value>) -> Value {
+    fn after_tools(&mut self, events: Vec<Value>) -> Value {
         if self.active.as_ref().is_some_and(|t| !t.pending.is_empty()) {
             json!({"events":events, "waiting":true})
         } else {
-            json!({"events":events, "request":self.request()})
+            match self.prepare_request() {
+                Ok(request) => json!({"events":events, "request":request}),
+                Err(error) => json!({"events":events, "error":error}),
+            }
         }
     }
 

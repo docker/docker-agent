@@ -53,7 +53,8 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       if (!pending.has(id)) throw new Error('no pending elicitation with that ID');
       const next = call('answerElicitation', { session: handle.session, id, action, content });
       if (!pending.delete(id)) throw new Error('elicitation is no longer pending');
-      if (!next.waiting) batch.resolve(next.request);
+      if (next.error) batch.reject(new Error(next.error));
+      else if (!next.waiting) batch.resolve(next.request);
       for (const event of next.events) emit(event);
     }
 
@@ -121,6 +122,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             continue;
           }
           for (const event of next.events) emit(event);
+          if (next.error) throw new Error(next.error);
           if (next.result) return next.result;
           signal.throwIfAborted();
           body = next.request;

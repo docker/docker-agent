@@ -1,4 +1,5 @@
 mod calculator;
+mod compaction;
 mod config;
 mod providers;
 mod responses;
@@ -114,13 +115,14 @@ impl Core {
                 history,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
-                let conv = Conversation::new(
+                let mut conv = Conversation::new(
                     spec.model_params,
                     spec.instruction,
                     &spec.toolsets,
                     spec.merge_messages,
                     history,
                 )?;
+                conv.compaction.policy = spec.compaction;
                 self.next_id = self
                     .next_id
                     .checked_add(1)
