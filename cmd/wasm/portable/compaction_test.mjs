@@ -129,3 +129,31 @@ test('never replace a prefix too large for the summary request, including after 
   await assert.rejects(result, /prefix does not fit/);
   assert.equal(requests.length, 1);
 });
+
+test('compaction on a picked model uses its parameters, redacted prefix and no user output schema', async t => {
+  const secret = 'dckr_pat_' + 'S'.repeat(27);
+  const cfg = `providers: {p: {base_url: https://fixture.invalid}}
+models:
+  start: {provider: p, model: start, context_window: 2048}
+  picked: {provider: p, model: picked, context_window: 2048, temperature: 0.25}
+agents:
+  root:
+    model: start
+    toolsets: [{type: model_picker, models: [picked]}]
+    structured_output: {name: answer, schema: {type: object, properties: {}}}`;
+  const pick = { choices: [{ delta: { tool_calls: [{ id: 'pick', index: 0, type: 'function', function: { name: 'change_model', arguments: '{"model":"picked"}' } }] }, finish_reason: 'tool_calls' }] };
+  const requests = intercept(t, (_, n) => n === 1 ? stream(pick) : stream(answer(n === 3 ? secret : 'ok'), usage(n === 2 ? 1900 : 1, 1)));
+  const s = await api.createSession({ yaml: cfg });
+  t.after(() => s.close());
+  await s.send(secret);
+  await s.send('next');
+  assert.deepEqual(requests.map(r => r.model), ['start', 'picked', 'picked', 'picked']);
+  const [, , summary, resume] = requests;
+  assert.equal(summary.temperature, 0.25);
+  assert.equal(summary.response_format, undefined);
+  assert.equal(summary.tools, undefined);
+  assert.match(summary.messages[0].content, /summarize conversations/);
+  assert.equal(resume.response_format.json_schema.name, 'answer');
+  assert.match(JSON.stringify(resume.messages), /Session Summary: \[REDACTED\]/);
+  assert.equal(JSON.stringify(requests).includes(secret), false);
+});

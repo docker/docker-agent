@@ -1,6 +1,7 @@
 //! Browser-safe subset of pkg/hooks/builtins. Compile and validate the entire
 //! configuration before opening a session, including unselected agents.
 mod redaction;
+pub(crate) use redaction::redact;
 
 use serde::Deserialize;
 use serde_json::Value;

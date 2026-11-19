@@ -8,7 +8,7 @@ const MIB: usize = 1024 * 1024;
 const MAX_ATTACHMENT: usize = 5 * MIB;
 const MAX_TOTAL: usize = 16 * MIB;
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Capabilities {
     image: bool,
@@ -78,18 +78,29 @@ fn claude(id: &str) -> bool {
             }))
 }
 
+impl Capabilities {
+    pub fn projection(caps: Option<Self>, model: &str) -> (Self, bool) {
+        (
+            caps.unwrap_or_default(),
+            caps.map_or_else(|| claude(model), |c| c.image),
+        )
+    }
+}
+
 pub fn history(
     messages: Vec<Value>,
     caps: Option<Capabilities>,
     model: &str,
     responses: bool,
+    preserve_names: bool,
 ) -> Result<Vec<Value>, String> {
     if messages.len() > 4096 {
         return Err("too many history messages".into());
     }
+    let (caps, legacy_image) = Capabilities::projection(caps, model);
     let mut profile = Profile {
-        caps: caps.unwrap_or_default(),
-        legacy_image: caps.map_or_else(|| claude(model), |c| c.image),
+        caps,
+        legacy_image,
         responses,
         total: 0,
     };
@@ -117,6 +128,9 @@ pub fn history(
         {
             return Err("unsupported history message or provider state".into());
         }
+        let name = preserve_names
+            .then(|| value["name"].as_str().map(str::to_owned))
+            .flatten();
         let m: Message =
             serde_json::from_value(value).map_err(|e| format!("invalid history: {e}"))?;
         let role = m.role.as_str();
@@ -124,6 +138,9 @@ pub fn history(
             return Err(format!("unsupported history role {role:?}"));
         }
         let mut msg = json!({"role":role});
+        if let Some(name) = name {
+            msg["name"] = name.into();
+        }
         if role == "tool" {
             let id = m.tool_call_id.ok_or("missing tool_call_id in history")?;
             if !pending.remove(&id) {
@@ -492,6 +509,7 @@ mod tests {
             }),
             "test",
             false,
+            false,
         )
     }
 
@@ -506,7 +524,7 @@ mod tests {
             json!({"role":"user","content":[]}),
             json!({"role":"assistant","content":"ok","audio":{"id":"ref"}}),
         ] {
-            assert!(history(vec![m], None, "test", false).is_err());
+            assert!(history(vec![m], None, "test", false, false).is_err());
         }
         for p in [
             json!({"type":"file","file":{"file_id":"123"}}),
@@ -547,6 +565,7 @@ mod tests {
             vec![json!({"role":"user", "multi_content":vec![p; 1025]})],
             None,
             "test",
+            false,
             false
         )
         .is_err());

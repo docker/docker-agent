@@ -361,8 +361,8 @@ impl Stream {
     }
 
     fn translate(&mut self, event: &Value) -> Result<Vec<Value>, String> {
-        if !event["error"].is_null() {
-            return Err(provider_error(&event["error"], event));
+        if let Some((_, reason)) = failure(event) {
+            return Err(reason);
         }
         let ty = string(event, "type")?;
         let mut out = Vec::new();
@@ -375,7 +375,6 @@ impl Stream {
                 self.finish(ty, &event["response"], &mut out)?;
                 return Ok(out);
             }
-            "error" => return Err(provider_error(event, event)),
             "response.refusal.delta" | "response.refusal.done" => {
                 return Err("model refused the request".into())
             }
@@ -479,9 +478,6 @@ impl Stream {
             .get("status")
             .map(|_| string(response, "status"))
             .transpose()?;
-        if ty == "response.failed" || status == Some("failed") || !response["error"].is_null() {
-            return Err(provider_error(&response["error"], response));
-        }
         let reason = if ty == "response.incomplete"
             || status == Some("incomplete")
             || !response["incomplete_details"].is_null()
@@ -559,6 +555,26 @@ impl Stream {
         out.push(chunk);
         Ok(())
     }
+}
+
+pub fn failure(event: &Value) -> Option<(&Value, String)> {
+    let (error, response) = if !event["error"].is_null() {
+        (&event["error"], event)
+    } else if event["type"] == "error" {
+        (event, event)
+    } else if matches!(
+        event["type"].as_str(),
+        Some("response.failed" | "response.completed" | "response.done" | "response.incomplete")
+    ) && event["response"].is_object()
+        && (event["type"] == "response.failed"
+            || event["response"]["status"] == "failed"
+            || !event["response"]["error"].is_null())
+    {
+        (&event["response"]["error"], &event["response"])
+    } else {
+        return None;
+    };
+    Some((error, provider_error(error, response)))
 }
 
 fn provider_error(error: &Value, response: &Value) -> String {

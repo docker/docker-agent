@@ -24,7 +24,7 @@ impl<T> Tool<T> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Discovery<T> {
     enabled: bool,
     catalog: BTreeMap<String, (Tool<T>, bool)>,

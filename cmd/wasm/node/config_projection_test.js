@@ -67,20 +67,15 @@ it("still validates references, fields and toolsets during projection", () => {
   }
 });
 
-it("session loading checks capabilities even on an unselected agent", async t => {
+it("local references on an unselected agent need no discovery", async t => {
   const fetch = t.mock.method(globalThis, "fetch", () => { throw new Error("unexpected fetch"); });
   for (const field of [
     "sub_agents: [root]", "handoffs: [root]",
   ]) {
     const yaml = withHelper(field);
     assert.equal(api.parseConfig(yaml).agents.length, 2);
-    const opening = api.createSession({ yaml, agentName: "root", env: { OPENAI_API_KEY: "k" } });
-    if (process.env.DOCKER_AGENT_TEST_PORTABLE) {
-      await assert.rejects(opening, /unsupported|not supported/, field);
-    } else {
-      const session = await opening;
-      await session.close();
-    }
+    const session = await api.createSession({ yaml, agentName: "root", env: { OPENAI_API_KEY: "k" } });
+    await session.close();
   }
   assert.equal(fetch.mock.callCount(), 0);
 });

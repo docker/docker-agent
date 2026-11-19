@@ -53,6 +53,8 @@ struct Agent {
     compaction_threshold: Option<f64>,
     structured_output: Option<StructuredOutput>,
     #[serde(default)]
+    fallback: crate::fallback::Config,
+    #[serde(default)]
     description: String,
     // Neither Go browser projection exposes the welcome message.
     #[serde(rename = "welcome_message")]
@@ -275,6 +277,20 @@ impl Defer {
 }
 
 impl Toolset {
+    pub fn hosted(&self) -> bool {
+        !matches!(
+            self.kind.as_str(),
+            "calculator"
+                | "think"
+                | "todo"
+                | "user_prompt"
+                | "transfer_task"
+                | "handoff"
+                | "model_picker"
+                | "session_context"
+        )
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.shared && self.kind != "todo" {
             return Err("shared can only be used with type 'todo'".into());
@@ -412,25 +428,43 @@ struct Provider {
     parallel_tool_calls: Option<bool>,
 }
 
-struct ModelRequest {
-    model_params: Map<String, Value>,
-    transport: Transport,
-    responses: bool,
-    merge_messages: bool,
-}
-
+#[derive(Default)]
 pub struct Selected {
-    pub policy: Policy,
-    pub picker: crate::model_picker::Picker,
-    pub compaction: crate::compaction::Policy,
+    pub tool_policy: Policy,
+    pub name: String,
+    pub team_prompts: Vec<String>,
+    pub sub_agents: Vec<String>,
+    pub handoffs: Vec<String>,
+    pub shared_todo: bool,
     pub hooks: crate::hooks::Hooks,
-    pub model_params: Map<String, Value>,
-    pub capabilities: Option<crate::media::Capabilities>,
-    pub transport: Transport,
+    pub picker: crate::model_picker::Picker,
+    pub models: Vec<Target>,
+    pub policy: crate::fallback::Policy,
     pub instruction: String,
     pub toolsets: Vec<Toolset>,
+}
+
+pub struct Target {
+    pub id: String,
+    pub model_params: Map<String, Value>,
+    pub transport: Transport,
+    pub compaction: crate::compaction::Policy,
+    pub capabilities: Option<crate::media::Capabilities>,
+    pub key_base: Option<String>,
     pub responses: bool,
     pub merge_messages: bool,
+}
+
+impl Target {
+    pub fn model(&self) -> &str {
+        self.model_params["model"]
+            .as_str()
+            .expect("configured model")
+    }
+
+    fn media_projection(&self) -> (crate::media::Capabilities, bool) {
+        crate::media::Capabilities::projection(self.capabilities, self.model())
+    }
 }
 
 fn load(yaml: &str) -> Result<Config, String> {
@@ -709,20 +743,14 @@ fn compaction_policy(a: &Agent, m: &Model) -> Result<crate::compaction::Policy, 
     )
 }
 
-pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
+pub fn team(
+    yaml: &str,
+    entry: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(String, Vec<Selected>), String> {
     let cfg = load(yaml)?;
     for (name, a) in &cfg.agents {
         compaction_policy(a, &cfg.models[&a.model])?;
-        for (enabled, field) in [
-            (!a.sub_agents.is_empty(), "sub_agents"),
-            (!a.handoffs.is_empty(), "handoffs"),
-        ] {
-            if enabled {
-                return Err(format!(
-                    "agent {name:?}: {field} is not supported in portable sessions"
-                ));
-            }
-        }
         if let Some(output) = &a.structured_output {
             output
                 .check_session(&cfg.models[&a.model].model, env)
@@ -761,38 +789,113 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         }
     }
     for m in cfg.models.values() {
-        let custom = cfg.providers.get(&m.provider);
-        let builtin = providers::lookup(&m.provider);
-        if custom.is_none() && builtin.is_none() {
-            return Err(format!("unsupported provider {:?}", m.provider));
-        }
-        if custom.is_some_and(|p| p.provider.is_empty()) && builtin.is_some_and(|p| p.scoped()) {
-            return Err(
-                "custom providers shadowing this built-in must declare their underlying provider"
-                    .into(),
-            );
-        }
-        m.provider_opts
-            .validate(builtin.filter(|_| custom.is_none()))?;
+        check_provider(cfg.providers.get(&m.provider), m)?;
     }
-    let a = if agent.is_empty() {
-        cfg.agents
-            .get("root")
-            .or_else(|| cfg.agents.first().map(|(_, a)| a))
+    let entry = if entry.is_empty() {
+        if cfg.agents.contains_key("root") {
+            "root"
+        } else {
+            cfg.agents.first().unwrap().0
+        }
     } else {
-        cfg.agents.get(agent)
+        entry
+    };
+    let root = cfg
+        .agents
+        .get(entry)
+        .ok_or_else(|| format!("agent {entry:?} not found"))?;
+    let team = !root.sub_agents.is_empty() || !root.handoffs.is_empty();
+    let mut pending = vec![entry];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut agents = Vec::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name) {
+            continue;
+        }
+        let a = &cfg.agents[name];
+        pending.extend(a.sub_agents.iter().chain(&a.handoffs).map(String::as_str));
+        agents.push(resolve(&cfg, name, a, env, team)?);
     }
-    .ok_or_else(|| format!("agent {agent:?} not found"))?;
+    Ok((entry.into(), agents))
+}
+
+#[cfg(test)]
+pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
+    Ok(team(yaml, agent, env)?.1.remove(0))
+}
+
+fn resolve(
+    cfg: &Config,
+    name: &str,
+    a: &Agent,
+    env: &BTreeMap<String, String>,
+    team: bool,
+) -> Result<Selected, String> {
+    if team && a.redact_secrets == Some(false) {
+        return Err("disabling secret redaction within local teams is not supported".into());
+    }
+    if team
+        && a.readonly
+        && a.sub_agents
+            .iter()
+            .chain(&a.handoffs)
+            .any(|n| !cfg.agents[n].readonly)
+    {
+        return Err("readonly agents cannot delegate or hand off to a writable agent".into());
+    }
+    if (team || !a.fallback.models.is_empty()) && a.hooks.max_calls.is_some() {
+        return Err("max_iterations with fallback or local teams is not supported".into());
+    }
+    if team && a.toolsets.iter().any(Toolset::hosted) {
+        return Err("host toolsets with local delegation or handoff are not supported".into());
+    }
+    if team && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
+        return Err("session_context with local delegation or handoff is not supported".into());
+    }
+    let mut toolsets = a.toolsets.clone();
+    for ts in &mut toolsets {
+        ts.readonly |= a.readonly;
+        ts.instruction = instruction(&ts.instruction, env);
+    }
+    let mut todos = a.toolsets.iter().filter(|ts| ts.kind == "todo");
+    let shared_todo = todos.next().is_some_and(|ts| ts.shared);
+    if todos.any(|ts| ts.shared != shared_todo) {
+        return Err(format!(
+            "agent {name:?}: mixing shared and private todo toolsets is not supported"
+        ));
+    }
+    let mut team_prompts = Vec::new();
+    for (tool, targets) in [("transfer_task", &a.sub_agents), ("handoff", &a.handoffs)] {
+        if !targets.is_empty() {
+            toolsets.push(Toolset {
+                kind: tool.into(),
+                ..Default::default()
+            });
+            let mut roster = String::new();
+            for target in targets {
+                use std::fmt::Write;
+                writeln!(
+                    roster,
+                    "Name: {target} | Description: {}",
+                    instruction(&cfg.agents[target].description, env)
+                )
+                .unwrap();
+            }
+            team_prompts.push(crate::team::prompt(tool, &roster, &targets.join(", ")));
+        }
+    }
     let primary = &cfg.models[&a.model];
-    let request = resolve_model(
-        &cfg,
-        primary,
-        env,
-        !a.toolsets.is_empty(),
-        a.structured_output.as_ref(),
-    )?;
+    let chain = !a.fallback.models.is_empty();
+    let resolve_target =
+        |m: &Model| resolve_model(cfg, m, a, env, !toolsets.is_empty(), chain || team);
+    let request = resolve_target(primary)?;
     let mut picker = crate::model_picker::Picker::default();
     for ts in a.toolsets.iter().filter(|ts| ts.kind == "model_picker") {
+        if chain {
+            return Err(
+                "model_picker with fallback models on the same agent is not supported".into(),
+            );
+        }
         if !picker.choices.is_empty() {
             return Err("multiple model_picker toolsets are not supported".into());
         }
@@ -818,8 +921,12 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             if m.provider != primary.provider {
                 return Err("model_picker cannot switch providers".into());
             }
-            let target = resolve_model(&cfg, m, env, true, a.structured_output.as_ref())?;
+            let target = resolve_target(m)?;
+            if target.media_projection() != request.media_projection() {
+                return Err("model_picker cannot change media capabilities".into());
+            }
             if target.transport != request.transport
+                || target.key_base != request.key_base
                 || target.responses != request.responses
                 || target.merge_messages != request.merge_messages
             {
@@ -830,15 +937,25 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             picker.choices.insert(name.clone(), target.model_params);
         }
     }
+    let mut models = vec![request];
+    for name in &a.fallback.models {
+        let inline;
+        let m = if let Some(m) = cfg.models.get(name) {
+            m
+        } else {
+            inline =
+                inline_model(name).ok_or_else(|| format!("fallback model {name:?} not found"))?;
+            &inline
+        };
+        models.push(resolve_target(m)?);
+    }
     Ok(Selected {
         hooks: a.hooks.clone().with_defaults(
             a.redact_secrets.unwrap_or(true),
             a.add_date,
             a.add_environment_info,
         ),
-        capabilities: primary.capabilities,
-        compaction: compaction_policy(a, primary)?,
-        policy: Policy {
+        tool_policy: Policy {
             rules: cfg.permissions.clone(),
             safety: if a.safety == Safety::Legacy {
                 cfg.runtime.safety
@@ -847,33 +964,47 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             },
         },
         picker,
-        model_params: request.model_params,
-        transport: request.transport,
-        responses: request.responses,
-        merge_messages: request.merge_messages,
+        models,
+        policy: a.fallback.policy(),
         instruction: instruction(&a.instruction, env),
-        toolsets: a
-            .toolsets
-            .iter()
-            .cloned()
-            .map(|mut ts| {
-                ts.readonly |= a.readonly;
-                ts.instruction = instruction(&ts.instruction, env);
-                ts
-            })
-            .collect(),
+        name: name.into(),
+        team_prompts,
+        sub_agents: a.sub_agents.clone(),
+        handoffs: a.handoffs.clone(),
+        shared_todo,
+        toolsets,
     })
+}
+
+fn check_provider(
+    custom: Option<&Provider>,
+    m: &Model,
+) -> Result<Option<&'static providers::Builtin>, String> {
+    let builtin = providers::lookup(&m.provider);
+    if custom.is_none() && builtin.is_none() {
+        return Err(format!("unsupported provider {:?}", m.provider));
+    }
+    if custom.is_some_and(|p| p.provider.is_empty()) && builtin.is_some_and(|p| p.scoped()) {
+        return Err(
+            "custom providers shadowing this built-in must declare their underlying provider"
+                .into(),
+        );
+    }
+    let builtin = builtin.filter(|_| custom.is_none());
+    m.provider_opts.validate(builtin)?;
+    Ok(builtin)
 }
 
 fn resolve_model(
     cfg: &Config,
     m: &Model,
+    a: &Agent,
     env: &BTreeMap<String, String>,
     tools: bool,
-    structured: Option<&StructuredOutput>,
-) -> Result<ModelRequest, String> {
+    multi_target: bool,
+) -> Result<Target, String> {
     let p = cfg.providers.get(&m.provider);
-    let builtin = providers::lookup(&m.provider).filter(|_| p.is_none());
+    let builtin = check_provider(p, m)?;
     let default_base = builtin.map_or("https://api.openai.com/v1", |b| b.base_url.as_str());
     let chatgpt = p.is_none() && m.provider == "chatgpt";
     // Go resolves a custom provider's default protocol before expanding the model.
@@ -912,28 +1043,71 @@ fn resolve_model(
     } else {
         "chat/completions"
     };
-    let mut params = model_params(
-        id,
-        m,
-        p,
-        tools,
-        crate::compaction::Policy::new(m.context_window, Some(false), None)?,
-    )?;
-    if let Some(output) = structured {
+    let provider_id = if p.provider.is_empty() {
+        &m.provider
+    } else {
+        &p.provider
+    };
+    let model_id = format!("{provider_id}/{id}");
+    let compaction = compaction_policy(a, m)?;
+    if multi_target && compaction.enabled() {
+        return Err("compaction with fallback or local teams is not supported; set session_compaction: false".into());
+    }
+    let mut params = model_params(id, m, p, tools, compaction)?;
+    if let Some(output) = &a.structured_output {
         output.check_session(&m.model, env)?;
         params.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":output.name,"description":output.description,"strict":output.strict,"schema":output.schema}}));
     }
-    Ok(ModelRequest {
+    if multi_target
+        && responses
+        && ["frequency_penalty", "presence_penalty"]
+            .iter()
+            .any(|k| params.contains_key(*k))
+    {
+        return Err(
+            "Responses does not support frequency_penalty or presence_penalty when switching model targets"
+                .into(),
+        );
+    }
+    // An override on one model must not redirect an inherited provider key to another origin.
+    let key_base = if custom
+        && !m.base_url.is_empty()
+        && multi_target
+        && m.token_key.is_empty()
+        && !key.is_empty()
+    {
+        Some(expand_model_field(
+            first_nonempty([&p.base_url, default_base, ""]),
+            env,
+        )?)
+    } else {
+        None
+    };
+    Ok(Target {
+        id: model_id,
         model_params: params,
         transport: providers::transport(builtin, &base, route, key, &m.provider_opts, env)?,
         responses,
         merge_messages,
+        key_base,
+        compaction,
+        capabilities: m.capabilities,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn primary_params(cfg: &str, agent: &str, env: &BTreeMap<String, String>) -> Value {
+        Value::Object(
+            select(cfg, agent, env)
+                .unwrap()
+                .models
+                .remove(0)
+                .model_params,
+        )
+    }
 
     #[test]
     fn strict_loader() {
@@ -964,8 +1138,7 @@ agents:
         required: []
   other: {model: local/test}
 ";
-        let params =
-            |agent| Value::Object(select(cfg, agent, &BTreeMap::new()).unwrap().model_params);
+        let params = |agent| primary_params(cfg, agent, &BTreeMap::new());
         let schema = json!({"type":"object", "properties":{"values":{"type":"array","items":{"$ref":"#/$defs/result"}}},
             "$defs":{"result":{"type":["string","null"], "enum":[null,"a"]}}, "required":[]});
         assert_eq!(
@@ -1063,7 +1236,7 @@ agents:
     #[test]
     fn model_options_override_provider_defaults_field_by_field() {
         let env = BTreeMap::from([("MODEL".into(), "gpt-5".into())]);
-        let select_params = |name| Value::Object(select(CONFIG, name, &env).unwrap().model_params);
+        let select_params = |name| primary_params(CONFIG, name, &env);
         assert_eq!(
             select_params("root"),
             json!({"model":"openai/gpt-5", "temperature":0,
@@ -1097,7 +1270,10 @@ agents:
             let cfg = format!("providers: {{p: {{provider_opts: {{service_tier: priority}}}}}}\nmodels: {{m: {{model: test, provider: p{option}}}}}\nagents: {{root: {{model: m}}}}");
             let m = select(&cfg, "root", &BTreeMap::new()).unwrap();
             assert_eq!(
-                m.model_params.get("service_tier").and_then(Value::as_str),
+                m.models[0]
+                    .model_params
+                    .get("service_tier")
+                    .and_then(Value::as_str),
                 expected,
                 "{option}"
             );
@@ -1108,7 +1284,7 @@ agents:
     fn openrouter_stays_on_chat_completions_for_newer_models() {
         let cfg = "models: {m: {provider: openrouter, model: openai/gpt-4.1-mini, max_tokens: 12}}\nagents: {root: {model: m}}";
         let env = BTreeMap::from([("OPENROUTER_API_KEY".into(), "key".into())]);
-        let params = Value::Object(select(cfg, "", &env).unwrap().model_params);
+        let params = primary_params(cfg, "", &env);
         assert_eq!(
             params,
             json!({"model":"openai/gpt-4.1-mini", "max_completion_tokens":12})
@@ -1118,8 +1294,7 @@ agents:
     #[test]
     fn omitted_and_nonpositive_token_caps_are_not_sent() {
         let yaml = "providers: {local: {}}\nagents: {root: {model: local/test}}";
-        let params =
-            |cfg: &str| Value::Object(select(cfg, "", &BTreeMap::new()).unwrap().model_params);
+        let params = |cfg: &str| primary_params(cfg, "", &BTreeMap::new());
         assert_eq!(params(yaml), json!({"model":"test"}));
         for cap in [0, -1] {
             let cfg = format!("providers: {{local: {{max_tokens: 42}}}}\nmodels: {{m: {{provider: local, model: test, max_tokens: {cap}}}}}\nagents: {{root: {{model: m}}}}");
@@ -1168,19 +1343,22 @@ agents:
         ]);
         let s = select(cfg, "root", &env).unwrap();
         assert_eq!(
-            s.transport.endpoint,
+            s.models[0].transport.endpoint,
             "http://localhost:8080/v1/chat/completions"
         );
-        assert_eq!(s.model_params["model"], "org/$LITERAL");
-        assert_eq!(s.transport.headers["Authorization"], "Bearer secret"); // token_key is a name, not a template.
+        assert_eq!(s.models[0].model_params["model"], "org/$LITERAL");
+        assert_eq!(
+            s.models[0].transport.headers["Authorization"],
+            "Bearer secret"
+        ); // token_key is a name, not a template.
         env.remove("HOST");
         assert!(select(cfg, "root", &env).err().unwrap().contains("HOST"));
         env.insert(" MODEL ".into(), "other".into());
         env.insert("BASE".into(), "https://example.invalid".into());
         let s = select(cfg, "other", &env).unwrap();
-        assert_eq!(s.model_params["model"], "other");
+        assert_eq!(s.models[0].model_params["model"], "other");
         assert_eq!(
-            s.transport.endpoint,
+            s.models[0].transport.endpoint,
             "https://example.invalid/v2/chat/completions"
         );
         assert!(expand_model_field("${env.PATH}", &env)
@@ -1225,7 +1403,13 @@ agents:
             "providers: {local: {api_type: openai_responses}}\nagents: {root: {model: local/test}}",
         ] {
             let selected = select(cfg, "", &env).unwrap();
-            assert!(selected.responses && selected.transport.endpoint.ends_with("/responses"));
+            assert!(
+                selected.models[0].responses
+                    && selected.models[0]
+                        .transport
+                        .endpoint
+                        .ends_with("/responses")
+            );
         }
         let cfg = "providers: {local: {max_tokens: 9007199254740993}}\nagents: {root: {model: local/test}}";
         assert!(select(cfg, "", &BTreeMap::new())
@@ -1242,11 +1426,13 @@ agents:
         ]);
         let cfg = "version: 16\nproviders: {local: {base_url: 'http://localhost:8001/v1'}}\nagents:\n  helper: {model: openai/other}\n  root: {model: local/org/name, instruction: '${env.WHO} ${x} ${wrap(${env.WHO})} ${env.ABSENT}'}";
         let s = select(cfg, "", &env).unwrap();
-        assert_eq!(s.model_params["model"], "org/name");
-        assert_eq!(s.transport.headers.get("Authorization"), None);
+        assert_eq!(s.models[0].model_params["model"], "org/name");
+        assert_eq!(s.models[0].transport.headers.get("Authorization"), None);
         assert_eq!(s.instruction, "Ada ${x} ${wrap(${env.WHO})} ");
         assert_eq!(
-            select(cfg, "helper", &env).unwrap().transport.headers["Authorization"],
+            select(cfg, "helper", &env).unwrap().models[0]
+                .transport
+                .headers["Authorization"],
             "Bearer secret"
         );
         assert!(select(cfg, "missing", &env).is_err());

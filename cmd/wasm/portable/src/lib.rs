@@ -2,6 +2,7 @@ mod calculator;
 mod compaction;
 mod config;
 mod discovery;
+mod fallback;
 mod go_json;
 mod hooks;
 mod media;
@@ -10,6 +11,7 @@ mod permission;
 mod providers;
 mod responses;
 mod session_context;
+mod team;
 mod todo;
 mod turn;
 mod wire;
@@ -17,7 +19,7 @@ mod wire;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{cell::RefCell, collections::BTreeMap};
-use turn::Conversation;
+use team::Session;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -39,6 +41,7 @@ enum Command {
     },
     Begin {
         session: u32,
+        now: f64,
         prompt: String,
         id: String,
     },
@@ -51,14 +54,21 @@ enum Command {
         session: u32,
         chunk: Value,
     },
+    Failure {
+        session: u32,
+        reason: String,
+        status: Option<u16>,
+    },
     End {
         session: u32,
+        now: f64,
     },
     RegisterTools {
         session: u32,
         sets: Vec<turn::HostSet>,
     },
     Confirm {
+        now: f64,
         session: u32,
         token: String,
         approved: bool,
@@ -96,49 +106,6 @@ struct Core {
     next_id: u32,
 }
 
-struct Session {
-    conversation: Conversation,
-    chatgpt: bool,
-    responses: Option<responses::Stream>,
-}
-
-impl Session {
-    fn request(&mut self, body: Value) -> Result<Value, String> {
-        if body.is_null() {
-            return Ok(body);
-        }
-        if let Some(stream) = &mut self.responses {
-            *stream = responses::Stream::default();
-            let mut request = responses::request(body)?;
-            if self.chatgpt {
-                providers::apply_chatgpt_policy(&mut request);
-            }
-            Ok(request)
-        } else {
-            Ok(body)
-        }
-    }
-
-    fn next(&mut self, mut next: Value) -> Result<Value, String> {
-        if let Some(body) = next.get_mut("request") {
-            *body = self.request(body.take())?;
-        }
-        Ok(next)
-    }
-
-    fn chunk(&mut self, chunk: Value) -> Result<Value, String> {
-        let mut events = Vec::new();
-        if let Some(stream) = &mut self.responses {
-            for c in stream.push(chunk)? {
-                events.extend(self.conversation.chunk(c)?);
-            }
-        } else {
-            events = self.conversation.chunk(chunk)?;
-        }
-        Ok(Value::Array(events))
-    }
-}
-
 impl Core {
     fn session(&mut self, id: u32) -> Result<&mut Session, String> {
         self.sessions
@@ -158,59 +125,25 @@ impl Core {
                 history,
                 stamp,
             } => {
-                let spec = config::select(&yaml, &agent, &env)?;
-                let history = media::history(
-                    history,
-                    spec.capabilities,
-                    spec.model_params["model"].as_str().expect("selected model"),
-                    spec.responses,
-                )?;
-                let toolsets = json!(spec.toolsets);
-                let archive = spec
-                    .toolsets
-                    .iter()
-                    .any(|ts| ts.kind == "session_context")
-                    .then(|| session_context::Archive::new(stamp));
-                let mut conv = Conversation::configured(
-                    spec.model_params,
-                    spec.instruction,
-                    turn::ToolProfile {
-                        specs: spec.toolsets,
-                        policy: spec.policy.with_auto_approve(auto_approve),
-                    },
-                    spec.merge_messages,
-                    history,
-                    spec.picker,
-                    archive,
-                )?;
-                conv.compaction.policy = spec.compaction;
-                let dynamic = json!({"addDate":spec.hooks.add_date,"addEnvironmentInfo":spec.hooks.add_environment_info});
-                conv.hooks = spec.hooks;
+                let session = Session::open(&yaml, &agent, &env, history, stamp, auto_approve)?;
                 self.next_id = self
                     .next_id
                     .checked_add(1)
                     .ok_or("session ID space exhausted")?;
-                self.sessions.insert(
-                    self.next_id,
-                    Session {
-                        conversation: conv,
-                        chatgpt: spec.transport.chatgpt,
-                        responses: spec.responses.then(responses::Stream::default),
-                    },
-                );
-                Ok(
-                    json!({"session": self.next_id, "dynamic":dynamic,"transport": spec.transport, "responses":spec.responses,"toolsets":toolsets}),
-                )
+                let handle = json!({
+                    "session": self.next_id,
+                    "targets": session.targets(),
+                    "toolsets": session.conversation.profile.spec.toolsets,
+                });
+                self.sessions.insert(self.next_id, session);
+                Ok(handle)
             }
             Command::Begin {
                 session,
                 prompt,
                 id,
-            } => {
-                let s = self.session(session)?;
-                let request = s.conversation.begin(&prompt, &id)?;
-                s.request(request)
-            }
+                now,
+            } => self.session(session)?.begin(&prompt, &id, now),
             Command::Prepare {
                 session,
                 environment,
@@ -221,16 +154,21 @@ impl Core {
                 s.request(body)
             }
             Command::Chunk { session, chunk } => self.session(session)?.chunk(chunk),
-            Command::End { session } => {
-                let s = self.session(session)?;
-                let next = s.conversation.end()?;
-                s.next(next)
+            Command::Failure {
+                session,
+                reason,
+                status,
+            } => {
+                let transient = status.is_none() || fallback::retryable(status, &reason);
+                self.session(session)?.failure(reason, transient)
             }
+            Command::End { session, now } => self.session(session)?.end(now),
             Command::RegisterTools { session, sets } => {
-                self.session(session)?.conversation.configure_tools(&sets)?;
+                self.session(session)?.register(&sets)?;
                 Ok(Value::Null)
             }
             Command::Confirm {
+                now,
                 session,
                 token,
                 approved,
@@ -241,7 +179,7 @@ impl Core {
                 let next = s
                     .conversation
                     .confirm(&token, approved, remember, &reason)?;
-                s.next(next)
+                s.confirmed(next, now)
             }
             Command::HostResult {
                 session,
@@ -264,11 +202,13 @@ impl Core {
                 s.next(next)
             }
             Command::Cancel { session } => {
-                self.session(session)?.conversation.cancel();
+                self.session(session)?.cancel();
                 Ok(Value::Null)
             }
             Command::Restart { session, stamp } => {
-                self.session(session)?.conversation.restart(stamp)?;
+                let s = self.session(session)?;
+                s.cancel();
+                s.conversation.restart(stamp)?;
                 Ok(Value::Null)
             }
             Command::Close { session } => {
