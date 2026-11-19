@@ -135,3 +135,10 @@ it('rejects missing and cyclic forced handoffs before execution', () => {
     'agents: {a: {model: openai/test, force_handoff: b}, b: {model: openai/test, force_handoff: a}}',
   ]) assert.throws(() => api.parseConfig(yaml), /force_handoff/);
 });
+
+it('opens the same hosted-tool team example on both implementations without calling a model', async () => {
+  const yaml = readFileSync(path.join(__dirname, '../examples/small-team.yaml'), 'utf8');
+  assert.deepEqual(api.listAgents(yaml).map(a => a.name), ['root', 'analyst']);
+  const s = await api.createSession({ yaml, env: { OPENROUTER_API_KEY: 'fixture' } });
+  await s.close();
+});

@@ -60,6 +60,11 @@ appear in a different order than Go's completion-dependent scheduling.
 Model requests use only explicit session credentials, never ambient environment
 or cookies, and refuse redirects. Tool calls are a separate trust boundary.
 
+For a runnable team config that both profiles accept, see
+[`examples/small-team.yaml`](../examples/small-team.yaml). Paste it into the
+portable demo, supply an OpenRouter key, and start a session. The analyst uses
+the calculator and the session's shared plan; plan writes prompt for approval.
+
 ### Remote tools and consent
 
 - `toolProxy` is an **operator-trusted HTTPS proxy**. It receives configured
@@ -134,7 +139,21 @@ body to that model's transport and credentials. It retries only before visible
 output; it never retries a completed tool action to recover a model stream.
 `session_compaction` uses a foreground summary when a declared `context_window`
 and threshold warrant it. Provider-native and alternate-model compaction are
-not implemented. Picker/toolset model overrides must be transport-compatible.
+not implemented. Picker/toolset model overrides must be transport-compatible. `session_context`
+reads only the originating handle's previous conversations and is unavailable
+inside a routed team. Teams reject readonly-to-writable routing and disabling
+secret redaction. Combining team/fallback routing with active compaction or
+per-tool model/history limits is not supported. Teams share plan and memory
+within one handle, but each acting agent gets its own authorized tool catalog,
+MCP connection, credentials and grants. Teams are limited to ten nested
+transfers and 32 switches per user turn.
+
+`num_history_items`, `max_old_tool_call_tokens` and `max_tool_result_tokens`
+control the stored or transmitted history; they do not truncate a tool event
+just to hide it from the host. Agent `max_iterations` finishes normally at its
+limit, while the `max_iterations` builtin hook rejects the run. Identical
+tool batches are checked against `max_consecutive_tool_calls` after execution;
+successful random and datetime reads are exempt, as in Go.
 
 The tool registry applies `tools`, `readonly`, and explicit denials before
 exposing a tool. `defer` provides `search_tool`/`add_tool`; activation takes

@@ -1,0 +1,28 @@
+# Runs on Go small and the Go-runtime-free browser port.
+# Supply OPENROUTER_API_KEY in the session's env, not in this file.
+providers:
+  router:
+    provider: openai
+    api_type: openai_chatcompletions
+    base_url: https://openrouter.ai/api/v1
+    token_key: OPENROUTER_API_KEY
+
+models:
+  fast: {provider: router, model: openai/gpt-4o-mini}
+
+toolsets:
+  notes: {type: plan}
+
+agents:
+  root:
+    model: fast
+    instruction: Ask what the user wants to compare, then delegate the calculation to analyst.
+    sub_agents: [analyst]
+    toolsets: [{type: user_prompt}]
+    use_toolsets: [notes]
+  analyst:
+    model: fast
+    description: Computes and records comparisons.
+    instruction: Use exact arithmetic. Record the result in the shared plan and report it to the caller.
+    toolsets: [{type: calculator}]
+    use_toolsets: [notes]
