@@ -136,3 +136,42 @@ test('explicit token_key does not inherit an alternative credential', async () =
   const cfg = yaml('github-copilot', 'test', ', token_key: GITHUB_TOKEN');
   await assert.rejects(api.createSession({ yaml: cfg, env: { GH_TOKEN: 'fallback' } }), /GITHUB_TOKEN/);
 });
+
+test('a fallback cannot carry Copilot credentials into a ChatGPT request', async t => {
+  const requests = intercept(t);
+  const success = globalThis.fetch;
+  let failed = false;
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (!failed) {
+      failed = true;
+      const req = new Request(url, init);
+      assert.equal(req.url, 'https://api.githubcopilot.com/chat/completions');
+      assert.equal(req.headers.get('authorization'), 'Bearer github');
+      assert.equal(req.headers.get('copilot-integration-id'), 'copilot-developer-cli');
+      assert.equal(req.headers.get('session_id'), null);
+      return Response.json({ error: { message: 'not available' } }, { status: 401 });
+    }
+    return success(url, init);
+  });
+  const cfg = 'agents: {root: {model: github-copilot/gpt-4o, fallback: {models: [chatgpt/gpt-5]}}}';
+  let session;
+  try { session = await api.createSession({ yaml: cfg, env }); }
+  catch (err) {
+    // Builds without fallback must reject it before any request, not silently run the primary.
+    if (!portable) throw err;
+    assert.match(err.message, /unknown field `fallback`/);
+    assert.equal(failed, false);
+    return;
+  }
+  t.after(() => session.close());
+  assert.equal((await session.send('hi')).message.content, 'ok');
+  assert.equal(failed, true);
+  assert.equal(requests.length, 1);
+  const [{ url, headers, body }] = requests;
+  assert.equal(url, 'https://chatgpt.com/backend-api/codex/responses');
+  assert.equal(headers.get('authorization'), 'Bearer codex');
+  assert.equal(headers.get('copilot-integration-id'), null);
+  assert.equal(headers.get('originator'), 'codex_cli_rs');
+  assert.ok(headers.get('session_id'));
+  assert.equal(body.store, false);
+});
