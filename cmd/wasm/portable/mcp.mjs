@@ -1,3 +1,4 @@
+import { createMCPOAuth } from './oauth.mjs';
 // The initialize-based Streamable HTTP protocol. The guarded transport owns
 // destination policy; no discovery URL, redirect or server message can replace it.
 const versions = ['2025-11-25', '2025-06-18', '2025-03-26'];
@@ -28,7 +29,7 @@ function connection(toolset, env, toolProxy) {
   if (toolset.type !== 'mcp') throw new Error('expected a remote MCP toolset');
   const { remote, name = '', allow_private_ips: allowPrivateIPs = false } = toolset;
   options(remote, ['url', 'transport_type', 'headers', 'standalone_sse', 'oauth'], 'MCP remote');
-  if (Object.hasOwn(remote, 'oauth')) throw new Error('MCP OAuth is not supported; configure explicit remote headers');
+  if (Object.hasOwn(remote, 'oauth')) options(remote.oauth, ['clientId','scopes','callbackRedirectURL'], 'MCP OAuth');
   if (!['streamable', 'streamable-http'].includes(remote.transport_type ?? 'streamable') || (remote.standalone_sse ?? false) !== false) {
     throw new Error('only streamable HTTP without standalone SSE is supported');
   }
@@ -139,14 +140,21 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
   options(opts, ['toolFetch', 'elicit', 'oauthRedirectURI'], 'MCP host');
   const { toolFetch, oauthRedirectURI } = opts;
   if (typeof toolFetch !== 'function') throw new Error('MCP requires an injected guarded toolFetch');
-  if (oauthRedirectURI != null) throw new Error('MCP OAuth is not supported');
+  if (toolset.remote?.oauth != null && !oauthRedirectURI) throw new Error('MCP OAuth requires an explicit host oauthRedirectURI');
+  if (oauthRedirectURI && (typeof opts.elicit !== 'function' || (toolset.remote.oauth?.callbackRedirectURL && toolset.remote.oauth.callbackRedirectURL !== oauthRedirectURI))) throw new Error('MCP OAuth requires a matching host redirect URI and elicitation handler');
   const { url, requestHeaders, policy, prefix } = connection(toolset, env ?? {}, toolProxy);
+  const oauth = oauthRedirectURI && !requestHeaders().has('Authorization') ? createMCPOAuth({
+    serverURL: url, oauthRedirectURI, ...policy, toolFetch, elicit: opts.elicit,
+    clientId: toolset.remote.oauth?.clientId, scopes: toolset.remote.oauth?.scopes,
+  }) : null;
   const lifetime = new AbortController(), names = new Map();
   let sessionID, version, closing, nextID = 1;
 
-  async function exchange(message, signal, budget) {
+  async function exchange(message, signal, budget, retriedAuth = false) {
     signal.throwIfAborted();
     const headers = requestHeaders();
+    const token = oauth?.accessToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
     if (sessionID) headers.set('MCP-Session-Id', sessionID);
     if (version) headers.set('MCP-Protocol-Version', version);
     const init = { method: message ? 'POST' : 'DELETE', headers, credentials: 'omit', redirect: 'error' };
@@ -160,7 +168,14 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
     catch { signal.throwIfAborted(); throw new Error('MCP transport request failed'); }
     try {
       if (res.redirected) throw new Error('unexpected MCP redirect');
-      if (res.status === 401 || res.status === 403) throw new Error(`MCP authorization failed (HTTP ${res.status}); OAuth is not supported`);
+      if (res.status === 401 && oauth && message && !retriedAuth) {
+        // Retry only an explicit authentication rejection, never a transport failure.
+        const challenge = res.headers.get('WWW-Authenticate');
+        await res.body?.cancel();
+        await oauth.authorize(challenge, signal);
+        return exchange(message, signal, budget, true);
+      }
+      if (res.status === 401 || res.status === 403) throw new Error(`MCP authorization failed (HTTP ${res.status}); OAuth was unavailable or rejected`);
       if (!message && [404, 405].includes(res.status)) return; // Gone, or the server owns expiry.
       if (sessionID && res.status === 404) {
         sessionID = undefined;
@@ -193,7 +208,14 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
             continue;
           }
           if (++requests > 16 || !(typeof reply.id === 'string' || Number.isSafeInteger(reply.id))) throw new Error('invalid or excessive MCP server requests');
-          const answer = reply.method === 'ping' ? { result: {} } : { error: { code: -32601, message: 'Method not supported' } };
+          let answer = reply.method === 'ping' ? { result: {} } : { error: { code: -32601, message: 'Method not supported' } };
+          if (reply.method === 'elicitation/create' && typeof opts.elicit === 'function') {
+            const p = reply.params;
+            if (!object(p) || typeof p.message !== 'string' || !['form','url'].includes(p.mode ?? 'form')) throw new Error('invalid MCP elicitation');
+            if (p.mode === 'url' && (typeof p.url !== 'string' || !/^https:\/\//.test(p.url) || !URL.canParse(p.url))) throw new Error('invalid MCP elicitation URL');
+            const r = await opts.elicit({ message:p.message, mode:p.mode ?? 'form', schema:p.requestedSchema ?? null, url:p.url ?? '', meta:p._meta ?? null, server_elicitation_id:p.elicitationId ?? '' },signal);
+            answer = { result: {action:r.action, ...(r.action === 'accept' && r.content ? {content:r.content} : {})} };
+          }
           await exchange({ id: reply.id, ...answer }, signal, budget);
           continue;
         }
@@ -201,7 +223,7 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
         if ('error' in reply) {
           const code = reply.error?.code;
           if (!Number.isInteger(code)) throw new Error('invalid MCP server error');
-          if (code === -32042) throw new Error('MCP URL elicitation and OAuth are not supported');
+          if (code === -32042) throw new Error('MCP out-of-band URL elicitation is not supported');
           throw new Error(`MCP ${message.method} failed (JSON-RPC ${code})`);
         }
         if (!object(reply.result)) throw new Error('invalid MCP result');
@@ -242,7 +264,7 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
     return await bounded([signal, lifetime.signal], 30000, async s => {
       const budget = { left: 2 * maxBytes };
       const rpc = (method, params) => exchange({ id: nextID++, method, params }, s, budget);
-      const hello = await rpc('initialize', { protocolVersion: versions[0], clientInfo: { name: 'docker agent', version: '1.0.0' }, capabilities: {} });
+      const hello = await rpc('initialize', { protocolVersion: versions[0], clientInfo: { name: 'docker agent', version: '1.0.0' }, capabilities: opts.elicit ? { elicitation: {form:{},url:{}} } : {} });
       if (!versions.includes(hello.protocolVersion)) throw new Error('unsupported MCP protocol version');
       version = hello.protocolVersion;
       const { capabilities, instructions = '', serverInfo } = hello;

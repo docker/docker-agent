@@ -26,7 +26,7 @@ agents:
   root: { model: local/test, instruction: 'Hello \${env.WHO}' }
 `;
 
-async function replay(api, name, yaml, replies, drive, endpoint = '/v1/chat/completions') {
+async function replay(api, name, yaml, replies, drive, endpoint = '/v1/chat/completions', service) {
   const trace = { requests: [], events: [], results: [] };
   const ids = new Map();
   function correlation(value) {
@@ -45,6 +45,7 @@ async function replay(api, name, yaml, replies, drive, endpoint = '/v1/chat/comp
   let unexpected = '';
   globalThis.fetch = async (input, init) => {
     const req = new Request(input, init);
+    if (service && req.url !== new URL(endpoint, location.origin).href) return service(req);
     if (req.url !== new URL(endpoint, location.origin).href || req.method !== 'POST' || !replies[trace.requests.length]) {
       unexpected = `unexpected ${req.method} ${req.url} (call ${trace.requests.length + 1})`;
       throw new Error(unexpected);
@@ -130,6 +131,40 @@ async function run() {
     options.env = { GROQ_API_KEY: 'fixture' };
     trace.results.push(await api.chat({ ...options, messages: [{ role: 'user', content: 'hi' }] }, record));
   }, 'https://api.groq.com/openai/v1/chat/completions');
+  const local = kinds => config.replace('model: local/test', `toolsets: [${kinds.map(type => `{type: ${type}}`).join(',')}], model: local/test`);
+  async function single({api, options, trace, record}) {
+    trace.results.push(await api.chat({...options,messages:[{role:'user',content:'go'}]}, record));
+  }
+  tests.random = await replay(api, 'random', local(['random']), [tool('random_int', {min:42, max:42}), answer], single);
+  tests.clock = await replay(api, 'clock', local(['datetime']), [tool('get_datetime', {format:'MST', timezone:'UTC'}), answer], single);
+  tests.memory = await replay(api, 'memory', local(['memory']), [tool('get_memories', {}), answer], single);
+  tests.plan = await replay(api, 'plan', local(['plan']), [tool('list_plans', {}), answer], single);
+  tests.rejectWrite = await replay(api, 'rejectWrite', local(['memory']), [tool('add_memory', {memory:'not stored'}), answer], async ({api, options, record, trace}) => {
+    trace.results.push(await api.chat({...options,messages:[{role:'user',content:'go'}]}, e => {
+      record(e); return e.type === 'tool_confirmation' ? {decision:'reject',reason:'tester declined'} : undefined;
+    }));
+  });
+  tests.readonly = await replay(api, 'readonly', config.replace('model: local/test', 'readonly: true, toolsets: [{type: memory, tools: [add_memory,get_memories], instruction: "Scoped"}], model: local/test'), [answer], single);
+  const apiTool = config.replace('model: local/test', 'toolsets: [{type: api, allow_private_ips: true, api_config: {name: greet, instruction: Return a greeting, method: GET, endpoint: "https://tool.invalid/greet"}}], model: local/test');
+  tests.apiTool = await replay(api, 'apiTool', apiTool,[tool('greet',{}),answer], single,'/v1/chat/completions', req => {
+    if (req.url !== 'https://tool.invalid/greet' || req.method !== 'GET') throw new Error('unexpected API request');
+    return new Response('hi');
+  });
+  const mcp = config.replace('model: local/test', 'toolsets: [{type: mcp, allow_private_ips: true, remote: {transport_type: streamable, url: "https://tool.invalid/mcp"}}], model: local/test');
+  tests.mcp = await replay(api, 'mcp', mcp,[tool('echo',{text:'from MCP'}),answer], async ({api,options,record,trace}) => {
+    const s=await api.createSession({...options, autoApprove:true}, record);
+    try {trace.results.push(await s.send('echo'));} finally {await s.close();}
+  }, '/v1/chat/completions', async req => {
+    if (req.url !== 'https://tool.invalid/mcp') throw new Error('unexpected MCP endpoint');
+    if (req.method === 'DELETE') return new Response(null,{status:204});
+    const m=await req.json();
+    if (m.method==='notifications/initialized') return new Response(null,{status:202});
+    const val = m.method==='initialize' ? {protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}
+      : m.method==='tools/list' ? {tools:[{name:'echo',description:'Echo a word',inputSchema:{type:'object',properties:{text:{type:'string'}},required:['text'],additionalProperties:false}}]}
+      : m.method==='tools/call' && m.params.name==='echo' ? {content:[{type:'text',text:m.params.arguments.text}]} : undefined;
+    if (!val) throw new Error(`unexpected MCP method ${m.method}`);
+    return Response.json({jsonrpc:'2.0',id:m.id,result:val},{headers:{'Mcp-Session-Id':'replay'}});
+  });
   const question = config.replace('model: local/test', 'toolsets: [{type: user_prompt}], model: local/test');
   tests.ask = await replay(api, 'ask', question, [tool('user_prompt', { message: 'Which color?', title: 'Color', schema: { type: 'string' } }), answer],
     async ({ api, options, record, trace }) => {

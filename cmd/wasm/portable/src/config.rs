@@ -35,6 +35,8 @@ struct Agent {
     add_date: bool,
     #[serde(default)]
     add_environment_info: bool,
+    #[serde(default)]
+    readonly: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -564,6 +566,7 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             .iter()
             .cloned()
             .map(|mut ts| {
+                ts.readonly |= a.readonly;
                 ts.instruction = instruction(&ts.instruction, env);
                 ts
             })

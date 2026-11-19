@@ -261,3 +261,41 @@ test('deadline covers call and cleanup; no retry after timeout', async t => {
   await assert.rejects(close, /timed out/);
   assert.deepEqual(srv.calls.slice(3).map(c => c.method), ['tools/call', 'DELETE']);
 });
+
+test('401 during initialization prompts once and retries only the bound resource with its bearer', async () => {
+  const issuer = 'https://issuer.example', redirect = 'https://app.example/callback';
+  const attempts = [], discoveryHeaders = [];
+  let prompts = 0;
+  const toolFetch = async (url, init, policy) => {
+    assert.deepEqual(policy,{toolProxy:proxy,allowPrivateIPs:false});
+    if (url !== endpoint) {
+      discoveryHeaders.push(new Headers(init.headers));
+      if (url.endsWith('/.well-known/oauth-protected-resource/tools')) return Response.json({resource:endpoint,authorization_servers:[issuer]});
+      if (url === issuer+'/.well-known/oauth-authorization-server') return Response.json({issuer,
+        authorization_endpoint:issuer+'/auth',token_endpoint:issuer+'/token',response_types_supported:['code'],
+        authorization_response_iss_parameter_supported:true, token_endpoint_auth_methods_supported:['none'],code_challenge_methods_supported:['S256']});
+      if (url === issuer+'/token') return Response.json({access_token:'session-only',token_type:'Bearer'});
+      assert.fail('unexpected discovery or token URL');
+    }
+    attempts.push(init.headers.get('Authorization'));
+    if (!attempts.at(-1)) return new Response(null,{status:401,headers:{'WWW-Authenticate':'Bearer'}});
+    assert.equal(attempts.at(-1),'Bearer session-only');
+    assert.equal(init.headers.get('X-Private'),'resource-only');
+    const msg=JSON.parse(init.body);
+    if (msg.method === 'initialize') return result(msg,hello);
+    if (msg.method === 'notifications/initialized') return ack();
+    if (msg.method === 'tools/list') return result(msg,{tools:[]});
+    assert.fail('unexpected RPC');
+  };
+  const session = await openMCP({type:'mcp',remote:{url:endpoint,headers:{'X-Private':'resource-only'},oauth:{clientId:'public-client'}}}, {}, proxy, undefined, {
+    toolFetch, oauthRedirectURI:redirect, elicit: async event => {
+      prompts++;
+      const state=new URL(event.url).searchParams.get('state');
+      return {action:'accept',content:{callback_url:redirect+'?'+new URLSearchParams({code:'test',state,iss:issuer})}};
+    },
+  });
+  await session.close();
+  assert.equal(prompts,1);
+  assert.equal(attempts.length,4);
+  assert.ok(discoveryHeaders.length >= 3 && discoveryHeaders.every(h=>!h.has('Authorization') && !h.has('X-Private')));
+});

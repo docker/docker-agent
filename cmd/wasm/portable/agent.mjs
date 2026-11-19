@@ -104,7 +104,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       const session = handle.session;
       try {
         signal.throwIfAborted();
-        if (!ready) { ready = prepare(signal); }
+        if (!ready) { ready = prepare(signal).catch(e => { ready = undefined; throw e; }); }
         await ready;
         signal.throwIfAborted();
         let body = call('begin', { session, prompt, id: crypto.randomUUID() });

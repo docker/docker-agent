@@ -89,7 +89,7 @@ it("session loading checks capabilities even on an unselected agent", async t =>
 it("portable sessions do not ignore security settings on an unselected agent", {
   skip: !process.env.DOCKER_AGENT_TEST_PORTABLE,
 }, async () => {
-  for (const field of ["readonly: true", "safety: strict", "redact_secrets: true"]) {
+  for (const field of ["safety: strict", "redact_secrets: true"]) {
     const yaml = withHelper(field);
     await assert.rejects(api.createSession({ yaml, agentName: "root", env: { OPENAI_API_KEY: "k" } }), Error, field);
   }
