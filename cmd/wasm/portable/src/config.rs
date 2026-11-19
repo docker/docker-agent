@@ -1131,6 +1131,7 @@ fn resolve_model(
     };
     let model_id = format!("{provider_id}/{id}");
     let compaction = compaction_policy(a, m)?;
+    // Go's summarizer clones the primary even when cooldown pins user calls to a fallback.
     if multi_target && compaction.enabled() {
         return Err("compaction with fallback or local teams is not supported; set session_compaction: false".into());
     }
@@ -1254,6 +1255,21 @@ agents:
         ] {
             assert!(parse(&format!("agents: {{root: {{model: openai/test, structured_output: {output}}}}}")).is_err(), "{output}");
         }
+    }
+
+    #[test]
+    fn matching_windows_do_not_make_fallback_compaction_same_model() {
+        let cfg = include_str!("../testdata/fallback-compaction.yaml");
+        let env = BTreeMap::from([
+            ("MODEL_URL".into(), "https://fixture.invalid/v1".into()),
+            ("LOCAL_KEY".into(), "fixture".into()),
+        ]);
+        assert!(select(cfg, "root", &env)
+            .err()
+            .unwrap()
+            .contains("compaction with fallback"));
+        let disabled = cfg.replace("session_compaction: true", "session_compaction: false");
+        assert_eq!(select(&disabled, "root", &env).unwrap().models.len(), 2);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { before, test } from 'node:test';
 import boot from '../node/boot.js';
 
@@ -36,6 +37,13 @@ test('explicit unsupported strategies, thresholds and unknown windows reject bef
     yaml.replace('model: chosen,', 'model: chosen, hooks: {before_compaction: []},'),
     yaml + '\n---\nagents: {root: {model: local/test}}',
   ]) await assert.rejects(api.createSession({ yaml: config }), undefined, config);
+  assert.equal(requests.length, 0);
+});
+
+test('a compatible fallback chain rejects active compaction before contacting either model', async t => {
+  const yaml = readFileSync(new URL('./testdata/fallback-compaction.yaml', import.meta.url), 'utf8');
+  const requests = intercept(t, () => assert.fail('unexpected model request'));
+  await assert.rejects(api.createSession({ yaml, env: { MODEL_URL: 'https://fixture.invalid/v1', LOCAL_KEY: 'fixture' } }), /compaction with fallback/);
   assert.equal(requests.length, 0);
 });
 
