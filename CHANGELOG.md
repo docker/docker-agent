@@ -3,6 +3,43 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.163.0] - 2026-11-19
+
+This release adds MCP elicitation and OAuth prompt support to the lean TUI, introduces new startup banner animations and a sunset gradient logo, and includes several bug fixes and internal refactoring.
+
+## What's New
+
+- Adds support for MCP elicitations and OAuth prompts in the lean TUI, including form display, field validation, and answer collection
+- Adds a windblown startup banner animation to the full TUI, using a block-character Docker Agent title with a violet-to-pink-to-apricot gradient on TrueColor terminals
+- Applies a sunset gradient (violet → hot pink → apricot) to the startup logo in both the full and lean TUIs
+
+## Bug Fixes
+
+- Fixes elicitations getting stuck when leaving a conversation by cancelling pending elicitations on retired conversations
+- Removes emoji, image name, MIME type, and caption row from inline tool images
+
+## Technical Changes
+
+- Extracts elicitation schema parsing, field validation, and answer collection into a shared `elicitform` package used by both TUIs
+- Refactors app, server, CLI, plans, board, teamloader, embeddedchat, and chatserver packages to share code and clarify ownership boundaries
+- Removes redundant and duplicate tests across bedrock, telemetry, options, runtime, todo, app, environment, history, config, session, and sidebar packages
+- Updates the Docker Agent logo and favicon on the docs site
+- Documents MCP elicitation forms, URL prompts, and OAuth consent prompts in the lean TUI
+### Pull Requests
+
+- [#4961](https://github.com/docker/docker-agent/pull/4961) - docs: update CHANGELOG.md for v1.162.0
+- [#4962](https://github.com/docker/docker-agent/pull/4962) - feat(leantui): support MCP elicitations and OAuth prompts
+- [#4963](https://github.com/docker/docker-agent/pull/4963) - Bump direct Go dependencies
+- [#4964](https://github.com/docker/docker-agent/pull/4964) - feat(tui): use a sunset gradient for the startup logo
+- [#4967](https://github.com/docker/docker-agent/pull/4967) - docs: auto-update for merged PRs (2026-11-19)
+- [#4968](https://github.com/docker/docker-agent/pull/4968) - docs: use the new Docker Agent logo on the docs site
+- [#4972](https://github.com/docker/docker-agent/pull/4972) - chore: update Go dependencies
+- [#4973](https://github.com/docker/docker-agent/pull/4973) - refactor: simplify Go package boundaries and shared code
+- [#4974](https://github.com/docker/docker-agent/pull/4974) - test: remove redundant and ineffective Go tests
+- [#4975](https://github.com/docker/docker-agent/pull/4975) - fix: remove captions from inline tool images
+- [#4977](https://github.com/docker/docker-agent/pull/4977) - feat(tui): add windblown startup banner
+
+
 ## [v1.162.0] - 2026-11-18
 
 This release adds new providers, a redesigned startup banner, and several bug fixes including a security fix for terminal control sequences in rendered Markdown.
@@ -7580,3 +7617,5 @@ This release improves the terminal user interface with better error handling and
 [v1.161.0]: https://github.com/docker/docker-agent/releases/tag/v1.161.0
 
 [v1.162.0]: https://github.com/docker/docker-agent/releases/tag/v1.162.0
+
+[v1.163.0]: https://github.com/docker/docker-agent/releases/tag/v1.163.0
