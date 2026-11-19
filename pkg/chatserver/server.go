@@ -566,26 +566,18 @@ func (s *sseStream) sendUsage(usage *ChatCompletionUsage) {
 	if usage == nil {
 		return
 	}
-	chunk := ChatCompletionStreamResponse{
+	s.writeJSON(ChatCompletionStreamResponse{
 		ID:      s.id,
 		Object:  "chat.completion.chunk",
 		Created: s.created,
 		Model:   s.model,
 		Choices: []ChatCompletionStreamChoice{},
 		Usage:   usage,
-	}
-	data, err := json.Marshal(chunk)
-	if err != nil {
-		return
-	}
-	_, _ = fmt.Fprintf(s.w, "data: %s\n\n", data)
-	if f, ok := s.w.(http.Flusher); ok {
-		f.Flush()
-	}
+	})
 }
 
 func (s *sseStream) send(delta ChatCompletionStreamDelta, finishReason string) {
-	chunk := ChatCompletionStreamResponse{
+	s.writeJSON(ChatCompletionStreamResponse{
 		ID:      s.id,
 		Object:  "chat.completion.chunk",
 		Created: s.created,
@@ -595,15 +587,7 @@ func (s *sseStream) send(delta ChatCompletionStreamDelta, finishReason string) {
 			Delta:        delta,
 			FinishReason: finishReason,
 		}},
-	}
-	data, err := json.Marshal(chunk)
-	if err != nil {
-		return
-	}
-	_, _ = fmt.Fprintf(s.w, "data: %s\n\n", data)
-	if f, ok := s.w.(http.Flusher); ok {
-		f.Flush()
-	}
+	})
 }
 
 // done writes the OpenAI sentinel terminator that ends the stream.
@@ -620,12 +604,15 @@ func (s *sseStream) done() {
 // in its own `data:` line carrying an `error` object before the stream
 // terminates.
 func (s *sseStream) sendError(err error) {
-	envelope := ErrorResponse{Error: ErrorDetail{
+	s.writeJSON(ErrorResponse{Error: ErrorDetail{
 		Message: err.Error(),
 		Type:    "internal_error",
-	}}
-	data, marshalErr := json.Marshal(envelope)
-	if marshalErr != nil {
+	}})
+}
+
+func (s *sseStream) writeJSON(event any) {
+	data, err := json.Marshal(event)
+	if err != nil {
 		return
 	}
 	_, _ = fmt.Fprintf(s.w, "data: %s\n\n", data)
