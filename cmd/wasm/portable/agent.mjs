@@ -3,6 +3,7 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const maxResponse = 16 * 1024 * 1024;
+const maxDocumentBytes = 16 * 1024 * 1024;
 
 export async function loadDockerAgent(source = new URL('./docker-agent.wasm', import.meta.url)) {
   const module = source instanceof WebAssembly.Module ? source
@@ -23,7 +24,8 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
 
   function session(opts, onEvent, history = []) {
     if (typeof opts?.yaml !== 'string') throw new Error('options.yaml must be a string');
-    for (const key of ['documents', 'toolProxy', 'oauthRedirectURI']) {
+    validateDocuments(opts.documents);
+    for (const key of ['toolProxy', 'oauthRedirectURI']) {
       if (opts[key] != null) throw new Error(`options.${key} is not supported by the portable profile`);
     }
     let config = { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env } };
@@ -134,6 +136,24 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     },
     abort() { currentChat?.abort(); },
   };
+}
+
+// Like Go small without RAG, validate host documents but do not index or send them.
+function validateDocuments(documents) {
+  if (documents == null) return;
+  if (typeof documents !== 'object') throw new Error('options.documents: must be an object of path to content');
+  const paths = Object.keys(documents);
+  if (paths.length > 1000) throw new Error(`options.documents: ${paths.length} documents exceed the limit of 1000`);
+  let size = 0;
+  for (const path of paths) {
+    if (!path.trim()) throw new Error('options.documents: document paths must not be empty');
+    const text = documents[path];
+    if (typeof text !== 'string') throw new Error(`options.documents: document ${JSON.stringify(path)} must be a string`);
+    // A code unit takes at least one UTF-8 byte. Avoid encoding oversized inputs.
+    if (size + text.length > maxDocumentBytes || (size += encoder.encode(text).length) > maxDocumentBytes) {
+      throw new Error(`options.documents: documents exceed the limit of ${maxDocumentBytes} bytes in total`);
+    }
+  }
 }
 
 function modelURL(endpoint) {

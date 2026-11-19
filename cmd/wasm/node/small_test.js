@@ -71,3 +71,16 @@ agents:
     },
   });
 });
+
+it("accepts validated host documents without enabling RAG", async () => {
+  const options = { yaml, env: { OPENAI_API_KEY: "k" } };
+  const session = await dockerAgent.createSession({ ...options, documents: { "notes.md": "hello" } });
+  await session.close();
+  for (const [documents, expected] of [
+    ["notes.md", /must be an object/], [{ " ": "text" }, /paths must not be empty/],
+    [{ "notes.md": 123 }, /must be a string/],
+    [Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [i, ""])), /limit of 1000/],
+  ]) {
+    await assert.rejects(dockerAgent.createSession({ ...options, documents }), expected);
+  }
+});
