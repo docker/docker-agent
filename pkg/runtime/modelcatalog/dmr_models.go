@@ -3,7 +3,6 @@ package modelcatalog
 import (
 	"context"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
@@ -40,13 +39,7 @@ func (r *Catalog) buildDMRChoices(ctx context.Context) []ModelChoice {
 		return nil
 	}
 
-	existingRefs := make(map[string]bool, len(r.Config.Models)*2)
-	for name, cfg := range r.Config.Models {
-		existingRefs[name] = true
-		if cfg.Provider != "" && cfg.Model != "" {
-			existingRefs[cfg.Provider+"/"+cfg.Model] = true
-		}
-	}
+	existingRefs := configuredModelRefs(r.Config.Models)
 
 	choices := make([]ModelChoice, 0, len(ids))
 	for _, model := range ids {
@@ -139,12 +132,6 @@ func (r *Catalog) populateDMRChoices(ctx context.Context, choices []ModelChoice)
 			meta = metadata[cfg.Model+":latest"]
 		}
 		applyDMRMetadata(choice, meta)
-		if n := r.configuredContextWindow(cfg); n > 0 {
-			if n > math.MaxInt {
-				choice.ContextLimit = math.MaxInt
-			} else {
-				choice.ContextLimit = int(n)
-			}
-		}
+		r.applyConfiguredContextWindow(choice, cfg)
 	}
 }

@@ -26,8 +26,10 @@ import (
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/js"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	providerdefaults "github.com/docker/docker-agent/pkg/model/provider/providers"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
 	"github.com/docker/docker-agent/pkg/tools/codemode"
@@ -244,6 +246,48 @@ func TestOverrideModel(t *testing.T) {
 				require.Equal(t, test.expected, rootAgent.Model(t.Context()).ID().String())
 			}
 		})
+	}
+}
+
+func TestAgentModelTokenLimits(t *testing.T) {
+	t.Parallel()
+	data := []byte(`models:
+  primary:
+    provider: openai
+    model: known
+    max_tokens: 0
+    title_model: openai/unknown
+    compaction_model: openai/known
+agents:
+  root:
+    model: primary
+    fallback:
+      models: [openai/known]
+`)
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"openai": {Models: map[string]modelsdev.Model{"known": {Limit: modelsdev.Limit{Output: 8192}}}},
+	}})
+	for _, override := range []bool{false, true} {
+		opts := []Opt{WithProviderRegistry(providerdefaults.NewDefaultRegistry())}
+		want := []int64{0, 8192, 32000, 8192}
+		if override {
+			opts = append(opts, WithModelOptions(options.WithMaxTokens(42)))
+			want = []int64{42, 42, 42, 42}
+		}
+		tm, err := Load(t.Context(), config.NewBytesSource("limits.yaml", data), &config.RuntimeConfig{
+			ModelsDevStoreOverride: store,
+			EnvProviderOverride:    environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test"}),
+		}, opts...)
+		require.NoError(t, err)
+		a, err := tm.DefaultAgent()
+		require.NoError(t, err)
+		require.Len(t, a.FallbackModels(), 1)
+		for i, m := range []provider.Provider{a.Model(t.Context()), a.FallbackModels()[0], a.TitleModel(), a.CompactionModel()} {
+			require.NotNil(t, m)
+			cfg := m.BaseConfig()
+			assert.Equal(t, want[i], cfg.ModelOptions.MaxTokens(), "model %s, override=%t", m.ID(), override)
+			assert.Same(t, store, cfg.ModelOptions.ModelsDevStore())
+		}
 	}
 }
 

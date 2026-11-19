@@ -87,6 +87,15 @@ func TestRecoveredContentTextEdits(t *testing.T) {
 		})
 	}
 
+	t.Run("cleared text block", func(t *testing.T) {
+		t.Parallel()
+		turn := recordedTurn(`[{"type":"thinking","thinking":"plan","signature":"sig"},{"type":"text","text":"old"}]`, 1,
+			chat.Message{ReasoningContent: "plan"}, nil)
+		raw, ok := recoveredContent(&turn, false)
+		require.True(t, ok)
+		assert.JSONEq(t, `[{"type":"thinking","thinking":"plan","signature":"sig"},{"type":"text","text":""}]`, string(raw))
+	})
+
 	t.Run("no text or tools", func(t *testing.T) {
 		t.Parallel()
 		turn := recordedTurn(`[{"type":"thinking","thinking":"plan","signature":"sig"}]`, 1,

@@ -19,16 +19,22 @@ type tmuxSessions struct {
 	ctx context.Context //nolint:containedctx // sessionManager methods are context-free
 }
 
+// sessionLaunch identifies both the tmux session and the agent conversation.
+type sessionLaunch struct {
+	name         string
+	workDir      string
+	agent        string
+	agentSession string
+	listenSocket string
+	// On first launch, create a worktree from worktreeBase. On resume, workDir is the existing worktree.
+	worktreeName string
+	worktreeBase string
+	prompt       string
+}
+
 // sessionManager abstracts tmux so tests can inject a fake.
 type sessionManager interface {
-	// NewSession creates a tmux session running the docker agent for the
-	// given docker-agent session ID, from workDir. The agent exposes its
-	// control plane on listenSocket. A non-empty worktreeName marks the
-	// first run: docker agent creates an isolated worktree of that name,
-	// branched from worktreeBase, and workDir is the repository. On resume,
-	// worktreeName is empty and workDir is the worktree directory. A
-	// non-empty prompt is sent as the first message.
-	NewSession(name, workDir, agent, sessionID, listenSocket, worktreeName, worktreeBase, prompt string) error
+	NewSession(launch sessionLaunch) error
 	KillSession(name string) error
 	// Alive reports whether the session exists and its agent pane is still
 	// running. It lets the controller tell a control plane that is merely
@@ -193,7 +199,7 @@ func applyServerDefaults(ctx context.Context) {
 // docker agent reattaches the session to its original worktree
 // automatically, so passing --worktree again (which would fail, the worktree
 // already exists) is avoided.
-func agentCommand(agent, sessionID, listenSocket, worktreeName, worktreeBase, prompt string) string {
+func (launch sessionLaunch) agentCommand() string {
 	// Launch through the current binary rather than assuming a `docker
 	// agent` plugin is installed; the binary supports direct invocation.
 	bin, err := os.Executable()
@@ -201,14 +207,14 @@ func agentCommand(agent, sessionID, listenSocket, worktreeName, worktreeBase, pr
 		bin = "docker-agent"
 	}
 	cmd := fmt.Sprintf("%s run %s --yolo --config-dir %s --data-dir %s --cache-dir %s --session %s --listen %s",
-		shQuote(bin), shQuote(agent),
+		shQuote(bin), shQuote(launch.agent),
 		shQuote(paths.GetConfigDir()), shQuote(paths.GetDataDir()), shQuote(paths.GetCacheDir()),
-		shQuote(sessionID), shQuote("unix://"+listenSocket))
-	if worktreeName != "" {
-		cmd += fmt.Sprintf(" --worktree=%s --worktree-base %s", shQuote(worktreeName), shQuote(worktreeBase))
+		shQuote(launch.agentSession), shQuote("unix://"+launch.listenSocket))
+	if launch.worktreeName != "" {
+		cmd += fmt.Sprintf(" --worktree=%s --worktree-base %s", shQuote(launch.worktreeName), shQuote(launch.worktreeBase))
 	}
-	if prompt != "" {
-		cmd += " " + shQuote(prompt)
+	if launch.prompt != "" {
+		cmd += " " + shQuote(launch.prompt)
 	}
 	return cmd
 }
@@ -227,8 +233,8 @@ func shQuote(s string) string {
 // exits the pane goes dead instead of dropping back to a shell (see
 // remain-on-exit), so the user can read its final output and the controller
 // can detect the dead pane and relaunch.
-func (t tmuxSessions) NewSession(name, workDir, agent, sessionID, listenSocket, worktreeName, worktreeBase, prompt string) error {
-	if _, err := tmuxRun(t.ctx, "new-session", "-d", "-s", name, "-c", workDir); err != nil {
+func (t tmuxSessions) NewSession(launch sessionLaunch) error {
+	if _, err := tmuxRun(t.ctx, "new-session", "-d", "-s", launch.name, "-c", launch.workDir); err != nil {
 		return err
 	}
 
@@ -237,12 +243,12 @@ func (t tmuxSessions) NewSession(name, workDir, agent, sessionID, listenSocket, 
 	// Keep the pane (and thus the session) alive after the agent exits. Set
 	// before the agent replaces the pane so there is no race where the
 	// agent could exit before the option takes effect.
-	_, _ = tmuxRun(t.ctx, "set-option", "-t", name, "remain-on-exit", "on")
+	_, _ = tmuxRun(t.ctx, "set-option", "-t", launch.name, "remain-on-exit", "on")
 
 	// exec makes the agent the pane's process (replacing the /bin/sh tmux
 	// runs the command with): when it exits the pane goes dead.
-	cmd := "exec " + agentCommand(agent, sessionID, listenSocket, worktreeName, worktreeBase, prompt)
-	if _, err := tmuxRun(t.ctx, "respawn-pane", "-k", "-t", name, "-c", workDir, cmd); err != nil {
+	cmd := "exec " + launch.agentCommand()
+	if _, err := tmuxRun(t.ctx, "respawn-pane", "-k", "-t", launch.name, "-c", launch.workDir, cmd); err != nil {
 		return err
 	}
 	return nil
