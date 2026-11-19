@@ -140,6 +140,10 @@ It works on any Go js/wasm binary.
 `e2e/dependencies_test.go` guards the profile's dependency closure and
 `node/small_test.js` its size.
 
+For a **Go-runtime-free** alternative, the [portable Rust/Wasm agent](portable/README.md)
+ports a subset of this profile: OpenAI-compatible streaming chat, multi-turn
+sessions and the `think` tool. It builds separately from the Go demo.
+
 ## Run (Node)
 
 ```sh

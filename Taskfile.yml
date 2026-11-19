@@ -202,6 +202,21 @@ tasks:
       - GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
       - go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
 
+  build-wasm-portable:
+    desc: Build the Go-runtime-free Rust browser agent (requires the wasm32-unknown-unknown Rust target)
+    cmds:
+      - cargo build --locked --release --manifest-path cmd/wasm/portable/Cargo.toml --target wasm32-unknown-unknown --target-dir bin/portable-target
+      - mkdir -p bin/wasm-portable
+      - cp bin/portable-target/wasm32-unknown-unknown/release/docker_agent_portable.wasm bin/wasm-portable/docker-agent.wasm
+      - cp cmd/wasm/portable/agent.mjs cmd/wasm/portable/index.html bin/wasm-portable/
+
+  test-wasm-portable:
+    desc: Test the standalone Rust browser agent against the small-profile contract (requires Rust and Node)
+    cmds:
+      - cargo test --locked --manifest-path cmd/wasm/portable/Cargo.toml --target-dir bin/portable-target
+      - task: build-wasm-portable
+      - DOCKER_AGENT_TEST_PORTABLE=1 DOCKER_AGENT_TEST_WASM=bin/wasm-portable/docker-agent.wasm node --test cmd/wasm/node/small_test.js cmd/wasm/portable/portable_test.mjs
+
   test-wasm-browser:
     desc: Test real browser fetch, tools and RAG (requires Chrome and openssl)
     cmds:
