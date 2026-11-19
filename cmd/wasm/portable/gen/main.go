@@ -11,8 +11,10 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/calculator"
+	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
 	"github.com/docker/docker-agent/pkg/tools/builtin/think"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
+	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 	"github.com/docker/docker-agent/pkg/tools/builtin/userprompt"
 )
 
@@ -24,22 +26,21 @@ func main() {
 }
 
 func generate(ctx context.Context, w io.Writer) error {
-	type toolset interface {
-		tools.ToolSet
-		Instructions() string
-	}
 	type entry struct {
 		Instructions string           `json:"instructions"`
 		Strict       map[string]bool  `json:"strict"`
 		Tools        []map[string]any `json:"tools"`
 	}
 	catalog := make(map[string]entry)
-	for key, ts := range map[string]toolset{"calculator": calculator.New(), "think": think.New(), "todo": todo.New(), "user_prompt": userprompt.New()} {
+	for key, ts := range map[string]tools.ToolSet{
+		"calculator": calculator.New(), "think": think.New(), "todo": todo.New(), "user_prompt": userprompt.New(),
+		"handoff": handoff.New(), "transfer_task": transfertask.New(),
+	} {
 		defs, err := ts.Tools(ctx)
 		if err != nil {
 			return err
 		}
-		e := entry{Instructions: ts.Instructions(), Strict: make(map[string]bool)}
+		e := entry{Instructions: tools.GetInstructions(ts), Strict: make(map[string]bool)}
 		for _, t := range defs {
 			schema, strict, err := openai.ConvertParametersToSchema(t.Parameters)
 			if err != nil {

@@ -93,7 +93,13 @@ struct Provider {
     parallel_tool_calls: Option<bool>,
 }
 
+#[derive(Default)]
 pub struct Selected {
+    pub name: String,
+    pub team_prompts: Vec<String>,
+    pub sub_agents: Vec<String>,
+    pub handoffs: Vec<String>,
+    pub shared_todo: bool,
     pub model_params: Map<String, Value>,
     pub endpoint: String,
     pub token: String,
@@ -349,12 +355,14 @@ fn first_nonempty(values: [&str; 3]) -> &str {
     values.into_iter().find(|s| !s.is_empty()).unwrap_or("")
 }
 
-pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
+pub fn team(
+    yaml: &str,
+    entry: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(String, Vec<Selected>), String> {
     let cfg = load(yaml)?;
     for (name, a) in &cfg.agents {
         for (enabled, field) in [
-            (!a.sub_agents.is_empty(), "sub_agents"),
-            (!a.handoffs.is_empty(), "handoffs"),
             (a.add_date, "add_date"),
             (a.add_environment_info, "add_environment_info"),
         ] {
@@ -390,14 +398,43 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             return Err(format!("unsupported provider {:?}", m.provider));
         }
     }
-    let a = if agent.is_empty() {
-        cfg.agents
-            .get("root")
-            .or_else(|| cfg.agents.first().map(|(_, a)| a))
+    let entry = if entry.is_empty() {
+        if cfg.agents.contains_key("root") {
+            "root"
+        } else {
+            cfg.agents.first().unwrap().0
+        }
     } else {
-        cfg.agents.get(agent)
+        entry
+    };
+    if !cfg.agents.contains_key(entry) {
+        return Err(format!("agent {entry:?} not found"));
     }
-    .ok_or_else(|| format!("agent {agent:?} not found"))?;
+    let mut pending = vec![entry];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut agents = Vec::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name) {
+            continue;
+        }
+        let a = &cfg.agents[name];
+        pending.extend(a.sub_agents.iter().chain(&a.handoffs).map(String::as_str));
+        agents.push(resolve(&cfg, name, a, env)?);
+    }
+    Ok((entry.into(), agents))
+}
+
+#[cfg(test)]
+fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
+    Ok(team(yaml, agent, env)?.1.remove(0))
+}
+
+fn resolve(
+    cfg: &Config,
+    name: &str,
+    a: &Agent,
+    env: &BTreeMap<String, String>,
+) -> Result<Selected, String> {
     let m = &cfg.models[&a.model];
     let p = cfg.providers.get(&m.provider);
     let builtin = crate::providers::lookup(&m.provider).filter(|_| p.is_none());
@@ -440,15 +477,44 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     } else {
         "chat/completions"
     };
-    let think = !a.toolsets.is_empty();
+    let mut toolsets: Vec<_> = a.toolsets.iter().map(|ts| ts.kind.clone()).collect();
+    let mut todos = a.toolsets.iter().filter(|ts| ts.kind == "todo");
+    let shared_todo = todos.next().is_some_and(|ts| ts.shared);
+    if todos.any(|ts| ts.shared != shared_todo) {
+        return Err(format!(
+            "agent {name:?}: mixing shared and private todo toolsets is not supported"
+        ));
+    }
+    let mut team_prompts = Vec::new();
+    for (tool, targets) in [("transfer_task", &a.sub_agents), ("handoff", &a.handoffs)] {
+        if !targets.is_empty() {
+            toolsets.push(tool.into());
+            let mut roster = String::new();
+            for target in targets {
+                use std::fmt::Write;
+                writeln!(
+                    roster,
+                    "Name: {target} | Description: {}",
+                    instruction(&cfg.agents[target].description, env)
+                )
+                .unwrap();
+            }
+            team_prompts.push(crate::team::prompt(tool, &roster, &targets.join(", ")));
+        }
+    }
     Ok(Selected {
-        model_params: model_params(id, m, p, think)?,
+        name: name.into(),
+        team_prompts,
+        sub_agents: a.sub_agents.clone(),
+        handoffs: a.handoffs.clone(),
+        shared_todo,
+        model_params: model_params(id, m, p, !toolsets.is_empty())?,
         endpoint: format!("{}/{route}", base.trim_end_matches('/')),
         responses,
         merge_messages,
         token,
         instruction: instruction(&a.instruction, env),
-        toolsets: a.toolsets.iter().map(|ts| ts.kind.clone()).collect(),
+        toolsets,
     })
 }
 

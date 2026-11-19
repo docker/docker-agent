@@ -27,6 +27,34 @@
       }
     ]
   },
+  "handoff": {
+    "instructions": "",
+    "strict": {
+      "handoff": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Use this function to hand off the conversation to the selected agent.",
+          "name": "handoff",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "agent": {
+                "description": "The name of the agent to hand off the conversation to.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "agent"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
   "think": {
     "instructions": "## Think Tool\n\nUse the think tool as a scratchpad before acting. Think to:\n- Check which rules or policies apply\n- Verify you have all required information\n- Validate planned actions before executing\n- Reason through complex multi-step problems",
     "strict": {
@@ -153,6 +181,44 @@
             "additionalProperties": false,
             "properties": {},
             "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "transfer_task": {
+    "instructions": "",
+    "strict": {
+      "transfer_task": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Use this function to transfer a task to the selected team member.\n            You must provide a clear and concise description of the task the member should achieve AND the expected output.",
+          "name": "transfer_task",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "agent": {
+                "description": "The name of the agent to transfer the task to.",
+                "type": "string"
+              },
+              "task": {
+                "description": "A clear and concise description of the task the member should achieve.",
+                "type": "string"
+              },
+              "expected_output": {
+                "description": "The expected output from the member (optional).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "agent",
+              "task",
+              "expected_output"
+            ],
             "type": "object"
           }
         },

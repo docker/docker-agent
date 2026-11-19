@@ -1,7 +1,10 @@
+use crate::{config::Selected, team::Switch};
 use indexmap::IndexMap;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Map, Value};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 use std::sync::LazyLock;
 
 const MAX_TOOL_ROUNDS: usize = 8;
@@ -28,20 +31,25 @@ pub fn response_strict(name: &str) -> Result<bool, String> {
 }
 type Tools = IndexMap<&'static str, &'static Value>;
 
-pub struct Conversation {
-    model_params: Map<String, Value>,
+pub struct Profile {
+    pub spec: Selected,
     tools: Tools,
-    merge_messages: bool,
+    instructions: Vec<Value>,
+    todos: Rc<RefCell<crate::todo::Todos>>,
+}
+
+pub struct Conversation {
+    pub profile: Rc<Profile>,
     messages: Vec<Value>,
-    instruction_count: usize,
-    todos: crate::todo::Todos,
-    scratchpad: String,
+    scratchpads: BTreeMap<String, String>,
+    pub switch: Option<Switch>,
     active: Option<Turn>,
 }
 
 struct Turn {
     messages_before: usize,
-    scratchpad_before: usize,
+    scratchpads_before: BTreeMap<String, usize>,
+    profile_before: Rc<Profile>,
     id: String,
     message_id: String,
     tool_rounds: usize,
@@ -88,21 +96,14 @@ struct Call {
     announced: bool,
 }
 
-impl Conversation {
-    pub fn new(
-        model_params: Map<String, Value>,
-        instruction: String,
-        toolsets: &[String],
-        merge_messages: bool,
-        mut history: Vec<Value>,
-    ) -> Result<Self, String> {
-        validate_history(&history)?;
+impl Profile {
+    pub fn new(spec: Selected, todos: Rc<RefCell<crate::todo::Todos>>) -> Result<Self, String> {
         let mut tools = Tools::new();
-        let mut instructions = Vec::new();
-        if !instruction.is_empty() {
-            instructions.push(instruction.as_str());
+        let mut instructions: Vec<&str> = spec.team_prompts.iter().map(String::as_str).collect();
+        if !spec.instruction.is_empty() {
+            instructions.push(&spec.instruction);
         }
-        for kind in toolsets {
+        for kind in &spec.toolsets {
             let def = CATALOG
                 .get(kind)
                 .ok_or_else(|| format!("unsupported toolset {kind:?}"))?;
@@ -116,29 +117,53 @@ impl Conversation {
                 tools.entry(name).or_insert(tool);
             }
         }
-        let instruction_count = instructions.len();
-        history.splice(
-            0..0,
-            instructions
-                .into_iter()
-                .map(|text| json!({"role":"system", "content":text})),
-        );
+        let instructions = instructions
+            .into_iter()
+            .map(|text| json!({"role":"system", "content":text}))
+            .collect();
         Ok(Self {
-            model_params,
-            merge_messages,
+            spec,
             tools,
-            messages: history,
-            instruction_count,
-            todos: crate::todo::Todos::default(),
-            scratchpad: "Thoughts:".into(),
-            active: None,
+            instructions,
+            todos,
         })
+    }
+}
+
+impl Conversation {
+    pub fn open(profile: Rc<Profile>, messages: Vec<Value>) -> Result<Self, String> {
+        validate_history(&messages)?;
+        Ok(Self {
+            profile,
+            messages,
+            scratchpads: BTreeMap::new(),
+            active: None,
+            switch: None,
+        })
+    }
+
+    #[cfg(test)]
+    fn new(
+        model_params: Map<String, Value>,
+        instruction: String,
+        toolsets: &[String],
+        merge_messages: bool,
+        history: Vec<Value>,
+    ) -> Result<Self, String> {
+        let spec = Selected {
+            model_params,
+            instruction,
+            toolsets: toolsets.to_vec(),
+            merge_messages,
+            ..Default::default()
+        };
+        Self::open(Rc::new(Profile::new(spec, Default::default())?), history)
     }
 
     pub fn restart(&mut self) {
         self.cancel();
-        self.messages.truncate(self.instruction_count);
-        self.scratchpad.truncate("Thoughts:".len());
+        self.messages.clear();
+        self.scratchpads.clear();
         // Go restart replaces the conversation, not the runtime's todo toolset.
     }
 
@@ -151,7 +176,12 @@ impl Conversation {
         }
         self.active = Some(Turn {
             messages_before: self.messages.len(),
-            scratchpad_before: self.scratchpad.len(),
+            scratchpads_before: self
+                .scratchpads
+                .iter()
+                .map(|(k, s)| (k.clone(), s.len()))
+                .collect(),
+            profile_before: Rc::clone(&self.profile),
             id: id.into(),
             message_id: id.into(),
             tool_rounds: 0,
@@ -164,16 +194,29 @@ impl Conversation {
         Ok(self.request())
     }
 
-    fn request(&self) -> Value {
-        let mut body = Value::Object(self.model_params.clone());
-        body["messages"] = json!(self.messages);
+    pub fn request(&self) -> Value {
+        let mut body = Value::Object(self.profile.spec.model_params.clone());
+        body["messages"] = Value::Array(
+            self.profile
+                .instructions
+                .iter()
+                .chain(&self.messages)
+                .cloned()
+                .collect(),
+        );
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});
-        if !self.tools.is_empty() {
+        if !self.profile.tools.is_empty() {
             body["tool_choice"] = "auto".into();
-            body["tools"] = Value::Array(self.tools.values().map(|tool| (*tool).clone()).collect());
+            body["tools"] = Value::Array(
+                self.profile
+                    .tools
+                    .values()
+                    .map(|tool| (*tool).clone())
+                    .collect(),
+            );
         }
-        if self.merge_messages {
+        if self.profile.spec.merge_messages {
             crate::wire::merge_text_messages(&mut body);
         }
         body
@@ -189,7 +232,9 @@ impl Conversation {
             self.active = None;
             return Err(format!("model failed: error receiving from stream: received error while streaming: {error}"));
         }
-        let result = turn.step.chunk(chunk, &turn.message_id, &self.tools);
+        let result = turn
+            .step
+            .chunk(chunk, &turn.message_id, &self.profile.tools);
         if result.is_err() {
             self.cancel();
         }
@@ -199,7 +244,16 @@ impl Conversation {
     pub fn cancel(&mut self) {
         if let Some(turn) = self.active.take() {
             self.messages.truncate(turn.messages_before);
-            self.scratchpad.truncate(turn.scratchpad_before);
+            self.profile = turn.profile_before;
+            self.scratchpads
+                .retain(|name, pad| match turn.scratchpads_before.get(name) {
+                    Some(&n) => {
+                        pad.truncate(n);
+                        true
+                    }
+                    None => false,
+                });
+            self.switch = None;
         }
     }
 
@@ -291,9 +345,19 @@ impl Conversation {
         let mut ids = BTreeSet::new();
         let mut wire_calls = Vec::with_capacity(calls.len());
         let mut replies = Vec::with_capacity(calls.len());
+        if calls.len() != 1
+            && calls
+                .values()
+                .any(|c| matches!(c.name.as_str(), "handoff" | "transfer_task"))
+        {
+            return Err("team tools must be called alone, not in a parallel batch".into());
+        }
         for (index, (key, call)) in calls.iter().enumerate() {
             if *key != index as u64 || call.id.is_empty() || !ids.insert(&call.id) {
                 return Err("missing or duplicate tool call ID or index".into());
+            }
+            if !self.profile.tools.contains_key(call.name.as_str()) {
+                return Err("missing or unavailable tool name".into());
             }
             wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
             events.push(
@@ -301,21 +365,31 @@ impl Conversation {
             );
             let mut reply = json!({"role":"tool", "tool_call_id":call.id});
             match call.name.as_str() {
+                "handoff" | "transfer_task" => {
+                    self.switch = Some(Switch::parse(&call.name, &call.arguments)?);
+                }
                 "think" => {
                     let Think { thought } = call.parse()?;
-                    if self.scratchpad.len() + 1 + thought.len() > MAX_SCRATCHPAD_BYTES {
+                    let scratchpad = self
+                        .scratchpads
+                        .entry(self.profile.spec.name.clone())
+                        .or_insert_with(|| "Thoughts:".into());
+                    if scratchpad.len() + 1 + thought.len() > MAX_SCRATCHPAD_BYTES {
                         return Err("think scratchpad size limit reached".into());
                     }
-                    self.scratchpad.push('\n');
-                    self.scratchpad.push_str(&thought);
-                    reply["content"] = json!(self.scratchpad);
-                    events.push(tool_result(&call.id, &call.name, &self.scratchpad, false));
+                    scratchpad.push('\n');
+                    scratchpad.push_str(&thought);
+                    reply["content"] = json!(scratchpad);
+                    events.push(tool_result(&call.id, &call.name, scratchpad, false));
                 }
                 "calculate" | "create_todo" | "create_todos" | "update_todos" | "list_todos" => {
                     let result = if call.name == "calculate" {
                         crate::calculator::calculate(&call.arguments)
                     } else {
-                        self.todos.call(&call.name, &call.arguments)
+                        self.profile
+                            .todos
+                            .borrow_mut()
+                            .call(&call.name, &call.arguments)
                     };
                     let is_error = result.is_err();
                     let output = result.unwrap_or_else(|error| error);
@@ -347,7 +421,42 @@ impl Conversation {
         message["tool_calls"] = Value::Array(wire_calls);
         self.messages.push(message);
         self.messages.extend(replies);
+        if self.switch.is_some() {
+            return Ok(json!({"events":events}));
+        }
         Ok(self.after_tools(events))
+    }
+
+    pub fn last_answer(&self) -> String {
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "assistant")
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .trim()
+            .into()
+    }
+
+    pub fn include_usage(&mut self, usage: &Value) {
+        let turn = self.active.as_mut().expect("suspended caller");
+        turn.input += usage["input_tokens"].as_u64().unwrap_or(0);
+        turn.output += usage["output_tokens"].as_u64().unwrap_or(0);
+    }
+
+    pub fn complete_switch(&mut self, name: &str, output: String, error: bool) -> Value {
+        let reply = self
+            .messages
+            .last_mut()
+            .expect("reserved team tool message");
+        let event = tool_result(
+            reply["tool_call_id"].as_str().unwrap(),
+            name,
+            &output,
+            error,
+        );
+        reply["content"] = Value::String(output);
+        event
     }
 
     fn after_tools(&self, events: Vec<Value>) -> Value {
@@ -799,7 +908,7 @@ mod tests {
                 .and_then(|_| c.end())
                 .is_err());
             assert_eq!(c.messages, saved);
-            assert_eq!(c.scratchpad, "Thoughts:");
+            assert!(c.scratchpads.is_empty());
         }
     }
 
@@ -828,7 +937,7 @@ mod tests {
                 .chunk(chunk(delta, Some("tool_calls")))
                 .and_then(|_| c.end())
                 .is_err());
-            assert_eq!(c.scratchpad, "Thoughts:");
+            assert!(c.scratchpads.is_empty());
         }
         let mut c = conversation(&[]);
         c.begin("go", "go").unwrap();
@@ -948,7 +1057,7 @@ mod tests {
         ))
         .unwrap();
         assert!(c.end().unwrap_err().contains("iteration limit"));
-        assert_eq!(c.scratchpad, "Thoughts:");
+        assert!(c.scratchpads.is_empty());
         c.begin("retry", "retry").unwrap();
         let args = json!({"thought":"x".repeat(MAX_SCRATCHPAD_BYTES)}).to_string();
         c.chunk(chunk(

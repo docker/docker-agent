@@ -2,6 +2,7 @@ mod calculator;
 mod config;
 mod providers;
 mod responses;
+mod team;
 mod todo;
 mod turn;
 mod wire;
@@ -9,7 +10,7 @@ mod wire;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{cell::RefCell, collections::BTreeMap};
-use turn::Conversation;
+use team::Session;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -61,41 +62,6 @@ struct Core {
     next_id: u32,
 }
 
-struct Session {
-    conversation: Conversation,
-    responses: Option<responses::Stream>,
-}
-
-impl Session {
-    fn request(&mut self, body: Value) -> Result<Value, String> {
-        if let Some(stream) = &mut self.responses {
-            *stream = responses::Stream::default();
-            responses::request(body)
-        } else {
-            Ok(body)
-        }
-    }
-
-    fn next(&mut self, mut next: Value) -> Result<Value, String> {
-        if let Some(body) = next.get_mut("request") {
-            *body = self.request(body.take())?;
-        }
-        Ok(next)
-    }
-
-    fn chunk(&mut self, chunk: Value) -> Result<Value, String> {
-        let mut events = Vec::new();
-        if let Some(stream) = &mut self.responses {
-            for c in stream.push(chunk)? {
-                events.extend(self.conversation.chunk(c)?);
-            }
-        } else {
-            events = self.conversation.chunk(chunk)?;
-        }
-        Ok(Value::Array(events))
-    }
-}
-
 impl Core {
     fn session(&mut self, id: u32) -> Result<&mut Session, String> {
         self.sessions
@@ -113,44 +79,22 @@ impl Core {
                 env,
                 history,
             } => {
-                let spec = config::select(&yaml, &agent, &env)?;
-                let conv = Conversation::new(
-                    spec.model_params,
-                    spec.instruction,
-                    &spec.toolsets,
-                    spec.merge_messages,
-                    history,
-                )?;
+                let session = Session::open(&yaml, &agent, &env, history)?;
                 self.next_id = self
                     .next_id
                     .checked_add(1)
                     .ok_or("session ID space exhausted")?;
-                self.sessions.insert(
-                    self.next_id,
-                    Session {
-                        conversation: conv,
-                        responses: spec.responses.then(responses::Stream::default),
-                    },
-                );
-                Ok(
-                    json!({"session": self.next_id, "endpoint": spec.endpoint, "token": spec.token, "responses":spec.responses}),
-                )
+                let handle = json!({"session":self.next_id, "endpoints":session.endpoints()});
+                self.sessions.insert(self.next_id, session);
+                Ok(handle)
             }
             Command::Begin {
                 session,
                 prompt,
                 id,
-            } => {
-                let s = self.session(session)?;
-                let request = s.conversation.begin(&prompt, &id)?;
-                s.request(request)
-            }
+            } => self.session(session)?.begin(&prompt, &id),
             Command::Chunk { session, chunk } => self.session(session)?.chunk(chunk),
-            Command::End { session } => {
-                let s = self.session(session)?;
-                let next = s.conversation.end()?;
-                s.next(next)
-            }
+            Command::End { session } => self.session(session)?.end(),
             Command::AnswerElicitation {
                 session,
                 id,
@@ -162,11 +106,13 @@ impl Core {
                 s.next(next)
             }
             Command::Cancel { session } => {
-                self.session(session)?.conversation.cancel();
+                self.session(session)?.cancel();
                 Ok(Value::Null)
             }
             Command::Restart { session } => {
-                self.session(session)?.conversation.restart();
+                let s = self.session(session)?;
+                s.cancel();
+                s.conversation.restart();
                 Ok(Value::Null)
             }
             Command::Close { session } => {

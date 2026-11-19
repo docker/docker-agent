@@ -70,7 +70,7 @@ it("still validates references, fields and toolsets during projection", () => {
 it("session loading checks capabilities even on an unselected agent", async t => {
   const fetch = t.mock.method(globalThis, "fetch", () => { throw new Error("unexpected fetch"); });
   for (const field of [
-    "sub_agents: [root]", "handoffs: [root]", "add_date: true", "add_environment_info: true",
+    "add_date: true", "add_environment_info: true",
     "toolsets: [{type: datetime}]", "toolsets: [{type: fetch}]", "toolsets: [{type: plan}]",
   ]) {
     const yaml = withHelper(field);

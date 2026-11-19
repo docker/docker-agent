@@ -30,7 +30,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       if (opts[key] != null) throw new Error(`options.${key} is not supported by the portable profile`);
     }
     let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, history: history ?? [] });
-    try { modelURL(handle.endpoint); }
+    try { handle.endpoints.forEach(modelURL); }
     catch (e) { call('close', { session: handle.session }); throw e; }
     let active, batch, restarting = false, closing;
     const pending = new Set();
@@ -95,18 +95,19 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       const session = handle.session;
       try {
         signal.throwIfAborted();
-        let body = call('begin', { session, prompt, id: crypto.randomUUID() });
+        let request = call('begin', { session, prompt, id: crypto.randomUUID() });
         for (;;) {
-          const response = await fetch(handle.endpoint, {
+          const { endpoint, token, responses, body } = request;
+          const response = await fetch(endpoint, {
             method: 'POST', redirect: 'error', credentials: 'omit', signal,
-            headers: { 'Content-Type': 'application/json', ...(handle.token && { Authorization: `Bearer ${handle.token}` }) },
+            headers: { 'Content-Type': 'application/json', ...(token && { Authorization: `Bearer ${token}` }) },
             body: JSON.stringify(body),
           });
           if (!response.ok) {
             await response.body?.cancel();
             throw new Error(`model request failed: HTTP ${response.status}`);
           }
-          for await (const chunk of sse(response, handle.responses)) {
+          for await (const chunk of sse(response, responses)) {
             signal.throwIfAborted();
             for (const event of call('chunk', { session, chunk })) {
               signal.throwIfAborted();
@@ -116,14 +117,17 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           signal.throwIfAborted();
           const next = call('end', { session });
           if (next.waiting) {
-            body = await elicit(next.events, signal);
+            request = await elicit(next.events, signal);
             signal.throwIfAborted();
             continue;
           }
-          for (const event of next.events) emit(event);
+          for (const event of next.events) {
+            signal.throwIfAborted();
+            emit(event);
+          }
           if (next.result) return next.result;
           signal.throwIfAborted();
-          body = next.request;
+          request = next.request;
         }
       } catch (e) {
         call('cancel', { session });
