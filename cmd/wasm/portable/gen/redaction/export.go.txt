@@ -1,0 +1,41 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"reflect"
+	"regexp/syntax"
+	"runtime"
+	"strings"
+)
+
+func main() {
+	type entry struct {
+		Pattern       string   `json:"pattern"`
+		Keywords      []string `json:"keywords,omitempty"`
+		CaseSensitive bool     `json:"case_sensitive,omitempty"`
+		Validator     string   `json:"validator,omitempty"`
+	}
+	var entries []entry
+	for _, r := range rules() {
+		// Expand Go's Perl classes (ASCII even under case folding) and quoting
+		// in Go, rather than teaching Rust a second regex syntax.
+		re, err := syntax.Parse(r.expression, syntax.Perl)
+		if err != nil {
+			panic(err)
+		}
+		pattern := strings.ReplaceAll(re.String(), `\b`, `(?-u:\b)`)
+		e := entry{Pattern: pattern, Keywords: r.keywords, CaseSensitive: r.caseSensitive}
+		if r.validator != nil {
+			e.Validator = strings.TrimPrefix(runtime.FuncForPC(reflect.ValueOf(r.validator).Pointer()).Name(), "main.valid")
+		}
+		entries = append(entries, e)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(map[string]any{"source": fmt.Sprintf("%s; rules derived from docker/mcp-gateway and Trivy, Copyright (c) 2025 Docker (MIT), relicensed Apache-2.0", os.Args[1]), "rules": entries, "iban_lengths": ibanLengths}); err != nil {
+		panic(err)
+	}
+}

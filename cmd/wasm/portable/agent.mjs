@@ -110,7 +110,15 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         await ready;
         signal.throwIfAborted();
         let body = call('begin', { session, prompt, id: crypto.randomUUID() });
+        let environment;
         for (;;) {
+          if (body === null) {
+            const { dynamicPrompt } = await import('./clock.mjs');
+            signal.throwIfAborted();
+            if (handle.dynamic.addEnvironmentInfo) environment ??= dynamicPrompt({ add_environment_info: true })[0];
+            const date = handle.dynamic.addDate ? dynamicPrompt({ add_date: true })[0] : undefined;
+            body = call('prepare', { session, environment, date });
+          }
           const response = await fetch(handle.transport.endpoint, {
             method: 'POST', redirect: 'error', credentials: 'omit', signal,
             headers: handle.transport.headers,

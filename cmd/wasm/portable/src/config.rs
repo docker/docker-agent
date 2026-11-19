@@ -43,6 +43,8 @@ struct Agent {
     add_environment_info: bool,
     #[serde(default)]
     readonly: bool,
+    #[serde(default)]
+    hooks: crate::hooks::Hooks,
 }
 
 #[derive(Deserialize)]
@@ -346,6 +348,7 @@ struct ModelRequest {
 pub struct Selected {
     pub picker: crate::model_picker::Picker,
     pub compaction: crate::compaction::Policy,
+    pub hooks: crate::hooks::Hooks,
     pub model_params: Map<String, Value>,
     pub capabilities: Option<crate::media::Capabilities>,
     pub transport: Transport,
@@ -617,17 +620,6 @@ fn first_nonempty(values: [&str; 3]) -> &str {
 }
 
 fn compaction_policy(a: &Agent, m: &Model) -> Result<crate::compaction::Policy, String> {
-    if a.redact_secrets == Some(true) {
-        return Err("redact_secrets is not supported in portable sessions".into());
-    }
-    // Go enables redaction by default. Don't replay history to an auxiliary
-    // model request unless the caller explicitly elected to run without it.
-    if m.context_window.is_some()
-        && a.session_compaction != Some(false)
-        && a.redact_secrets != Some(false)
-    {
-        return Err("portable compaction requires explicit redact_secrets: false; the Go redaction hooks are not ported".into());
-    }
     crate::compaction::Policy::new(
         m.context_window,
         a.session_compaction,
@@ -642,8 +634,6 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         for (enabled, field) in [
             (!a.sub_agents.is_empty(), "sub_agents"),
             (!a.handoffs.is_empty(), "handoffs"),
-            (a.add_date, "add_date"),
-            (a.add_environment_info, "add_environment_info"),
         ] {
             if enabled {
                 return Err(format!(
@@ -758,6 +748,11 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         }
     }
     Ok(Selected {
+        hooks: a.hooks.clone().with_defaults(
+            a.redact_secrets.unwrap_or(true),
+            a.add_date,
+            a.add_environment_info,
+        ),
         capabilities: primary.capabilities,
         compaction: compaction_policy(a, primary)?,
         picker,
@@ -854,7 +849,7 @@ mod tests {
         for yaml in [
             "agents: {}",
             "agents: {a: {model: nope}}",
-            "agents: {a: {model: a/b, hooks: {}}}",
+            "agents: {a: {model: a/b, hooks: {bogus: []}}}",
             "agents: {a: {model: a/b}, a: {model: a/c}}",
             "version: 2\nagents: {a: {model: a/b}}",
         ] {

@@ -10,12 +10,15 @@ license = "Apache-2.0"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+aho-corasick = "1"
 base64 = "0.22"
+crc32fast = "1"
 dashu-base = "0.4"
 dashu-int = { version = "0.4", default-features = false }
 dashu-ratio = { version = "0.4", default-features = false }
 http = "1"
 indexmap = { version = "2", features = ["serde"] }
+regex = { version = "1", default-features = false, features = ["std", "unicode-case", "perf-dfa"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"

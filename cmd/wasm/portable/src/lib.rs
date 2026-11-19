@@ -2,6 +2,7 @@ mod calculator;
 mod compaction;
 mod config;
 mod go_json;
+mod hooks;
 mod media;
 mod model_picker;
 mod providers;
@@ -36,6 +37,11 @@ enum Command {
         session: u32,
         prompt: String,
         id: String,
+    },
+    Prepare {
+        session: u32,
+        environment: Option<String>,
+        date: Option<String>,
     },
     Chunk {
         session: u32,
@@ -87,6 +93,9 @@ struct Session {
 
 impl Session {
     fn request(&mut self, body: Value) -> Result<Value, String> {
+        if body.is_null() {
+            return Ok(body);
+        }
         if let Some(stream) = &mut self.responses {
             *stream = responses::Stream::default();
             let mut request = responses::request(body)?;
@@ -160,6 +169,8 @@ impl Core {
                     archive,
                 )?;
                 conv.compaction.policy = spec.compaction;
+                let dynamic = json!({"addDate":spec.hooks.add_date,"addEnvironmentInfo":spec.hooks.add_environment_info});
+                conv.hooks = spec.hooks;
                 self.next_id = self
                     .next_id
                     .checked_add(1)
@@ -173,7 +184,7 @@ impl Core {
                     },
                 );
                 Ok(
-                    json!({"session": self.next_id, "transport": spec.transport, "responses":spec.responses,"toolsets":toolsets}),
+                    json!({"session": self.next_id, "dynamic":dynamic,"transport": spec.transport, "responses":spec.responses,"toolsets":toolsets}),
                 )
             }
             Command::Begin {
@@ -184,6 +195,15 @@ impl Core {
                 let s = self.session(session)?;
                 let request = s.conversation.begin(&prompt, &id)?;
                 s.request(request)
+            }
+            Command::Prepare {
+                session,
+                environment,
+                date,
+            } => {
+                let s = self.session(session)?;
+                let body = s.conversation.prepare(environment, date)?;
+                s.request(body)
             }
             Command::Chunk { session, chunk } => self.session(session)?.chunk(chunk),
             Command::End { session } => {

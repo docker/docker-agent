@@ -26,8 +26,6 @@ test('explicit unsupported strategies, thresholds and unknown windows reject bef
   const requests = intercept(t, () => { throw new Error('unexpected fetch'); });
   for (const config of [
     yaml.replace('context_window: 2048, ', ''),
-    yaml.replace('redact_secrets: false, ', ''),
-    yaml.replace('redact_secrets: false', 'redact_secrets: true'),
     yaml.replace('window: 2048', 'window: 4294967296'),
     yaml.replace('threshold: 0.5', 'threshold: 0'),
     yaml.replace('threshold: 0.5', 'threshold: 1.01'),
