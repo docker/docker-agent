@@ -26,7 +26,7 @@ require (
 	github.com/aymanbagabas/go-udiff v0.4.2
 	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/charmbracelet/ultraviolet v0.0.0-20260812204455-68fa937c71be
-	github.com/charmbracelet/x/ansi v0.11.9
+	github.com/charmbracelet/x/ansi v0.11.10
 	github.com/clipperhouse/displaywidth v0.11.0
 	github.com/clipperhouse/uax29/v2 v2.7.0
 	github.com/coder/acp-go-sdk v0.13.5
