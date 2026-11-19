@@ -27,6 +27,14 @@ struct Agent {
     instruction: String,
     #[serde(default)]
     toolsets: Vec<Toolset>,
+    #[serde(default)]
+    sub_agents: Vec<String>,
+    #[serde(default)]
+    handoffs: Vec<String>,
+    #[serde(default)]
+    add_date: bool,
+    #[serde(default)]
+    add_environment_info: bool,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +42,23 @@ struct Agent {
 struct Toolset {
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default)]
+    shared: bool,
+}
+
+impl Toolset {
+    fn validate(&self) -> Result<(), String> {
+        if self.shared && self.kind != "todo" {
+            return Err("shared can only be used with type 'todo'".into());
+        }
+        // Only project toolsets that do not require additional configuration.
+        match self.kind.as_str() {
+            "calculator" | "datetime" | "fetch" | "file" | "filesystem" | "memory" | "plan"
+            | "random" | "session_context" | "shell" | "tasks" | "think" | "todo"
+            | "user_prompt" => Ok(()),
+            _ => Err(format!("unsupported toolset type {:?}", self.kind)),
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -98,8 +123,20 @@ fn load(yaml: &str) -> Result<Config, String> {
             return Err("empty agent name".into());
         }
         for ts in &a.toolsets {
-            if ts.kind != "think" {
-                return Err(format!("unsupported toolset type {:?}", ts.kind));
+            ts.validate()?;
+        }
+        for (kind, targets) in [("sub-agent", &a.sub_agents), ("handoff agent", &a.handoffs)] {
+            for target in targets {
+                if target.contains('/') {
+                    return Err(format!(
+                        "external agent reference {target:?} is not supported"
+                    ));
+                }
+                if !cfg.agents.contains_key(target) {
+                    return Err(format!(
+                        "agent {name:?} references non-existent {kind} {target:?}"
+                    ));
+                }
             }
         }
         if !cfg.models.contains_key(&a.model) {
@@ -132,10 +169,10 @@ fn agent_list(cfg: &Config, full: bool) -> Vec<Value> {
     cfg.agents.iter().map(|(name, a)| {
         let mut v = json!({"name":name, "model":a.model, "description":a.description, "instruction":a.instruction});
         if full {
-            v["sub_agents"] = json!([]);
-            v["handoffs"] = json!([]);
-            v["add_date"] = false.into();
-            v["add_env_info"] = false.into();
+            v["sub_agents"] = json!(a.sub_agents);
+            v["handoffs"] = json!(a.handoffs);
+            v["add_date"] = a.add_date.into();
+            v["add_env_info"] = a.add_environment_info.into();
         }
         v
     }).collect()
@@ -314,6 +351,25 @@ fn first_nonempty(values: [&str; 3]) -> &str {
 
 pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
     let cfg = load(yaml)?;
+    for (name, a) in &cfg.agents {
+        for (enabled, field) in [
+            (!a.sub_agents.is_empty(), "sub_agents"),
+            (!a.handoffs.is_empty(), "handoffs"),
+            (a.add_date, "add_date"),
+            (a.add_environment_info, "add_environment_info"),
+        ] {
+            if enabled {
+                return Err(format!(
+                    "agent {name:?}: {field} is not supported in portable sessions"
+                ));
+            }
+        }
+        for ts in &a.toolsets {
+            if ts.kind != "think" {
+                return Err(format!("unsupported toolset type {:?}", ts.kind));
+            }
+        }
+    }
     for p in cfg.providers.values() {
         if !matches!(p.provider.as_str(), "" | "openai")
             || !matches!(
