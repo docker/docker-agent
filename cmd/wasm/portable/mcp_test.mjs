@@ -104,7 +104,7 @@ test('stateless session: reply in fragmented SSE, ping and explicit refusal of s
   assert.ok(srv.calls.every(c => !c.init.headers.has('MCP-Session-Id') && c.method !== 'DELETE' && c.policy.allowPrivateIPs === false));
 });
 
-test('only configured streamable HTTP and session env; no transport or OAuth fallback', async t => {
+test('only configured HTTP transports and session env; no transport or OAuth fallback', async t => {
   const raw = t.mock.method(globalThis, 'fetch', () => assert.fail('unexpected global fetch'));
   const srv = server();
   await assert.rejects(openMCP(config, {}, proxy), /guarded toolFetch/);
@@ -112,11 +112,11 @@ test('only configured streamable HTTP and session env; no transport or OAuth fal
     await assert.rejects(openMCP(ts, {}, toolProxy, undefined, { toolFetch: srv.toolFetch, ...options }), error);
   }
   for (const key of ['command', 'args', 'ref', 'env', 'lifecycle', 'readonly', 'defer']) await refused({ ...config, [key]: true }, /unsupported MCP toolset/);
-  for (const fields of [{ oauth: {} }, { transport_type: 'sse' }, { standalone_sse: true }, { unsupported: true },
+  for (const fields of [{ oauth: {} }, { transport_type: 'stdio' }, { standalone_sse: true }, { unsupported: true },
     { url: 'unix:///socket' }, { url: 'ftp://server' }, { url: 'https://user:pass@x/' }, { url: 'https://x/#secret' },
     { url: 'https://${env.ABSENT}/' }, { headers: { Token: '${headers.Authorization}' } }, { headers: { Token: '${something(${env.KEY})}' } },
     { headers: { 'mCp-seSSion-id': 'untrusted' } }, { headers: { 'Content-Type': 'not JSON' } }, { headers: { hi: 'a\r\nb' } }]) {
-    await refused({ ...config, remote: { ...config.remote, ...fields } }, /MCP|only streamable HTTP/);
+    await refused({ ...config, remote: { ...config.remote, ...fields } }, /MCP/);
   }
   await refused(config, /requires a trusted toolProxy/, {}, '');
   await refused({ ...config, allow_private_ips: 'true' }, /allow_private_ips/);

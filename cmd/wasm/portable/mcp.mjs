@@ -1,8 +1,7 @@
 import { createMCPOAuth } from './oauth.mjs';
-// The initialize-based Streamable HTTP protocol. The guarded transport owns
-// destination policy; no discovery URL, redirect or server message can replace it.
+import { chunks, legacySSE, maxBytes, sseEvents } from './legacy-sse.mjs';
+
 const versions = ['2025-11-25', '2025-06-18', '2025-03-26'];
-const maxBytes = 1 << 20;
 const maxTools = 256;
 
 function object(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
@@ -30,8 +29,8 @@ function connection(toolset, env, toolProxy) {
   const { remote, name = '', allow_private_ips: allowPrivateIPs = false } = toolset;
   options(remote, ['url', 'transport_type', 'headers', 'standalone_sse', 'oauth'], 'MCP remote');
   if (Object.hasOwn(remote, 'oauth')) options(remote.oauth, ['clientId','scopes','callbackRedirectURL'], 'MCP OAuth');
-  if (!['streamable', 'streamable-http'].includes(remote.transport_type ?? 'streamable') || (remote.standalone_sse ?? false) !== false) {
-    throw new Error('only streamable HTTP without standalone SSE is supported');
+  if (!['sse', 'streamable', 'streamable-http'].includes(remote.transport_type ?? 'streamable') || (remote.standalone_sse ?? false) !== false) {
+    throw new Error('unsupported MCP transport or standalone SSE');
   }
   if (typeof name !== 'string' || typeof allowPrivateIPs !== 'boolean') throw new Error('invalid MCP name or allow_private_ips');
   if (!toolProxy && !allowPrivateIPs) throw new Error('MCP requires a trusted toolProxy or allow_private_ips: true');
@@ -71,50 +70,38 @@ function parseJSON(text) {
   try { return JSON.parse(text); } catch { throw new Error('invalid MCP JSON'); }
 }
 
-// Parse only newly received text, including CR/LF and UTF-8 split across reads.
 async function* records(response, budget, signal) {
   const type = response.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase();
   const sse = type === 'text/event-stream';
   if (!response.body || (!sse && type !== 'application/json')) throw new Error('expected an MCP JSON or event-stream response');
-  const reader = response.body.getReader(), decoder = new TextDecoder('utf-8', { fatal: true });
-  const abort = () => { reader.cancel().catch(() => {}); };
-  signal.addEventListener('abort', abort, { once: true });
-  let size = 0, partial = '', afterCR = false, data = [], event = '';
-  try {
-    for (;;) {
-      signal.throwIfAborted();
-      const { value, done } = await reader.read();
-      signal.throwIfAborted();
-      const bytes = value?.byteLength ?? 0;
-      size += bytes;
-      budget.left -= bytes;
-      if (size > maxBytes || budget.left < 0) throw new Error('MCP response too large');
-      let text = decoder.decode(value, { stream: !done });
-      if (!sse) partial += text;
-      else if (text) {
-        if (afterCR && text.startsWith('\n')) text = text.slice(1);
-        afterCR = text.endsWith('\r');
-        const lines = text.split(/\r\n|[\r\n]/);
-        lines[0] = partial + lines[0];
-        partial = lines.pop();
-        for (const line of lines) {
-          if (line === '') {
-            const message = (!event || event === 'message') && data.join('\n');
-            data = []; event = '';
-            if (message) yield parseJSON(message);
-          } else if (line === 'data' || line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
-          else if (line.startsWith('event:')) event = line.slice(6).replace(/^ /, '');
-        }
-      }
-      if (done) {
-        if (!sse) yield parseJSON(partial);
-        return;
-      }
+  let size = 0;
+  const source = chunks(response.body, signal, n => {
+    size += n;
+    budget.left -= n;
+    if (size > maxBytes || budget.left < 0) throw new Error('MCP response too large');
+  });
+  if (sse) {
+    for await (const { event, data } of sseEvents(source)) {
+      if (event === 'message' && data) yield parseJSON(data);
     }
-  } finally {
-    signal.removeEventListener('abort', abort);
-    reader.releaseLock();
+  } else {
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    let text = '';
+    for await (const chunk of source) text += decoder.decode(chunk, { stream: true });
+    yield parseJSON(text + decoder.decode());
   }
+}
+
+function rpcResult(message, reply) {
+  if (reply.id !== message.id || ('error' in reply) === ('result' in reply)) throw new Error('invalid or mismatched MCP response');
+  if ('error' in reply) {
+    const code = reply.error?.code;
+    if (!Number.isInteger(code)) throw new Error('invalid MCP server error');
+    if (code === -32042) throw new Error('MCP out-of-band URL elicitation is not supported');
+    throw new Error(`MCP ${message.method} failed (JSON-RPC ${code})`);
+  }
+  if (!object(reply.result)) throw new Error('invalid MCP result');
+  return reply.result;
 }
 
 function output(result) {
@@ -143,31 +130,70 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
   if (toolset.remote?.oauth != null && !oauthRedirectURI) throw new Error('MCP OAuth requires an explicit host oauthRedirectURI');
   if (oauthRedirectURI && (typeof opts.elicit !== 'function' || (toolset.remote.oauth?.callbackRedirectURL && toolset.remote.oauth.callbackRedirectURL !== oauthRedirectURI))) throw new Error('MCP OAuth requires a matching host redirect URI and elicitation handler');
   const { url, requestHeaders, policy, prefix } = connection(toolset, env ?? {}, toolProxy);
-  const oauth = oauthRedirectURI && !requestHeaders().has('Authorization') ? createMCPOAuth({
+  const isLegacy = toolset.remote.transport_type === 'sse';
+  if (isLegacy && toolset.remote.oauth) throw new Error('MCP OAuth is not supported with legacy SSE');
+  const oauth = !isLegacy && oauthRedirectURI && !requestHeaders().has('Authorization') ? createMCPOAuth({
     serverURL: url, oauthRedirectURI, ...policy, toolFetch, elicit: opts.elicit,
     clientId: toolset.remote.oauth?.clientId, scopes: toolset.remote.oauth?.scopes,
   }) : null;
   const lifetime = new AbortController(), names = new Map();
   let sessionID, version, closing, nextID = 1;
 
-  async function exchange(message, signal, budget, retriedAuth = false) {
+  async function request(target, method, message, signal) {
     signal.throwIfAborted();
     const headers = requestHeaders();
     const token = oauth?.accessToken();
     if (token) headers.set('Authorization', `Bearer ${token}`);
     if (sessionID) headers.set('MCP-Session-Id', sessionID);
-    if (version) headers.set('MCP-Protocol-Version', version);
-    const init = { method: message ? 'POST' : 'DELETE', headers, credentials: 'omit', redirect: 'error' };
+    if (!isLegacy && version) headers.set('MCP-Protocol-Version', version);
+    if (method === 'GET') {
+      headers.set('Accept', 'text/event-stream');
+      headers.delete('Content-Type');
+    }
+    const init = { method, headers, credentials: 'omit', redirect: 'error' };
     if (message) {
       init.body = JSON.stringify({ jsonrpc: '2.0', ...message });
       if (init.body.length > maxBytes) throw new Error('MCP request too large');
     }
     // A transport error may embed the URL (including query credentials).
     let res;
-    try { res = await toolFetch(url, init, policy, signal); }
+    try { res = await toolFetch(target, init, policy, signal); }
     catch { signal.throwIfAborted(); throw new Error('MCP transport request failed'); }
+    if (res.redirected) {
+      res.body?.cancel().catch(() => {});
+      throw new Error('unexpected MCP redirect');
+    }
+    return res;
+  }
+
+  function validateMessage(reply) {
+    if (!object(reply) || reply.jsonrpc !== '2.0') throw new Error('invalid MCP JSON-RPC message');
+    if ('method' in reply) {
+      if (typeof reply.method !== 'string' || 'result' in reply || 'error' in reply) throw new Error('invalid MCP server message');
+      if ('params' in reply && !object(reply.params)) throw new Error('invalid MCP server parameters');
+      if (reply.method === 'notifications/tools/list_changed' && !('id' in reply)) {
+        lifetime.abort(new Error('MCP tool catalog changed; reopen the session'));
+        lifetime.signal.throwIfAborted();
+      }
+    }
+    return reply;
+  }
+
+  const legacy = isLegacy && legacySSE({ url, request, lifetime, parseMessage(data) {
+    const reply = validateMessage(parseJSON(data));
+    if (!('method' in reply)) return reply;
+    if ('id' in reply) throw new Error('server requests are not supported with MCP legacy SSE');
+  } });
+
+  async function exchange(message, signal, budget, retriedAuth = false) {
+    signal.throwIfAborted();
+    if (legacy) {
+      const reply = await legacy.exchange(message, signal, budget);
+      if (reply) return rpcResult(message, reply);
+      return;
+    }
+    const res = await request(url, message ? 'POST' : 'DELETE', message, signal);
     try {
-      if (res.redirected) throw new Error('unexpected MCP redirect');
       if (res.status === 401 && oauth && message && !retriedAuth) {
         // Retry only an explicit authentication rejection, never a transport failure.
         const challenge = res.headers.get('WWW-Authenticate');
@@ -196,17 +222,9 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
       let requests = 0;
       for await (const reply of records(res, budget, signal)) {
         signal.throwIfAborted();
-        if (!object(reply) || reply.jsonrpc !== '2.0') throw new Error('invalid MCP JSON-RPC message');
+        validateMessage(reply);
         if ('method' in reply) {
-          if (typeof reply.method !== 'string' || 'result' in reply || 'error' in reply) throw new Error('invalid MCP server message');
-          if ('params' in reply && !object(reply.params)) throw new Error('invalid MCP server parameters');
-          if (!('id' in reply)) {
-            if (reply.method === 'notifications/tools/list_changed') {
-              lifetime.abort(new Error('MCP tool catalog changed; reopen the session'));
-              lifetime.signal.throwIfAborted();
-            }
-            continue;
-          }
+          if (!('id' in reply)) continue;
           if (++requests > 16 || !(typeof reply.id === 'string' || Number.isSafeInteger(reply.id))) throw new Error('invalid or excessive MCP server requests');
           let answer = reply.method === 'ping' ? { result: {} } : { error: { code: -32601, message: 'Method not supported' } };
           if (reply.method === 'elicitation/create' && typeof opts.elicit === 'function') {
@@ -219,15 +237,7 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
           await exchange({ id: reply.id, ...answer }, signal, budget);
           continue;
         }
-        if (reply.id !== message.id || ('error' in reply) === ('result' in reply)) throw new Error('invalid or mismatched MCP response');
-        if ('error' in reply) {
-          const code = reply.error?.code;
-          if (!Number.isInteger(code)) throw new Error('invalid MCP server error');
-          if (code === -32042) throw new Error('MCP out-of-band URL elicitation is not supported');
-          throw new Error(`MCP ${message.method} failed (JSON-RPC ${code})`);
-        }
-        if (!object(reply.result)) throw new Error('invalid MCP result');
-        return reply.result;
+        return rpcResult(message, reply);
       }
       throw new Error('MCP stream ended without a matching response');
     } finally { res.body?.cancel().catch(() => {}); }
@@ -235,7 +245,10 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
 
   function close() {
     if (!closing) {
-      closing = Promise.resolve().then(() => sessionID ? bounded([], 2500, s => exchange(null, s)) : undefined);
+      closing = Promise.resolve().then(() => {
+        if (legacy) return legacy.closed();
+        if (sessionID) return bounded([], 2500, s => exchange(null, s));
+      });
       lifetime.abort(new Error('MCP session is closed'));
     }
     return closing;
@@ -262,10 +275,11 @@ export async function openMCP(toolset, env, toolProxy, signal, opts = {}) {
 
   try {
     return await bounded([signal, lifetime.signal], 30000, async s => {
+      if (legacy) await legacy.connect(s);
       const budget = { left: 2 * maxBytes };
       const rpc = (method, params) => exchange({ id: nextID++, method, params }, s, budget);
-      const hello = await rpc('initialize', { protocolVersion: versions[0], clientInfo: { name: 'docker agent', version: '1.0.0' }, capabilities: opts.elicit ? { elicitation: {form:{},url:{}} } : {} });
-      if (!versions.includes(hello.protocolVersion)) throw new Error('unsupported MCP protocol version');
+      const hello = await rpc('initialize', { protocolVersion: versions[0], clientInfo: { name: 'docker agent', version: '1.0.0' }, capabilities: !isLegacy && opts.elicit ? { elicitation: {form:{},url:{}} } : {} });
+      if (!versions.includes(hello.protocolVersion) && !(isLegacy && hello.protocolVersion === '2024-11-05')) throw new Error('unsupported MCP protocol version');
       version = hello.protocolVersion;
       const { capabilities, instructions = '', serverInfo } = hello;
       if (!object(capabilities) || typeof serverInfo?.name !== 'string' || typeof serverInfo.version !== 'string' || typeof instructions !== 'string') {
