@@ -86,7 +86,7 @@ func (s *service) Create(ctx context.Context, req CreateRequest) (Plan, error) {
 	// ExpectedRevision 0 is kept alongside it as a defensive guard for
 	// injected backends that predate MustNotExist: those still conflict for
 	// any plan that ever took a revision bump.
-	p, err := s.storage.Upsert(ctx, plan.UpsertRequest{
+	return s.upsert(ctx, "create", plan.UpsertRequest{
 		Name:             req.Ref.Name,
 		Content:          &req.Content,
 		Title:            &req.Title,
@@ -95,10 +95,6 @@ func (s *service) Create(ctx context.Context, req CreateRequest) (Plan, error) {
 		ExpectedRevision: new(0),
 		MustNotExist:     true,
 	})
-	if err != nil {
-		return Plan{}, sharedError("create", req.Ref.Name, err)
-	}
-	return sharedPlan(p), nil
 }
 
 func (s *service) Update(ctx context.Context, req UpdateRequest) (Plan, error) {
@@ -108,7 +104,7 @@ func (s *service) Update(ctx context.Context, req UpdateRequest) (Plan, error) {
 	if err := validateContent(req.Content); err != nil {
 		return Plan{}, err
 	}
-	p, err := s.storage.Upsert(ctx, plan.UpsertRequest{
+	return s.upsert(ctx, "update", plan.UpsertRequest{
 		Name:             req.Ref.Name,
 		Content:          &req.Content,
 		Title:            req.Title,
@@ -117,10 +113,6 @@ func (s *service) Update(ctx context.Context, req UpdateRequest) (Plan, error) {
 		ExpectedRevision: req.ExpectedVersion,
 		MustExist:        true,
 	})
-	if err != nil {
-		return Plan{}, sharedError("update", req.Ref.Name, err)
-	}
-	return sharedPlan(p), nil
 }
 
 func (s *service) SetStatus(ctx context.Context, req SetStatusRequest) (Plan, error) {
@@ -130,14 +122,18 @@ func (s *service) SetStatus(ctx context.Context, req SetStatusRequest) (Plan, er
 	if req.Status == "" {
 		return Plan{}, &ValidationError{Message: "status must not be empty"}
 	}
-	p, err := s.storage.Upsert(ctx, plan.UpsertRequest{
+	return s.upsert(ctx, "set_status", plan.UpsertRequest{
 		Name:             req.Ref.Name,
 		Status:           &req.Status,
 		ExpectedRevision: req.ExpectedVersion,
 		MustExist:        true,
 	})
+}
+
+func (s *service) upsert(ctx context.Context, op string, req plan.UpsertRequest) (Plan, error) {
+	p, err := s.storage.Upsert(ctx, req)
 	if err != nil {
-		return Plan{}, sharedError("set_status", req.Ref.Name, err)
+		return Plan{}, sharedError(op, req.Name, err)
 	}
 	return sharedPlan(p), nil
 }
