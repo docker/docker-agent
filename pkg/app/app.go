@@ -1338,14 +1338,8 @@ func (a *App) QueueSteerMessage(ctx context.Context, content string, attachments
 
 // QueueSteerMessageForSession uses the caller's session snapshot during asynchronous attachment resolution.
 func (a *App) QueueSteerMessageForSession(ctx context.Context, sess *session.Session, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
-	msg := runtime.QueuedMessage{ID: uuid.NewV4().String(), Content: content}
-	if err := ctx.Err(); err != nil {
-		return msg, err
-	}
-	if len(attachments) > 0 {
-		msg.MultiContent = a.buildUserMultiContent(ctx, sess, content, attachments)
-	}
-	if err := ctx.Err(); err != nil {
+	msg, err := a.prepareQueuedMessage(ctx, sess, content, attachments)
+	if err != nil {
 		return msg, err
 	}
 	return msg, a.runtime.Steer(ctx, msg)
@@ -1365,6 +1359,14 @@ func (a *App) QueueFollowUpMessage(ctx context.Context, content string, attachme
 
 // QueueFollowUpMessageForSession uses the caller's session snapshot during asynchronous attachment resolution.
 func (a *App) QueueFollowUpMessageForSession(ctx context.Context, sess *session.Session, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
+	msg, err := a.prepareQueuedMessage(ctx, sess, content, attachments)
+	if err != nil {
+		return msg, err
+	}
+	return msg, a.runtime.FollowUp(ctx, msg)
+}
+
+func (a *App) prepareQueuedMessage(ctx context.Context, sess *session.Session, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
 	msg := runtime.QueuedMessage{ID: uuid.NewV4().String(), Content: content}
 	if err := ctx.Err(); err != nil {
 		return msg, err
@@ -1372,10 +1374,7 @@ func (a *App) QueueFollowUpMessageForSession(ctx context.Context, sess *session.
 	if len(attachments) > 0 {
 		msg.MultiContent = a.buildUserMultiContent(ctx, sess, content, attachments)
 	}
-	if err := ctx.Err(); err != nil {
-		return msg, err
-	}
-	return msg, a.runtime.FollowUp(ctx, msg)
+	return msg, ctx.Err()
 }
 
 // TogglePause toggles whether the runtime loop is paused at iteration
