@@ -15,8 +15,8 @@ async function boot() {
 const piece = (delta, finish_reason = null) => ({ choices: [{ index: 0, delta, finish_reason }] });
 const usage = { choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } };
 const answer = [piece({ role: 'assistant', content: 'hello ' }), piece({ content: '🌍' }, 'stop'), usage];
-function tool(name, args) {
-  const text = JSON.stringify(args);
+function tool(name, args) { return rawTool(name, JSON.stringify(args)); }
+function rawTool(name, text) {
   return [piece({ role: 'assistant', tool_calls: [{ id: 'call_1', index: 0, type: 'function', function: { name, arguments: text.slice(0, 4) } }] }),
     piece({ tool_calls: [{ index: 0, function: { arguments: text.slice(4) } }] }, 'tool_calls'), usage];
 }
@@ -313,6 +313,37 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
   tests.structuredResponses = await replay(api, 'structuredResponses',
     withSchema(responses, { description: 'Chosen colors', strict: true, mode: 'native' }),
     [responseTool, responsesJSON, responsesJSON], turns, '/v1/responses');
+  const output = '__structured_output__';
+  const final = tool(output, JSON.parse(jsonAnswer));
+  const palette = withSchema(local(['think']), { mode: 'tool', description: 'Chosen colors' });
+  // The ordinary tool is first on the wire; Go intercepts and rejects the output call before dispatch.
+  const mixed = [['think', '{"thought":"plan"}'], [output, jsonAnswer]].map(([name, args], index) =>
+    ({ index, id: `mixed_${index}`, type: 'function', function: { name, arguments: args } }));
+  tests.outputTool = await replay(api, 'outputTool', palette, [answer, rawTool(output, '{"colors":'), tool(output, {}),
+    [piece({ tool_calls: mixed }, 'tool_calls'), usage], final, final], turns);
+  const toolFailure = async ({ api, options, record, trace }) => {
+    const s = await api.createSession(options, record);
+    try {
+      await s.send('first').then(() => { throw new Error('accepted plain text'); }, e => trace.results.push(e.message));
+      trace.results.push(await s.send('again'));
+    } finally { await s.close(); }
+  };
+  tests.outputFailure = await replay(api, 'outputFailure', palette, [answer, answer, answer, final], toolFailure);
+  tests.claudeOutputFailure = await replay(api, 'claudeOutputFailure', palette.replace('local/test', 'local/claude-sonnet-5'), [answer, final], toolFailure);
+  tests.outputDiscovery = await replay(api, 'outputDiscovery', withSchema(deferred, {mode:'tool'}),
+    [tool('add_tool', {name:'think'}), tool('think', {thought:'discovered'}), final], single);
+  tests.outputFallback = await replay(api, 'outputFallback', palette.replace('model: local/test', 'model: local/test, fallback: {models: [local/claude-sonnet-5]}'),
+    [[{error:{message:'primary unavailable'}}], answer, final], toolFailure);
+  tests.outputRepetition = await replay(api, 'outputRepetition', palette.replace('model: local/test', 'model: local/test, max_consecutive_tool_calls: 2'),
+    [tool(output, {}), tool(output, {}), final], toolFailure);
+  const outputFn = { ...fn, name: output };
+  const raw = '{ "colors" : [ "blue" ] }';
+  const responseOutput = [{ type: 'response.output_item.added', output_index: 0, item: outputFn },
+    { type: 'response.function_call_arguments.delta', output_index: 0, item_id: fn.id, delta: raw },
+    fin([{ ...outputFn, arguments: raw, status: 'completed' }])];
+  tests.outputResponses = await replay(api, 'outputResponses', withSchema(responses, { mode: 'tool',
+    schema: { ...schema, properties: { ...schema.properties, note: { type: 'string', enum: ['extra'] } }, additionalProperties: true } }),
+    [responseTool, responseOutput, responseOutput], turns, '/v1/responses');
   const mediaConfig = config.replace('agents:', `models:
   capable: {provider: local, model: test, capabilities: {image: true, pdf: true, audio: true}}
 agents:`)

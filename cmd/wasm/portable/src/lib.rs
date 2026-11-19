@@ -12,6 +12,7 @@ mod permission;
 mod providers;
 mod responses;
 mod session_context;
+mod structured_output;
 mod team;
 mod todo;
 mod turn;
