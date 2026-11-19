@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -535,38 +536,40 @@ func TestHTTPRequestVerification(t *testing.T) {
 		assert.Equal(t, "run", properties["action"], "Expected action 'run'")
 		assert.True(t, properties["is_success"].(bool), "Expected is_success true")
 	})
+}
 
-	t.Run("NoHTTPWhenMissingCredentials", func(t *testing.T) {
-		mockHTTP2 := NewMockHTTPClient()
-		client2 := newClient(t.Context(), logger, true, true, "test-version", mockHTTP2.Client)
+func TestTrackSkipsHTTP(t *testing.T) {
+	t.Parallel()
 
-		// Leave endpoint and API key empty
-		client2.endpoint = ""
-		client2.apiKey = ""
+	const endpoint = "https://telemetry.example.com/events"
+	const apiKey = "test-key"
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		apiKey   string
+		enabled  bool
+	}{
+		{name: "no endpoint", apiKey: apiKey, enabled: true},
+		{name: "no API key", endpoint: endpoint, enabled: true},
+		{name: "disabled", endpoint: endpoint, apiKey: apiKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				mockHTTP := NewMockHTTPClient()
+				client := &Client{
+					logger:     NewTelemetryLogger(slog.New(slog.DiscardHandler)),
+					httpClient: mockHTTP.Client,
+					endpoint:   tc.endpoint,
+					apiKey:     tc.apiKey,
+					enabled:    tc.enabled,
+				}
 
-		event := &CommandEvent{
-			Action:  "version",
-			Success: true,
-		}
-
-		client2.Track(ctx, event)
-
-		assert.Zero(t, mockHTTP2.GetRequestCount(), "Expected no HTTP requests when endpoint/apiKey are missing")
-	})
-
-	t.Run("NoHTTPWhenDisabled", func(t *testing.T) {
-		mockHTTP3 := NewMockHTTPClient()
-		client3 := newClient(t.Context(), logger, false, true, "test-version", mockHTTP3.Client)
-
-		event := &CommandEvent{
-			Action:  "version",
-			Success: true,
-		}
-
-		client3.Track(ctx, event)
-
-		assert.Zero(t, mockHTTP3.GetRequestCount(), "Expected no HTTP requests when client is disabled")
-	})
+				client.Track(t.Context(), &CommandEvent{Action: "version", Success: true})
+				synctest.Wait()
+				assert.Zero(t, mockHTTP.GetRequestCount())
+			})
+		})
+	}
 }
 
 // TestCreateEventTelemetryTags tests the TELEMETRY_TAGS environment variable support in createEvent
