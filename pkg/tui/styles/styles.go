@@ -150,7 +150,7 @@ const (
 // Thresholds outside (0, 1] fall back to [compaction.DefaultThreshold],
 // mirroring compaction.ShouldCompact.
 func ContextGaugeLevelFor(fill, threshold float64) ContextGaugeLevel {
-	if threshold <= 0 || threshold > 1 {
+	if !(threshold > 0 && threshold <= 1) {
 		threshold = compaction.DefaultThreshold
 	}
 	switch {

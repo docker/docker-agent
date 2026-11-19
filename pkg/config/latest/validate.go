@@ -229,7 +229,9 @@ func validateCompactionThreshold(v *float64) error {
 	if v == nil {
 		return nil
 	}
-	if *v <= 0 || *v > 1 {
+	// Spelled positively so NaN — which compares false to both bounds — is
+	// rejected too.
+	if !(*v > 0 && *v <= 1) {
 		return fmt.Errorf("compaction_threshold must be greater than 0 and at most 1, got %v", *v)
 	}
 	return nil
