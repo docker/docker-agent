@@ -13,10 +13,12 @@ _Docker Agent's default interface is a rich, interactive terminal UI with file a
 
 ## Launching the TUI
 
-Both the full TUI and the lean TUI display a braille-dot “docker agent” wordmark banner on startup, colored with a gradient from your theme’s accent to info color.
+Both the full TUI and the lean TUI display a braille “Docker Agent” title on startup. It uses a violet-to-pink-to-apricot gradient on dark backgrounds and dark grey on light backgrounds, adjusted for contrast against the selected theme’s background. On supported TrueColor terminals, the full TUI draws a twisting stream of dots from the left edge of the chat pane into a cloud that settles into the title from left to right once at launch. Set `DOCKER_AGENT_REDUCE_MOTION=1` to skip the animation; the banner remains static. Terminals without detected TrueColor support, redirected output, and the lean TUI also use the static banner. In lean mode, the terminal's actual background may differ from the selected theme.
 
 - **Full TUI:** the banner is centered in the empty chat pane. It is not drawn if the pane is narrower than 76 columns or shorter than 6 rows, and it disappears as soon as the conversation has content: when you send a message, when the agent starts responding, or when the agent's `welcome_message` is shown (which replaces the banner as soon as the agent info arrives).
 - **Lean TUI:** the banner is printed left-aligned at the start of the transcript, above the resumed session if any, and stays in the scrollback as messages arrive.
+
+The lean TUI does not change the terminal's background. Choose a theme that matches it: for example, use `--theme default` on a dark terminal or `--theme default-light` on a light terminal. `--theme auto` detects the background at startup when the terminal supports it, falling back to dark when it cannot. A mismatched theme may make text hard to read.
 
 You can disable the banner entirely from the **Appearance** tab of `/settings`, or by setting `show_banner: false` in your [user settings](../../configuration/user-settings/index.md).
 
@@ -636,7 +638,7 @@ settings:
   theme_light: default-light # optional, theme used on light backgrounds (default: default-light)
 ```
 
-At startup the terminal background is queried (OSC 11) to pick the dark or light theme of the pair; non-interactive runs (pipes, CI) fall back to the dark theme. In terminals that report appearance changes (DEC mode 2031 — Ghostty, kitty, contour, …), flipping the OS or terminal appearance while Docker Agent is running switches the theme live. Terminals without that mode re-sync when the window regains focus.
+At startup the terminal background is queried (OSC 11) to pick the dark or light theme of the pair; when detection is unavailable, the dark theme is used. In the full TUI, terminals that report appearance changes (DEC mode 2031 — Ghostty, kitty, contour, …) switch the theme live when the OS or terminal appearance changes. Terminals without that mode re-sync when the window regains focus. The lean TUI selects its auto theme at startup and does not update it live.
 
 ### Custom Themes
 

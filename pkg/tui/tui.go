@@ -291,7 +291,8 @@ type appModel struct {
 
 	// showBanner displays the ASCII-art startup banner on an empty
 	// conversation. Shared by every tab and managed via /settings.
-	showBanner bool
+	showBanner             bool
+	startupBannerAnimation bool
 
 	// buildCommandCategories is a function that returns the list of command categories.
 	buildCommandCategories func(context.Context, tea.Model) []commands.Category
@@ -321,6 +322,11 @@ type Transcriber interface {
 
 // Option configures the TUI.
 type Option func(*appModel)
+
+// WithStartupBannerAnimation enables the one-time startup animation.
+func WithStartupBannerAnimation() Option {
+	return func(m *appModel) { m.startupBannerAnimation = true }
+}
 
 // WithProgramStatusProbe detects support through the running UI input parser.
 func WithProgramStatusProbe(reporter *programstatus.Reporter) Option {
@@ -2070,6 +2076,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	}
 	m.cancelSidebarPlanEdit()
 	if outgoing != m.tabs[sessionID] {
+		chat.CancelStartupBanner(outgoing.chatPage)
 		m.cancelSpeechSend(outgoing)
 		m.parkAttention(outgoing)
 	}
@@ -2252,11 +2259,13 @@ func (m *appModel) handleWindowResize(width, height int) tea.Cmd {
 	m.width = width
 	m.height = height
 
-	if !m.ready {
-		m.ready = true
+	firstSize := !m.ready
+	m.ready = true
+	resize := m.resizeAll()
+	if firstSize && m.startupBannerAnimation && !m.paneHidden && !m.leanMode {
+		return tea.Batch(resize, chat.StartStartupBanner(m.activeTab.chatPage))
 	}
-
-	return m.resizeAll()
+	return resize
 }
 
 // resizeAll recalculates all component sizes based on current window dimensions.

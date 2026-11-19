@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
@@ -189,6 +190,9 @@ func runTUIWrapped(ctx context.Context, rt runtime.Runtime, sess *session.Sessio
 	imageWriter.SetSupported(imageWriter.Enabled() && tuiimage.SupportsKittyGraphics(os.Stdin, os.Stdout))
 	tuiimage.SetRenderingEnabled(imageWriter.RenderingEnabled())
 	tuiOpts = append(tuiOpts, tui.WithImageWriter(imageWriter))
+	if bannerAnimationSupported(os.Stdout) {
+		tuiOpts = append(tuiOpts, tui.WithStartupBannerAnimation())
+	}
 	if isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
 		reporter := &programstatus.Reporter{}
 		tuiOpts = append(tuiOpts, tui.WithProgramStatusProbe(reporter))
@@ -221,4 +225,11 @@ func resetLightDarkReports() {
 		return
 	}
 	_, _ = os.Stdout.WriteString(ansi.ResetModeLightDark)
+}
+
+func bannerAnimationSupported(output *os.File) bool {
+	if output == nil || !isatty.IsTerminal(output.Fd()) || os.Getenv("DOCKER_AGENT_REDUCE_MOTION") != "" || os.Getenv("NO_COLOR") != "" || os.Getenv("CLICOLOR") == "0" || os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	return colorprofile.Detect(output, os.Environ()) == colorprofile.TrueColor
 }
