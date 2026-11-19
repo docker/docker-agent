@@ -694,38 +694,6 @@ func TestIsTrustedDockerURL(t *testing.T) {
 	}
 }
 
-func TestURLSource_Read_WithDockerAuth_NonDockerURL(t *testing.T) {
-	t.Parallel()
-
-	var receivedAuth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte("test content"))
-	}))
-	t.Cleanup(server.Close)
-
-	envProvider := environment.NewMapEnvProvider(map[string]string{
-		environment.DockerDesktopTokenEnv: "docker-jwt-token",
-	})
-
-	// Use a non-Docker, non-localhost URL as the source URL so
-	// isTrustedDockerURL returns false. The actual HTTP request still goes to
-	// the local test server via the unsafe flag.
-	src := &urlSource{
-		url:         "https://example.com/agent.yaml",
-		envProvider: envProvider,
-		unsafe:      true,
-	}
-	// Override the url to point at our test server for the actual fetch,
-	// but addDockerAuth checks the url field which is example.com.
-	// We need to actually fetch from the test server though, so we
-	// manually test addDockerAuth in isolation instead.
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
-	require.NoError(t, err)
-	src.addDockerAuth(t.Context(), req)
-	assert.Empty(t, receivedAuth, "non-Docker URLs should not receive Docker auth header")
-}
-
 func TestURLSource_Read_WithDockerAuth_LocalhostURL(t *testing.T) {
 	t.Parallel()
 
