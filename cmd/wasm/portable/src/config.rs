@@ -1,9 +1,10 @@
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{de::Error, Deserialize, Deserializer};
 use serde_json::{json, Map, Number, Value};
 use std::collections::BTreeMap;
 
 const VERSION: &str = "16";
+const MAX_SAFE_INTEGER: i64 = (1_i64 << 53) - 1;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,6 +22,7 @@ struct Config {
 #[serde(deny_unknown_fields)]
 struct Agent {
     model: String,
+    structured_output: Option<StructuredOutput>,
     #[serde(default)]
     description: String,
     #[serde(default)]
@@ -35,6 +37,126 @@ struct Agent {
     add_date: bool,
     #[serde(default)]
     add_environment_info: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructuredOutput {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    strict: bool,
+    #[serde(default)]
+    mode: OutputMode,
+    #[serde(deserialize_with = "output_schema")]
+    schema: Value,
+}
+
+impl StructuredOutput {
+    fn check_session(&self, model: &str, env: &BTreeMap<String, String>) -> Result<(), String> {
+        if matches!(self.mode, OutputMode::Tool) {
+            return Err("tool mode is not supported in portable sessions".into());
+        }
+        if self.name.is_empty()
+            || self.name.len() > 64
+            || !self
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        {
+            return Err("name must be 1-64 ASCII letters, digits, hyphens or underscores".into());
+        }
+        let id = expand_model_field(model, env)?;
+        if needs_claude_schema_instruction(&id) {
+            return Err(format!(
+                "the Claude schema instruction for {id:?} is not supported in portable sessions"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum OutputMode {
+    #[default]
+    #[serde(alias = "")]
+    Native,
+    Tool,
+}
+
+fn output_schema<'de, D: Deserializer<'de>>(de: D) -> Result<Value, D::Error> {
+    use serde_yaml_ng::Value as Yaml;
+
+    // serde_json maps non-finite YAML numbers to null, and the JS host rounds large integers.
+    fn check(value: &Yaml) -> Result<(), &'static str> {
+        match value {
+            Yaml::Mapping(map) => {
+                for (key, value) in map {
+                    let Yaml::String(key) = key else {
+                        return Err("schema keys must be strings");
+                    };
+                    if key == "<<" {
+                        return Err("YAML merge keys are unsupported");
+                    }
+                    check(value)?;
+                }
+            }
+            Yaml::Sequence(seq) => seq.iter().try_for_each(check)?,
+            Yaml::Number(n) if !n.is_finite() => return Err("schema numbers must be finite"),
+            Yaml::Number(n)
+                if n.as_f64()
+                    .is_some_and(|v| v.abs() > MAX_SAFE_INTEGER as f64) =>
+            {
+                return Err("schema number exceeds the JavaScript safe integer range");
+            }
+            Yaml::Tagged(_) => return Err("tagged schema values are unsupported"),
+            _ => (),
+        }
+        Ok(())
+    }
+
+    let yaml = Yaml::deserialize(de)?;
+    check(&yaml).map_err(|e| D::Error::custom(format!("structured_output.schema: {e}")))?;
+    let schema: Value = serde_yaml_ng::from_value(yaml).map_err(D::Error::custom)?;
+    if schema["type"] != "object" || !schema["properties"].is_object() {
+        return Err(D::Error::custom(
+            "structured_output.schema requires type: object and a properties map",
+        ));
+    }
+    if schema.get("required").is_some_and(|v| {
+        !v.as_array()
+            .is_some_and(|keys| keys.iter().all(Value::is_string))
+    }) {
+        return Err(D::Error::custom(
+            "structured_output.schema.required must be an array of strings",
+        ));
+    }
+    if schema
+        .get("additionalProperties")
+        .is_some_and(|v| !v.is_boolean())
+    {
+        return Err(D::Error::custom(
+            "structured_output.schema.additionalProperties must be a boolean",
+        ));
+    }
+    Ok(schema)
+}
+
+// Go adds a schema instruction on both OpenAI protocols for modelinfo.IsClaude(nil, id).
+fn needs_claude_schema_instruction(model: &str) -> bool {
+    let id = model.trim().to_ascii_lowercase();
+    let mut segments = id.rsplit('/');
+    let name = segments.next().unwrap();
+    if segments.next() == Some("openai") {
+        return false;
+    }
+    name.starts_with("claude-")
+        || name.starts_with("anthropic.claude-")
+        || name.split_once('.').is_some_and(|(region, rest)| {
+            !region.is_empty() && rest.starts_with("anthropic.claude-")
+        })
 }
 
 #[derive(Deserialize)]
@@ -324,7 +446,7 @@ fn model_params(
     }
     if let Some(cap) = m.max_tokens.or(p.max_tokens).filter(|&n| n > 0) {
         // The JS host parses and re-encodes this request before fetch.
-        if cap > (1_i64 << 53) - 1 {
+        if cap > MAX_SAFE_INTEGER {
             return Err("max_tokens exceeds the JavaScript safe integer range".into());
         }
         // No catalog or context_window declarations in this profile: no known window to clamp to.
@@ -363,6 +485,11 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
                     "agent {name:?}: {field} is not supported in portable sessions"
                 ));
             }
+        }
+        if let Some(output) = &a.structured_output {
+            output
+                .check_session(&cfg.models[&a.model].model, env)
+                .map_err(|e| format!("agents.{name}.structured_output: {e}"))?;
         }
         for ts in &a.toolsets {
             if !matches!(
@@ -440,9 +567,14 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     } else {
         "chat/completions"
     };
-    let think = !a.toolsets.is_empty();
+    let mut model_params = model_params(id, m, p, !a.toolsets.is_empty())?;
+    if let Some(output) = &a.structured_output {
+        model_params.insert("response_format".into(), json!({"type":"json_schema", "json_schema":{
+            "name":output.name, "description":output.description, "strict":output.strict, "schema":output.schema
+        }}));
+    }
     Ok(Selected {
-        model_params: model_params(id, m, p, think)?,
+        model_params,
         endpoint: format!("{}/{route}", base.trim_end_matches('/')),
         responses,
         merge_messages,
@@ -466,6 +598,94 @@ mod tests {
             "version: 2\nagents: {a: {model: a/b}}",
         ] {
             assert!(parse(yaml).is_err(), "{yaml}");
+        }
+    }
+
+    #[test]
+    fn native_schema_is_per_agent_and_projected_without_normalization() {
+        let cfg = r"providers: {local: {}}
+agents:
+  root:
+    model: local/test
+    toolsets: [{type: think}]
+    structured_output:
+      name: result
+      schema:
+        type: object
+        properties: {values: {type: array, items: {$ref: '#/$defs/result'}}}
+        $defs: {result: {type: [string, 'null'], enum: [null, 'a']}}
+        required: []
+  other: {model: local/test}
+";
+        let params =
+            |agent| Value::Object(select(cfg, agent, &BTreeMap::new()).unwrap().model_params);
+        let schema = json!({"type":"object", "properties":{"values":{"type":"array","items":{"$ref":"#/$defs/result"}}},
+            "$defs":{"result":{"type":["string","null"], "enum":[null,"a"]}}, "required":[]});
+        assert_eq!(
+            params("root"),
+            json!({"model":"test", "tool_choice":"auto", "response_format":{
+            "type":"json_schema", "json_schema":{"name":"result", "description":"", "strict":false, "schema":schema}}})
+        );
+        assert_eq!(params("other"), json!({"model":"test"}));
+        assert!(parse(cfg).unwrap()["agents"][0]
+            .get("structured_output")
+            .is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_output_configs_and_lossy_schema_values() {
+        for output in [
+            "[]", "{}", "{name: out}", "{schema: {type: object, properties: {}}}",
+            "{name: out, schema: null}", "{name: out, schema: true}", "{name: out, schema: {type: string}}",
+            "{name: out, schema: {type: object, properties: []}}",
+            "{name: out, schema: {type: object, properties: {}, required: [2]}}",
+            "{name: out, schema: {type: object, properties: {}, additionalProperties: null}}",
+            "{name: out, schema: {type: object, properties: {}, $defs: {s: {const: [9007199254740993]}}}}",
+            "{name: out, schema: {type: object, properties: {}, enum: [-9007199254740993]}}",
+            "{name: out, schema: {type: object, properties: {x: {enum: [.nan]}}}}",
+            "{name: out, schema: {type: object, properties: {<<: {x: {type: string}}}}}",
+            "{name: out, schema: {type: object, properties: {false: {type: string}}}}",
+            "{name: out, schema: {type: object, properties: {}}, strict: 'true'}",
+            "{name: out, schema: {type: object, properties: {}}, typo: false}",
+            "{name: out, schema: {type: object, properties: {}}, mode: Tool}",
+        ] {
+            assert!(parse(&format!("agents: {{root: {{model: openai/test, structured_output: {output}}}}}")).is_err(), "{output}");
+        }
+    }
+
+    #[test]
+    fn rejects_unimplemented_output_modes_and_claude_fallback_before_open() {
+        let cfg = "providers: {local: {}}\nagents:\n  root: {model: local/test}\n  other: {model: 'local/$MODEL', structured_output: {mode: native, name: output, schema: {type: object, properties: {}}}}";
+        let tool = cfg.replace("mode: native", "mode: tool");
+        assert!(list(&tool).is_ok());
+        assert!(select(&tool, "root", &BTreeMap::new())
+            .err()
+            .unwrap()
+            .contains("tool mode"));
+        for model in [
+            " claude-opus-4.8 ",
+            "org/anthropic/CLAUDE-sonnet",
+            "anthropic.claude-3",
+            "foo/global.anthropic.claude-test",
+        ] {
+            let env = BTreeMap::from([("MODEL".into(), model.into())]);
+            assert!(
+                select(cfg, "root", &env).err().unwrap().contains("Claude"),
+                "{model}"
+            );
+        }
+        let env = BTreeMap::from([("MODEL".into(), "org/openai/claude-test".into())]);
+        assert!(select(cfg, "other", &env).is_ok()); // Go preserves an explicit openai/ qualifier.
+        assert!(select(&cfg.replace("mode: native", "mode: ''"), "other", &env).is_ok());
+        for name in ["''", "two words", &"x".repeat(65)] {
+            assert!(select(
+                &cfg.replace("name: output", &format!("name: {name}")),
+                "other",
+                &env
+            )
+            .err()
+            .unwrap()
+            .contains("name must be"));
         }
     }
 
