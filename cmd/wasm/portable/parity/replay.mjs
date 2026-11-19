@@ -183,6 +183,39 @@ async function run() {
   const apiFallback = apiTool.replace('model: local/test', 'model: local/test, fallback: {models: [local/backup]}');
   tests.fallbackHost = await replay(api, 'fallbackHost', apiFallback, [[{ error: { message: 'primary unavailable' } }], tool('greet', {}), answer], single,
     '/v1/chat/completions', greet);
+  const fixture = 'https://tool.invalid';
+  const httpConfig = ts => config.replace('model: local/test', `toolsets: [${JSON.stringify({ ...ts, allow_private_ips: true })}], model: local/test`);
+  async function approved({ api, options, trace, record }) {
+    trace.results.push(await api.chat({ ...options, messages: [{ role: 'user', content: 'go' }], autoApprove: true }, record));
+  }
+  const pages = new Map([
+    ['/article', '<!doctype html><html><head><title>Ignore</title></head><body><h2>News</h2><p>Hé <b>there</b> &amp; <em>friends</em>!<br>Read <a href="/next">next</a>.</p></body></html>'],
+    ['/ok.php', '<ul><li>One</li><li>Two</li></ul>'],
+    ['/hidden', '<script src="/never.js">throw 0</script><style>@import "/never.css";</style><img src="/never.png" alt="diagram">'],
+  ]);
+  for (const format of ['text', 'markdown']) {
+    const name = `fetch_${format}`;
+    const urls = ['/article', '/nested/no.php', '/ok.php', '/hidden'].map(path => fixture + path);
+    tests[name] = await replay(api, name, httpConfig({ type: 'fetch' }), [tool('fetch', { urls, format }), answer], approved, '/v1/chat/completions', req => {
+      const path = new URL(req.url).pathname;
+      if (path === '/robots.txt') return new Response('User-agent: *\nDisallow: /\nUser-agent: Cagent\nDisallow: *.php$\nAllow: /ok.php$');
+      if (!pages.has(path)) throw new Error('unexpected fetch fixture request');
+      return new Response(pages.get(path), { statusText: 'OK', headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    });
+  }
+  const row = { type: 'object', properties: { label: { type: 'string' }, text: { type: 'string' } }, required: ['text'] };
+  const postArgs = { rows: { type: 'array', items: row } };
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']) {
+    const name = `api_${method}`;
+    const ts = { type: 'api', api_config: { name: 'submit', instruction: 'Submit', method, endpoint: fixture + '/submit', args: postArgs } };
+    const values = { rows: [{ text: '{"keep":"<literal>&"}', label: null }, { text: '${env.WHO}' }] };
+    tests[name] = await replay(api, name, httpConfig(ts), [tool('submit', values), answer], approved, '/v1/chat/completions', async req => {
+      if (req.url !== fixture + '/submit' || req.method !== method) throw new Error('unexpected API fixture request');
+      const body = await req.text();
+      if (method === 'HEAD') return new Response(null, { status: 418, statusText: "I'm a teapot" });
+      return new Response(`${method} ${req.headers.get('Content-Type') ?? '(no content type)'}: ${body}`);
+    });
+  }
   const mcp = config.replace('agents:', `mcps:
   remote: {name: default, allow_private_ips: true, remote: {transport_type: streamable, url: 'https://tool.invalid/mcp', headers: {X-Agent: '\${env.WHO}'}}}
 toolsets:

@@ -1,8 +1,12 @@
+import { convertHTML } from './http-html.mjs';
+
 // Browser fetch has no dial hook. Only the operator's proxy can enforce the IP
 // policy after DNS resolution. See pkg/httpclient/egress.go for its protocol.
 const relayHeader = 'X-Docker-Agent-Location';
 const redirects = new Set([301, 302, 303, 307, 308]);
 const maxBody = 1 << 20;
+const encoder = new TextEncoder();
+const requestMethods = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 const userAgent = 'Cagent/dev (js; wasm)';
 
 function fields(value, allowed, where) {
@@ -76,8 +80,8 @@ async function request(raw, init, { proxy, allowPrivateIPs, checkDomain }, signa
   if (init.signal) signal = signal ? AbortSignal.any([signal, init.signal]) : init.signal;
   let { method = 'GET', body } = init;
   let headers = checkedHeaders(init.headers), target = webURL(raw);
-  if (typeof method !== 'string' || !/^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/i.test(method)) throw new Error('unsupported request method');
-  method = method.toUpperCase();
+  if (typeof method === 'string') method = method.toUpperCase();
+  if (!requestMethods.has(method)) throw new Error('unsupported request method');
   if (body != null && (method === 'GET' || method === 'HEAD' || !(typeof body === 'string' || body instanceof Uint8Array || body instanceof ArrayBuffer))) {
     throw new Error('expected a replayable request body on a non-GET/HEAD method');
   }
@@ -174,11 +178,13 @@ function deadline(seconds, parent) {
 async function readBytes(response, limit) {
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader(), chunks = [];
-  let size = 0;
+  let size = 0, reads = 0;
   try {
     while (size < limit) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (++reads > 65536) throw new Error('response chunk count limit reached');
+      if (!value.length) continue;
       const chunk = value.subarray(0, limit - size);
       chunks.push(chunk);
       size += chunk.length;
@@ -214,46 +220,76 @@ function domainPatterns(domains = []) {
   });
 }
 
-// Support the plain prefix-rule subset. Ambiguous or unsupported syntax denies
-// the fetch, rather than accidentally treating a disallow as an allow.
+// temoto/robotstxt ranks a wildcard by its *compiled* Go regexp length,
+// and searches anywhere in the decoded path (literal rules are prefixes).
+function robotsRule(value, allow) {
+  if (!/^[/*]/.test(value)) value = '/' + value;
+  let n = value.length;
+  while (value[n - 1] === '*') n--;
+  value = value.slice(0, n);
+  const wildcard = /[*$]/.test(value);
+  const end = value.endsWith('$');
+  const pattern = end ? value.slice(0, -1) : value;
+  if (pattern.includes('$')) throw new Error('unsupported interior $ in robots.txt rule');
+  const length = encoder.encode(value).length;
+  if (!wildcard) return { weight: length, allow, cost: 0, matches: path => value === '/' || path.startsWith(value) };
+  const parts = pattern.split('*').filter(Boolean);
+  const anchoredLast = end && !pattern.endsWith('*');
+  const weight = length + (value.match(/[\\.+*?()|[\]{}^]/g) ?? []).length;
+  function matches(path) {
+    if (path.includes('\n')) throw new Error('unsupported newline in robots.txt wildcard match');
+    let from = 0;
+    for (const [i, part] of parts.entries()) {
+      if (anchoredLast && i === parts.length - 1) return path.length - part.length >= from && path.endsWith(part);
+      const pos = path.indexOf(part, from);
+      if (pos < 0) return false;
+      from = pos + part.length;
+    }
+    return true;
+  }
+  return { weight, allow, cost: value.length, matches };
+}
+
 function robotsRules(text) {
   const agentName = userAgent.toLowerCase();
   let specificity = -1, inRules = false, best = -1, rules = [], hasGroup = false;
-  for (const raw of text.split(/[\r\n]/)) {
-    const comment = raw.indexOf('#');
-    if (comment > 0 && !/[ \t]/.test(raw[comment - 1])) throw new Error('unsupported inline robots.txt comment');
-    const line = (comment < 0 ? raw : raw.slice(0, comment)).trim();
-    if (!line) continue;
-    const m = /^([\w-]+):\s*(\S*)$/.exec(line);
+  // A missing value at EOF has no token; before a newline Go consumes the EOL token.
+  const lines = text.split(/[\r\n]/);
+  for (const [i, raw] of lines.entries()) {
+    const line = raw.replace(/^[ \t\v]+/, '');
+    if (!line || line.startsWith('#')) continue;
+    const m = /^([\w-]+):(.*)$/s.exec(line);
     if (!m) throw new Error('unsupported robots.txt directive');
-    const [, key, value] = m;
-    switch (key.toLowerCase()) {
-      case 'user-agent': case 'useragent':
-        if (!value) throw new Error('invalid robots.txt user agent');
-        if (inRules) specificity = -1;
-        if (value === '*') specificity = Math.max(specificity, 1);
-        else if (agentName.startsWith(value.toLowerCase())) {
-          if (value.length === 1) throw new Error('ambiguous robots.txt user agent');
-          specificity = Math.max(specificity, value.length);
-        }
-        hasGroup = true;
-        inRules = false;
-        break;
-      case 'disallow': case 'allow':
-        if (!value) break;
-        if (!hasGroup || !value.startsWith('/') || /[*$]/.test(value)) throw new Error('unsupported robots.txt rule');
-        if (specificity > best) { best = specificity; rules = []; }
-        inRules = true;
-        if (specificity >= 0 && specificity === best) rules.push([value, key.toLowerCase() === 'allow']);
-        break;
-      case 'sitemap': case 'host': break;
-      default: throw new Error('unsupported robots.txt directive');
+    // A # inside a token is literal; at the start of a token it starts a comment.
+    let [value, extra] = m[2].replace(/^[ \t\v]+/, '').split(/[ \t\v]+/, 2);
+    if (value.startsWith('#')) value = '';
+    else if (extra && !extra.startsWith('#')) throw new Error('unsupported robots.txt directive');
+    if (!value && i === lines.length - 1) break;
+    value ||= '\n';
+    const key = m[1].toLowerCase();
+    if (key === 'user-agent' || key === 'useragent') {
+      if (inRules) specificity = -1;
+      // In Go the wildcard beats a one-letter prefix, but no longer prefix.
+      if (value === '*') specificity = Math.max(specificity, 1);
+      else if (agentName.startsWith(value.toLowerCase())) specificity = Math.max(specificity, value.length === 1 ? 0 : value.length);
+      hasGroup = true;
+      inRules = false;
+    } else if (['allow', 'disallow', 'crawl-delay', 'crawldelay'].includes(key)) {
+      if (!hasGroup) throw new Error('robots.txt rule before user-agent');
+      if (specificity > best) { best = specificity; rules = []; }
+      inRules = true;
+      if (key === 'allow' || key === 'disallow') {
+        if (specificity >= 0 && specificity === best) rules.push(robotsRule(value, key === 'allow'));
+      } else if (!/^\d+(?:\.\d+)?$/.test(value) || !Number.isFinite(Number(value))) throw new Error('unsupported robots.txt crawl-delay');
     }
   }
   return path => {
-    let longest = -1, allow = true;
-    for (const [prefix, ok] of rules) {
-      if (path.startsWith(prefix) && prefix.length > longest) { longest = prefix.length; allow = ok; }
+    let longest = 0, allow = true, work = 0;
+    for (const rule of rules) {
+      if (rule.weight <= longest) continue; // Go keeps the first match on a tie.
+      work += rule.cost * path.length;
+      if (work > (8 << 20)) throw new Error('robots.txt wildcard match limit reached');
+      if (rule.matches(path)) { longest = rule.weight; allow = rule.allow; }
     }
     return allow;
   };
@@ -315,24 +351,30 @@ function fetchTool(ts, env, policy, seconds) {
       const headers = makeHeaders(env, accepts[format] ?? 'text/plain;q=1.0, */*;q=0.1');
       for (const raw of urls) {
         signal?.throwIfAborted();
-        const r = { url: raw, statusCode: 0, status: '', contentLength: 0 };
+        const r = { url: raw, statusCode: 0, status: '', contentType: undefined, contentLength: 0 };
         try {
+          if (raw.length > 16384) throw new Error('portable fetch URL too long');
           const url = webURL(raw);
           if (!robots.has(url.origin)) robots.set(url.origin, await loadRobots(url, robotsHeaders, policy, deadline(timeoutSeconds, signal)));
-          if (!robots.get(url.origin)(decodeURIComponent(url.pathname))) throw new Error('URL blocked by robots.txt');
+          // WHATWG URL removes dot segments. Check Go's original path as well
+          // as the path the browser will actually send. Neither includes query.
+          const original = decodeURIComponent(/^https?:\/\/[^/?#]+([^?#]*)/i.exec(raw)[1]);
+          const path = decodeURIComponent(url.pathname), allows = robots.get(url.origin);
+          if (!allows(original) || (path !== original && !allows(path))) throw new Error('URL blocked by robots.txt');
           const res = await request(url, { headers }, policy, deadline(timeoutSeconds, signal));
           r.statusCode = res.status;
           r.status = `${res.status} ${res.statusText}`.trimEnd();
           const type = res.headers.get('Content-Type');
           if (type) r.contentType = type;
-          // Parsing untrusted HTML with DOMParser can issue unguarded subresource requests.
-          if (type?.toLowerCase().includes('text/html') && (format === 'text' || format === 'markdown')) {
-            await res.body?.cancel();
-            throw new Error('HTML conversion is not supported; request format html for raw HTML');
-          }
           const bytes = await readBytes(res, maxBody);
-          if (bytes.length) r.body = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
-          r.contentLength = bytes.length;
+          let body = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
+          if (type?.includes('text/html') && (format === 'text' || format === 'markdown')) {
+            body = convertHTML(body, format);
+            const length = encoder.encode(body).length;
+            if (length > maxBody) throw new Error('converted HTML exceeds portable size limit');
+            r.contentLength = length;
+          } else r.contentLength = bytes.length;
+          if (body) r.body = body;
         } catch (err) {
           signal?.throwIfAborted();
           r.error = err.message;
@@ -350,25 +392,104 @@ function fetchTool(ts, env, policy, seconds) {
   };
 }
 
+// Go sorts valid UTF-8 map keys by bytes, not UTF-16 code units.
+function compareKeys(a, b) {
+  for (let i = 0; i < a.length && i < b.length;) {
+    const x = a.codePointAt(i), y = b.codePointAt(i);
+    if (x !== y) return x - y;
+    i += x > 0xffff ? 2 : 1;
+  }
+  return a.length - b.length;
+}
+
 // Keep the API schema subset small and explicit rather than silently dropping
 // constraints while translating optional properties for OpenAI strict mode.
 function apiParameters(args, required, method) {
-  if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('api_config.args must be an object');
-  if (!Array.isArray(required) || required.some(k => typeof k !== 'string' || !Object.hasOwn(args, k))) throw new Error('invalid api_config.required');
-  const properties = Object.create(null), names = Object.keys(args).sort();
-  for (const key of names) {
-    const prop = args[key];
-    fields(prop, ['type', 'description', 'enum'], 'api_config argument schema');
-    if (!['string', 'integer', 'number', 'boolean'].includes(prop.type) || (method === 'GET' && prop.type !== 'string')) {
-      throw new Error('portable api_config supports scalar POST arguments and string GET arguments');
-    }
+  let nodes = 0;
+  function schema(prop, depth) {
+    if (++nodes > 512 || depth > 16) throw new Error('portable API schema size or depth limit reached');
+    const type = prop?.type;
+    if (method === 'GET' && depth === 1 && type !== 'string') throw new Error('GET arguments must be strings');
+    const keys = ['type', 'description'];
+    if (type === 'array') keys.push('items');
+    else if (type === 'object') keys.push('properties', 'required', 'additionalProperties');
+    else keys.push('enum');
+    fields(prop, keys, 'api_config argument schema');
     if ('description' in prop && typeof prop.description !== 'string') throw new Error('invalid argument description');
-    if ('enum' in prop && (!Array.isArray(prop.enum) || !prop.enum.length || prop.enum.some(v => !scalarMatches(prop.type, v)))) throw new Error('invalid argument enum');
-    const schema = structuredClone(prop);
-    properties[key] = required.includes(key) ? schema : 'enum' in schema
-      ? { anyOf: [schema, { type: 'null' }] } : { ...schema, type: [schema.type, 'null'] };
+    if (type === 'array') return { ...prop, items: schema(prop.items, depth + 1) };
+    if (type === 'object') {
+      const { properties, required = [] } = prop;
+      if (!properties || typeof properties !== 'object' || Array.isArray(properties) || ('additionalProperties' in prop && prop.additionalProperties !== false)) {
+        throw new Error('portable API objects require named properties');
+      }
+      if (!Array.isArray(required) || required.length > 512 || required.some(k => typeof k !== 'string' || !Object.hasOwn(properties, k))) throw new Error('invalid api_config.required');
+      const names = Object.keys(properties), strict = Object.create(null);
+      if (names.length > 512) throw new Error('portable API schema size limit reached');
+      if (names.some(name => !name.isWellFormed())) throw new Error('invalid Unicode API argument name');
+      names.sort(compareKeys);
+      for (const name of names) {
+        const child = schema(properties[name], depth + 1);
+        if (required.includes(name)) strict[name] = child;
+        else if (child.enum || ['array', 'object'].includes(child.type)) strict[name] = { anyOf: [child, { type: 'null' }] };
+        else strict[name] = { ...child, type: [child.type, 'null'] };
+      }
+      return { ...prop, properties: strict, required: names, additionalProperties: false };
+    }
+    if (!['string', 'integer', 'number', 'boolean'].includes(type)) throw new Error('unsupported portable API argument type');
+    if ('enum' in prop && (!Array.isArray(prop.enum) || !prop.enum.length || prop.enum.length > 512 || prop.enum.some(v => !scalarMatches(type, v)))) throw new Error('invalid argument enum');
+    return structuredClone(prop);
   }
-  return { type: 'object', properties, required: names, additionalProperties: false };
+  return schema({ type: 'object', properties: args, required }, 0);
+}
+
+// Only POST encodes the validated values. A JSON.stringify key-list would
+// filter nested keys too; encode each object's own keys in Go's sorted order.
+function apiArguments(values, args, required, post) {
+  const parts = [];
+  let nodes = 0, size = 0, inputChars = 0;
+  function write(s) {
+    if ((size += s.length) > maxBody) throw new Error('API argument size limit reached');
+    parts.push(s);
+  }
+  function visit(value, prop, key, optional = false) {
+    if (++nodes > 16384) throw new Error('API argument size limit reached');
+    if (value === null && optional) { if (post) write('null'); return; }
+    if (prop.type === 'object') {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`invalid argument: ${key}`);
+      const required = prop.required ?? [];
+      for (const name of required) if (!Object.hasOwn(value, name) || value[name] == null) throw new Error(`missing required argument: ${name}`);
+      const names = Object.keys(value);
+      if (names.length > 512) throw new Error('API argument size limit reached');
+      if (post) { write('{'); names.sort(compareKeys); }
+      for (const [i, name] of names.entries()) {
+        if (!Object.hasOwn(prop.properties, name)) throw new Error(`unsupported API argument option: ${name}`);
+        if (post) write((i ? ',' : '') + JSON.stringify(name) + ':');
+        visit(value[name], prop.properties[name], name, !required.includes(name));
+      }
+      if (post) write('}');
+    } else if (prop.type === 'array') {
+      if (!Array.isArray(value)) throw new Error(`invalid array argument: ${key}`);
+      if (post) write('[');
+      for (const [i, item] of value.entries()) {
+        if (post && i) write(',');
+        visit(item, prop.items, key);
+      }
+      if (post) write(']');
+    } else {
+      if (!scalarMatches(prop.type, value) || (prop.enum && !prop.enum.includes(value))) throw new Error(`invalid argument: ${key}`);
+      if (typeof value === 'string' && (inputChars += value.length) > maxBody) throw new Error('API argument size limit reached');
+      if (post) {
+        const scalar = typeof value === 'string' ? value.toWellFormed() : value;
+        write(Object.is(scalar, -0) ? '-0' : JSON.stringify(scalar));
+      }
+    }
+  }
+  visit(values, { type: 'object', properties: args, required }, 'API arguments');
+  if (post) {
+    const json = parts.join('').replace(/[<>&\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    if (encoder.encode(json).length > maxBody) throw new Error('API request body too large');
+    return json;
+  }
 }
 
 function scalarMatches(type, value) {
@@ -379,7 +500,7 @@ function apiTool(config, env, policy, seconds) {
   fields(config, ['name', 'method', 'endpoint', 'instruction', 'headers', 'args', 'required'], 'api_config');
   const { name, method, endpoint, instruction = '', args = {}, required = [] } = config;
   if (typeof name !== 'string' || !/^[\w-]{1,64}$/.test(name)) throw new Error('invalid api_config.name');
-  if (method !== 'GET' && method !== 'POST') throw new Error('api_config.method must be GET or POST');
+  if (!requestMethods.has(method)) throw new Error('unsupported api_config.method');
   if (typeof instruction !== 'string') throw new Error('invalid api_config.instruction');
   if (typeof endpoint !== 'string' || !/^https?:\/\//i.test(endpoint)) throw new Error('expected absolute HTTP(S) api_config.endpoint');
   const authority = endpoint.slice(endpoint.indexOf('://') + 3).split(/[/?#]/, 1)[0];
@@ -389,20 +510,12 @@ function apiTool(config, env, policy, seconds) {
   return {
     name, description: instruction, instructions: instruction, parameters,
     async run(values, signal) {
-      fields(values, Object.keys(args), 'API argument');
-      for (const key of required) if (values[key] == null || !Object.hasOwn(values, key)) throw new Error(`missing required argument: ${key}`);
-      for (const [key, v] of Object.entries(values)) {
-        if (v === null && !required.includes(key)) continue;
-        const prop = args[key];
-        if (!scalarMatches(prop.type, v) || (prop.enum && !prop.enum.includes(v))) throw new Error(`invalid argument: ${key}`);
-      }
-      let url = expand(endpoint, env), body;
+      const body = apiArguments(values, args, required, method === 'POST');
+      let url = expand(endpoint, env);
       const headers = makeHeaders(env);
+      // Like Go, other verbs have neither argument interpolation nor a JSON body.
       if (method === 'GET') url = expand(url, env, values);
-      else {
-        headers.set('Content-Type', 'application/json');
-        body = JSON.stringify(values, Object.keys(values).sort());
-      }
+      else if (method === 'POST') headers.set('Content-Type', 'application/json');
       const target = webURL(url);
       if (target.origin !== origin) throw new Error('endpoint expansion must not change origin');
       const res = await request(target, { method, headers, body }, policy, deadline(seconds, signal));
@@ -439,6 +552,7 @@ export function httpTools(toolset, env = {}, toolProxy) {
       try {
         signal?.throwIfAborted();
         if (called !== name) throw new Error('unknown HTTP tool');
+        if (ts.type === 'api' && typeof rawArgs === 'string' && rawArgs.length > maxBody) throw new Error('API argument size limit reached');
         const args = typeof rawArgs === 'string' ? JSON.parse(rawArgs || '{}') : rawArgs;
         return { output: await tool.run(args ?? {}, signal), is_error: false };
       } catch (e) { return { output: e.message ?? 'request failed', is_error: true }; }
