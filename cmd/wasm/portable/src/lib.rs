@@ -33,6 +33,12 @@ enum Command {
     End {
         session: u32,
     },
+    AnswerElicitation {
+        session: u32,
+        id: String,
+        action: String,
+        content: Option<serde_json::Map<String, Value>>,
+    },
     Cancel {
         session: u32,
     },
@@ -65,7 +71,13 @@ impl Core {
                 history,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
-                let conv = Conversation::new(spec.model, spec.instruction, spec.think, history)?;
+                let conv = Conversation::new(
+                    spec.model,
+                    spec.instruction,
+                    &spec.toolsets,
+                    spec.merge_instructions,
+                    history,
+                )?;
                 self.next_id = self
                     .next_id
                     .checked_add(1)
@@ -82,6 +94,12 @@ impl Core {
                 Ok(Value::Array(self.session(session)?.chunk(chunk)?))
             }
             Command::End { session } => self.session(session)?.end(),
+            Command::AnswerElicitation {
+                session,
+                id,
+                action,
+                content,
+            } => self.session(session)?.answer(&id, &action, content),
             Command::Cancel { session } => {
                 self.session(session)?.cancel();
                 Ok(Value::Null)

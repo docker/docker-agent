@@ -61,7 +61,8 @@ pub struct Selected {
     pub endpoint: String,
     pub token: String,
     pub instruction: String,
-    pub think: bool,
+    pub toolsets: Vec<String>,
+    pub merge_instructions: bool,
 }
 
 fn load(yaml: &str) -> Result<Config, String> {
@@ -84,7 +85,7 @@ fn load(yaml: &str) -> Result<Config, String> {
             return Err("empty agent name".into());
         }
         for ts in &a.toolsets {
-            if ts.kind != "think" {
+            if !matches!(ts.kind.as_str(), "think" | "user_prompt") {
                 return Err(format!("unsupported toolset type {:?}", ts.kind));
             }
         }
@@ -245,7 +246,10 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         endpoint: format!("{}/chat/completions", base.trim_end_matches('/')),
         token,
         instruction: instruction(&a.instruction, env),
-        think: !a.toolsets.is_empty(),
+        toolsets: a.toolsets.iter().map(|ts| ts.kind.clone()).collect(),
+        merge_instructions: p.is_some()
+            || m.provider != "openai"
+            || base.trim_end_matches('/') != default_base,
     })
 }
 
