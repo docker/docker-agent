@@ -40,7 +40,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
 
-var defaultMaxTokens int64 = 32000
+const defaultMaxTokens int64 = 32000
 
 type loadOptions struct {
 	workingDir       string
@@ -692,11 +692,38 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	}, nil
 }
 
+// agentModelFactory obtains the shared store once; catalog and environment
+// lookups for an individual model wait until its reference has been resolved.
+func agentModelFactory(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, runConfig *config.RuntimeConfig, registry *provider.Registry, modelOpts []options.Opt) func(*latest.ModelConfig) (provider.Provider, error) {
+	store, storeErr := runConfig.ModelsDevStore()
+	return func(model *latest.ModelConfig) (provider.Provider, error) {
+		maxTokens := defaultMaxTokens
+		if model.MaxTokens != nil {
+			maxTokens = *model.MaxTokens
+		} else if storeErr == nil {
+			if m, err := store.GetModel(ctx, modelsdev.NewID(model.Provider, model.Model)); err == nil {
+				maxTokens = m.Limit.Output
+			}
+		}
+		opts := []options.Opt{
+			options.WithGateway(runConfig.ModelsGateway),
+			options.WithEncryptedConfig(runConfig.EncryptedConfig),
+			options.WithStructuredOutput(a.StructuredOutput),
+			options.WithProviders(cfg.Providers),
+			options.WithMaxTokens(maxTokens),
+		}
+		if storeErr == nil {
+			opts = append(opts, options.WithModelsDevStore(store))
+		}
+		opts = append(opts, modelOpts...)
+		return registry.NewWithModels(ctx, model, cfg.Models, runConfig.EnvProvider(), opts...)
+	}
+}
+
 func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, autoModelFn func() latest.ModelConfig, dmrFallbackSelectors map[string]bool, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry, modelOpts []options.Opt) ([]provider.Provider, error) {
 	var models []provider.Provider
 
-	// Obtain the singleton store once, outside the loop.
-	modelsStore, modelsStoreErr := runConfig.ModelsDevStore()
+	buildModel := agentModelFactory(ctx, cfg, a, runConfig, providerRegistry, modelOpts)
 
 	for name := range strings.SplitSeq(a.Model, ",") {
 		modelCfg, exists := cfg.Models[name]
@@ -719,38 +746,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 		modelCfg.Name = name
 		config.ApplyModelOverridePolicy(cfg, a.Name, name, &modelCfg)
 
-		// Use max_tokens from config if specified, otherwise look up from models.dev
-		maxTokens := &defaultMaxTokens
-		if modelCfg.MaxTokens != nil {
-			maxTokens = modelCfg.MaxTokens
-		} else if modelsStoreErr == nil {
-			m, err := modelsStore.GetModel(ctx, modelsdev.NewID(modelCfg.Provider, modelCfg.Model))
-			if err == nil {
-				maxTokens = &m.Limit.Output
-			}
-		}
-
-		opts := []options.Opt{
-			options.WithGateway(runConfig.ModelsGateway),
-			options.WithEncryptedConfig(runConfig.EncryptedConfig),
-			options.WithStructuredOutput(a.StructuredOutput),
-			options.WithProviders(cfg.Providers),
-		}
-		if maxTokens != nil {
-			opts = append(opts, options.WithMaxTokens(*maxTokens))
-		}
-		if modelsStoreErr == nil {
-			opts = append(opts, options.WithModelsDevStore(modelsStore))
-		}
-		opts = append(opts, modelOpts...)
-
-		// Pass the full models map for routing rules to resolve model references
-		model, err := providerRegistry.NewWithModels(ctx,
-			&modelCfg,
-			cfg.Models,
-			runConfig.EnvProvider(),
-			opts...,
-		)
+		model, err := buildModel(&modelCfg)
 		if err != nil {
 			// Return a cleaner error message for auto model selection failures,
 			// keeping the underlying cause (e.g. a declined DMR pull) so the
@@ -771,8 +767,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry, modelOpts []options.Opt) ([]provider.Provider, error) {
 	var fallbackModels []provider.Provider
 
-	// Obtain the singleton store once, outside the loop.
-	modelsStore, modelsStoreErr := runConfig.ModelsDevStore()
+	buildModel := agentModelFactory(ctx, cfg, a, runConfig, providerRegistry, modelOpts)
 
 	for _, name := range a.GetFallbackModels() {
 		modelCfg, exists := cfg.Models[name]
@@ -786,38 +781,7 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 		}
 		modelCfg.Name = name
 
-		// Use max_tokens from config if specified, otherwise look up from models.dev
-		maxTokens := &defaultMaxTokens
-		if modelCfg.MaxTokens != nil {
-			maxTokens = modelCfg.MaxTokens
-		} else if modelsStoreErr == nil {
-			m, err := modelsStore.GetModel(ctx, modelsdev.NewID(modelCfg.Provider, modelCfg.Model))
-			if err == nil {
-				maxTokens = &m.Limit.Output
-			}
-		}
-
-		opts := []options.Opt{
-			options.WithGateway(runConfig.ModelsGateway),
-			options.WithEncryptedConfig(runConfig.EncryptedConfig),
-			options.WithStructuredOutput(a.StructuredOutput),
-			options.WithProviders(cfg.Providers),
-		}
-		if maxTokens != nil {
-			opts = append(opts, options.WithMaxTokens(*maxTokens))
-		}
-		if modelsStoreErr == nil {
-			opts = append(opts, options.WithModelsDevStore(modelsStore))
-		}
-		opts = append(opts, modelOpts...)
-
-		// Pass the full models map for routing rules to resolve model references
-		model, err := providerRegistry.NewWithModels(ctx,
-			&modelCfg,
-			cfg.Models,
-			runConfig.EnvProvider(),
-			opts...,
-		)
+		model, err := buildModel(&modelCfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create fallback model '%s': %w", name, err)
 		}
@@ -842,7 +806,7 @@ func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.Ag
 		return nil, nil
 	}
 
-	modelsStore, modelsStoreErr := runConfig.ModelsDevStore()
+	buildModel := agentModelFactory(ctx, cfg, a, runConfig, providerRegistry, modelOpts)
 
 	modelCfg, exists := cfg.Models[titleRef]
 	if !exists {
@@ -854,31 +818,7 @@ func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.Ag
 	}
 	modelCfg.Name = titleRef
 
-	maxTokens := &defaultMaxTokens
-	if modelCfg.MaxTokens != nil {
-		maxTokens = modelCfg.MaxTokens
-	} else if modelsStoreErr == nil {
-		m, err := modelsStore.GetModel(ctx, modelsdev.NewID(modelCfg.Provider, modelCfg.Model))
-		if err == nil {
-			maxTokens = &m.Limit.Output
-		}
-	}
-
-	opts := []options.Opt{
-		options.WithGateway(runConfig.ModelsGateway),
-		options.WithEncryptedConfig(runConfig.EncryptedConfig),
-		options.WithStructuredOutput(a.StructuredOutput),
-		options.WithProviders(cfg.Providers),
-	}
-	if maxTokens != nil {
-		opts = append(opts, options.WithMaxTokens(*maxTokens))
-	}
-	if modelsStoreErr == nil {
-		opts = append(opts, options.WithModelsDevStore(modelsStore))
-	}
-	opts = append(opts, modelOpts...)
-
-	model, err := providerRegistry.NewWithModels(ctx, &modelCfg, cfg.Models, runConfig.EnvProvider(), opts...)
+	model, err := buildModel(&modelCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create title model '%s': %w", titleRef, err)
 	}
@@ -897,7 +837,7 @@ func getCompactionModelForAgent(ctx context.Context, cfg *latest.Config, a *late
 		return nil, nil
 	}
 
-	modelsStore, modelsStoreErr := runConfig.ModelsDevStore()
+	buildModel := agentModelFactory(ctx, cfg, a, runConfig, providerRegistry, modelOpts)
 
 	modelCfg, exists := cfg.Models[compactionRef]
 	if !exists {
@@ -909,31 +849,7 @@ func getCompactionModelForAgent(ctx context.Context, cfg *latest.Config, a *late
 	}
 	modelCfg.Name = compactionRef
 
-	maxTokens := &defaultMaxTokens
-	if modelCfg.MaxTokens != nil {
-		maxTokens = modelCfg.MaxTokens
-	} else if modelsStoreErr == nil {
-		m, err := modelsStore.GetModel(ctx, modelsdev.NewID(modelCfg.Provider, modelCfg.Model))
-		if err == nil {
-			maxTokens = &m.Limit.Output
-		}
-	}
-
-	opts := []options.Opt{
-		options.WithGateway(runConfig.ModelsGateway),
-		options.WithEncryptedConfig(runConfig.EncryptedConfig),
-		options.WithStructuredOutput(a.StructuredOutput),
-		options.WithProviders(cfg.Providers),
-	}
-	if maxTokens != nil {
-		opts = append(opts, options.WithMaxTokens(*maxTokens))
-	}
-	if modelsStoreErr == nil {
-		opts = append(opts, options.WithModelsDevStore(modelsStore))
-	}
-	opts = append(opts, modelOpts...)
-
-	model, err := providerRegistry.NewWithModels(ctx, &modelCfg, cfg.Models, runConfig.EnvProvider(), opts...)
+	model, err := buildModel(&modelCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create compaction model '%s': %w", compactionRef, err)
 	}
