@@ -70,6 +70,14 @@ The lean TUI supports **steering** and **follow-ups** while the agent is running
 
 The lean TUI supports a focused set of slash commands: `/new`, `/sessions`, `/compact`, `/model`, `/effort`, `/copy`, `/clear`, `/settings`, `/help`, `/exit` (alias: `/quit`), plus any agent-defined commands. Type `/model` (or `/model <provider/model>`) to switch the active model inline — the command opens a fuzzy-searchable list of available models. If what you type after `/` doesn't match any command, the autocomplete menu automatically falls back to fuzzy-matching it against available models (by name, provider, or ID) instead of dismissing — selecting a match switches the model just like `/model` would, without needing to type `/model` first; this fallback is unavailable when `/model` itself is disabled via `--disable-commands`. Type `/sessions` (or `/sessions <session-id>`) to browse and resume past sessions from the current working directory. Type `/copy` to copy the last assistant response to the clipboard. Type `/settings` to open the lean TUI's inline settings panel — see [User Settings](../../configuration/user-settings/index.md) for the fields it exposes.
 
+MCP elicitations and OAuth prompts appear inline in the lean TUI, in place of the editor, so a tool that asks for input no longer blocks the run with nothing on screen:
+
+- **Forms** (from MCP servers or the [`user_prompt`](../../tools/user-prompt/index.md) tool) support text, number/integer, boolean, single- and multi-select fields, and masked password fields, plus free-form answers. Single-select fields start on the schema `default` when one is set, instead of always the first option. The full TUI dialog behaves the same way and shares the same validation.
+- **URL prompts:** press <kbd>y</kbd> when done, <kbd>n</kbd> to decline, <kbd>o</kbd> to open the browser, or <kbd>Esc</kbd> to cancel.
+- **OAuth consent:** press <kbd>y</kbd> to authorize, or <kbd>n</kbd>/<kbd>Esc</kbd> to decline. A notice is shown when authorization completes.
+
+Concurrent requests are queued and shown oldest first. <kbd>Ctrl</kbd>+<kbd>C</kbd> cancels the prompt and interrupts the run. Starting a new conversation (`/new`), switching sessions, or reloading a tab cancels any elicitation still waiting from the previous conversation, in both the lean and full TUI, so the tool that raised it is not left waiting.
+
 Prefix a message with `!` to run it as a shell command directly, without going through the agent — for example `!git status`. The command runs in your default shell and its output is shown inline in the transcript. Bang commands are disabled in read-only sessions.
 
 Type `@` to open a fuzzy-searchable file completion menu (respects `.gitignore`); press <kbd>Tab</kbd> or <kbd>Enter</kbd> to insert the selected file's path into the message text.

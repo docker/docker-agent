@@ -161,7 +161,7 @@ Agent: Deploying to staging...
 
 How the prompt appears depends on the interface:
 
-- **TUI**: Displays an interactive dialog with appropriate input controls
+- **TUI**: Displays an interactive dialog with appropriate input controls. The lean TUI shows the same form inline in place of the editor
 - **CLI (exec mode)**: Automatically declines form prompts; the agent must handle the decline without reading an answer from stdin
 - **API/MCP**: Returns an elicitation request to the client
 
@@ -181,4 +181,4 @@ The agent should handle all possible actions:
 > [!WARNING]
 > **Context Requirement**
 >
-> The user prompt tool requires an elicitation handler. The TUI supports interactive form prompts; API/MCP clients must implement elicitation. Exec mode declines form prompts automatically. Interactive OAuth authorization in exec mode is a separate flow, not support for `user_prompt` forms.
+> The user prompt tool requires an elicitation handler. The full and lean TUIs support interactive form prompts; API/MCP clients must implement elicitation. Exec mode declines form prompts automatically. Interactive OAuth authorization in exec mode is a separate flow, not support for `user_prompt` forms.
