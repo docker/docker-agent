@@ -22,24 +22,72 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     return reply.ok;
   }
 
-  function session(opts, onEvent, history = []) {
+  function session(opts, onEvent, history) {
+    const stateless = history !== undefined;
     if (typeof opts?.yaml !== 'string') throw new Error('options.yaml must be a string');
     validateDocuments(opts.documents);
     for (const key of ['toolProxy', 'oauthRedirectURI']) {
       if (opts[key] != null) throw new Error(`options.${key} is not supported by the portable profile`);
     }
     let config = { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env } };
-    let handle = call('open', { ...config, history });
+    let handle = call('open', { ...config, history: history ?? [] });
     try { modelURL(handle.endpoint); }
     catch (e) { call('close', { session: handle.session }); throw e; }
-    let active, restarting = false, closing;
+    let active, batch, restarting = false, closing;
+    const pending = new Set();
 
     function emit(event) {
       if (typeof onEvent !== 'function') return;
       try { Promise.resolve(onEvent(event)).catch(report); } catch (e) { report(e); }
     }
     function report(e) { console.warn('docker-agent: onEvent failed', e); }
-    function abort() { active?.controller.abort(); }
+    function abort() {
+      active?.controller.abort();
+      pending.clear();
+      batch?.reject(new Error('chat aborted'));
+    }
+
+    function answer(reply) {
+      if (closing) throw new Error('session is closed');
+      const { id, action, content } = reply ?? {};
+      if (typeof id !== 'string' || !id) throw new Error('respondToElicitation: id is required');
+      if (!pending.has(id)) throw new Error('no pending elicitation with that ID');
+      const next = call('answerElicitation', { session: handle.session, id, action, content });
+      if (!pending.delete(id)) throw new Error('elicitation is no longer pending');
+      if (!next.waiting) batch.resolve(next.request);
+      for (const event of next.events) emit(event);
+    }
+
+    async function elicit(events, signal) {
+      const replies = new Promise((resolve, reject) => { batch = { resolve, reject }; });
+      try {
+        for (const event of events) {
+          if (signal.aborted) break;
+          if (event.type !== 'elicitation') { emit(event); continue; }
+          // Register before onEvent, including for synchronously answered prompts.
+          const id = event.id;
+          pending.add(id);
+          if (typeof onEvent !== 'function') answer({ id, action: 'decline' });
+          else if (stateless) answerFromCallback(event, id);
+          else emit(event);
+        }
+        return await replies;
+      } finally {
+        pending.clear();
+        batch = null;
+      }
+    }
+
+    async function answerFromCallback(event, id) {
+      try {
+        const reply = await onEvent(event);
+        if (!pending.has(id)) return;
+        const action = typeof reply === 'string' ? reply : reply === true ? 'accept' : reply?.action;
+        answer({ id, action, content: reply?.content });
+      } catch {
+        if (pending.has(id)) answer({ id, action: 'decline' });
+      }
+    }
     async function stop() {
       abort();
       await active?.done.catch(() => {});
@@ -68,6 +116,11 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           }
           signal.throwIfAborted();
           const next = call('end', { session });
+          if (next.waiting) {
+            body = await elicit(next.events, signal);
+            signal.throwIfAborted();
+            continue;
+          }
           for (const event of next.events) emit(event);
           if (next.result) return next.result;
           signal.throwIfAborted();
@@ -112,7 +165,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         });
       },
       async confirm() { throw new Error(closing ? 'session is closed' : 'no tool confirmation is pending'); },
-      async respondToElicitation() { throw new Error(closing ? 'session is closed' : 'no elicitation is pending'); },
+      async respondToElicitation(reply) { answer(reply); },
     };
   }
 

@@ -98,7 +98,7 @@ pub struct Selected {
     pub endpoint: String,
     pub token: String,
     pub instruction: String,
-    pub think: bool,
+    pub toolsets: Vec<String>,
     pub responses: bool,
     pub merge_messages: bool,
 }
@@ -365,7 +365,7 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             }
         }
         for ts in &a.toolsets {
-            if ts.kind != "think" {
+            if !matches!(ts.kind.as_str(), "think" | "user_prompt") {
                 return Err(format!("unsupported toolset type {:?}", ts.kind));
             }
         }
@@ -445,7 +445,7 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         merge_messages,
         token,
         instruction: instruction(&a.instruction, env),
-        think,
+        toolsets: a.toolsets.iter().map(|ts| ts.kind.clone()).collect(),
     })
 }
 

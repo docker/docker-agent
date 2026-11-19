@@ -36,6 +36,12 @@ enum Command {
     End {
         session: u32,
     },
+    AnswerElicitation {
+        session: u32,
+        id: String,
+        action: String,
+        content: Option<serde_json::Map<String, Value>>,
+    },
     Cancel {
         session: u32,
     },
@@ -103,9 +109,13 @@ impl Core {
                 history,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
-                let mut conv =
-                    Conversation::new(spec.model_params, spec.instruction, spec.think, history)?;
-                conv.merge_messages = spec.merge_messages;
+                let conv = Conversation::new(
+                    spec.model_params,
+                    spec.instruction,
+                    &spec.toolsets,
+                    spec.merge_messages,
+                    history,
+                )?;
                 self.next_id = self
                     .next_id
                     .checked_add(1)
@@ -134,6 +144,16 @@ impl Core {
             Command::End { session } => {
                 let s = self.session(session)?;
                 let next = s.conversation.end()?;
+                s.next(next)
+            }
+            Command::AnswerElicitation {
+                session,
+                id,
+                action,
+                content,
+            } => {
+                let s = self.session(session)?;
+                let next = s.conversation.answer(&id, &action, content)?;
                 s.next(next)
             }
             Command::Cancel { session } => {

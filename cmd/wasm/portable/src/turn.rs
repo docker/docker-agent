@@ -1,16 +1,30 @@
-use serde::Deserialize;
+use indexmap::IndexMap;
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
 const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_PARALLEL_CALLS: u64 = 16;
 // Every think result repeats the scratchpad and becomes part of the next request.
 const MAX_SCRATCHPAD_BYTES: usize = 64 * 1024;
+const MAX_ELICITATION_BYTES: usize = 64 * 1024;
+
+#[derive(Deserialize)]
+struct ToolsetDefinition {
+    instructions: String,
+    tools: Vec<Value>,
+}
+
+static CATALOG: LazyLock<BTreeMap<String, ToolsetDefinition>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("tool_catalog.json")).expect("generated tool catalog")
+});
+type Tools = IndexMap<&'static str, &'static Value>;
 
 pub struct Conversation {
     model_params: Map<String, Value>,
-    think: bool,
-    pub merge_messages: bool,
+    tools: Tools,
+    merge_messages: bool,
     messages: Vec<Value>,
     scratchpad: String,
     active: Option<Turn>,
@@ -25,6 +39,21 @@ struct Turn {
     input: u64,
     output: u64,
     step: Step,
+    pending: BTreeMap<String, usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Think {
+    thought: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Prompt {
+    message: String,
+    title: Option<String>,
+    schema: Option<Map<String, Value>>,
 }
 
 #[derive(Default)]
@@ -54,17 +83,40 @@ impl Conversation {
     pub fn new(
         model_params: Map<String, Value>,
         instruction: String,
-        think: bool,
+        toolsets: &[String],
+        merge_messages: bool,
         mut history: Vec<Value>,
     ) -> Result<Self, String> {
         validate_history(&history)?;
+        let mut tools = Tools::new();
+        let mut instructions = Vec::new();
         if !instruction.is_empty() {
-            history.insert(0, json!({"role":"system", "content":instruction}));
+            instructions.push(instruction.as_str());
         }
+        for kind in toolsets {
+            let def = CATALOG
+                .get(kind)
+                .ok_or_else(|| format!("unsupported toolset {kind:?}"))?;
+            if !def.instructions.is_empty() {
+                instructions.push(&def.instructions);
+            }
+            for tool in &def.tools {
+                let name = tool["function"]["name"]
+                    .as_str()
+                    .expect("catalog function name");
+                tools.entry(name).or_insert(tool);
+            }
+        }
+        history.splice(
+            0..0,
+            instructions
+                .into_iter()
+                .map(|text| json!({"role":"system", "content":text})),
+        );
         Ok(Self {
             model_params,
-            think,
-            merge_messages: false,
+            merge_messages,
+            tools,
             messages: history,
             scratchpad: "Thoughts:".into(),
             active: None,
@@ -87,6 +139,7 @@ impl Conversation {
             input: 0,
             output: 0,
             step: Step::default(),
+            pending: BTreeMap::new(),
         });
         self.messages.push(json!({"role":"user", "content":prompt}));
         Ok(self.request())
@@ -97,11 +150,9 @@ impl Conversation {
         body["messages"] = json!(self.messages);
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});
-        if self.think {
-            body["tools"] = json!([{"type":"function", "function":{
-                "name":"think", "description":"Append a thought to the conversation scratchpad. This obtains no new information and changes no external data.",
-                "parameters":{"type":"object", "properties":{"thought":{"type":"string"}}, "required":["thought"], "additionalProperties":false}
-            }}]);
+        if !self.tools.is_empty() {
+            body["tool_choice"] = "auto".into();
+            body["tools"] = Value::Array(self.tools.values().map(|tool| (*tool).clone()).collect());
         }
         if self.merge_messages {
             crate::wire::merge_text_messages(&mut body);
@@ -111,13 +162,15 @@ impl Conversation {
 
     pub fn chunk(&mut self, chunk: Value) -> Result<Vec<Value>, String> {
         let turn = self.active.as_mut().ok_or("no active turn")?;
+        if !turn.pending.is_empty() {
+            return Err("waiting for elicitation".into());
+        }
         if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
-            // Go has already admitted this user message (and completed tool steps).
-            // A provider error discards the unfinished response, not that history.
+            // Preserve admitted user messages and completed tools on a model error.
             self.active = None;
             return Err(format!("model failed: error receiving from stream: received error while streaming: {error}"));
         }
-        let result = turn.step.chunk(chunk, &turn.message_id, self.think);
+        let result = turn.step.chunk(chunk, &turn.message_id, &self.tools);
         if result.is_err() {
             self.cancel();
         }
@@ -132,6 +185,9 @@ impl Conversation {
     }
 
     pub fn end(&mut self) -> Result<Value, String> {
+        if self.active.as_ref().is_some_and(|t| !t.pending.is_empty()) {
+            return Err("waiting for elicitation".into());
+        }
         let result = self.finish_step();
         if result.is_err() {
             self.cancel();
@@ -154,7 +210,9 @@ impl Conversation {
             }));
         }
         let mut message = json!({"role":"assistant"});
-        message["content"] = Value::String(step.text);
+        if !step.text.is_empty() || step.calls.is_empty() {
+            message["content"] = Value::String(step.text);
+        }
         if !step.reasoning.is_empty() {
             message["reasoning_content"] = Value::String(step.reasoning);
         }
@@ -178,8 +236,7 @@ impl Conversation {
                 }
                 turn.tool_rounds += 1;
                 turn.message_id = format!("{}:{}", turn.id, turn.tool_rounds);
-                self.execute_calls(step.calls, message, &mut events)?;
-                Ok(json!({"events":events, "request":self.request()}))
+                self.execute_calls(step.calls, message, events)
             }
             Some(reason) => Err(format!(
                 "incomplete or unsupported model response (finish_reason: {reason})"
@@ -191,8 +248,9 @@ impl Conversation {
         &mut self,
         calls: BTreeMap<u64, Call>,
         mut message: Value,
-        events: &mut Vec<Value>,
-    ) -> Result<(), String> {
+        mut events: Vec<Value>,
+    ) -> Result<Value, String> {
+        let turn = self.active.as_mut().expect("active tool round");
         let mut ids = BTreeSet::new();
         let mut wire_calls = Vec::with_capacity(calls.len());
         let mut replies = Vec::with_capacity(calls.len());
@@ -200,28 +258,97 @@ impl Conversation {
             if *key != index as u64 || call.id.is_empty() || !ids.insert(&call.id) {
                 return Err("missing or duplicate tool call ID or index".into());
             }
-            let thought = call.thought()?;
-            if self.scratchpad.len() + 1 + thought.len() > MAX_SCRATCHPAD_BYTES {
-                return Err("think scratchpad size limit reached".into());
-            }
-            self.scratchpad.push('\n');
-            self.scratchpad.push_str(&thought);
+            wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
             events.push(
                 json!({"type":"tool_call", "id":call.id, "name":call.name, "args":call.arguments}),
             );
-            events.push(json!({"type":"tool_result", "id":call.id, "name":call.name, "output":self.scratchpad, "is_error":false}));
-            wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
-            replies.push(json!({"role":"tool", "tool_call_id":call.id, "content":self.scratchpad}));
+            let mut reply = json!({"role":"tool", "tool_call_id":call.id});
+            match call.name.as_str() {
+                "think" => {
+                    let Think { thought } = call.parse()?;
+                    if self.scratchpad.len() + 1 + thought.len() > MAX_SCRATCHPAD_BYTES {
+                        return Err("think scratchpad size limit reached".into());
+                    }
+                    self.scratchpad.push('\n');
+                    self.scratchpad.push_str(&thought);
+                    reply["content"] = json!(self.scratchpad);
+                    events.push(tool_result(&call.id, &call.name, &self.scratchpad, false));
+                }
+                "user_prompt" => {
+                    if call.arguments.len() > MAX_ELICITATION_BYTES {
+                        return Err("elicitation argument size limit reached".into());
+                    }
+                    let prompt: Prompt = call.parse()?;
+                    // Reserve the tool message in call order even if answers arrive out of order.
+                    let id = format!("{}:prompt:{index}", turn.message_id);
+                    turn.pending
+                        .insert(id.clone(), self.messages.len() + 1 + index);
+                    let meta = prompt
+                        .title
+                        .filter(|t| !t.is_empty())
+                        .map(|t| json!({"cagent/title":t}));
+                    events.push(json!({
+                        "type":"elicitation", "id":id, "message":prompt.message,
+                        "schema":prompt.schema, "meta":meta, "server_elicitation_id":"", "mode":"", "url":""
+                    }));
+                }
+                _ => return Err("missing or invalid tool name".into()),
+            }
+            replies.push(reply);
         }
         message["tool_calls"] = Value::Array(wire_calls);
         self.messages.push(message);
         self.messages.extend(replies);
-        Ok(())
+        Ok(self.after_tools(events))
+    }
+
+    fn after_tools(&self, events: Vec<Value>) -> Value {
+        if self.active.as_ref().is_some_and(|t| !t.pending.is_empty()) {
+            json!({"events":events, "waiting":true})
+        } else {
+            json!({"events":events, "request":self.request()})
+        }
+    }
+
+    pub fn answer(
+        &mut self,
+        id: &str,
+        action: &str,
+        content: Option<Map<String, Value>>,
+    ) -> Result<Value, String> {
+        if !matches!(action, "accept" | "decline" | "cancel") {
+            return Err(format!("unknown elicitation action {action:?}"));
+        }
+        let turn = self.active.as_mut().ok_or("no active turn")?;
+        let &index = turn
+            .pending
+            .get(id)
+            .ok_or("no pending elicitation with that ID")?;
+        let mut response = json!({"action":action});
+        if let Some(data) = content.filter(|c| !c.is_empty()) {
+            response["content"] = Value::Object(data);
+        }
+        let output = response.to_string();
+        if output.len() > MAX_ELICITATION_BYTES {
+            return Err("elicitation answer size limit reached".into());
+        }
+        let reply = &mut self.messages[index];
+        let call_id = reply["tool_call_id"]
+            .as_str()
+            .expect("reserved tool message");
+        let event = tool_result(call_id, "user_prompt", &output, action != "accept");
+        reply["content"] = Value::String(output);
+        turn.pending.remove(id);
+        Ok(self.after_tools(vec![event]))
     }
 }
 
+fn tool_result(id: &str, name: &str, output: &str, is_error: bool) -> Value {
+    json!({"type":"tool_result", "id":id, "name":name, "output":output, "is_error":is_error})
+}
+
 impl Step {
-    fn chunk(&mut self, chunk: Value, id: &str, think: bool) -> Result<Vec<Value>, String> {
+    fn chunk(&mut self, chunk: Value, id: &str, tools: &Tools) -> Result<Vec<Value>, String> {
         if !chunk["usage"].is_null() {
             if !chunk["usage"].is_object() {
                 return Err("invalid token usage".into());
@@ -271,14 +398,19 @@ impl Step {
                 .as_array()
                 .ok_or("expected tool_calls array")?
             {
-                if !think {
+                if tools.is_empty() {
                     return Err("tool calls are disabled".into());
                 }
                 let index = fragment["index"]
                     .as_u64()
                     .filter(|n| *n < MAX_PARALLEL_CALLS)
                     .ok_or("invalid tool call index")?;
-                if let Some(event) = self.calls.entry(index).or_default().append(fragment)? {
+                if let Some(event) = self
+                    .calls
+                    .entry(index)
+                    .or_default()
+                    .append(fragment, tools)?
+                {
                     events.push(event);
                 }
             }
@@ -289,7 +421,7 @@ impl Step {
 }
 
 impl Call {
-    fn append(&mut self, fragment: &Value) -> Result<Option<Value>, String> {
+    fn append(&mut self, fragment: &Value, tools: &Tools) -> Result<Option<Value>, String> {
         if string(fragment, "type")?.is_some_and(|t| t != "function") {
             return Err("unsupported tool call type".into());
         }
@@ -306,13 +438,16 @@ impl Call {
         }
         if let Some(name) = string(f, "name")? {
             self.name.push_str(name);
-            if !"think".starts_with(&self.name) {
-                return Err("unsupported tool name; only think is available".into());
+            if !tools.keys().any(|name| name.starts_with(&self.name)) {
+                return Err("unsupported tool name".into());
             }
         }
         let args = string(f, "arguments")?.unwrap_or_default();
         self.arguments.push_str(args);
-        if self.id.is_empty() || self.name != "think" || (self.announced && args.is_empty()) {
+        if self.id.is_empty()
+            || !tools.contains_key(self.name.as_str())
+            || (self.announced && args.is_empty())
+        {
             return Ok(None);
         }
         // Arguments can arrive before the name or ID. Flush them once a card can be identified.
@@ -327,23 +462,13 @@ impl Call {
         ))
     }
 
-    fn thought(&self) -> Result<String, String> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Args {
-            thought: String,
-        }
-
-        if self.name != "think" {
-            return Err("missing or invalid tool name".into());
-        }
-        // serde structs also deserialize from positional arrays, which our tool schema forbids.
+    fn parse<T: DeserializeOwned>(&self) -> Result<T, String> {
+        // serde structs also deserialize from positional arrays, which our tool schemas forbid.
         if !self.arguments.trim_start().starts_with('{') {
-            return Err("think arguments must be a JSON object".into());
+            return Err(format!("{} arguments must be a JSON object", self.name));
         }
-        serde_json::from_str::<Args>(&self.arguments)
-            .map(|a| a.thought)
-            .map_err(|e| format!("invalid think arguments: {e}"))
+        serde_json::from_str(&self.arguments)
+            .map_err(|e| format!("invalid {} arguments: {e}", self.name))
     }
 }
 
@@ -411,8 +536,15 @@ mod tests {
         Map::from_iter([("model".into(), name.into())])
     }
 
-    fn conversation(think: bool) -> Conversation {
-        Conversation::new(model("model"), "be concise".into(), think, vec![]).unwrap()
+    fn conversation(toolsets: &[&str]) -> Conversation {
+        Conversation::new(
+            model("model"),
+            "be concise".into(),
+            &toolsets.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            true,
+            vec![],
+        )
+        .unwrap()
     }
 
     fn chunk(delta: Value, reason: Option<&str>) -> Value {
@@ -444,7 +576,8 @@ mod tests {
             json!({"role":"assistant", "tool_calls":[{"id":"old", "type":"function", "function":{"name":"old-tool", "arguments":"{}"}}]}),
             json!({"role":"tool", "tool_call_id":"old", "content":"prior output"}),
         ];
-        let mut c = Conversation::new(model("test"), "sys".into(), false, history.clone()).unwrap();
+        let mut c =
+            Conversation::new(model("test"), "sys".into(), &[], true, history.clone()).unwrap();
         let request = c.begin("hello", "turn-id").unwrap();
         assert_eq!(
             request["messages"][0],
@@ -489,13 +622,20 @@ mod tests {
             vec![assistant.clone()],
             vec![assistant, tool.clone(), tool],
         ] {
-            assert!(Conversation::new(model("model"), String::new(), true, history).is_err());
+            assert!(Conversation::new(
+                model("model"),
+                String::new(),
+                &["think".into()],
+                true,
+                history
+            )
+            .is_err());
         }
     }
 
     #[test]
     fn interleaved_tool_fragments_and_usage() {
-        let mut c = conversation(true);
+        let mut c = conversation(&["think"]);
         let req = c.begin("go", "turn").unwrap();
         assert_eq!(req["tools"][0]["function"]["name"], "think");
         let events = c
@@ -564,7 +704,7 @@ mod tests {
 
     #[test]
     fn cancel_rolls_back_only_the_active_turn_including_its_tool_results() {
-        let mut c = conversation(true);
+        let mut c = conversation(&["think"]);
         c.begin("first", "first").unwrap();
         think_once(&mut c, "committed");
         answer(&mut c, "one");
@@ -579,7 +719,7 @@ mod tests {
             think_once(&mut c, "third")["events"][1]["output"],
             "Thoughts:\ncommitted\nthird"
         );
-        let mut other = conversation(true);
+        let mut other = conversation(&["think"]);
         other.begin("go", "go").unwrap();
         assert_eq!(
             think_once(&mut other, "isolated")["events"][1]["output"],
@@ -607,7 +747,7 @@ mod tests {
                 Some("stop"),
             )],
         ] {
-            let mut c = conversation(true);
+            let mut c = conversation(&["think"]);
             let saved = c.messages.clone();
             c.begin("broken", "id").unwrap();
             assert!(chunks
@@ -638,7 +778,7 @@ mod tests {
             json!({"index":1, "type":"custom", "id":"b"}),
             json!({"index":4294967295_u64}),
         ] {
-            let mut c = conversation(true);
+            let mut c = conversation(&["think"]);
             c.begin("go", "go").unwrap();
             let delta = json!({"tool_calls":[call(0, "a", "think", args), invalid]});
             assert!(c
@@ -647,7 +787,7 @@ mod tests {
                 .is_err());
             assert_eq!(c.scratchpad, "Thoughts:");
         }
-        let mut c = conversation(false);
+        let mut c = conversation(&[]);
         c.begin("go", "go").unwrap();
         assert!(c
             .chunk(chunk(
@@ -658,8 +798,103 @@ mod tests {
     }
 
     #[test]
+    fn official_openai_keeps_system_messages_separate_and_deduplicates_advertised_tools() {
+        let mut c = Conversation::new(
+            "model".into(),
+            "agent".into(),
+            &["user_prompt".into(), "think".into(), "user_prompt".into()],
+            false,
+            vec![],
+        )
+        .unwrap();
+        let req = c.begin("go", "turn").unwrap();
+        assert_eq!(
+            req["tools"],
+            json!([CATALOG["user_prompt"].tools[0], CATALOG["think"].tools[0]])
+        );
+        let texts: Vec<_> = req["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "agent",
+                &CATALOG["user_prompt"].instructions,
+                &CATALOG["think"].instructions,
+                &CATALOG["user_prompt"].instructions,
+                "go"
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_batch_never_exposes_a_prompt_or_commits_partial_history() {
+        let args = r#"{"message":"A?"}"#;
+        let mut c = conversation(&["user_prompt"]);
+        let saved = c.messages.clone();
+        for invalid in [
+            call(1, "b", "think", r#"{"thought":"no"}"#),
+            call(1, "b", "user_", args),
+            call(1, "a", "user_prompt", args),
+            call(1, "b", "user_prompt", "{}"),
+            call(1, "b", "user_prompt", r#"["question"]"#),
+            call(1, "b", "user_prompt", r#"{"message":"A","message":"B"}"#),
+            call(1, "b", "user_prompt", r#"{"message":"A?","url":"no"}"#),
+            call(1, "b", "user_prompt", r#"{"message":"A?","schema":"oops"}"#),
+            call(
+                1,
+                "b",
+                "user_prompt",
+                &json!({"message":"x".repeat(MAX_ELICITATION_BYTES)}).to_string(),
+            ),
+        ] {
+            c.begin("go", "turn").unwrap();
+            let delta = json!({"tool_calls":[call(0, "a", "user_prompt", args), invalid]});
+            assert!(c
+                .chunk(chunk(delta, Some("tool_calls")))
+                .and_then(|_| c.end())
+                .is_err());
+            assert_eq!(c.messages, saved);
+            assert!(c.active.is_none());
+        }
+    }
+
+    #[test]
+    fn incomplete_batch_rejects_model_chunks_and_waits_for_its_own_replies() {
+        let mut c = conversation(&["user_prompt"]);
+        c.begin("go", "turn").unwrap();
+        c.chunk(chunk(
+            json!({"tool_calls":[call(0,"one","user_",r#"{"message":"A?"}"#)]}),
+            None,
+        ))
+        .unwrap();
+        let events = c
+            .chunk(chunk(
+                json!({"tool_calls":[{"index":0,"function":{"name":"prompt"}}]}),
+                Some("tool_calls"),
+            ))
+            .unwrap();
+        assert_eq!(events[0]["arguments"], r#"{"message":"A?"}"#);
+        let waiting = c.end().unwrap();
+        let id = waiting["events"][1]["id"].as_str().unwrap();
+        assert!(waiting.get("request").is_none());
+        assert!(c.end().is_err());
+        assert!(c
+            .chunk(chunk(json!({"content":"skip"}), Some("stop")))
+            .is_err());
+        assert!(c.answer("one", "accept", None).is_err());
+        let next = c.answer(id, "accept", Some(Default::default())).unwrap();
+        assert_eq!(next["events"][0]["output"], r#"{"action":"accept"}"#);
+        assert!(c.answer(id, "decline", None).is_err());
+        assert_eq!(answer(&mut c, "ok")["result"]["message"]["content"], "ok");
+    }
+
+    #[test]
     fn repeated_tools_cannot_loop_forever_or_exhaust_the_scratchpad() {
-        let mut c = conversation(true);
+        let mut c = conversation(&["think"]);
         c.begin("loop", "loop").unwrap();
         for _ in 0..MAX_TOOL_ROUNDS {
             think_once(&mut c, "");
