@@ -238,22 +238,13 @@ func recoveredContent(msg *chat.Message, keepMarkers bool) (json.RawMessage, boo
 			return nil, false
 		}
 		blocks[text[0]]["text"] = msg.Content
-	} else if lastThinking >= firstTool {
-		return nil, false
-	}
-	patched := make([]map[string]any, 0, len(blocks))
-	inserted := len(text) > 0 || msg.Content == ""
-	for _, b := range blocks {
-		if !inserted && b["type"] == "tool_use" {
-			patched = append(patched, map[string]any{"type": "text", "text": msg.Content})
-			inserted = true
+	} else {
+		if lastThinking >= firstTool {
+			return nil, false
 		}
-		patched = append(patched, b)
+		blocks = slices.Insert(blocks, firstTool, map[string]any{"type": "text", "text": msg.Content})
 	}
-	if !inserted {
-		patched = append(patched, map[string]any{"type": "text", "text": msg.Content})
-	}
-	raw, err := json.Marshal(patched)
+	raw, err := json.Marshal(blocks)
 	return raw, err == nil
 }
 
