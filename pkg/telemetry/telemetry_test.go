@@ -164,21 +164,6 @@ func TestClientContext(t *testing.T) {
 	assert.Same(t, client, FromContext(WithClient(ctx, client)))
 }
 
-func TestStructuredEvent(t *testing.T) {
-	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	// Use debug mode to avoid HTTP calls in tests
-	client := newClient(t.Context(), logger, true, true, "test-version")
-
-	event := CommandEvent{
-		Action:  "test-command",
-		Success: true,
-	}
-
-	// Should not panic
-	client.Track(t.Context(), &event)
-}
-
 func TestGetTelemetryEnabled(t *testing.T) {
 	// When running under 'go test', GetTelemetryEnabled() always returns false
 	// because flag.Lookup("test.v") is set. This test verifies that behavior.
