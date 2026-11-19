@@ -1,0 +1,1663 @@
+{
+  "iban_lengths": {
+    "AD": 24,
+    "AE": 23,
+    "AL": 28,
+    "AT": 20,
+    "AZ": 28,
+    "BA": 20,
+    "BE": 16,
+    "BG": 22,
+    "BH": 22,
+    "BI": 27,
+    "BR": 29,
+    "BY": 28,
+    "CH": 21,
+    "CR": 22,
+    "CY": 28,
+    "CZ": 24,
+    "DE": 22,
+    "DJ": 27,
+    "DK": 18,
+    "DO": 28,
+    "EE": 20,
+    "EG": 29,
+    "ES": 24,
+    "FI": 18,
+    "FK": 18,
+    "FO": 18,
+    "FR": 27,
+    "GB": 22,
+    "GE": 22,
+    "GI": 23,
+    "GL": 18,
+    "GR": 27,
+    "GT": 28,
+    "HR": 21,
+    "HU": 28,
+    "IE": 22,
+    "IL": 23,
+    "IQ": 23,
+    "IS": 26,
+    "IT": 27,
+    "JO": 30,
+    "KW": 30,
+    "KZ": 20,
+    "LB": 28,
+    "LC": 32,
+    "LI": 21,
+    "LT": 20,
+    "LU": 20,
+    "LV": 21,
+    "LY": 25,
+    "MC": 27,
+    "MD": 24,
+    "ME": 22,
+    "MK": 19,
+    "MN": 20,
+    "MR": 27,
+    "MT": 31,
+    "MU": 30,
+    "NI": 28,
+    "NL": 18,
+    "NO": 15,
+    "OM": 23,
+    "PK": 24,
+    "PL": 28,
+    "PS": 29,
+    "PT": 25,
+    "QA": 29,
+    "RO": 24,
+    "RS": 22,
+    "RU": 33,
+    "SA": 24,
+    "SC": 31,
+    "SD": 18,
+    "SE": 24,
+    "SI": 19,
+    "SK": 24,
+    "SM": 27,
+    "SO": 23,
+    "ST": 25,
+    "SV": 28,
+    "TL": 23,
+    "TN": 24,
+    "TR": 26,
+    "UA": 29,
+    "VA": 22,
+    "VG": 24,
+    "XK": 20,
+    "YE": 30
+  },
+  "rules": [
+    {
+      "pattern": "((?P<secret>(A(?:3T[0-9A-Z]|KIA|GPA|IDA|ROA|IPA|N(?:PA|VA)|SIA))[0-9A-Z]{16})[\"']?)",
+      "keywords": [
+        "AKIA",
+        "AGPA",
+        "AIDA",
+        "AROA",
+        "AIPA",
+        "ANPA",
+        "ANVA",
+        "ASIA",
+        "A3T"
+      ],
+      "case_sensitive": true,
+      "validator": "AWSAccessKeyID"
+    },
+    {
+      "pattern": "(?i:[\"']?AWS_?(SEC(RET)?)?_?(ACCESS)?_?KEY[\"']?[\\t\\n\\f\\r ]*(:|=(?:>|(?:)))?[\\t\\n\\f\\r ]*[\"']?(?P<secret>[\\+/-9=A-Za-zſK]{40})[\"']?)",
+      "keywords": [
+        "key"
+      ]
+    },
+    {
+      "pattern": "(?P<secret>ghp_[0-9A-Za-z]{36})",
+      "keywords": [
+        "ghp_"
+      ],
+      "validator": "GitHubChecksum"
+    },
+    {
+      "pattern": "(?P<secret>gho_[0-9A-Za-z]{36})",
+      "keywords": [
+        "gho_"
+      ],
+      "validator": "GitHubChecksum"
+    },
+    {
+      "pattern": "(?P<secret>(gh[su])_[0-9A-Za-z]{36})",
+      "keywords": [
+        "ghu_",
+        "ghs_"
+      ],
+      "validator": "GitHubChecksum"
+    },
+    {
+      "pattern": "ghs_ey[\\-0-9A-Z_a-z]{10,}\\.ey[\\-0-9A-Z_a-z]{10,}\\.[\\-0-9A-Z_a-z]{10,}",
+      "keywords": [
+        "ghs_ey"
+      ],
+      "case_sensitive": true,
+      "validator": "GitHubStatelessToken"
+    },
+    {
+      "pattern": "(?P<secret>ghr_[0-9A-Za-z]{36})",
+      "keywords": [
+        "ghr_"
+      ],
+      "validator": "GitHubChecksum"
+    },
+    {
+      "pattern": "(?P<secret>github_pat_[0-9A-Za-z]{22}_[0-9A-Za-z]{59})",
+      "keywords": [
+        "github_pat_"
+      ],
+      "validator": "GitHubChecksum"
+    },
+    {
+      "pattern": "(?P<secret>glpat-[\\-0-9A-Z_a-z]{20})",
+      "keywords": [
+        "glpat-"
+      ]
+    },
+    {
+      "pattern": "(?P<secret>hf_[0-9A-Za-z]{34,40})",
+      "keywords": [
+        "hf_"
+      ]
+    },
+    {
+      "pattern": "(?i:-----[\\t\\n\\f\\r ]*?BEGIN[ \\-0-9A-Z_a-zſK]*?PRIVATE KEY( BLOCK)?[\\t\\n\\f\\r ]*?-----[\\t\\n\\f\\r ]*?(?P<secret>[\\n\\r\\+/-9=A-Z\\\\a-zſK][\\t\\n\\f\\r \\+/-9=A-Z\\\\a-zſK]+)[\\t\\n\\f\\r ]*?-----[\\t\\n\\f\\r ]*?END[ \\-0-9A-Z_a-zſK]*? PRIVATE KEY( BLOCK)?[\\t\\n\\f\\r ]*?-----)",
+      "keywords": [
+        "-----"
+      ]
+    },
+    {
+      "pattern": "shp(ss|at|ca|pa)_[0-9A-Fa-f]{32}",
+      "keywords": [
+        "shpss_",
+        "shpat_",
+        "shpca_",
+        "shppa_"
+      ]
+    },
+    {
+      "pattern": "(?P<secret>xox[abprs]-([0-9A-Za-z]{10,48}))",
+      "keywords": [
+        "xoxb-",
+        "xoxa-",
+        "xoxp-",
+        "xoxr-",
+        "xoxs-"
+      ]
+    },
+    {
+      "pattern": "(?i:(?P<secret>SK_(TEST|LIVE|PROD)_[0-9A-Za-zſK]{10,32}))",
+      "keywords": [
+        "sk_test_",
+        "sk_live_",
+        "sk_prod_"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>HEROKU[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})[\"'])",
+      "keywords": [
+        "heroku"
+      ]
+    },
+    {
+      "pattern": "(?-s:https://hooks.slack.com/services/[\\+/-9A-Za-z]{44,48})",
+      "keywords": [
+        "hooks.slack.com"
+      ]
+    },
+    {
+      "pattern": "SK[0-9A-Fa-f]{32}",
+      "keywords": [
+        "SK"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "AGE-SECRET-KEY-1[02-9AC-HJ-NP-Z]{58}",
+      "keywords": [
+        "AGE-SECRET-KEY-1"
+      ],
+      "case_sensitive": true,
+      "validator": "AgeSecretKey"
+    },
+    {
+      "pattern": "(?i-s:(?P<key>FACEBOOK[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Fa-f]{32})[\"'])",
+      "keywords": [
+        "facebook"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>TWITTER[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Fa-f]{35,44})[\"'])",
+      "keywords": [
+        "twitter"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>ADOBE[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Fa-f]{32})[\"'])",
+      "keywords": [
+        "adobe"
+      ]
+    },
+    {
+      "pattern": "(p8e-)[0-9A-Za-zſK]{32}",
+      "keywords": [
+        "p8e-"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>ALIBABA[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Za-zſK]{30})[\"'])",
+      "keywords": [
+        "alibaba"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>ASANA[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9]{16})[\"'])",
+      "keywords": [
+        "asana"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>ASANA[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Za-zſK]{32})[\"'])",
+      "keywords": [
+        "asana"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>ATLASSIAN[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Za-zſK]{24})[\"'])",
+      "keywords": [
+        "atlassian"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>BITBUCKET[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Za-zſK]{32})[\"'])",
+      "keywords": [
+        "bitbucket"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>BITBUCKET[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[\\-0-9A-Z_a-zſK]{64})[\"'])",
+      "keywords": [
+        "bitbucket"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>BEAMER[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>B_[\\-0-9=A-Z_a-zſK]{44})[\"'])",
+      "keywords": [
+        "beamer"
+      ]
+    },
+    {
+      "pattern": "(CLOJARS_)[0-9A-Za-zſK]{60}",
+      "keywords": [
+        "CLOJARS_"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "(?i-s:(?P<key>CONTENTFUL[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[\\-0-9=A-Z_a-zſK]{43})[\"'])",
+      "keywords": [
+        "contentful"
+      ]
+    },
+    {
+      "pattern": "dapi[0-9a-h]{32}",
+      "keywords": [
+        "dapi"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>DISCORD[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Ha-h]{64})[\"'])",
+      "keywords": [
+        "discord"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>DISCORD[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9]{18})[\"'])",
+      "keywords": [
+        "discord"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>DISCORD[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[\\-0-9=A-Z_a-zſK]{32})[\"'])",
+      "keywords": [
+        "discord"
+      ]
+    },
+    {
+      "pattern": "(dp\\.pt\\.)[0-9A-Za-zſK]{43}",
+      "keywords": [
+        "dp.pt."
+      ]
+    },
+    {
+      "pattern": "(?i-s:(DROPBOX[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"']([0-9A-Za-zſK]{15})[\"'])",
+      "keywords": [
+        "dropbox"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(DROPBOX[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](SL\\.[\\-0-9=A-Z_a-zſK]{135})[\"'])",
+      "keywords": [
+        "dropbox"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(DROPBOX[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'][0-9A-Za-zſK]{11}(AAAAAAAAAA)[\\-0-9=A-Z_a-zſK]{43}[\"'])",
+      "keywords": [
+        "dropbox"
+      ]
+    },
+    {
+      "pattern": "[\"']duffel_(test|live)_[\\-0-9A-Z_a-zſK]{43}[\"']",
+      "keywords": [
+        "duffel_test_",
+        "duffel_live_"
+      ]
+    },
+    {
+      "pattern": "dt0c01\\.[0-9A-Za-zſK]{24}\\.[0-9A-Za-zſK]{64}",
+      "keywords": [
+        "dt0c01."
+      ]
+    },
+    {
+      "pattern": "EZ[AT]K[0-9A-Za-zſK]{54}",
+      "keywords": [
+        "EZAK",
+        "EZTK"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "(?i-s:(?P<key>FASTLY[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[\\-0-9=A-Z_a-zſK]{32})[\"'])",
+      "keywords": [
+        "fastly"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>FINICITY[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Za-zſK]{20})[\"'])",
+      "keywords": [
+        "finicity"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>FINICITY[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Fa-f]{32})[\"'])",
+      "keywords": [
+        "finicity"
+      ]
+    },
+    {
+      "pattern": "(?P<secret>FLW(PUB|SEC)K_TEST-[0-9A-Ha-h]{32}(?i:-X))",
+      "keywords": [
+        "FLWSECK_TEST-",
+        "FLWPUBK_TEST-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "(?P<secret>FLWSECK_TEST[0-9a-h]{12})",
+      "keywords": [
+        "FLWSECK_TEST"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "fio-u-[\\-0-9=A-Z_a-zſK]{64}",
+      "keywords": [
+        "fio-u-"
+      ]
+    },
+    {
+      "pattern": "[\"']live_[\\-0-9=A-Z_a-zſK]{40}[\"']",
+      "keywords": [
+        "live_"
+      ]
+    },
+    {
+      "pattern": "[\"']?eyJrIjoi[\\-0-9=A-Z_a-zſK]{72,92}[\"']?",
+      "keywords": [
+        "eyJrIjoi"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "(?i:[0-9A-Za-zſK]{14}\\.ATLASV1\\.[\\-0-9=A-Z_a-zſK]{60,70})",
+      "keywords": [
+        "atlasv1."
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>HUBSPOT[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Ha-h]{8}-[0-9A-Ha-h]{4}-[0-9A-Ha-h]{4}-[0-9A-Ha-h]{4}-[0-9A-Ha-h]{12})[\"'])",
+      "keywords": [
+        "hubspot"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>INTERCOM[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9=A-Z_a-zſK]{60})[\"'])",
+      "keywords": [
+        "intercom"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>INTERCOM[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Ha-h]{8}-[0-9A-Ha-h]{4}-[0-9A-Ha-h]{4}-[0-9A-Ha-h]{4}-[0-9A-Ha-h]{12})[\"'])",
+      "keywords": [
+        "intercom"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(IONIC[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](ION_[0-9A-Za-zſK]{42})[\"'])",
+      "keywords": [
+        "ionic"
+      ]
+    },
+    {
+      "pattern": "(?P<secret>ey[\\-0-9A-Z_a-z]{17,}\\.ey[\\-0-9A-Z_a-z]{17,}\\.[\\-0-9A-Z_a-z]{10,})",
+      "keywords": [
+        ".eyJ"
+      ],
+      "case_sensitive": true,
+      "validator": "JWT"
+    },
+    {
+      "pattern": "lin_api_[0-9A-Za-zſK]{40}",
+      "keywords": [
+        "lin_api_"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>LINEAR[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Fa-f]{32})[\"'])",
+      "keywords": [
+        "linear"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>LOB[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>(LIVE|TEST)_[0-9A-Fa-f]{35})[\"'])",
+      "keywords": [
+        "lob"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>LOB[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>(TEST|LIVE)_PUB_[0-9A-Fa-f]{31})[\"'])",
+      "keywords": [
+        "lob"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>MAILCHIMP[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Fa-f]{32}-US20)[\"'])",
+      "keywords": [
+        "mailchimp"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>MAILGUN[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>(PUB)?KEY-[0-9A-Fa-f]{32})[\"'])",
+      "keywords": [
+        "mailgun"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>MAILGUN[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Ha-h]{32}-[0-9A-Ha-h]{8}-[0-9A-Ha-h]{8})[\"'])",
+      "keywords": [
+        "mailgun"
+      ]
+    },
+    {
+      "pattern": "(?i:(PK\\.[0-9A-Za-zſK]{60}\\.[0-9A-Za-zſK]{22}))",
+      "keywords": [
+        "pk."
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>MESSAGEBIRD[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Za-zſK]{25})[\"'])",
+      "keywords": [
+        "messagebird"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>MESSAGEBIRD[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Ha-h]{8}-[0-9A-Ha-h]{4}-[0-9A-Ha-h]{4}-[0-9A-Ha-h]{4}-[0-9A-Ha-h]{12})[\"'])",
+      "keywords": [
+        "messagebird"
+      ]
+    },
+    {
+      "pattern": "NRAK-[0-9A-Z]{27}",
+      "keywords": [
+        "NRAK-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "(?i-s:(?P<key>NEWRELIC[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Za-zſK]{64})[\"'])",
+      "keywords": [
+        "newrelic"
+      ]
+    },
+    {
+      "pattern": "NRJS-[0-9a-f]{19}",
+      "keywords": [
+        "NRJS-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "npm_[0-9A-Za-zſK]{36}",
+      "keywords": [
+        "npm_"
+      ]
+    },
+    {
+      "pattern": "pscale_pw_[\\-\\.0-9A-Z_a-zſK]{43}",
+      "keywords": [
+        "pscale_pw_"
+      ]
+    },
+    {
+      "pattern": "pscale_tkn_[\\-\\.0-9A-Z_a-zſK]{43}",
+      "keywords": [
+        "pscale_tkn_"
+      ]
+    },
+    {
+      "pattern": "packagist_(uut|o(?:ut|rt))_[0-9A-Fa-f]{68}",
+      "keywords": [
+        "packagist_uut_",
+        "packagist_out_",
+        "packagist_ort_"
+      ]
+    },
+    {
+      "pattern": "PMAK-[0-9A-Fa-f]{24}-[0-9A-Fa-f]{34}",
+      "keywords": [
+        "PMAK-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "pul-[0-9a-f]{40}",
+      "keywords": [
+        "pul-"
+      ]
+    },
+    {
+      "pattern": "rubygems_[0-9a-f]{48}",
+      "keywords": [
+        "rubygems_"
+      ]
+    },
+    {
+      "pattern": "SG\\.[\\-\\.0-9A-Z_a-zſK]{66}",
+      "keywords": [
+        "SG."
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "xkeysib-[0-9a-f]{64}-[0-9A-Za-zſK]{16}",
+      "keywords": [
+        "xkeysib-"
+      ]
+    },
+    {
+      "pattern": "shippo_(live|test)_[0-9a-f]{40}",
+      "keywords": [
+        "shippo_live_",
+        "shippo_test_"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>LINKEDIN[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[A-Za-zſK]{16})[\"'])",
+      "keywords": [
+        "linkedin"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>LINKEDIN[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Za-zſK]{14})[\"'])",
+      "keywords": [
+        "linkedin"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>TWITCH[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}[\"'](?P<secret>[0-9A-Za-zſK]{30})[\"'])",
+      "keywords": [
+        "twitch"
+      ]
+    },
+    {
+      "pattern": "(?i-s:(?P<key>TYPEFORM[ ,-\\.0-9A-Z_a-zſK]{0,25})([=>]|:=|\\|\\|:|<=|=>|:).{0,5}(?P<secret>TFP_[\\-\\.0-9=A-Z_a-zſK]{59}))",
+      "keywords": [
+        "typeform"
+      ]
+    },
+    {
+      "pattern": "(?i:(\\.(DOCKERC(?:ONFIGJSON|FG)):[\\t\\n\\f\\r ]*\\|*[\\t\\n\\f\\r ]*(?P<secret>(E[WYwy])+[\\+/-9=A-Za-zſK]+)))",
+      "keywords": [
+        "dockerc"
+      ],
+      "validator": "DockerConfigSecret"
+    },
+    {
+      "pattern": "dckr_pat_[0-9A-Za-z]{27}",
+      "keywords": [
+        "dckr_pat_"
+      ]
+    },
+    {
+      "pattern": "dckr_oat_[0-9A-Za-z]{27}",
+      "keywords": [
+        "dckr_oat_"
+      ]
+    },
+    {
+      "pattern": "sk-[\\-0-9A-Z_a-z]{20,}T3BlbkFJ[\\-0-9A-Z_a-z]{20,}",
+      "keywords": [
+        "T3BlbkFJ"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "sk-ant-(api|sid|admin)[0-9]{2}-[\\-0-9A-Z_a-z]{93}AA",
+      "keywords": [
+        "sk-ant-"
+      ]
+    },
+    {
+      "pattern": "AIza[\\-0-9A-Z_a-z]{35}",
+      "keywords": [
+        "AIza"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "GOCSPX-[\\-0-9A-Z_a-z]{28}",
+      "keywords": [
+        "GOCSPX-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "do[opr]_v1_[0-9a-f]{64}",
+      "keywords": [
+        "dop_v1_",
+        "doo_v1_",
+        "dor_v1_"
+      ]
+    },
+    {
+      "pattern": "whsec_[0-9A-Za-z]{32,}",
+      "keywords": [
+        "whsec_"
+      ]
+    },
+    {
+      "pattern": "AKCp[0-9A-Za-z]{69,73}",
+      "keywords": [
+        "AKCp"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "sntrys_eyJ[\\+\\-/-9=A-Z_a-z]{40,}",
+      "keywords": [
+        "sntrys_"
+      ]
+    },
+    {
+      "pattern": "(?i:RK_(TEST|LIVE|PROD)_[0-9A-Za-zſK]{10,32})",
+      "keywords": [
+        "rk_test_",
+        "rk_live_",
+        "rk_prod_"
+      ]
+    },
+    {
+      "pattern": "ntn_[0-9A-Za-z]{46}",
+      "keywords": [
+        "ntn_"
+      ]
+    },
+    {
+      "pattern": "glptt-[0-9a-f]{40}",
+      "keywords": [
+        "glptt-"
+      ]
+    },
+    {
+      "pattern": "hvs\\.[\\-0-9A-Z_a-z]{90,200}",
+      "keywords": [
+        "hvs."
+      ]
+    },
+    {
+      "pattern": "xoxe(\\.xox[bp])?-[\\-\\.0-9A-Za-z]{40,300}",
+      "keywords": [
+        "xoxe-",
+        "xoxe.xox"
+      ]
+    },
+    {
+      "pattern": "r8_[0-9A-Za-z]{37}",
+      "keywords": [
+        "r8_"
+      ]
+    },
+    {
+      "pattern": "ATATT3xFfGF0[\\-0-9=A-Z_a-z]{180,250}",
+      "keywords": [
+        "ATATT3xFfGF0"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "[M-O][\\-0-9A-Z_a-z]{23,25}\\.[\\-0-9A-Z_a-z]{6,7}\\.[\\-0-9A-Z_a-z]{27,38}",
+      "keywords": [
+        "MT",
+        "Mz",
+        "ND",
+        "NT",
+        "Nz",
+        "OD"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "https://(?:canary\\.|ptb\\.)?discord(?:app)?\\.com/api/webhooks/[0-9]+/[\\-0-9A-Z_a-z]+",
+      "keywords": [
+        "discord.com/api/webhooks",
+        "discordapp.com/api/webhooks"
+      ],
+      "validator": "DiscordWebhookURL"
+    },
+    {
+      "pattern": "[0-9]{8,10}:AA[\\-0-9A-Z_a-z]{33}",
+      "keywords": [
+        ":AA"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "FlyV1 fm2_[\\-0-9=A-Z_a-z]{40,400}",
+      "keywords": [
+        "FlyV1 fm2_"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "gsk_[0-9A-Za-z]{52}",
+      "keywords": [
+        "gsk_"
+      ]
+    },
+    {
+      "pattern": "pplx-[0-9A-Za-z]{48,56}",
+      "keywords": [
+        "pplx-"
+      ]
+    },
+    {
+      "pattern": "xai-[0-9A-Za-z]{80}",
+      "keywords": [
+        "xai-"
+      ]
+    },
+    {
+      "pattern": "co_[0-9A-Za-z]{40}",
+      "keywords": [
+        "co_"
+      ]
+    },
+    {
+      "pattern": "bkua_[0-9A-Za-z]{40}",
+      "keywords": [
+        "bkua_"
+      ]
+    },
+    {
+      "pattern": "CCIPRJ_[\\-0-9A-Z_a-z]+_[\\-0-9A-Z_a-z]{32,}",
+      "keywords": [
+        "CCIPRJ_"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "cloudinary://[0-9]+:[\\-0-9A-Z_a-z]+@[\\-0-9A-Z_a-z]+",
+      "keywords": [
+        "cloudinary://"
+      ]
+    },
+    {
+      "pattern": "mongodb(?:\\+srv)?://[^\\t\\n\\f\\r #/:\\?@]+:(?P<secret>[^\\t\\n\\f\\r \\$%<@\\{][^\\t\\n\\f\\r @]{0,199})@",
+      "keywords": [
+        "mongodb://",
+        "mongodb+srv://"
+      ]
+    },
+    {
+      "pattern": "postgres(?:ql)?://[^\\t\\n\\f\\r #/:\\?@]+:(?P<secret>[^\\t\\n\\f\\r \\$%<@\\{][^\\t\\n\\f\\r @]{0,199})@",
+      "keywords": [
+        "postgres://",
+        "postgresql://"
+      ]
+    },
+    {
+      "pattern": "DefaultEndpointsProtocol=https?;AccountName=[^;]+;AccountKey=(?P<secret>[\\+/-9=A-Za-z]{88})",
+      "keywords": [
+        "DefaultEndpointsProtocol="
+      ],
+      "case_sensitive": true,
+      "validator": "AzureStorageAccountKey"
+    },
+    {
+      "pattern": "(?i:SK\\.[0-9A-Za-zſK]{60}\\.[0-9A-Za-zſK]{22})",
+      "keywords": [
+        "sk."
+      ]
+    },
+    {
+      "pattern": "hvb\\.[\\-0-9A-Z_a-z]{90,200}",
+      "keywords": [
+        "hvb."
+      ]
+    },
+    {
+      "pattern": "hvr\\.[\\-0-9A-Z_a-z]{90,200}",
+      "keywords": [
+        "hvr."
+      ]
+    },
+    {
+      "pattern": "nfp_[0-9A-Za-z]{40}",
+      "keywords": [
+        "nfp_"
+      ]
+    },
+    {
+      "pattern": "1/[0-9]{14,}:[0-9a-f]{32}",
+      "keywords": [
+        "1/"
+      ]
+    },
+    {
+      "pattern": "v1\\.0-[0-9a-f]{32}-[\\+/-9=A-Za-z]{146}",
+      "keywords": [
+        "v1.0-"
+      ]
+    },
+    {
+      "pattern": "ops_eyJ[\\+\\-/-9=A-Z_a-z]{250,1000}",
+      "keywords": [
+        "ops_eyJ"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "sk-or-v1-[0-9a-f]{64}",
+      "keywords": [
+        "sk-or-v1-"
+      ]
+    },
+    {
+      "pattern": "(sq[apu])_[0-9a-f]{40}",
+      "keywords": [
+        "squ_",
+        "sqp_",
+        "sqa_"
+      ]
+    },
+    {
+      "pattern": "pckey_[0-9A-Za-z]{1,40}_[\\-0-9A-Z_a-z]{24,80}",
+      "keywords": [
+        "pckey_"
+      ]
+    },
+    {
+      "pattern": "sb_secret_[\\-0-9A-Z_a-z]{40,80}",
+      "keywords": [
+        "sb_secret_"
+      ]
+    },
+    {
+      "pattern": "tskey-auth-[0-9A-Za-z]{10,30}-[0-9A-Za-z]{20,80}",
+      "keywords": [
+        "tskey-auth-"
+      ]
+    },
+    {
+      "pattern": "tskey-api-[0-9A-Za-z]{10,30}-[0-9A-Za-z]{20,80}",
+      "keywords": [
+        "tskey-api-"
+      ]
+    },
+    {
+      "pattern": "vc[ikp]_[0-9A-Za-z]{20,80}",
+      "keywords": [
+        "vcp_",
+        "vck_",
+        "vci_"
+      ]
+    },
+    {
+      "pattern": "rzp_(test|live)_[0-9A-Za-z]{14}",
+      "keywords": [
+        "rzp_test_",
+        "rzp_live_"
+      ]
+    },
+    {
+      "pattern": "access-(sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "keywords": [
+        "access-sandbox-",
+        "access-development-",
+        "access-production-"
+      ]
+    },
+    {
+      "pattern": "phx_[0-9A-Za-z]{43}",
+      "keywords": [
+        "phx_"
+      ]
+    },
+    {
+      "pattern": "rnd_[\\-0-9A-Z_a-z]{30,80}",
+      "keywords": [
+        "rnd_"
+      ]
+    },
+    {
+      "pattern": "hca(i[ck])_[0-9A-Za-z]{58}",
+      "keywords": [
+        "hcaik_",
+        "hcaic_"
+      ]
+    },
+    {
+      "pattern": "akab-[0-9a-z]{16}-[0-9a-z]{16}",
+      "keywords": [
+        "akab-"
+      ]
+    },
+    {
+      "pattern": "aio_[0-9A-Za-z]{28}",
+      "keywords": [
+        "aio_"
+      ]
+    },
+    {
+      "pattern": "A3-[0-9A-Z]{6}-(?:[0-9A-Z]{11}|[0-9A-Z]{6}-[0-9A-Z]{5})-[0-9A-Z]{5}-[0-9A-Z]{5}-[0-9A-Z]{5}",
+      "keywords": [
+        "A3-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "glcbt-[0-9A-Za-z]{1,5}_[\\-0-9A-Z_a-z]{20}",
+      "keywords": [
+        "glcbt-"
+      ]
+    },
+    {
+      "pattern": "gldt-[\\-0-9A-Z_a-z]{20}",
+      "keywords": [
+        "gldt-"
+      ]
+    },
+    {
+      "pattern": "glffct-[\\-0-9A-Z_a-z]{20}",
+      "keywords": [
+        "glffct-"
+      ]
+    },
+    {
+      "pattern": "glft-[\\-0-9A-Z_a-z]{20}",
+      "keywords": [
+        "glft-"
+      ]
+    },
+    {
+      "pattern": "glagent-[\\-0-9A-Z_a-z]{50}",
+      "keywords": [
+        "glagent-"
+      ]
+    },
+    {
+      "pattern": "gloas-[\\-0-9A-Z_a-z]{64}",
+      "keywords": [
+        "gloas-"
+      ]
+    },
+    {
+      "pattern": "GR1348941[\\-0-9A-Z_a-z]{20}",
+      "keywords": [
+        "GR1348941"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "glrt-[\\-0-9A-Z_a-z]{20}",
+      "keywords": [
+        "glrt-"
+      ]
+    },
+    {
+      "pattern": "glsoat-[\\-0-9A-Z_a-z]{20}",
+      "keywords": [
+        "glsoat-"
+      ]
+    },
+    {
+      "pattern": "glimt-[\\-0-9A-Z_a-z]{25}",
+      "keywords": [
+        "glimt-"
+      ]
+    },
+    {
+      "pattern": "glpat-[\\-0-9A-Z_a-z]{27,300}\\.[0-9a-z]{9}",
+      "keywords": [
+        "glpat-"
+      ]
+    },
+    {
+      "pattern": "ABSK[\\+/-9A-Za-z]{128}",
+      "keywords": [
+        "ABSK"
+      ],
+      "case_sensitive": true,
+      "validator": "AWSBedrockLongLivedKey"
+    },
+    {
+      "pattern": "bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t[\\+\\-/-9=A-Z_a-z]{20,400}",
+      "keywords": [
+        "bedrock-api-key-"
+      ]
+    },
+    {
+      "pattern": "HRKU-AA[\\-0-9A-Z_a-z]{58}",
+      "keywords": [
+        "HRKU-AA"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "[\\.0-9A-Z_a-z~]{3}[0-9]Q~[\\-\\.0-9A-Z_a-z~]{31,34}",
+      "keywords": [
+        "Q~"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "sha256~[\\-0-9A-Z_a-z]{43}",
+      "keywords": [
+        "sha256~"
+      ]
+    },
+    {
+      "pattern": "pscale_oauth_[\\-\\.0-9=A-Z_a-z]{32,80}",
+      "keywords": [
+        "pscale_oauth_"
+      ]
+    },
+    {
+      "pattern": "glc_[\\+/-9A-Za-z]{32,400}={0,3}",
+      "keywords": [
+        "glc_"
+      ]
+    },
+    {
+      "pattern": "glsa_[0-9A-Za-z]{32}_[0-9A-Fa-f]{8}",
+      "keywords": [
+        "glsa_"
+      ]
+    },
+    {
+      "pattern": "NRII-[\\-0-9A-Za-z]{32}",
+      "keywords": [
+        "NRII-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "sntryu_[0-9a-f]{64}",
+      "keywords": [
+        "sntryu_"
+      ]
+    },
+    {
+      "pattern": "xapp-[0-9]-[0-9A-Z]{8,16}-[0-9]{8,16}-[0-9A-Fa-f]{32,128}",
+      "keywords": [
+        "xapp-"
+      ]
+    },
+    {
+      "pattern": "https://[0-9a-z]+\\.webhook\\.office\\.com/webhookb2/[0-9a-z]{8}-(?:[0-9a-z]{4}-){3}[0-9a-z]{12}@[0-9a-z]{8}-(?:[0-9a-z]{4}-){3}[0-9a-z]{12}/IncomingWebhook/[0-9A-Za-z]{32}/[0-9a-z]{8}-(?:[0-9a-z]{4}-){3}[0-9a-z]{12}",
+      "keywords": [
+        "webhook.office.com"
+      ]
+    },
+    {
+      "pattern": "cmVmd[0-9A-Za-z]{59}",
+      "keywords": [
+        "cmVmd"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "ico-[0-9A-Za-z]{32}",
+      "keywords": [
+        "ico-"
+      ]
+    },
+    {
+      "pattern": "pnu_[0-9A-Za-z]{36}",
+      "keywords": [
+        "pnu_"
+      ]
+    },
+    {
+      "pattern": "rdme_[0-9a-z]{70}",
+      "keywords": [
+        "rdme_"
+      ]
+    },
+    {
+      "pattern": "[0-9A-Za-z]{6}_[0-9A-Za-z]{29}_mmk",
+      "keywords": [
+        "_mmk"
+      ]
+    },
+    {
+      "pattern": "AQVN[\\-0-9A-Z_a-z]{35,38}",
+      "keywords": [
+        "AQVN"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "sgp_(?:(?:[0-9A-Fa-f]{16}|local)_)?[0-9A-Fa-f]{40}",
+      "keywords": [
+        "sgp_"
+      ]
+    },
+    {
+      "pattern": "dnkey-[\\-0-9=A-Z_a-z]{26}-[\\-0-9=A-Z_a-z]{52}",
+      "keywords": [
+        "dnkey-"
+      ]
+    },
+    {
+      "pattern": "tk-(?:us|eu|osc-(?:fr1|secnum-fr1))-[\\-0-9A-Z_a-z]{48}",
+      "keywords": [
+        "tk-us-",
+        "tk-eu-",
+        "tk-osc-"
+      ]
+    },
+    {
+      "pattern": "(?i-m:DATADOG[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{40})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "datadog"
+      ]
+    },
+    {
+      "pattern": "(?i-m:SNYK[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "snyk"
+      ]
+    },
+    {
+      "pattern": "(?i-m:LAUNCHDARKLY[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[\\-0-9=A-Z_a-zſK]{40})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "launchdarkly"
+      ]
+    },
+    {
+      "pattern": "(?i-m:CLOUDFLARE[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[\\-0-9A-Z_a-zſK]{40})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "cloudflare"
+      ],
+      "validator": "CloudflareAPIKey"
+    },
+    {
+      "pattern": "(?i-m:CLOUDFLARE[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Fa-f]{37})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "cloudflare"
+      ]
+    },
+    {
+      "pattern": "(?i-m:CONFLUENT[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{16})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "confluent"
+      ]
+    },
+    {
+      "pattern": "(?i-m:CONFLUENT[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{64})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "confluent"
+      ]
+    },
+    {
+      "pattern": "(?i-m:LOOKER[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{20})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "looker"
+      ]
+    },
+    {
+      "pattern": "(?i-m:LOOKER[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{24})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "looker"
+      ]
+    },
+    {
+      "pattern": "(?i-m:MATTERMOST[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{26})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "mattermost"
+      ]
+    },
+    {
+      "pattern": "(?i-m:SUMO[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{64})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "sumo"
+      ]
+    },
+    {
+      "pattern": "(?i-m:TRAVIS[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{22})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "travis"
+      ]
+    },
+    {
+      "pattern": "(?i-m:ZENDESK[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{40})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "zendesk"
+      ]
+    },
+    {
+      "pattern": "(?i-m:CODECOV[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{32})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "codecov"
+      ]
+    },
+    {
+      "pattern": "(?i-m:ALGOLIA[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{32})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "algolia"
+      ]
+    },
+    {
+      "pattern": "(?i-m:AIRTABLE[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{17})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "airtable"
+      ]
+    },
+    {
+      "pattern": "(?i-m:SENDBIRD[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Fa-f]{40})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "sendbird"
+      ]
+    },
+    {
+      "pattern": "(?i-m:OKTA[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>00[\\-0-9=A-Z_a-zſK]{40})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "okta"
+      ]
+    },
+    {
+      "pattern": "(?i-m:TRELLO[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{32})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "trello"
+      ]
+    },
+    {
+      "pattern": "(?i-m:MERAKI[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Fa-f]{40})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "meraki"
+      ]
+    },
+    {
+      "pattern": "(?-u:\\b)pk_[0-9]{7,9}_[0-9A-Z]{32}(?-u:\\b)",
+      "keywords": [
+        "pk_"
+      ]
+    },
+    {
+      "pattern": "alcht_[0-9A-Za-z]{30}",
+      "keywords": [
+        "alcht_"
+      ]
+    },
+    {
+      "pattern": "(?i-m:NGROK[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>2[0-9A-Za-zſK]{26}_[0-9][0-9A-Za-zſK]{20})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "ngrok"
+      ]
+    },
+    {
+      "pattern": "(?i-m:DEEPSEEK[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>SK-[0-9A-Za-zſK]{32})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "deepseek"
+      ]
+    },
+    {
+      "pattern": "(?i-m:ASSEMBLYAI[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Fa-f]{32})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "assemblyai"
+      ]
+    },
+    {
+      "pattern": "(?i-m:DEEPGRAM[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Fa-f]{40})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "deepgram"
+      ]
+    },
+    {
+      "pattern": "(?i-m:LOGZ[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "logz"
+      ]
+    },
+    {
+      "pattern": "(?i-m:ETHERSCAN[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{34})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "etherscan"
+      ]
+    },
+    {
+      "pattern": "(?i-m:MORALIS[\\t \\-\\.0-9A-Z_a-zſK]{0,20}[\\t\\n\\f\\r \"']{0,3}(?:[=>]|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\t\\n\\f\\r \"'=`]{0,5}(?P<secret>[0-9A-Za-zſK]{64})(?:[\\t\\n\\f\\r \"';`]|\\\\[NRnr]|$))",
+      "keywords": [
+        "moralis"
+      ]
+    },
+    {
+      "pattern": "figd_[\\-0-9A-Z_a-z]{22,100}",
+      "keywords": [
+        "figd_"
+      ]
+    },
+    {
+      "pattern": "CFPAT-[\\-0-9A-Z_a-z]{43}",
+      "keywords": [
+        "CFPAT-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "dp\\.(st|ct|scim|audit|sa)\\.[0-9A-Za-zſK]{43}",
+      "keywords": [
+        "dp.st.",
+        "dp.ct.",
+        "dp.scim.",
+        "dp.audit.",
+        "dp.sa."
+      ]
+    },
+    {
+      "pattern": "pat-(?:na1|eu1)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "keywords": [
+        "pat-na1-",
+        "pat-eu1-"
+      ]
+    },
+    {
+      "pattern": "sdk-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "keywords": [
+        "sdk-"
+      ]
+    },
+    {
+      "pattern": "access_token\\$(?:production|sandbox)\\$[0-9a-z]{1,128}\\$[0-9a-f]{25,36}",
+      "keywords": [
+        "access_token$"
+      ]
+    },
+    {
+      "pattern": "mysql://[^\\t\\n\\f\\r #/:\\?@]+:(?P<secret>[^\\t\\n\\f\\r \\$%<@\\{][^\\t\\n\\f\\r @]{0,199})@",
+      "keywords": [
+        "mysql://"
+      ]
+    },
+    {
+      "pattern": "rediss?://[^\\t\\n\\f\\r #/:\\?@]*:(?P<secret>[^\\t\\n\\f\\r \\$%<@\\{][^\\t\\n\\f\\r @]{0,199})@",
+      "keywords": [
+        "redis://",
+        "rediss://"
+      ]
+    },
+    {
+      "pattern": "amqps?://[^\\t\\n\\f\\r #/:\\?@]+:(?P<secret>[^\\t\\n\\f\\r \\$%<@\\{][^\\t\\n\\f\\r @]{0,199})@",
+      "keywords": [
+        "amqp://",
+        "amqps://"
+      ]
+    },
+    {
+      "pattern": "(?i:HTTPS?://[0-9A-Fa-f]{8}:(?P<secret>[0-9A-Fa-f]{8})@(?:GEMS|ENTERPRISE)\\.CONTRIBSYS\\.COM)",
+      "keywords": [
+        "contribsys.com"
+      ]
+    },
+    {
+      "pattern": "(?:pat|sat)\\.[\\-0-9A-Z_a-z]{22}\\.[0-9A-Za-z]{24}\\.[0-9A-Za-z]{20}",
+      "keywords": [
+        "pat.",
+        "sat."
+      ]
+    },
+    {
+      "pattern": "api_org_[0-9A-Za-z]{34}",
+      "keywords": [
+        "api_org_"
+      ]
+    },
+    {
+      "pattern": "sm_(?:pat|aat|sat)_[0-9A-Za-z]{16}",
+      "keywords": [
+        "sm_pat_",
+        "sm_aat_",
+        "sm_sat_"
+      ]
+    },
+    {
+      "pattern": "(?:sc|ext|scauth|authress)_[0-9A-Za-z]{5,30}\\.[0-9A-Za-z]{4,6}\\.acc[\\-_][\\-0-9A-Za-z]{10,32}\\.[\\+\\-/-9=A-Z_a-z]{30,120}",
+      "keywords": [
+        "sc_",
+        "ext_",
+        "scauth_",
+        "authress_"
+      ]
+    },
+    {
+      "pattern": "pcsk_[0-9A-Za-z]{5,6}_[0-9A-Za-z]{63}",
+      "keywords": [
+        "pcsk_"
+      ]
+    },
+    {
+      "pattern": "lsv2_(?:pt|sk)_[0-9a-f]{32}_[0-9a-f]{10}",
+      "keywords": [
+        "lsv2_pt_",
+        "lsv2_sk_"
+      ]
+    },
+    {
+      "pattern": "nvapi-[\\-0-9A-Z_a-z]{64}",
+      "keywords": [
+        "nvapi-"
+      ]
+    },
+    {
+      "pattern": "NF-[0-9A-Za-z]{32}",
+      "keywords": [
+        "NF-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "https://hooks\\.zapier\\.com/hooks/catch/[/-9A-Za-z]{16,}",
+      "keywords": [
+        "hooks.zapier.com"
+      ]
+    },
+    {
+      "pattern": "https://[\\-0-9A-Z_a-z]+\\.tines\\.com/webhook/[0-9a-z]{32}/[0-9a-z]{32}",
+      "keywords": [
+        ".tines.com/webhook/"
+      ]
+    },
+    {
+      "pattern": "pub-c-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "keywords": [
+        "pub-c-"
+      ]
+    },
+    {
+      "pattern": "sub-c-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "keywords": [
+        "sub-c-"
+      ]
+    },
+    {
+      "pattern": "rootly_[0-9a-f]{64}",
+      "keywords": [
+        "rootly_"
+      ]
+    },
+    {
+      "pattern": "VF\\.(?:(?:DM|WS)\\.)?[0-9A-Fa-f]{24}\\.[0-9A-Za-z]{16}",
+      "keywords": [
+        "VF."
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "dd[pw]_[0-9A-Za-z]{36}",
+      "keywords": [
+        "ddp_",
+        "ddw_"
+      ]
+    },
+    {
+      "pattern": "BBFF-[0-9A-Za-z]{30}",
+      "keywords": [
+        "BBFF-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "CCIPAT_[0-9A-Za-z]{22}_[0-9A-Fa-f]{40}",
+      "keywords": [
+        "CCIPAT_"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "endr\\+[\\-0-9A-Za-z]{16}",
+      "keywords": [
+        "endr+"
+      ]
+    },
+    {
+      "pattern": "ATBB[\\-\\.0-9=A-Z_a-z]{20,200}",
+      "keywords": [
+        "ATBB"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "pi_[0-9A-Za-z]{24}_secret_[0-9A-Za-z]{25}",
+      "keywords": [
+        "_secret_"
+      ]
+    },
+    {
+      "pattern": "thog-(?:key-[0-9a-f]{16}|secret-[0-9a-f]{32})",
+      "keywords": [
+        "thog-key-",
+        "thog-secret-"
+      ]
+    },
+    {
+      "pattern": "ramp_(?:id_[0-9A-Za-z]{40}|sec_[0-9A-Za-z]{48})",
+      "keywords": [
+        "ramp_id_",
+        "ramp_sec_"
+      ]
+    },
+    {
+      "pattern": "[su]-s4t2(?:ud|af)-[0-9a-f]{64}",
+      "keywords": [
+        "-s4t2ud-",
+        "-s4t2af-"
+      ]
+    },
+    {
+      "pattern": "FLWSECK-[0-9a-f]{32}-X",
+      "keywords": [
+        "FLWSECK-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "https://hooks\\.slack\\.com/workflows/T[0-9A-Z]+/A[0-9A-Z]+/[0-9]{17,19}/[0-9A-Za-z]{20,30}",
+      "keywords": [
+        "hooks.slack.com/workflows"
+      ]
+    },
+    {
+      "pattern": "slk_[0-9a-f]{64}",
+      "keywords": [
+        "slk_"
+      ]
+    },
+    {
+      "pattern": "dtn_[0-9a-f]{64}",
+      "keywords": [
+        "dtn_"
+      ]
+    },
+    {
+      "pattern": "bl_[0-9a-z]{32}",
+      "keywords": [
+        "bl_"
+      ]
+    },
+    {
+      "pattern": "sq0(?:atp-[\\-0-9A-Z_a-z]{22}|csp-[\\-0-9A-Z_a-z]{43})",
+      "keywords": [
+        "sq0atp-",
+        "sq0csp-"
+      ]
+    },
+    {
+      "pattern": "API-[0-9A-Z]{26,30}",
+      "keywords": [
+        "API-"
+      ],
+      "case_sensitive": true
+    },
+    {
+      "pattern": "(?P<secret>(?-u:\\b)(?:4[0-9]{3}|5[1-5][0-9]{2}|2[2-7][0-9]{2}|3[47][0-9]{2}|6(?:011|5[0-9]{2})|3(?:0[0-5]|[68][0-9])[0-9])(?:[\\t\\n\\f\\r \\-]?[0-9]){9,15}(?-u:\\b))",
+      "validator": "Luhn"
+    },
+    {
+      "pattern": "(?P<secret>(?-u:\\b)[A-Za-zſK]{2}[0-9]{2}(?: ?[0-9A-Za-zſK]{4}){2,7}(?: ?[0-9A-Za-zſK]{1,3})?(?-u:\\b))",
+      "validator": "IBAN"
+    },
+    {
+      "pattern": "(?P<secret>(?-u:\\b)[0-9]{3}[ \\-]?[0-9]{2}[ \\-]?[0-9]{4}(?-u:\\b))",
+      "validator": "USSSN"
+    },
+    {
+      "pattern": "secret-(?:live|test)-[\\-0-9=A-Z_a-z]{40,50}",
+      "keywords": [
+        "secret-live-",
+        "secret-test-"
+      ]
+    }
+  ],
+  "source": "github.com/docker/portcullis@v1.1.5; rules derived from docker/mcp-gateway and Trivy, Copyright (c) 2025 Docker (MIT), relicensed Apache-2.0"
+}

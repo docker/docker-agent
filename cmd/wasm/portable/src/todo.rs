@@ -1,11 +1,11 @@
 //! Session-local counterpart of pkg/tools/builtin/todo.
 
+use crate::wire::encode;
 use serde::de::IgnoredAny;
 use serde::Serialize;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::fmt::Write as _;
-use std::io;
 
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 // Every successful call includes the whole list, often also its text in a reminder.
@@ -171,44 +171,6 @@ impl Todos {
         }
         s
     }
-}
-
-// serde_json already matches encoding/json for quotes, backslashes and control characters.
-struct GoFormatter;
-
-impl serde_json::ser::Formatter for GoFormatter {
-    fn write_string_fragment<W: io::Write + ?Sized>(
-        &mut self,
-        w: &mut W,
-        s: &str,
-    ) -> io::Result<()> {
-        let mut start = 0;
-        for (i, ch) in s.char_indices() {
-            let escape = match ch {
-                '<' => br"\u003c",
-                '>' => br"\u003e",
-                '&' => br"\u0026",
-                '\u{2028}' => br"\u2028",
-                '\u{2029}' => br"\u2029",
-                _ => continue,
-            };
-            w.write_all(&s.as_bytes()[start..i])?;
-            w.write_all(escape)?;
-            start = i + ch.len_utf8();
-        }
-        w.write_all(&s.as_bytes()[start..])
-    }
-}
-
-fn encode(value: impl Serialize) -> String {
-    let mut bytes = Vec::new();
-    value
-        .serialize(&mut serde_json::Serializer::with_formatter(
-            &mut bytes,
-            GoFormatter,
-        ))
-        .unwrap();
-    String::from_utf8(bytes).unwrap()
 }
 
 enum Args {

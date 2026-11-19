@@ -1,4 +1,6 @@
+use serde::Serialize;
 use serde_json::{json, Value};
+use std::io;
 
 // Generic Chat Completions gateways often reject consecutive system/user
 // messages. Responses and the first-party chat endpoint retain the boundaries.
@@ -27,6 +29,44 @@ pub fn merge_text_messages(request: &mut Value) {
             messages.extend_from_slice(run);
         }
     }
+}
+
+// serde_json already matches encoding/json for quotes, backslashes and control characters.
+struct GoFormatter;
+
+impl serde_json::ser::Formatter for GoFormatter {
+    fn write_string_fragment<W: io::Write + ?Sized>(
+        &mut self,
+        w: &mut W,
+        s: &str,
+    ) -> io::Result<()> {
+        let mut start = 0;
+        for (i, ch) in s.char_indices() {
+            let escape = match ch {
+                '<' => br"\u003c",
+                '>' => br"\u003e",
+                '&' => br"\u0026",
+                '\u{2028}' => br"\u2028",
+                '\u{2029}' => br"\u2029",
+                _ => continue,
+            };
+            w.write_all(&s.as_bytes()[start..i])?;
+            w.write_all(escape)?;
+            start = i + ch.len_utf8();
+        }
+        w.write_all(&s.as_bytes()[start..])
+    }
+}
+
+pub fn encode(value: impl Serialize) -> String {
+    let mut bytes = Vec::new();
+    value
+        .serialize(&mut serde_json::Serializer::with_formatter(
+            &mut bytes,
+            GoFormatter,
+        ))
+        .unwrap();
+    String::from_utf8(bytes).unwrap()
 }
 
 #[cfg(test)]

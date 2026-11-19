@@ -70,7 +70,7 @@ it("still validates references, fields and toolsets during projection", () => {
 it("session loading checks capabilities even on an unselected agent", async t => {
   const fetch = t.mock.method(globalThis, "fetch", () => { throw new Error("unexpected fetch"); });
   for (const field of [
-    "sub_agents: [root]", "handoffs: [root]", "add_date: true", "add_environment_info: true",
+    "sub_agents: [root]", "handoffs: [root]",
     "toolsets: [{type: datetime}]", "toolsets: [{type: fetch}]", "toolsets: [{type: plan}]",
   ]) {
     const yaml = withHelper(field);
@@ -89,7 +89,7 @@ it("session loading checks capabilities even on an unselected agent", async t =>
 it("portable sessions do not ignore security settings on an unselected agent", {
   skip: !process.env.DOCKER_AGENT_TEST_PORTABLE,
 }, async () => {
-  for (const field of ["readonly: true", "safety: strict", "redact_secrets: true", "toolsets: [{type: think, readonly: true}]"]) {
+  for (const field of ["readonly: true", "safety: strict", "hooks: {post_tool_use: {type: builtin, command: redact_secrets}}", "toolsets: [{type: think, readonly: true}]"]) {
     const yaml = withHelper(field);
     await assert.rejects(api.createSession({ yaml, agentName: "root", env: { OPENAI_API_KEY: "k" } }), Error, field);
   }

@@ -35,6 +35,9 @@ struct Agent {
     add_date: bool,
     #[serde(default)]
     add_environment_info: bool,
+    #[serde(default)]
+    hooks: crate::hooks::Hooks,
+    redact_secrets: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +97,7 @@ struct Provider {
 }
 
 pub struct Selected {
+    pub hooks: crate::hooks::Hooks,
     pub model_params: Map<String, Value>,
     pub endpoint: String,
     pub token: String,
@@ -355,8 +359,6 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         for (enabled, field) in [
             (!a.sub_agents.is_empty(), "sub_agents"),
             (!a.handoffs.is_empty(), "handoffs"),
-            (a.add_date, "add_date"),
-            (a.add_environment_info, "add_environment_info"),
         ] {
             if enabled {
                 return Err(format!(
@@ -442,6 +444,11 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     };
     let think = !a.toolsets.is_empty();
     Ok(Selected {
+        hooks: a.hooks.clone().with_defaults(
+            a.redact_secrets.unwrap_or(true),
+            a.add_date,
+            a.add_environment_info,
+        ),
         model_params: model_params(id, m, p, think)?,
         endpoint: format!("{}/{route}", base.trim_end_matches('/')),
         responses,
@@ -461,7 +468,7 @@ mod tests {
         for yaml in [
             "agents: {}",
             "agents: {a: {model: nope}}",
-            "agents: {a: {model: a/b, hooks: {}}}",
+            "agents: {a: {model: a/b, hooks: {bogus: []}}}",
             "agents: {a: {model: a/b}, a: {model: a/c}}",
             "version: 2\nagents: {a: {model: a/b}}",
         ] {

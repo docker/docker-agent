@@ -29,6 +29,7 @@ pub fn response_strict(name: &str) -> Result<bool, String> {
 type Tools = IndexMap<&'static str, &'static Value>;
 
 pub struct Conversation {
+    pub hooks: crate::hooks::Hooks,
     model_params: Map<String, Value>,
     tools: Tools,
     merge_messages: bool,
@@ -124,6 +125,7 @@ impl Conversation {
                 .map(|text| json!({"role":"system", "content":text})),
         );
         Ok(Self {
+            hooks: crate::hooks::Hooks::default(),
             model_params,
             merge_messages,
             tools,
@@ -161,12 +163,43 @@ impl Conversation {
             pending: BTreeMap::new(),
         });
         self.messages.push(json!({"role":"user", "content":prompt}));
-        Ok(self.request())
+        self.request()
     }
 
-    fn request(&self) -> Value {
+    fn request(&self) -> Result<Value, String> {
+        if self.hooks.add_date || self.hooks.add_environment_info {
+            // The host samples context only when it is actually about to fetch.
+            return Ok(Value::Null);
+        }
+        self.prepare(None, None)
+    }
+
+    pub fn prepare(
+        &self,
+        environment: Option<String>,
+        date: Option<String>,
+    ) -> Result<Value, String> {
+        let turn = self.active.as_ref().ok_or("no active turn")?;
+        if !turn.pending.is_empty() {
+            return Err("waiting for elicitation".into());
+        }
+        let mut messages = self.messages.clone();
+        let mut pos = self.instruction_count;
+        for (enabled, text) in [
+            (self.hooks.add_environment_info, environment),
+            (self.hooks.add_date, date),
+        ] {
+            if enabled {
+                let text = text
+                    .filter(|s| !s.is_empty() && s.len() <= 4096)
+                    .ok_or("missing or invalid dynamic prompt")?;
+                messages.insert(pos, json!({"role":"system","content":text}));
+                pos += 1;
+            }
+        }
+        self.hooks.rewrite_messages(&mut messages)?;
         let mut body = Value::Object(self.model_params.clone());
-        body["messages"] = json!(self.messages);
+        body["messages"] = messages.into();
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});
         if !self.tools.is_empty() {
@@ -176,7 +209,7 @@ impl Conversation {
         if self.merge_messages {
             crate::wire::merge_text_messages(&mut body);
         }
-        body
+        Ok(body)
     }
 
     pub fn chunk(&mut self, chunk: Value) -> Result<Vec<Value>, String> {
@@ -291,16 +324,19 @@ impl Conversation {
         let mut ids = BTreeSet::new();
         let mut wire_calls = Vec::with_capacity(calls.len());
         let mut replies = Vec::with_capacity(calls.len());
-        for (index, (key, call)) in calls.iter().enumerate() {
-            if *key != index as u64 || call.id.is_empty() || !ids.insert(&call.id) {
+        for (index, (key, mut call)) in calls.into_iter().enumerate() {
+            if key != index as u64 || call.id.is_empty() || !ids.insert(call.id.clone()) {
                 return Err("missing or duplicate tool call ID or index".into());
             }
             wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
+            if self.hooks.rewrite_input(&call.name, &mut call.arguments)? {
+                events.push(json!({"type":"warning", "message":format!("redact_secrets: redacted secret material from arguments of tool {:?}", call.name)}));
+            }
             events.push(
                 json!({"type":"tool_call", "id":call.id, "name":call.name, "args":call.arguments}),
             );
             let mut reply = json!({"role":"tool", "tool_call_id":call.id});
-            match call.name.as_str() {
+            let result = match call.name.as_str() {
                 "think" => {
                     let Think { thought } = call.parse()?;
                     if self.scratchpad.len() + 1 + thought.len() > MAX_SCRATCHPAD_BYTES {
@@ -308,19 +344,11 @@ impl Conversation {
                     }
                     self.scratchpad.push('\n');
                     self.scratchpad.push_str(&thought);
-                    reply["content"] = json!(self.scratchpad);
-                    events.push(tool_result(&call.id, &call.name, &self.scratchpad, false));
+                    Some(("think", Ok(self.scratchpad.clone())))
                 }
-                "calculate" | "create_todo" | "create_todos" | "update_todos" | "list_todos" => {
-                    let result = if call.name == "calculate" {
-                        crate::calculator::calculate(&call.arguments)
-                    } else {
-                        self.todos.call(&call.name, &call.arguments)
-                    };
-                    let is_error = result.is_err();
-                    let output = result.unwrap_or_else(|error| error);
-                    events.push(tool_result(&call.id, &call.name, &output, is_error));
-                    reply["content"] = Value::String(output);
+                "calculate" => Some(("calculator", crate::calculator::calculate(&call.arguments))),
+                "create_todo" | "create_todos" | "update_todos" | "list_todos" => {
+                    Some(("todo", self.todos.call(&call.name, &call.arguments)))
                 }
                 "user_prompt" => {
                     if call.arguments.len() > MAX_ELICITATION_BYTES {
@@ -339,8 +367,17 @@ impl Conversation {
                         "type":"elicitation", "id":id, "message":prompt.message,
                         "schema":prompt.schema, "meta":meta, "server_elicitation_id":"", "mode":"", "url":""
                     }));
+                    None
                 }
                 _ => return Err("missing or invalid tool name".into()),
+            };
+            if let Some((category, result)) = result {
+                let is_error = result.is_err();
+                let output =
+                    self.hooks
+                        .tool_result(&call.name, category, result.unwrap_or_else(|e| e))?;
+                events.push(tool_result(&call.id, &call.name, &output, is_error));
+                reply["content"] = output.into();
             }
             replies.push(reply);
         }
@@ -350,11 +387,26 @@ impl Conversation {
         Ok(self.after_tools(events))
     }
 
-    fn after_tools(&self, events: Vec<Value>) -> Value {
-        if self.active.as_ref().is_some_and(|t| !t.pending.is_empty()) {
-            json!({"events":events, "waiting":true})
-        } else {
-            json!({"events":events, "request":self.request()})
+    fn after_tools(&mut self, events: Vec<Value>) -> Value {
+        let turn = self.active.as_ref().expect("active tool round");
+        if !turn.pending.is_empty() {
+            return json!({"events":events, "waiting":true});
+        }
+        if let Some(limit) = self
+            .hooks
+            .max_calls
+            .filter(|&n| turn.tool_rounds >= n as usize)
+        {
+            // The calls were admitted: publish their events and keep their history.
+            self.active = None;
+            return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
+        }
+        match self.request() {
+            Ok(body) => json!({"events":events, "request":body}),
+            Err(error) => {
+                self.active = None;
+                json!({"events":events, "error":error})
+            }
         }
     }
 
@@ -380,6 +432,9 @@ impl Conversation {
         if output.len() > MAX_ELICITATION_BYTES {
             return Err("elicitation answer size limit reached".into());
         }
+        let output = self
+            .hooks
+            .tool_result("user_prompt", "user_prompt", output)?;
         let reply = &mut self.messages[index];
         let call_id = reply["tool_call_id"]
             .as_str()
@@ -933,6 +988,74 @@ mod tests {
         assert_eq!(next["events"][0]["output"], r#"{"action":"accept"}"#);
         assert!(c.answer(id, "decline", None).is_err());
         assert_eq!(answer(&mut c, "ok")["result"]["message"]["content"], "ok");
+    }
+
+    #[test]
+    fn max_calls_checks_between_rounds_including_pending_elicitations() {
+        let mut c = conversation(&["user_prompt", "think"]);
+        c.hooks = crate::hooks::Hooks::try_from(
+            json!({"before_llm_call":{"type":"builtin","command":"max_iterations","args":["1"]}}),
+        )
+        .unwrap();
+        c.begin("go", "a").unwrap();
+        c.chunk(chunk(
+            json!({"tool_calls":[call(0,"q","user_prompt",r#"{"message":"ok?"}"#)]}),
+            Some("tool_calls"),
+        ))
+        .unwrap();
+        let waiting = c.end().unwrap();
+        assert_eq!(waiting["waiting"], true);
+        let stop = c
+            .answer(
+                waiting["events"][1]["id"].as_str().unwrap(),
+                "decline",
+                None,
+            )
+            .unwrap();
+        assert_eq!(stop["events"][0]["type"], "tool_result");
+        assert!(stop["error"]
+            .as_str()
+            .unwrap()
+            .contains("limit of 1 model call(s)"));
+        assert!(stop.get("request").is_none());
+        c.cancel();
+        let req = c.begin("new run", "b").unwrap();
+        assert_eq!(req["messages"][3]["role"], "tool");
+        assert_eq!(answer(&mut c, "ok")["result"]["message"]["content"], "ok");
+    }
+
+    #[test]
+    fn dynamic_context_is_transient_and_redacted_on_each_model_call() {
+        let mut c = conversation(&["think"]);
+        c.hooks = crate::hooks::Hooks::default().with_defaults(true, true, true);
+        let secret = format!("dckr_pat_{}", "a".repeat(27));
+        assert_eq!(c.begin(&secret, "a").unwrap(), Value::Null);
+        assert!(c.prepare(None, None).is_err());
+        let req = c.prepare(Some("env".into()), Some("day 1".into())).unwrap();
+        assert!(req["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("env\nday 1"));
+        assert_eq!(req["messages"][1]["content"], "[REDACTED]");
+        let step = think_once(&mut c, &secret);
+        assert_eq!(step["events"][0]["type"], "warning");
+        assert!(step["events"][1]["args"]
+            .as_str()
+            .unwrap()
+            .contains("[REDACTED]"));
+        assert_eq!(step["events"][2]["output"], "Thoughts:\n[REDACTED]");
+        let req = c.prepare(Some("env".into()), Some("day 2".into())).unwrap();
+        assert!(!req.to_string().contains(&secret));
+        assert!(!req.to_string().contains("day 1"));
+        assert!(req["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("day 2"));
+        assert!(c.messages.iter().all(|m| !m.to_string().contains("day 2")));
+        c.restart();
+        c.begin("new", "b").unwrap();
+        let req = c.prepare(Some("env".into()), Some("day 3".into())).unwrap();
+        assert_eq!(req["messages"].as_array().unwrap().len(), 2);
     }
 
     #[test]
