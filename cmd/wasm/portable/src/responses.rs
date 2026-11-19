@@ -104,7 +104,7 @@ pub fn request(chat: Value) -> Result<Value, String> {
             return Err(format!("missing parameters for tool {name}"));
         }
         // Strictness is determined from the original Go schema, before normalization.
-        let strict = crate::turn::response_strict(name)?;
+        let strict = crate::turn::response_strict(name);
         tools.push(json!({
             "type":"function", "name":name, "description":string(f,"description")?,
             "parameters":f["parameters"], "strict":strict

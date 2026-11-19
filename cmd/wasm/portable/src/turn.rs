@@ -14,23 +14,33 @@ const MAX_ELICITATION_BYTES: usize = 64 * 1024;
 struct ToolsetDefinition {
     instructions: String,
     strict: BTreeMap<String, bool>,
+    read_only: BTreeMap<String, bool>,
     tools: Vec<Value>,
 }
 
 static CATALOG: LazyLock<BTreeMap<String, ToolsetDefinition>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("tool_catalog.json")).expect("generated tool catalog")
 });
-pub fn response_strict(name: &str) -> Result<bool, String> {
+pub fn response_strict(name: &str) -> bool {
     CATALOG
         .values()
         .find_map(|set| set.strict.get(name).copied())
-        .ok_or_else(|| format!("no response schema for tool {name:?}"))
+        .unwrap_or(false)
 }
-type Tools = IndexMap<&'static str, &'static Value>;
+type Tools = IndexMap<String, Value>;
+#[derive(Debug, Deserialize)]
+pub struct HostSet {
+    pub index: usize,
+    pub instructions: String,
+    pub tools: Vec<Value>,
+}
 
 pub struct Conversation {
     model_params: Map<String, Value>,
     tools: Tools,
+    host: BTreeMap<String, bool>,
+    specs: Vec<crate::config::Toolset>,
+    agent_instruction: String,
     merge_messages: bool,
     messages: Vec<Value>,
     instruction_count: usize,
@@ -49,6 +59,7 @@ struct Turn {
     output: u64,
     step: Step,
     pending: BTreeMap<String, usize>,
+    host_pending: BTreeMap<String, usize>,
 }
 
 #[derive(Deserialize)]
@@ -89,50 +100,144 @@ struct Call {
 }
 
 impl Conversation {
+    #[cfg(test)]
     pub fn new(
         model_params: Map<String, Value>,
         instruction: String,
         toolsets: &[String],
         merge_messages: bool,
-        mut history: Vec<Value>,
+        history: Vec<Value>,
+    ) -> Result<Self, String> {
+        let specs = toolsets
+            .iter()
+            .map(|kind| crate::config::Toolset {
+                kind: kind.clone(),
+                ..Default::default()
+            })
+            .collect();
+        Self::configured(model_params, instruction, specs, merge_messages, history)
+    }
+
+    pub fn configured(
+        model_params: Map<String, Value>,
+        instruction: String,
+        specs: Vec<crate::config::Toolset>,
+        merge_messages: bool,
+        history: Vec<Value>,
     ) -> Result<Self, String> {
         validate_history(&history)?;
-        let mut tools = Tools::new();
-        let mut instructions = Vec::new();
-        if !instruction.is_empty() {
-            instructions.push(instruction.as_str());
-        }
-        for kind in toolsets {
-            let def = CATALOG
-                .get(kind)
-                .ok_or_else(|| format!("unsupported toolset {kind:?}"))?;
-            if !def.instructions.is_empty() {
-                instructions.push(&def.instructions);
-            }
-            for tool in &def.tools {
-                let name = tool["function"]["name"]
-                    .as_str()
-                    .expect("catalog function name");
-                tools.entry(name).or_insert(tool);
-            }
-        }
-        let instruction_count = instructions.len();
-        history.splice(
-            0..0,
-            instructions
-                .into_iter()
-                .map(|text| json!({"role":"system", "content":text})),
-        );
-        Ok(Self {
+        let mut c = Self {
             model_params,
-            merge_messages,
-            tools,
+            tools: Tools::new(),
+            host: BTreeMap::new(),
+            specs,
+            agent_instruction: instruction,
             messages: history,
-            instruction_count,
+            merge_messages,
+            instruction_count: 0,
             todos: crate::todo::Todos::default(),
             scratchpad: "Thoughts:".into(),
             active: None,
-        })
+        };
+        c.configure_tools(&[])?;
+        Ok(c)
+    }
+
+    pub fn configure_tools(&mut self, external: &[HostSet]) -> Result<(), String> {
+        if self.active.is_some() {
+            return Err("cannot change tools during a turn".into());
+        }
+        let mut tools = Tools::new();
+        let mut host = BTreeMap::new();
+        let mut instructions = Vec::new();
+        if !self.agent_instruction.is_empty() {
+            instructions.push(self.agent_instruction.clone());
+        }
+        for (index, spec) in self.specs.iter().enumerate() {
+            let def = CATALOG.get(&spec.kind);
+            let ext = external.iter().find(|x| x.index == index);
+            let dynamic = matches!(spec.kind.as_str(), "api" | "mcp" | "fetch");
+            if ext.is_some() && !dynamic {
+                return Err("unexpected host tool registration".into());
+            }
+            let (original, defs) = if let Some(e) = ext {
+                (e.instructions.as_str(), e.tools.as_slice())
+            } else if let Some(d) = def {
+                (d.instructions.as_str(), d.tools.as_slice())
+            } else if dynamic {
+                continue;
+            } else {
+                return Err(format!("unsupported toolset {:?}", spec.kind));
+            };
+            let text = if spec.instruction.is_empty() {
+                original.into()
+            } else {
+                spec.instruction
+                    .replacen("{ORIGINAL_INSTRUCTIONS}", original, 1)
+            };
+            if !text.is_empty() {
+                instructions.push(text);
+            }
+            for tool in defs {
+                let name = tool["function"]["name"]
+                    .as_str()
+                    .filter(|s| {
+                        !s.is_empty()
+                            && s.len() <= 200
+                            && s.bytes().all(|c| {
+                                c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.')
+                            })
+                    })
+                    .ok_or("invalid function name")?;
+                let read_only = if spec.kind == "api" {
+                    spec.options
+                        .get("api_config")
+                        .is_some_and(|v| v["method"] == "GET")
+                } else {
+                    def.and_then(|d| d.read_only.get(name))
+                        .copied()
+                        .unwrap_or(false)
+                };
+                if spec.readonly && !read_only
+                    || !spec.tools.is_empty() && !spec.tools.iter().any(|n| n == name)
+                {
+                    continue;
+                }
+                let hosted = !matches!(
+                    spec.kind.as_str(),
+                    "think" | "user_prompt" | "todo" | "calculator"
+                );
+                if tools.contains_key(name) {
+                    if hosted || host.contains_key(name) {
+                        return Err(format!("duplicate tool name {name:?}"));
+                    }
+                    continue;
+                }
+                if dynamic
+                    && CATALOG
+                        .values()
+                        .flat_map(|d| &d.tools)
+                        .any(|t| t["function"]["name"] == name)
+                    && spec.kind != "fetch"
+                {
+                    return Err(format!("reserved tool name {name:?}"));
+                }
+                if hosted {
+                    host.insert(name.into(), read_only);
+                }
+                tools.insert(name.to_owned(), tool.clone());
+            }
+        }
+        self.messages.splice(
+            0..self.instruction_count,
+            instructions
+                .iter()
+                .map(|text| json!({"role":"system","content":text})),
+        );
+        self.instruction_count = instructions.len();
+        self.tools = tools;
+        self.host = host;
+        Ok(())
     }
 
     pub fn restart(&mut self) {
@@ -159,6 +264,7 @@ impl Conversation {
             output: 0,
             step: Step::default(),
             pending: BTreeMap::new(),
+            host_pending: BTreeMap::new(),
         });
         self.messages.push(json!({"role":"user", "content":prompt}));
         Ok(self.request())
@@ -171,7 +277,7 @@ impl Conversation {
         body["stream_options"] = json!({"include_usage": true});
         if !self.tools.is_empty() {
             body["tool_choice"] = "auto".into();
-            body["tools"] = Value::Array(self.tools.values().map(|tool| (*tool).clone()).collect());
+            body["tools"] = Value::Array(self.tools.values().cloned().collect());
         }
         if self.merge_messages {
             crate::wire::merge_text_messages(&mut body);
@@ -181,7 +287,7 @@ impl Conversation {
 
     pub fn chunk(&mut self, chunk: Value) -> Result<Vec<Value>, String> {
         let turn = self.active.as_mut().ok_or("no active turn")?;
-        if !turn.pending.is_empty() {
+        if !turn.pending.is_empty() || !turn.host_pending.is_empty() {
             return Err("waiting for elicitation".into());
         }
         if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
@@ -204,7 +310,11 @@ impl Conversation {
     }
 
     pub fn end(&mut self) -> Result<Value, String> {
-        if self.active.as_ref().is_some_and(|t| !t.pending.is_empty()) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|t| !t.pending.is_empty() || !t.host_pending.is_empty())
+        {
             return Err("waiting for elicitation".into());
         }
         let result = self.finish_step();
@@ -296,6 +406,13 @@ impl Conversation {
                 return Err("missing or duplicate tool call ID or index".into());
             }
             wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
+            if let Some(read_only) = self.host.get(&call.name) {
+                turn.host_pending
+                    .insert(call.id.clone(), self.messages.len() + 1 + index);
+                events.push(json!({"type":"host_call","id":call.id,"name":call.name,"args":call.arguments,"readOnly":read_only}));
+                replies.push(json!({"role":"tool","tool_call_id":call.id}));
+                continue;
+            }
             events.push(
                 json!({"type":"tool_call", "id":call.id, "name":call.name, "args":call.arguments}),
             );
@@ -351,11 +468,32 @@ impl Conversation {
     }
 
     fn after_tools(&self, events: Vec<Value>) -> Value {
-        if self.active.as_ref().is_some_and(|t| !t.pending.is_empty()) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|t| !t.pending.is_empty() || !t.host_pending.is_empty())
+        {
             json!({"events":events, "waiting":true})
         } else {
             json!({"events":events, "request":self.request()})
         }
+    }
+
+    pub fn host_result(
+        &mut self,
+        id: &str,
+        name: &str,
+        output: String,
+        is_error: bool,
+    ) -> Result<Value, String> {
+        if output.len() > 16 * 1024 * 1024 {
+            return Err("tool result exceeds 16 MiB".into());
+        }
+        let turn = self.active.as_mut().ok_or("no active turn")?;
+        let index = turn.host_pending.remove(id).ok_or("unknown host call")?;
+        let event = tool_result(id, name, &output, is_error);
+        self.messages[index]["content"] = output.into();
+        Ok(self.after_tools(vec![event]))
     }
 
     pub fn answer(

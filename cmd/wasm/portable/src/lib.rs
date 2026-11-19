@@ -38,6 +38,17 @@ enum Command {
     End {
         session: u32,
     },
+    RegisterTools {
+        session: u32,
+        sets: Vec<turn::HostSet>,
+    },
+    HostResult {
+        session: u32,
+        id: String,
+        name: String,
+        output: String,
+        is_error: bool,
+    },
     AnswerElicitation {
         session: u32,
         id: String,
@@ -114,10 +125,11 @@ impl Core {
                 history,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
-                let conv = Conversation::new(
+                let toolsets = json!(spec.toolsets);
+                let conv = Conversation::configured(
                     spec.model_params,
                     spec.instruction,
-                    &spec.toolsets,
+                    spec.toolsets,
                     spec.merge_messages,
                     history,
                 )?;
@@ -133,7 +145,7 @@ impl Core {
                     },
                 );
                 Ok(
-                    json!({"session": self.next_id, "endpoint": spec.endpoint, "token": spec.token, "responses":spec.responses}),
+                    json!({"session": self.next_id, "endpoint": spec.endpoint, "token": spec.token, "responses":spec.responses,"toolsets":toolsets}),
                 )
             }
             Command::Begin {
@@ -150,6 +162,21 @@ impl Core {
                 let s = self.session(session)?;
                 let next = s.conversation.end()?;
                 s.next(next)
+            }
+            Command::RegisterTools { session, sets } => {
+                self.session(session)?.conversation.configure_tools(&sets)?;
+                Ok(Value::Null)
+            }
+            Command::HostResult {
+                session,
+                id,
+                name,
+                output,
+                is_error,
+            } => {
+                let s = self.session(session)?;
+                let n = s.conversation.host_result(&id, &name, output, is_error)?;
+                s.next(n)
             }
             Command::AnswerElicitation {
                 session,

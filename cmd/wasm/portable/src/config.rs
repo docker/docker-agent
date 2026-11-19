@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
 use std::collections::BTreeMap;
 
@@ -37,13 +37,20 @@ struct Agent {
     add_environment_info: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Toolset {
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Toolset {
     #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    shared: bool,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub readonly: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instruction: String,
+    #[serde(flatten)]
+    pub options: BTreeMap<String, Value>,
 }
 
 impl Toolset {
@@ -51,11 +58,105 @@ impl Toolset {
         if self.shared && self.kind != "todo" {
             return Err("shared can only be used with type 'todo'".into());
         }
+        let allowed: &[&str] = match self.kind.as_str() {
+            "fetch" => &[
+                "allow_private_ips",
+                "headers",
+                "timeout",
+                "allowed_domains",
+                "blocked_domains",
+                "escape_html",
+            ],
+            "api" => &["allow_private_ips", "api_config", "timeout"],
+            "mcp" => &["allow_private_ips", "remote"],
+            _ => &[],
+        };
+        for (name, val) in &self.options {
+            if !allowed.contains(&name.as_str()) {
+                return Err(format!("unsupported {} option {name:?}", self.kind));
+            }
+            let valid = match name.as_str() {
+                "allow_private_ips" | "escape_html" => val.is_boolean(),
+                "headers" => val
+                    .as_object()
+                    .is_some_and(|obj| obj.values().all(Value::is_string)),
+                "timeout" => val.as_u64().is_some_and(|n| n <= 300),
+                "allowed_domains" | "blocked_domains" => val
+                    .as_array()
+                    .is_some_and(|a| a.iter().all(Value::is_string)),
+                "remote" | "api_config" => val.is_object(),
+                _ => false,
+            };
+            if !valid {
+                return Err(format!("invalid {} option {name:?}", self.kind));
+            }
+        }
+        if self
+            .options
+            .get("allowed_domains")
+            .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+            && self
+                .options
+                .get("blocked_domains")
+                .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+        {
+            return Err("allowed_domains and blocked_domains are mutually exclusive".into());
+        }
+        match self.kind.as_str() {
+            "mcp" => {
+                let remote = self
+                    .options
+                    .get("remote")
+                    .and_then(Value::as_object)
+                    .ok_or("mcp requires remote.url")?;
+                if remote
+                    .get("url")
+                    .and_then(Value::as_str).is_none_or(|s| s.is_empty())
+                {
+                    return Err("mcp requires remote.url".into());
+                }
+                if remote
+                    .keys()
+                    .any(|k| !matches!(k.as_str(), "url" | "headers" | "transport_type" | "oauth"))
+                {
+                    return Err("unsupported remote MCP configuration".into());
+                }
+            }
+            "api" => {
+                let api = self
+                    .options
+                    .get("api_config")
+                    .and_then(Value::as_object)
+                    .ok_or("api requires api_config")?;
+                if api.keys().any(|k| {
+                    !matches!(
+                        k.as_str(),
+                        "endpoint"
+                            | "method"
+                            | "name"
+                            | "instruction"
+                            | "required"
+                            | "args"
+                            | "headers"
+                            | "output_schema"
+                    )
+                }) {
+                    return Err("unsupported api_config field".into());
+                }
+                if ["name", "endpoint"].iter().any(|k| {
+                    api.get(*k)
+                        .and_then(Value::as_str).is_none_or(|s| s.is_empty())
+                }) {
+                    return Err("api needs a name and endpoint".into());
+                }
+            }
+            _ => {}
+        }
         // Only project toolsets that do not require additional configuration.
         match self.kind.as_str() {
-            "calculator" | "datetime" | "fetch" | "file" | "filesystem" | "memory" | "plan"
-            | "random" | "session_context" | "shell" | "tasks" | "think" | "todo"
-            | "user_prompt" => Ok(()),
+            "api" | "mcp" | "calculator" | "datetime" | "fetch" | "file" | "filesystem"
+            | "memory" | "plan" | "random" | "session_context" | "shell" | "tasks" | "think"
+            | "todo" | "user_prompt" => Ok(()),
             _ => Err(format!("unsupported toolset type {:?}", self.kind)),
         }
     }
@@ -98,7 +199,7 @@ pub struct Selected {
     pub endpoint: String,
     pub token: String,
     pub instruction: String,
-    pub toolsets: Vec<String>,
+    pub toolsets: Vec<Toolset>,
     pub responses: bool,
     pub merge_messages: bool,
 }
@@ -367,7 +468,17 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         for ts in &a.toolsets {
             if !matches!(
                 ts.kind.as_str(),
-                "think" | "user_prompt" | "calculator" | "todo"
+                "think"
+                    | "user_prompt"
+                    | "calculator"
+                    | "todo"
+                    | "datetime"
+                    | "random"
+                    | "plan"
+                    | "memory"
+                    | "api"
+                    | "mcp"
+                    | "fetch"
             ) {
                 return Err(format!("unsupported toolset type {:?}", ts.kind));
             }
@@ -448,7 +559,15 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         merge_messages,
         token,
         instruction: instruction(&a.instruction, env),
-        toolsets: a.toolsets.iter().map(|ts| ts.kind.clone()).collect(),
+        toolsets: a
+            .toolsets
+            .iter()
+            .cloned()
+            .map(|mut ts| {
+                ts.instruction = instruction(&ts.instruction, env);
+                ts
+            })
+            .collect(),
     })
 }
 

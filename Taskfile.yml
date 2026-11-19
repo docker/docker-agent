@@ -219,7 +219,8 @@ tasks:
       - cargo build --locked --release --manifest-path cmd/wasm/portable/Cargo.toml --target wasm32-unknown-unknown --target-dir bin/portable-target
       - mkdir -p bin/wasm-portable
       - cp bin/portable-target/wasm32-unknown-unknown/release/docker_agent_portable.wasm bin/wasm-portable/docker-agent.wasm
-      - cp cmd/wasm/portable/agent.mjs cmd/wasm/portable/index.html bin/wasm-portable/
+      - find cmd/wasm/portable -maxdepth 1 -name '*.mjs' ! -name '*_test.mjs' -exec cp {} bin/wasm-portable/ \;
+      - cp cmd/wasm/portable/index.html bin/wasm-portable/
 
   test-wasm-portable:
     desc: Test the standalone Rust browser agent against the small-profile contract (requires Rust and Node)

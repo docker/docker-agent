@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { createReadStream } from 'node:fs';
+import { createReadStream, readdirSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,7 @@ const goroot = execFileSync('go', ['env', 'GOROOT'], { encoding: 'utf8' }).trim(
 const files = new Map([
   ['/go.wasm', [join(root, 'cmd/wasm/web/docker-agent.wasm'), 'application/wasm']],
   ['/wasm_exec.js', [join(goroot, 'lib/wasm/wasm_exec.js'), 'text/javascript']],
-  ['/agent.mjs', [join(root, 'bin/wasm-portable/agent.mjs'), 'text/javascript']],
+  ...readdirSync(join(root, 'bin/wasm-portable')).filter(f => f.endsWith('.mjs')).map(f => ['/' + f, [join(root, 'bin/wasm-portable', f), 'text/javascript']]),
   ['/docker-agent.wasm', [join(root, 'bin/wasm-portable/docker-agent.wasm'), 'application/wasm']],
   ['/replay.mjs', [new URL('./replay.mjs', import.meta.url), 'text/javascript']],
 ]);
