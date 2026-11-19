@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/calculator"
 	"github.com/docker/docker-agent/pkg/tools/builtin/datetime"
+	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
 	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
 	"github.com/docker/docker-agent/pkg/tools/builtin/memory"
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
@@ -42,7 +43,7 @@ func generate(ctx context.Context, w io.Writer) error {
 	}
 	catalog := make(map[string]entry)
 	for key, ts := range map[string]tools.ToolSet{
-		"calculator": calculator.New(), "think": think.New(), "todo": todo.New(), "user_prompt": userprompt.New(),
+		"deferred": deferred.New(), "calculator": calculator.New(), "think": think.New(), "todo": todo.New(), "user_prompt": userprompt.New(),
 		"datetime": datetime.New(), "random": random.New(), "session_context": sessioncontext.New(), "fetch": fetch.New(),
 		"model_picker": modelpicker.New([]string{"{AVAILABLE_MODELS}"}),
 		"memory":       memory.New(inmemory.New()),
@@ -63,7 +64,7 @@ func generate(ctx context.Context, w io.Writer) error {
 			}
 			tools.OrderedSchemaProperties(schema)
 			e.Strict[t.Name] = strict
-			e.ReadOnly[t.Name] = t.Annotations.ReadOnlyHint
+			e.ReadOnly[t.Name] = t.Annotations.ReadOnlyHint && (t.Annotations.DestructiveHint == nil || !*t.Annotations.DestructiveHint)
 			e.Tools = append(e.Tools, map[string]any{"type": "function", "function": map[string]any{
 				"name": t.Name, "description": t.Description, "parameters": schema,
 			}})

@@ -1,16 +1,15 @@
 //! Session-local discovery over admitted tool definitions. Never list or execute a source here.
 
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{cmp::Reverse, collections::BTreeMap, fmt::Write};
 
 pub const SEARCH: &str = "search_tool";
 pub const ADD: &str = "add_tool";
-pub const INSTRUCTIONS: &str = "## Deferred Tools\n\nUse search_tool to discover additional tools by keyword (e.g., \"remote\", \"read\", \"write\"). Use add_tool to activate a discovered tool.";
 
 /// T carries the source's dispatch binding (not just the function name).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Tool<T> {
     pub definition: Value,
     pub target: T,
@@ -88,31 +87,21 @@ impl<T> Discovery<T> {
         self.enabled
     }
 
-    pub fn catalog(&self) -> impl Iterator<Item = (&str, &Tool<T>)> {
-        self.catalog
-            .iter()
-            .map(|(name, (tool, _))| (name.as_str(), tool))
-    }
-
-    pub fn activated(&self) -> impl Iterator<Item = (&str, &Tool<T>)> {
-        self.catalog
-            .iter()
-            .filter(|(_, (_, active))| *active)
-            .map(|(k, (tool, _))| (k.as_str(), tool))
-    }
-
     /// `Err` denotes a model-facing tool result with IsError, not a fatal turn error.
-    pub fn add(&mut self, name: &str) -> Result<String, String> {
+    pub fn add(&mut self, name: &str) -> Result<(String, Option<&Tool<T>>), String> {
         let Some((tool, active)) = self.catalog.get_mut(name) else {
             return Err(format!("Tool '{name}' not found."));
         };
         if *active {
-            return Ok(format!("Tool '{name}' is already active"));
+            return Ok((format!("Tool '{name}' is already active"), None));
         }
         *active = true;
-        Ok(format!(
-            "Tool '{name}' has been activated and is now available for use.\n\nDescription: {}",
-            tool.description()
+        Ok((
+            format!(
+                "Tool '{name}' has been activated and is now available for use.\n\nDescription: {}",
+                tool.description()
+            ),
+            Some(tool),
         ))
     }
 
@@ -135,12 +124,12 @@ impl<T> Discovery<T> {
                 continue;
             }
             let description = tool.description();
+            work = work
+                .checked_sub(name.len() + description.len() + 1)
+                .ok_or("deferred search work limit reached")?;
             let score = if pattern.is_empty() {
                 Some(0)
             } else {
-                work = work
-                    .checked_sub(name.len() + description.len() + 1)
-                    .ok_or("deferred search work limit reached")?;
                 score(&format!("{name} {description}"), &pattern, &mut work)?
             };
             if let Some(score) = score {
@@ -156,13 +145,7 @@ impl<T> Discovery<T> {
         }
         // Go leaves ties in map iteration order. Keep a deterministic name tiebreak here.
         hits.sort_by_key(|hit| hit.rank);
-        let json = serde_json::to_string(&hits)
-            .expect("string fields")
-            .replace('&', "\\u0026")
-            .replace('<', "\\u003c")
-            .replace('>', "\\u003e")
-            .replace('\u{2028}', "\\u2028")
-            .replace('\u{2029}', "\\u2029");
+        let json = crate::go_json::encode(&hits);
         Ok(format!("Found {} deferred tool(s):\n{json}", hits.len()))
     }
 }
@@ -367,8 +350,19 @@ fn normalize(c: char) -> char {
 }
 
 /// Compile once when loading config. Invalid/unsupported patterns reject the source, not just a tool.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ToonSpec(Vec<Regex>);
+
+impl<'de> Deserialize<'de> for ToonSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let serde_yaml_ng::Value::String(spec) = serde_yaml_ng::Value::deserialize(d)? else {
+            return Err(serde::de::Error::custom(
+                "toon must be a regular expression string",
+            ));
+        };
+        Self::compile(&spec).map_err(serde::de::Error::custom)
+    }
+}
 
 impl ToonSpec {
     pub fn compile(spec: &str) -> Result<Self, String> {
@@ -732,11 +726,6 @@ mod tests {
         assert_eq!(eager.len(), 1);
         assert_eq!(eager[0].definition["function"]["name"], "read_file");
         assert!(!eager[0].toon);
-        assert_eq!(d.activated().count(), 0);
-        assert_eq!(
-            d.catalog().map(|(n, _)| n).collect::<Vec<_>>(),
-            ["create_file"]
-        );
         d.wrap_source(
             [tool("create_file", "Other", 2)],
             true,
@@ -749,14 +738,13 @@ mod tests {
             d.add("read_file").unwrap_err(),
             "Tool 'read_file' not found."
         );
-        assert_eq!(d.add("create_file").unwrap(), "Tool 'create_file' has been activated and is now available for use.\n\nDescription: Creates <new> & fresh file");
-        assert_eq!(
-            d.add("create_file").unwrap(),
-            "Tool 'create_file' is already active"
-        );
-        let (name, tool) = d.activated().next().unwrap();
-        assert_eq!((name, tool.target, tool.toon), ("create_file", 1, true));
-        assert_eq!(d.catalog().count(), 1);
+        let (text, activated) = d.add("create_file").unwrap();
+        let tool = activated.unwrap();
+        assert_eq!((tool.target, tool.toon), (1, true));
+        assert_eq!(text, "Tool 'create_file' has been activated and is now available for use.\n\nDescription: Creates <new> & fresh file");
+        let (text, tool) = d.add("create_file").unwrap();
+        assert_eq!(text, "Tool 'create_file' is already active");
+        assert!(tool.is_none());
         assert_eq!(
             d.search(" c ").unwrap_err(),
             "No deferred tools found matching ' c '"
@@ -775,7 +763,7 @@ mod tests {
             )
             .is_err());
         assert!(!d.enabled());
-        assert_eq!(d.catalog().count(), 0);
+        assert!(d.catalog.is_empty());
     }
 
     #[test]

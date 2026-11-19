@@ -1,3 +1,4 @@
+use crate::permission::{Permissions, Policy, Safety};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
@@ -12,9 +13,27 @@ struct Config {
     version: Option<Value>,
     agents: IndexMap<String, Agent>,
     #[serde(default)]
+    permissions: Permissions,
+    #[serde(default, deserialize_with = "runtime_defaults")]
+    runtime: Runtime,
+    #[serde(default)]
     models: BTreeMap<String, Model>,
     #[serde(default)]
     providers: BTreeMap<String, Provider>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Runtime {
+    safety: Safety,
+}
+
+fn runtime_defaults<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Runtime, D::Error> {
+    let value = serde_yaml_ng::Value::deserialize(d)?;
+    if !matches!(value, serde_yaml_ng::Value::Mapping(_)) {
+        return Err(serde::de::Error::custom("runtime must be a mapping"));
+    }
+    serde_yaml_ng::from_value(value).map_err(serde::de::Error::custom)
 }
 
 #[derive(Deserialize)]
@@ -37,6 +56,8 @@ struct Agent {
     add_environment_info: bool,
     #[serde(default)]
     readonly: bool,
+    #[serde(default)]
+    safety: Safety,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -45,7 +66,11 @@ pub struct Toolset {
     pub kind: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "tool_filter",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub tools: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub readonly: bool,
@@ -53,8 +78,48 @@ pub struct Toolset {
     pub instruction: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    #[serde(default, skip_serializing)]
+    pub defer: Defer,
+    #[serde(default, skip_serializing)]
+    pub toon: crate::discovery::ToonSpec,
     #[serde(flatten)]
     pub options: BTreeMap<String, Value>,
+}
+
+// The typed YAML sequence decoder treats null as an empty (unrestricted) allow-list.
+fn tool_filter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let serde_yaml_ng::Value::Sequence(names) = serde_yaml_ng::Value::deserialize(d)? else {
+        return Err(serde::de::Error::custom("tools must be a list of names"));
+    };
+    names
+        .into_iter()
+        .map(|name| match name {
+            serde_yaml_ng::Value::String(name) => Ok(name),
+            _ => Err(serde::de::Error::custom("invalid tool filter name")),
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Defer {
+    All(bool),
+    Names(Vec<String>),
+}
+
+impl Default for Defer {
+    fn default() -> Self {
+        Self::All(false)
+    }
+}
+
+impl Defer {
+    pub fn parts(&self) -> (bool, &[String]) {
+        match self {
+            Self::All(all) => (*all, &[]),
+            Self::Names(names) => (false, names),
+        }
+    }
 }
 
 impl Toolset {
@@ -214,6 +279,7 @@ struct ModelRequest<'a> {
 }
 
 pub struct Selected {
+    pub policy: Policy,
     pub picker: crate::model_picker::Picker,
     pub model_params: Map<String, Value>,
     pub endpoint: String,
@@ -577,6 +643,14 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             .clone()
     };
     Ok(Selected {
+        policy: Policy {
+            rules: cfg.permissions.clone(),
+            safety: if a.safety == Safety::Legacy {
+                cfg.runtime.safety
+            } else {
+                a.safety
+            },
+        },
         picker,
         model_params: request.model_params,
         endpoint: request.endpoint,

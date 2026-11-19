@@ -1,9 +1,8 @@
-// Each live session has its own native resources, tool bindings, and approvals.
+// Each live session has its own native resources, tool bindings, and outstanding questions.
 export function createHost(opts, onEvent, stateless) {
-  const handlers = new Map(), closers = [], grants = new Set();
+  const handlers = new Map(), closers = [];
   const questions = new Map();
-  let local, confirmation;
-  const autoApprove = opts.autoApprove === true;
+  let local, confirmation, delivering;
   const env = Object.assign(Object.create(null), opts.env);
   const proxy = opts.toolProxy;
   if (proxy != null && proxy !== '') {
@@ -15,32 +14,41 @@ export function createHost(opts, onEvent, stateless) {
   }
   function confirm(reply, reason) {
     const waiter = confirmation;
-    if (!waiter) throw new Error('no tool confirmation is pending');
+    if (!waiter || waiter.signal.aborted) throw new Error('no tool confirmation is pending');
+    // Legacy synchronous callbacks are already bound to the event being delivered.
+    if (reply?.confirmationId !== waiter.token && !(reply?.confirmationId === undefined && delivering === waiter)) {
+      throw new Error('confirmationId must match the pending tool confirmation');
+    }
+    decide(waiter, reply, reason);
+  }
+  function decide(waiter, reply, reason) {
     const decision = typeof reply === 'boolean' ? reply ? 'approve' : 'reject' : typeof reply === 'string' ? reply : reply?.decision;
     if (!['reject','approve','approve_tool','approve_balanced','approve_autonomous'].includes(decision)) throw new Error(`unknown decision ${JSON.stringify(decision)}`);
-    if (decision === 'approve_tool') {
-      if (reply?.toolName !== waiter.name) throw new Error('approve_tool requires toolName matching pending tool');
-      grants.add(waiter.name);
-    }
+    if (decision === 'approve_tool' && reply?.toolName !== waiter.name) throw new Error('approve_tool requires toolName matching pending tool');
     // Broader modes authorize this invocation. Do not infer an always-allow rule
     // for other tools from the current tool's safety classification.
+    const result = { approved: decision !== 'reject', reason: String(reason ?? reply?.reason ?? '').trim() };
+    if (decision === 'approve_tool') result.remember = true;
     confirmation = null;
-    waiter.resolve({ approved: decision !== 'reject', reason: String(reason ?? reply?.reason ?? '').trim() });
+    waiter.resolve(result);
   }
-  async function approval(event, signal) {
-    if (autoApprove || grants.has(event.name)) return { approved: true };
-    if (typeof onEvent !== 'function') return { approved: false };
+  async function approval({ name, args, id, token }, signal) {
+    signal.throwIfAborted();
+    if (typeof onEvent !== 'function') return { approved:false, reason:'' };
     const { promise, resolve, reject } = Promise.withResolvers();
-    const waiter = { resolve, name: event.name };
+    const waiter = { resolve, name, token, signal };
     confirmation = waiter;
     const abort = () => reject(new Error('chat aborted'));
     signal.addEventListener('abort', abort, { once: true });
     try {
       signal.throwIfAborted();
-      const reply = dispatch({ ...event, type: 'tool_confirmation' });
+      delivering = waiter;
+      let reply;
+      try { reply = dispatch({ type:'tool_confirmation', id, name, args, ...(!stateless && {confirmationId:token}) }); }
+      finally { delivering = null; }
       if (stateless) Promise.resolve(reply).then(v => {
-        if (confirmation === waiter) confirm(v ?? false);
-      }).catch(() => { if (confirmation === waiter) confirm(false); });
+        if (confirmation === waiter && !signal.aborted) decide(waiter, v ?? false);
+      }).catch(() => { if (confirmation === waiter && !signal.aborted) decide(waiter, false); });
       else Promise.resolve(reply).catch(() => {});
       return await promise;
     } finally {
@@ -69,34 +77,33 @@ export function createHost(opts, onEvent, stateless) {
     if (!['accept','decline','cancel'].includes(reply.action)) throw new Error('unknown elicitation action');
     questions.delete(reply.id); resolve(reply); return true;
   }
-  async function prepare(specs, signal) {
+  async function prepare(specs, signal, register) {
     const sets = [], bindings = new Map(), resources = [];
     try {
-    for (const [index, spec] of specs.entries()) {
-      signal.throwIfAborted();
-      if (spec.type === 'memory' || spec.type === 'plan') {
-        local ??= (await import('./local-tools.mjs')).localTools();
-      } else if (['mcp','fetch','api'].includes(spec.type)) {
-        const { toolFetch, httpTools } = await import('./http-tools.mjs');
-        const clean = { ...spec };
-        for (const key of ['readonly', 'tools', 'instruction']) delete clean[key]; // enforced by Wasm registration
-        const set = spec.type === 'mcp'
-          ? await (await import('./mcp.mjs')).openMCP(clean, env, proxy, signal, { toolFetch, elicit, oauthRedirectURI:opts.oauthRedirectURI })
-          : await httpTools(clean, env, proxy);
-        if (set.close) resources.push(() => set.close());
-        if (!Array.isArray(set.tools) || set.tools.length > 256) throw new Error('invalid host tool catalog');
-        for (const tool of set.tools) {
-          const name = tool.function?.name;
-          if (bindings.has(name)) throw new Error(`duplicate tool name ${name}`);
-          bindings.set(name, (args, signal) => set.call(name, args, signal));
+      for (const [index, spec] of specs.entries()) {
+        signal.throwIfAborted();
+        if (spec.type === 'memory' || spec.type === 'plan') {
+          local ??= (await import('./local-tools.mjs')).localTools();
+          bindings.set(index, (...args) => local.call(...args));
+        } else if (spec.type === 'datetime' || spec.type === 'random') {
+          bindings.set(index, async (name, args) => (await import('./clock.mjs')).clockTool(name, args));
+        } else if (['mcp','fetch','api'].includes(spec.type)) {
+          const { toolFetch, httpTools } = await import('./http-tools.mjs');
+          const clean = { ...spec };
+          for (const key of ['readonly', 'tools', 'instruction']) delete clean[key];
+          const set = spec.type === 'mcp'
+            ? await (await import('./mcp.mjs')).openMCP(clean, env, proxy, signal, { toolFetch, elicit, oauthRedirectURI:opts.oauthRedirectURI })
+            : await httpTools(clean, env, proxy);
+          if (set.close) resources.push(() => set.close());
+          if (!Array.isArray(set.tools) || set.tools.length > 256) throw new Error('invalid host tool catalog');
+          bindings.set(index, (name, args, signal) => set.call(name, args, signal));
+          sets.push({ index, tools: set.tools, instructions: set.instructions ?? '' });
         }
-        sets.push({ index, tools: set.tools, instructions: set.instructions ?? '' });
       }
-    }
-    signal.throwIfAborted();
-    for (const [name, fn] of bindings) handlers.set(name, fn);
-    closers.push(...resources);
-    return sets;
+      signal.throwIfAborted();
+      if (sets.length) register(sets);
+      for (const [index, fn] of bindings) handlers.set(index, fn);
+      closers.push(...resources);
     } catch (error) {
       await Promise.allSettled(resources.map(fn => Promise.resolve().then(fn)));
       throw error;
@@ -104,20 +111,13 @@ export function createHost(opts, onEvent, stateless) {
   }
   async function execute(internal, signal, emit) {
     const event = { type:'tool_call', id:internal.id, name:internal.name, args:internal.args };
-    if (!internal.readOnly) {
-      const { approved, reason } = await approval(event, signal);
-      if (!approved) return { output: 'The user rejected the tool call.' + (reason ? ` Reason: ${reason}` : ''), is_error:true };
-    }
     signal.throwIfAborted();
     emit(event);
     signal.throwIfAborted();
     try {
-      const fn = handlers.get(event.name);
-      let result;
-      if (fn) result = await fn(event.args, signal);
-      else if (['get_datetime','random_int'].includes(event.name)) result = (await import('./clock.mjs')).clockTool(event.name,event.args);
-      else if (local) result = await local.call(event.name,event.args,signal);
-      else throw new Error(`unavailable host tool ${event.name}`);
+      const fn = handlers.get(internal.source);
+      if (!fn) throw new Error(`unavailable host tool ${event.name}`);
+      const result = await fn(internal.name, internal.args, signal);
       if (typeof result.output !== 'string' || typeof result.is_error !== 'boolean') throw new Error('invalid host tool result');
       return result;
     } catch (e) {
@@ -125,8 +125,8 @@ export function createHost(opts, onEvent, stateless) {
       return { output:e.message || String(e), is_error:true };
     }
   }
-  return { prepare, execute, confirm, respond, restart: () => grants.clear(), async close() {
-    grants.clear(); handlers.clear(); local = null;
+  return { prepare, approval, execute, confirm, respond, async close() {
+    handlers.clear(); local = null;
     await Promise.allSettled(closers.splice(0).map(fn => Promise.resolve().then(fn)));
   } };
 }

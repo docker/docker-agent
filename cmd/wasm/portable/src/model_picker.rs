@@ -71,7 +71,7 @@ mod tests {
             ),
             (
                 "{}",
-                "{type: model_picker, models: [local/fast], defer: true}",
+                "{type: model_picker, models: [local/fast], defer: {unsupported: true}}",
             ),
             ("{}", "{type: model_picker, models: [other/fast]}"),
             ("{}", "{type: model_picker, models: [local/gpt-5]}"),

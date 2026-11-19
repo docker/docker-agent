@@ -1,7 +1,9 @@
 mod calculator;
 mod config;
+mod discovery;
 mod go_json;
 mod model_picker;
+mod permission;
 mod providers;
 mod responses;
 mod session_context;
@@ -27,6 +29,8 @@ enum Command {
         yaml: String,
         agent: String,
         env: BTreeMap<String, String>,
+        #[serde(default)]
+        auto_approve: bool,
         history: Vec<Value>,
         stamp: session_context::Stamp,
     },
@@ -46,10 +50,17 @@ enum Command {
         session: u32,
         sets: Vec<turn::HostSet>,
     },
+    Confirm {
+        session: u32,
+        token: String,
+        approved: bool,
+        #[serde(default)]
+        remember: bool,
+        reason: String,
+    },
     HostResult {
         session: u32,
-        id: String,
-        name: String,
+        token: String,
         output: String,
         is_error: bool,
     },
@@ -127,6 +138,7 @@ impl Core {
                 yaml,
                 agent,
                 env,
+                auto_approve,
                 history,
                 stamp,
             } => {
@@ -140,7 +152,10 @@ impl Core {
                 let conv = Conversation::configured(
                     spec.model_params,
                     spec.instruction,
-                    spec.toolsets,
+                    turn::ToolProfile {
+                        specs: spec.toolsets,
+                        policy: spec.policy.with_auto_approve(auto_approve),
+                    },
                     spec.merge_messages,
                     history,
                     spec.picker,
@@ -180,15 +195,27 @@ impl Core {
                 self.session(session)?.conversation.configure_tools(&sets)?;
                 Ok(Value::Null)
             }
+            Command::Confirm {
+                session,
+                token,
+                approved,
+                remember,
+                reason,
+            } => {
+                let s = self.session(session)?;
+                let next = s
+                    .conversation
+                    .confirm(&token, approved, remember, &reason)?;
+                s.next(next)
+            }
             Command::HostResult {
                 session,
-                id,
-                name,
+                token,
                 output,
                 is_error,
             } => {
                 let s = self.session(session)?;
-                let n = s.conversation.host_result(&id, &name, output, is_error)?;
+                let n = s.conversation.host_result(&token, output, is_error)?;
                 s.next(n)
             }
             Command::AnswerElicitation {

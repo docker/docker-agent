@@ -1,5 +1,4 @@
-//! Team-tier permissions and annotation-based safety (pkg/permissions and pkg/runtime/toolexec).
-//! Decode both config fields with `#[serde(default)]`; malformed policy must fail config loading.
+//! Portable rule precedence is deny, mandatory ask, allow, then annotation-based safety.
 //! Patterns are ASCII tool globs (`*`, `?`) with optional `:key=glob` string conditions.
 //! Unsupported inputs and exhausted match budgets deny the call, never fall back to approval.
 
@@ -44,6 +43,54 @@ pub struct Permissions {
     deny: Vec<Rule>,
 }
 
+#[derive(Default)]
+pub struct Policy {
+    pub rules: Permissions,
+    pub safety: Safety,
+}
+
+impl Policy {
+    pub fn with_auto_approve(mut self, auto: bool) -> Self {
+        // Never promote an explicitly configured safety mode to autonomous.
+        if auto && self.safety == Safety::Legacy {
+            self.safety = Safety::Autonomous;
+        }
+        self
+    }
+
+    // Argument-dependent rules are checked again at dispatch, not guessed from a schema.
+    pub fn visible(&self, name: &str, safe: bool) -> Result<bool, &'static str> {
+        let mut budget = MATCH_BUDGET;
+        let restricted = self.safety == Safety::Restricted;
+        let prohibitions = self
+            .rules
+            .deny
+            .iter()
+            .chain(self.rules.ask.iter().filter(|_| restricted));
+        for rule in prohibitions {
+            if rule.conditions.is_empty() && glob(&rule.name, name, &mut budget)? {
+                return Ok(false);
+            }
+        }
+        if restricted && !safe {
+            for rule in &self.rules.allow {
+                if glob(&rule.name, name, &mut budget)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    pub fn grantable(&self) -> bool {
+        self.safety == Safety::Legacy
+            && self.rules.allow.is_empty()
+            && self.rules.deny.is_empty()
+            && self.rules.ask.is_empty()
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum Verdict {
     Allow,
@@ -54,7 +101,7 @@ pub enum Verdict {
 /// Check at tool registration as well as dispatch. Go classifies command tools by their
 /// actual command, not by their annotations; this profile has no shell classifier.
 pub fn validate_tool(name: &str) -> Result<(), &'static str> {
-    if name.is_empty() || name.len() > MAX_PATTERN_BYTES || !name.bytes().all(tool_byte) {
+    if name.is_empty() || name.len() > 200 || !name.bytes().all(tool_byte) {
         return Err("Unsupported portable tool name.");
     }
     if matches!(name, "shell" | "run_background_job") {
@@ -64,25 +111,11 @@ pub fn validate_tool(name: &str) -> Result<(), &'static str> {
 }
 
 impl Permissions {
-    /// Supply the resolved tool's trusted annotations, never hints from a model call.
-    pub fn verdict(
-        &self,
-        safety: Safety,
-        auto_approve: bool,
-        name: &str,
-        arguments: &str,
-        read_only: bool,
-        destructive: bool,
-    ) -> Verdict {
+    pub fn verdict(&self, safety: Safety, name: &str, arguments: &str, safe: bool) -> Verdict {
         if let Err(reason) = validate_tool(name) {
             return Verdict::Deny(reason.into());
         }
-        let mode = if auto_approve {
-            Safety::Autonomous
-        } else {
-            safety
-        };
-        self.decide(mode, name, arguments, read_only && !destructive)
+        self.decide(safety, name, arguments, safe)
             .unwrap_or_else(|reason| Verdict::Deny(format!("Tool '{name}' is denied: {reason}.")))
     }
 
@@ -104,14 +137,22 @@ impl Permissions {
                 "Tool '{name}' is denied by permissions configuration."
             )));
         }
+        // Portable asks are mandatory, including under autoApprove and overlapping allows.
+        if call.any(&self.ask)? {
+            return Ok(if mode == Safety::Restricted {
+                Verdict::Deny(format!(
+                    "Tool '{name}' requires confirmation in restricted mode."
+                ))
+            } else {
+                Verdict::Ask
+            });
+        }
         if call.any(&self.allow)? {
             return Ok(Verdict::Allow);
         }
-        // A team-level ask changes the fallback only for read-only calls in legacy mode.
         Ok(match mode {
             Safety::Autonomous => Verdict::Allow,
             Safety::Strict => Verdict::Ask,
-            Safety::Legacy if safe && call.any(&self.ask)? => Verdict::Ask,
             _ if safe => Verdict::Allow,
             Safety::Restricted => Verdict::Deny(format!("Tool '{name}' is denied by the restricted safety mode: the call is not classified safe, and the mode's fallback denies instead of asking for confirmation.")),
             _ => Verdict::Ask,
@@ -160,7 +201,7 @@ impl Match<'_> {
 }
 
 fn tool_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b"_-.:".contains(&b)
+    b.is_ascii_alphanumeric() || b"_-.".contains(&b)
 }
 
 #[derive(Clone, Debug)]
@@ -177,7 +218,7 @@ impl Rule {
         {
             return Err("portable permission rules require at most 256 ASCII bytes and do not support character classes or escapes");
         }
-        // Only :word= introduces a condition. Qualified names and URLs can both contain colons.
+        // Colons in argument values (e.g. URLs) are not separators.
         let mut boundaries = pattern
             .match_indices(':')
             .filter_map(|(i, _)| {
@@ -455,6 +496,7 @@ mod tests {
             " ",
             ":k=v",
             "tool:a-b=c",
+            "mcp:git:*",
             "think[abc]",
             "tool:k=\\?",
             "tool:k=κ",
@@ -486,11 +528,11 @@ mod tests {
     }
 
     #[test]
-    fn safety_and_team_rules_match_go_dispatch() {
+    fn portable_asks_are_mandatory_and_denies_take_precedence() {
         let empty = Permissions::default();
         let deny: Permissions = load("{deny: ['*'], allow: [tool], ask: [tool]}").unwrap();
-        let allow: Permissions = load("{allow: ['t*'], ask: [tool]}").unwrap();
-        let ask: Permissions = load("{ask: [tool]}").unwrap();
+        let allow: Permissions = load("{allow: ['t*']}").unwrap();
+        let ask: Permissions = load("{allow: [tool], ask: [tool]}").unwrap();
         for (mode, annotated, other) in [
             (Safety::Legacy, Allow, Ask),
             (Safety::Strict, Ask, Ask),
@@ -499,70 +541,43 @@ mod tests {
             (Safety::Autonomous, Allow, Allow),
         ] {
             for (ro, destructive) in [(true, false), (false, false), (false, true), (true, true)] {
-                let verdict = |p: &Permissions, auto| p.verdict(mode, auto, "tool", "{}", ro, destructive);
+                let verdict = |p: &Permissions| p.verdict(mode, "tool", "{}", ro && !destructive);
                 let fallback = if ro && !destructive { &annotated } else { &other };
-                assert_eq!(&verdict(&empty, false), fallback);
-                assert_eq!(&verdict(&ask, false), if mode == Safety::Legacy { &Ask } else { fallback });
-                for auto in [false, true] {
-                    assert_eq!(verdict(&deny, auto), Deny("Tool 'tool' is denied by permissions configuration.".into()));
-                    assert_eq!(verdict(&allow, auto), Allow);
-                }
-                assert_eq!(verdict(&ask, true), Allow);
+                assert_eq!(&verdict(&empty), fallback);
+                if mode == Safety::Restricted { assert!(matches!(verdict(&ask), Deny(_))); }
+                else { assert_eq!(verdict(&ask), Ask); }
+                assert_eq!(verdict(&deny), Deny("Tool 'tool' is denied by permissions configuration.".into()));
+                assert_eq!(verdict(&allow), Allow);
             }
         }
     }
 
     #[test]
-    fn qualified_names_and_string_conditions() {
+    fn wire_names_and_string_conditions() {
         let p: Permissions =
-            load("{deny: ['mcp:git:*:url=https://host:8443/pr*?x:method=P?ST']}").unwrap();
+            load("{deny: ['git_*:url=https://host:8443/pr*?x:method=P?ST']}").unwrap();
         let blocked = |n, url, method| {
             let raw = json!({"url":url,"method":method}).to_string();
-            matches!(
-                p.verdict(Safety::Autonomous, true, n, &raw, true, false),
-                Deny(_)
-            )
+            matches!(p.verdict(Safety::Autonomous, n, &raw, true), Deny(_))
         };
-        assert!(blocked(
-            "MCP:git:query",
-            "https://HOST:8443/pr/a\nX",
-            "post"
-        ));
+        assert!(blocked("GIT_query", "https://HOST:8443/pr/a\nX", "post"));
+        assert!(!blocked("GIT_query", "https://HOST:8443/pr/a\nX#", "post"));
+        assert!(!blocked("GIT_query", "https://HOST:8443/pr/a\nX", "get"));
         assert!(!blocked(
-            "MCP:git:query",
-            "https://HOST:8443/pr/a\nX#",
-            "post"
-        ));
-        assert!(!blocked(
-            "MCP:git:query",
-            "https://HOST:8443/pr/a\nX",
-            "get"
-        ));
-        assert!(!blocked(
-            "MCP:gitlab:query",
+            "GITLAB_query",
             "https://HOST:8443/pr/a\nX",
             "post"
         ));
         assert_eq!(
-            p.verdict(
-                Safety::Autonomous,
-                false,
-                "mcp:git:query",
-                "{}",
-                false,
-                false
-            ),
+            p.verdict(Safety::Autonomous, "git_query", "{}", false),
             Allow
         );
         let p: Permissions = load("{allow: ['do:arg=']}").unwrap();
         assert_eq!(
-            p.verdict(Safety::Strict, false, "do", r#"{"arg":""}"#, false, true),
+            p.verdict(Safety::Strict, "do", r#"{"arg":""}"#, false),
             Allow
         );
-        assert_eq!(
-            p.verdict(Safety::Strict, false, "do", "{}", false, true),
-            Ask
-        );
+        assert_eq!(p.verdict(Safety::Strict, "do", "{}", false), Ask);
     }
 
     #[test]
@@ -586,19 +601,13 @@ mod tests {
             r#"{"mode":"fine","Mode":"special"}"#,
         ] {
             assert!(
-                matches!(
-                    p.verdict(Safety::Autonomous, true, "x", raw, false, false),
-                    Deny(_)
-                ),
+                matches!(p.verdict(Safety::Autonomous, "x", raw, false), Deny(_)),
                 "{raw}"
             );
         }
         // No checked condition, no need to interpret (or normalize) handler arguments.
         let p: Permissions = load("{deny: ['other:mode=x'], allow: [x]}").unwrap();
-        assert_eq!(
-            p.verdict(Safety::Strict, false, "x", "ignored", false, false),
-            Allow
-        );
+        assert_eq!(p.verdict(Safety::Strict, "x", "ignored", false), Allow);
     }
 
     #[test]
@@ -612,7 +621,7 @@ mod tests {
             (MAX_ARGUMENT_BYTES / 2, "match budget"),
         ] {
             let raw = json!({"s": "a".repeat(size)}).to_string();
-            let Deny(msg) = p.verdict(Safety::Autonomous, true, "x", &raw, true, false) else {
+            let Deny(msg) = p.verdict(Safety::Autonomous, "x", &raw, true) else {
                 panic!("must deny");
             };
             assert!(msg.contains(reason), "{msg}");
@@ -627,7 +636,7 @@ mod tests {
         ] {
             let reason = validate_tool(name).unwrap_err();
             assert_eq!(
-                p.verdict(Safety::Autonomous, true, name, "{}", true, false),
+                p.verdict(Safety::Autonomous, name, "{}", true),
                 Deny(reason.into())
             );
         }
