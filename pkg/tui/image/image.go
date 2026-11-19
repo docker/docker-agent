@@ -29,7 +29,6 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 var markdownImageRangePattern = regexp.MustCompile(`!\[([^\]\n]*)\]\([ \t]*(?:<([^>\n]+)>|([^ \t)\n]+))(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^\)\n]*\)))?[ \t]*\)`)
@@ -309,7 +308,7 @@ func FromBytes(name, mimeType string, data []byte) (Inline, bool) {
 	}, true
 }
 
-// Render returns a label, kitty image sequence, and the rows reserved by it.
+// Render returns a kitty image sequence and the rows reserved by it.
 func Render(img Inline, width int) []string {
 	if len(img.PNGData) == 0 || img.Width <= 0 || img.Height <= 0 || width <= 0 {
 		return nil
@@ -317,16 +316,7 @@ func Render(img Inline, width int) []string {
 
 	cols, rows := cellSize(img, width)
 
-	label := "image"
-	if img.Name != "" {
-		label = img.Name
-	}
-	if img.MIME != "" {
-		label += " (" + img.MIME + ")"
-	}
-
-	out := []string{"  " + styles.MutedStyle.Render("🖼 "+label)}
-	out = append(out, "  "+KittySequence(img.PNGData, cols, rows))
+	out := []string{"  " + KittySequence(img.PNGData, cols, rows)}
 	for range rows - 1 {
 		out = append(out, "")
 	}
