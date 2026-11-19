@@ -169,7 +169,7 @@ test('api POST sends JSON, handles error statuses and truncates/cancels response
 
 test('reject unsupported settings and ambiguous policies when registering tools', t => {
   const calls = network(t);
-  for (const options of [{ method: 'DELETE' }, { output_schema: {} }, { args: { p: { type: 'object', properties: {} } } },
+  for (const options of [{ method: 'TRACE' }, { method: 'post' }, { output_schema: {} }, { args: { p: { type: 'object', properties: {} } } },
     { args: { p: { type: 'string', pattern: 'x' } } }, { endpoint: 'https://${who}/x' }, { required: ['unknown'] }]) {
     assert.throws(() => api(options));
   }
@@ -220,7 +220,7 @@ test('fetch checks domains on robots, content and every redirect, including mapp
   assert.deepEqual(calls.map(c => c.target), ['https://api.example/robots.txt', 'https://api.example/robots.txt', start]);
 });
 
-test('fetch limits bodies and fails closed on unsupported HTML conversion and robots files', async t => {
+test('fetch bounds both raw and converted bodies and fails closed on unsupported robots files', async t => {
   let robots = '', cancelled = false;
   network(t, ({ target }) => target.endsWith('/robots.txt') ? new Response(robots) : new Response(new ReadableStream({
     start(c) { c.enqueue(new Uint8Array((1 << 20) + 1).fill(97)); }, cancel() { cancelled = true; },
@@ -230,10 +230,9 @@ test('fetch limits bodies and fails closed on unsupported HTML conversion and ro
   assert.match(large.output, /Length: 1048576 bytes/);
   assert.ok(cancelled);
   const text = await ts.call('fetch', { urls: [start], format: 'text' });
-  assert.equal(text.is_error, true);
-  assert.match(text.output, /HTML conversion/);
-  robots = 'User-agent: *\nDisallow: /foo$';
-  assert.match((await ts.call('fetch', { urls: [start] })).output, /unsupported robots/);
+  assert.deepEqual(text, large);
+  robots = 'User-agent: *\nDisallow: /foo$bar';
+  assert.match((await ts.call('fetch', { urls: [start] })).output, /unsupported interior/);
   robots = ' '.repeat(65537);
   assert.match((await ts.call('fetch', { urls: [start] })).output, /robots.txt too large/);
 });
@@ -247,4 +246,135 @@ test('invalid args, absent proxy, and pre-aborted signal never issue a request',
   }
   assert.equal((await api().call('lookup', '{}', AbortSignal.abort())).is_error, true);
   assert.equal(calls.length, 0);
+});
+
+test('bodyless API verbs expand only env; POST alone sets JSON content type', async t => {
+  const calls = network(t, () => new Response(null, { status: 204 }));
+  for (const method of ['HEAD', 'OPTIONS', 'PUT', 'PATCH', 'DELETE']) {
+    const ts = api({ method, endpoint: start + '/${env.PATH}?who=${who}', args: { who: { type: 'string' } } }, {}, { PATH: 'item' });
+    assert.deepEqual(await ts.call('lookup', { who: 'not interpolated' }), { output: '', is_error: false });
+    const call = calls.at(-1);
+    assert.equal(call.method, method);
+    assert.equal(call.wire.origin, new URL(proxy).origin);
+    assert.equal(call.target, start + '/item?who=${who}');
+    assert.equal(call.body, undefined);
+    assert.equal(call.headers.get('Content-Type'), null);
+  }
+});
+
+test('nested POST keys and string values survive without filtering, coercion or expansion', async t => {
+  const calls = network(t, () => new Response('ok'));
+  const row = { type: 'object', properties: JSON.parse('{"__proto__":{"type":"string"},"q":{"type":"string"},"v":{"type":"integer"}}'), required: ['q'] };
+  const ts = api({ method: 'POST', args: { rows: { type: 'array', items: row } } });
+  const values = JSON.parse('{"rows":[{"v":null,"q":"{\\"k\\":\\"<&>\\"}","__proto__":"${env.TOKEN}"},{"q":"03"}]}');
+  assert.deepEqual(await ts.call('lookup', JSON.stringify(values)), { output: 'ok', is_error: false });
+  assert.deepEqual(JSON.parse(calls[0].body), values);
+  assert.equal(calls[0].body, '{"rows":[{"__proto__":"${env.TOKEN}","q":"{\\"k\\":\\"\\u003c\\u0026\\u003e\\"}","v":null},{"q":"03"}]}');
+  for (const rows of [[{ q: 3 }], [{ q: 'ok', v: 1.1 }], [null], [{ v: 1 }], [{ extra: 'x' }], '[{"q":"x"}]']) {
+    assert.equal((await ts.call('lookup', { rows })).is_error, true);
+  }
+  for (const prop of [{ type: 'array', prefixItems: [] }, { type: 'array', items: { anyOf: [] } },
+    { type: 'object', properties: {}, additionalProperties: true }, { ...row, patternProperties: {} }]) {
+    assert.throws(() => api({ method: 'POST', args: { p: prop } }));
+  }
+  const deep = Array.from({ length: 17 }).reduce(items => ({ type: 'array', items }), { type: 'number' });
+  assert.throws(() => api({ method: 'POST', args: { deep } }), /schema size or depth/);
+  assert.match((await ts.call('lookup', { rows: [{ q: '<'.repeat(180000) }] })).output, /body too large/);
+  assert.equal(calls.length, 1);
+});
+
+test('offline conversion processes quoted tags, comments, entities and inert resource references', async t => {
+  // A detached DOM can load subresources without calling fetch.
+  for (const key of ['document', 'DOMParser', 'Image', 'XMLHttpRequest']) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, get() { throw new Error(`conversion touched ${key}`); } });
+    t.after(() => previous ? Object.defineProperty(globalThis, key, previous) : delete globalThis[key]);
+  }
+  const html = '<head><link rel="preload" href="/n"><style>@import url(/n)</style></head>'
+    + '<!-- <img src=/n> --><script src=/n>if (x < y) fetch("/n")</script><h2 title=">">Café</h2>'
+    + '<p>Hi <strong>there</strong> &amp; &#x1f600;!<br>See <a href="/a?x=1&amp;y=2">me</a>.'
+    + '<img src="/n" alt="img" onload="fetch(1)"><iframe src="/n"></iframe></p>';
+  const calls = network(t, ({ target }) => target.endsWith('/robots.txt') ? new Response('') : new Response(html, { headers: { 'Content-Type': 'text/html' } }));
+  const ts = httpTools({ type: 'fetch' }, {}, proxy);
+  for (const [format, body] of [['html', html], ['text', 'Café\r\n\r\nHi there & 😀!\r\nSee /a?x=1&y=2.'],
+    ['markdown', '## Café\n\nHi **there** & 😀!  \nSee [me](/a?x=1&y=2).![img](/n)']]) {
+    assert.deepEqual(await ts.call('fetch', { urls: [start], format }), {
+      output: `Successfully fetched ${start} (Status: 200, Length: ${Buffer.byteLength(body)} bytes):\n\n${body}`, is_error: false,
+    });
+  }
+  assert.deepEqual(calls.map(c => c.target), Array(3).fill(['https://api.example/robots.txt', start]).flat());
+});
+
+test('conversion preserves non-HTML bytes and bounds expanded output and stream work', async t => {
+  let response;
+  network(t, ({ target }) => target.endsWith('/robots.txt') ? new Response('') : response());
+  const ts = httpTools({ type: 'fetch' }, {}, proxy);
+  for (const format of ['text', 'markdown', 'html']) {
+    response = () => new Response('<p>*raw*</p>', { headers: { 'Content-Type': 'text/plain' } });
+    assert.deepEqual(await ts.call('fetch', { urls: [start], format }), {
+      output: `Successfully fetched ${start} (Status: 200, Length: 12 bytes):\n\n<p>*raw*</p>`, is_error: false,
+    });
+  }
+  let cancelled = false;
+  response = () => new Response(new ReadableStream({ pull(c) { c.enqueue(new Uint8Array()); }, cancel() { cancelled = true; } }));
+  assert.match((await ts.call('fetch', { urls: [start] })).output, /chunk count limit/);
+  assert.ok(cancelled);
+  response = () => new Response('>'.repeat((1 << 18) + 1), { headers: { 'Content-Type': 'text/html' } });
+  assert.match((await ts.call('fetch', { urls: [start], format: 'markdown' })).output, /converted HTML exceeds/);
+});
+
+test('unsupported markup and conversion limits never silently return HTML as Markdown', async t => {
+  let html;
+  const calls = network(t, ({ target }) => target.endsWith('/robots.txt') ? new Response('') : new Response(html, { headers: { 'Content-Type': 'text/html' } }));
+  const ts = httpTools({ type: 'fetch' }, {}, proxy);
+  for (html of ['<table></table>', '<p>not closed', '<pre>x</pre>', '<p>&NotEqualTilde;</p>',
+    '<p>literal *Markdown*</p>', '<a href="javascript:untrusted()">go</a>', '<a title="bad>attribute</a>',
+    '<div>'.repeat(65), '<br>'.repeat(32769), `<p ${'a '.repeat(32769)}>x</p>`]) {
+    const { is_error, output } = await ts.call('fetch', { urls: [start], format: 'markdown' });
+    assert.ok(is_error);
+    assert.match(output, /request format html/);
+  }
+  assert.ok(calls.every(c => c.target === start || c.target === 'https://api.example/robots.txt'));
+});
+
+test('robots matches Go group precedence, unanchored globs, escaped paths, byte weights and first ties', async t => {
+  let robots;
+  const calls = network(t, ({ target }) => target.endsWith('/robots.txt') ? new Response(robots) : new Response('ok'));
+  const ts = httpTools({ type: 'fetch' }, {}, proxy);
+  for (const [rules, path, allowed] of [
+    ['User-agent: c\nDisallow: /\nUser-agent: *\nAllow: /', '/a', true],
+    ['User-agent: c\nDisallow: /', '/a', false],
+    ['User-agent: *\nDisallow: /\nUser-agent: Cagent\nCrawl-delay: 1.5', '/a', true],
+    ['User-agent: *\nDisallow: /\nUser-agent: Cagent\nDisallow:\n', '/a', true],
+    ['User-agent: *\nDisallow: /\nUser-agent: Cagent\nDisallow:', '/a', false],
+    ['User-agent: *\nDisallow: priv/one*** # trailing stars drop to prefix', '/xx/priv/one', true],
+    ['User-agent: *\nDisallow: /priv/*/one$', '/xx/%70riv/x/one?q=tail', false],
+    ['User-agent: *\nDisallow: /priv/*/one$', '/xx/priv/x/oner', true],
+    ['User-agent: *\nDisallow: /priv/*/one$', '/xx/priv/one', true],
+    ['User-agent: *\nDisallow: *é$\nAllow: /xéé', '/xéé', true],
+    ['User-agent: *\nDisallow: /a#b', '/a%23b', false],
+    ['User-agent: *\nDisallow: /secret', '/secret/../public', false],
+    ['User-agent: *\nDisallow: /secret', '/public/%2e%2e/secret', false],
+    ['User-agent: *\nDisallow: /\nAllow: /$', '', false],
+    ['User-agent: *\nDisallow: *𝔸$\nAllow: /é/𝔸', '/é/𝔸', true],
+    ['User-agent: *\nDisallow: /a.t*\nAllow: /a.t', '/a.t', false],
+    ['User-agent: *\nAllow: /a.t\nDisallow: /a.t*', '/a.t', true],
+    ['User-agent: *\nDisallow: *[a].$', '/a.', true],
+  ]) {
+    robots = rules;
+    const n = calls.length;
+    const r = await ts.call('fetch', { urls: ['https://api.example' + path], format: 'text' });
+    assert.equal(r.is_error, !allowed, rules);
+    if (!allowed) assert.match(r.output, /blocked by robots.txt/);
+    assert.equal(calls.length - n, allowed ? 2 : 1);
+  }
+  robots = 'User-agent: *\nAllow: *' + 'ab*'.repeat(4096) + 'x$';
+  assert.match((await ts.call('fetch', { urls: [start + 'a'.repeat(1024)] })).output, /wildcard match limit/);
+});
+
+test('POST uses Go byte order for keys, replaces unpaired surrogates and preserves signed zero', async t => {
+  const calls = network(t, () => new Response('ok'));
+  const ts = api({ method: 'POST', args: { '𐀀': { type: 'number' }, '\ue000': { type: 'string' } } });
+  assert.deepEqual(await ts.call('lookup', '{"𐀀":-0,"\\ue000":"\\ud800"}'), { output: 'ok', is_error: false });
+  assert.equal(calls[0].body, '{"\ue000":"�","𐀀":-0}');
 });
