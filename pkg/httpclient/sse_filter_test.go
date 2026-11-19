@@ -430,6 +430,11 @@ func TestSSEFilter_KeepaliveMode(t *testing.T) {
 			want: geminiTextChunk,
 		},
 		{
+			name: "drops keepalive with whitespace around the empty object",
+			in:   "event: keepalive\ndata:  \t{} \t\n\n" + geminiTextChunk,
+			want: geminiTextChunk,
+		},
+		{
 			name: "drops keepalive with an empty data payload",
 			in:   "event: keepalive\ndata:\n\n" + geminiTextChunk,
 			want: geminiTextChunk,
