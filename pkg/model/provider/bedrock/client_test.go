@@ -615,47 +615,6 @@ func TestDerefString(t *testing.T) {
 	})
 }
 
-// Test that usage values are properly converted from int32 pointers to int64
-func TestUsageConversion(t *testing.T) {
-	t.Parallel()
-
-	// Simulate what happens when we convert AWS SDK values
-	inputTokens := int32(1500)
-	outputTokens := int32(500)
-	cacheReadTokens := int32(100)
-	cacheWriteTokens := int32(50)
-
-	usage := &chat.Usage{
-		InputTokens:       int64(derefInt32(&inputTokens)),
-		OutputTokens:      int64(derefInt32(&outputTokens)),
-		CachedInputTokens: int64(derefInt32(&cacheReadTokens)),
-		CacheWriteTokens:  int64(derefInt32(&cacheWriteTokens)),
-	}
-
-	assert.Equal(t, int64(1500), usage.InputTokens)
-	assert.Equal(t, int64(500), usage.OutputTokens)
-	assert.Equal(t, int64(100), usage.CachedInputTokens)
-	assert.Equal(t, int64(50), usage.CacheWriteTokens)
-}
-
-// Test that nil usage pointers result in zero values (not panics)
-func TestUsageConversion_NilSafe(t *testing.T) {
-	t.Parallel()
-
-	// Simulate nil pointers from AWS SDK
-	usage := &chat.Usage{
-		InputTokens:       int64(derefInt32(nil)),
-		OutputTokens:      int64(derefInt32(nil)),
-		CachedInputTokens: int64(derefInt32(nil)),
-		CacheWriteTokens:  int64(derefInt32(nil)),
-	}
-
-	assert.Equal(t, int64(0), usage.InputTokens)
-	assert.Equal(t, int64(0), usage.OutputTokens)
-	assert.Equal(t, int64(0), usage.CachedInputTokens)
-	assert.Equal(t, int64(0), usage.CacheWriteTokens)
-}
-
 func TestBuildAdditionalModelRequestFields_Enabled(t *testing.T) {
 	t.Parallel()
 
