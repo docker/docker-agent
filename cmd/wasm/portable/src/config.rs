@@ -4,6 +4,8 @@ use serde::{de::Error, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Number, Value};
 use std::collections::BTreeMap;
 
+mod definitions;
+
 const VERSION: &str = "16";
 const MAX_SAFE_INTEGER: i64 = (1_i64 << 53) - 1;
 
@@ -13,6 +15,10 @@ struct Config {
     #[serde(default)]
     version: Option<Value>,
     agents: IndexMap<String, Agent>,
+    #[serde(default)]
+    toolsets: BTreeMap<String, Toolset>,
+    #[serde(default)]
+    mcps: BTreeMap<String, Toolset>,
     #[serde(default)]
     models: BTreeMap<String, Model>,
     #[serde(default)]
@@ -29,10 +35,15 @@ struct Agent {
     structured_output: Option<StructuredOutput>,
     #[serde(default)]
     description: String,
-    #[serde(default)]
+    // Neither Go browser projection exposes the welcome message.
+    #[serde(rename = "welcome_message")]
+    _welcome_message: Option<String>,
+    #[serde(default, deserialize_with = "load_instruction")]
     instruction: String,
     #[serde(default)]
     toolsets: Vec<Toolset>,
+    #[serde(default)]
+    use_toolsets: Vec<String>,
     #[serde(default)]
     sub_agents: Vec<String>,
     #[serde(default)]
@@ -167,9 +178,22 @@ fn needs_claude_schema_instruction(model: &str) -> bool {
         })
 }
 
+fn load_instruction<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Instruction {
+        Text(String),
+        Paragraphs(Vec<String>),
+    }
+    Ok(match Instruction::deserialize(d)? {
+        Instruction::Text(text) => text,
+        Instruction::Paragraphs(parts) => parts.join("\n\n"),
+    })
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Toolset {
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type")]
     pub kind: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared: bool,
@@ -200,7 +224,7 @@ impl Toolset {
                 "escape_html",
             ],
             "api" => &["allow_private_ips", "api_config", "timeout"],
-            "mcp" => &["allow_private_ips", "remote"],
+            "mcp" => &["allow_private_ips", "remote", "name", "ref"],
             _ => &[],
         };
         for (name, val) in &self.options {
@@ -208,6 +232,7 @@ impl Toolset {
                 return Err(format!("unsupported {} option {name:?}", self.kind));
             }
             let valid = match name.as_str() {
+                "name" | "ref" => val.is_string(),
                 "allow_private_ips" | "escape_html" => val.is_boolean(),
                 "headers" => val
                     .as_object()
@@ -235,26 +260,7 @@ impl Toolset {
             return Err("allowed_domains and blocked_domains are mutually exclusive".into());
         }
         match self.kind.as_str() {
-            "mcp" => {
-                let remote = self
-                    .options
-                    .get("remote")
-                    .and_then(Value::as_object)
-                    .ok_or("mcp requires remote.url")?;
-                if remote
-                    .get("url")
-                    .and_then(Value::as_str)
-                    .is_none_or(|s| s.is_empty())
-                {
-                    return Err("mcp requires remote.url".into());
-                }
-                if remote
-                    .keys()
-                    .any(|k| !matches!(k.as_str(), "url" | "headers" | "transport_type" | "oauth"))
-                {
-                    return Err("unsupported remote MCP configuration".into());
-                }
-            }
+            "mcp" => definitions::validate_mcp(self)?,
             "api" => {
                 let api = self
                     .options
@@ -306,6 +312,8 @@ impl Toolset {
 struct Model {
     context_window: Option<u32>,
     compaction_threshold: Option<f64>,
+    #[serde(rename = "description")]
+    _description: Option<String>,
     provider: String,
     model: String,
     capabilities: Option<crate::media::Capabilities>,
@@ -326,6 +334,7 @@ struct Model {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Provider {
+    provider_opts: Options,
     provider: String,
     base_url: String,
     token_key: String,
@@ -373,14 +382,12 @@ fn load(yaml: &str) -> Result<Config, String> {
     if cfg.agents.is_empty() {
         return Err("at least one agent must be configured".into());
     }
+    definitions::resolve(&mut cfg)?;
     for (name, a) in &cfg.agents {
         if name.trim().is_empty() {
             return Err("empty agent name".into());
         }
         validate_threshold(a.compaction_threshold)?;
-        for ts in &a.toolsets {
-            ts.validate()?;
-        }
         for (kind, targets) in [("sub-agent", &a.sub_agents), ("handoff agent", &a.handoffs)] {
             for target in targets {
                 if target.contains('/') {
@@ -584,6 +591,15 @@ fn model_params(
     policy: crate::compaction::Policy,
 ) -> Result<Map<String, Value>, String> {
     let mut params = Map::new();
+    if let Some(tier) = m
+        .provider_opts
+        .service_tier
+        .as_ref()
+        .or(p.provider_opts.service_tier.as_ref())
+        .filter(|s| !s.is_empty())
+    {
+        params.insert("service_tier".into(), tier.clone().into());
+    }
     for (key, model, provider) in [
         ("temperature", &m.temperature, &p.temperature),
         ("top_p", &m.top_p, &p.top_p),
@@ -668,6 +684,7 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         }
     }
     for p in cfg.providers.values() {
+        p.provider_opts.validate(None)?;
         if !matches!(p.provider.as_str(), "" | "openai")
             || !matches!(
                 p.api_type.as_str(),
@@ -995,6 +1012,25 @@ agents:
     }
 
     #[test]
+    fn service_tier_uses_present_model_option_before_provider() {
+        for (option, expected) in [
+            ("", Some("priority")),
+            (", provider_opts: {}", Some("priority")),
+            (", provider_opts: {service_tier: flex}", Some("flex")),
+            (", provider_opts: {service_tier: ''}", None),
+            (", provider_opts: {service_tier: null}", None),
+        ] {
+            let cfg = format!("providers: {{p: {{provider_opts: {{service_tier: priority}}}}}}\nmodels: {{m: {{model: test, provider: p{option}}}}}\nagents: {{root: {{model: m}}}}");
+            let m = select(&cfg, "root", &BTreeMap::new()).unwrap();
+            assert_eq!(
+                m.model_params.get("service_tier").and_then(Value::as_str),
+                expected,
+                "{option}"
+            );
+        }
+    }
+
+    #[test]
     fn openrouter_stays_on_chat_completions_for_newer_models() {
         let cfg = "models: {m: {provider: openrouter, model: openai/gpt-4.1-mini, max_tokens: 12}}\nagents: {root: {model: m}}";
         let env = BTreeMap::from([("OPENROUTER_API_KEY".into(), "key".into())]);
@@ -1095,6 +1131,9 @@ agents:
             "top_p: 1, top_p: 0",
             "context_window: 0",
             "provider_opts: {transport: websocket}",
+            "provider_opts: {extra_body: {model: other}}",
+            "provider_opts: {service_tier: 42}",
+            "provider_opts: {service_tier: priority, service_tier: flex}",
             "thinking_budget: low",
             "max_completion_tokens: 42",
         ] {

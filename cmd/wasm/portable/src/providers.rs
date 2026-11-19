@@ -50,9 +50,16 @@ pub fn lookup(name: &str) -> Option<&'static Builtin> {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Options {
+    #[serde(deserialize_with = "service_tier")]
+    pub service_tier: Option<String>,
     api_version: Option<String>,
     #[serde(rename = "http_headers", deserialize_with = "copilot_header")]
     copilot_header: Option<String>,
+}
+
+// A present map key shadows the provider default even if its value is null or empty.
+fn service_tier<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(Some(Option::<String>::deserialize(d)?.unwrap_or_default()))
 }
 
 fn copilot_header<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
