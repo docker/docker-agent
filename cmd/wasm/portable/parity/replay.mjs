@@ -73,6 +73,11 @@ async function run() {
       for (const prompt of ['first', 'again']) trace.results.push(await s.send(prompt));
     } finally { await s.close(); }
   }
+  const picker = config.replace('agents:', 'models: {careful: {provider: local, model: precise, max_tokens: 33, temperature: 0.2}}\nagents:')
+    .replace('model: local/test', 'model: local/test, toolsets: [{type: model_picker, models: [careful, local/fast]}, {type: session_context}]');
+  tests.modelPicker = await replay(api, 'modelPicker', picker, [tool('change_model', { model: 'careful' }), answer,
+    tool('change_model', { model: 'off-list' }), tool('list_sessions', {}), tool('read_session', { session_id: '-1' }),
+    tool('change_model', { model: 'local/fast' }), tool('revert_model', {}), answer], turns);
   tests.plain = await replay(api, 'plain', config, [answer, answer], turns);
   tests.think = await replay(api, 'think', config.replace('model: local/test', 'toolsets: [{type: think}], model: local/test'),
     [tool('think', { thought: 'a plan' }), answer, answer], turns);
@@ -152,6 +157,13 @@ async function run() {
     { type: 'response.function_call_arguments.delta', output_index: 0, item_id: fn.id, delta: args },
     { type: 'response.function_call_arguments.done', output_index: 0, item_id: fn.id, arguments: args },
     fin([{ ...fn, arguments: args, status: 'completed' }])];
+  const switchArgs = '{"model":"careful"}';
+  const change = { ...fn, name: 'change_model' };
+  const switched = [{ type: 'response.output_item.added', output_index: 0, item: change },
+    { type: 'response.function_call_arguments.done', output_index: 0, item_id: fn.id, arguments: switchArgs },
+    fin([{ ...change, arguments: switchArgs, status: 'completed' }])];
+  tests.responsesPicker = await replay(api, 'responsesPicker', picker.replace('provider: openai,', 'provider: openai, api_type: openai_responses,'),
+    [switched, text, text], turns, '/v1/responses');
   const responses = config.replace('provider: openai,', 'provider: openai, api_type: openai_responses,')
     .replace('model: local/test', 'toolsets: [{type: think}], model: local/test');
   const combined = config.replace('model: local/test', 'toolsets: [{type: user_prompt}, {type: think}, {type: calculator}], model: local/test');

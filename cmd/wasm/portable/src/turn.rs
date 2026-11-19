@@ -36,6 +36,8 @@ pub struct HostSet {
 }
 
 pub struct Conversation {
+    picker: crate::model_picker::Picker,
+    archive: Option<crate::session_context::Archive>,
     model_params: Map<String, Value>,
     tools: Tools,
     host: BTreeMap<String, bool>,
@@ -115,7 +117,15 @@ impl Conversation {
                 ..Default::default()
             })
             .collect();
-        Self::configured(model_params, instruction, specs, merge_messages, history)
+        Self::configured(
+            model_params,
+            instruction,
+            specs,
+            merge_messages,
+            history,
+            Default::default(),
+            None,
+        )
     }
 
     pub fn configured(
@@ -124,10 +134,14 @@ impl Conversation {
         specs: Vec<crate::config::Toolset>,
         merge_messages: bool,
         history: Vec<Value>,
+        picker: crate::model_picker::Picker,
+        archive: Option<crate::session_context::Archive>,
     ) -> Result<Self, String> {
         validate_history(&history)?;
         let mut c = Self {
             model_params,
+            picker,
+            archive,
             tools: Tools::new(),
             host: BTreeMap::new(),
             specs,
@@ -160,10 +174,16 @@ impl Conversation {
             if ext.is_some() && !dynamic {
                 return Err("unexpected host tool registration".into());
             }
+            let picker_metadata;
             let (original, defs) = if let Some(e) = ext {
                 (e.instructions.as_str(), e.tools.as_slice())
             } else if let Some(d) = def {
-                (d.instructions.as_str(), d.tools.as_slice())
+                if spec.kind == "model_picker" {
+                    picker_metadata = self.picker.metadata(&d.instructions, &d.tools);
+                    (picker_metadata.0.as_str(), picker_metadata.1.as_slice())
+                } else {
+                    (d.instructions.as_str(), d.tools.as_slice())
+                }
             } else if dynamic {
                 continue;
             } else {
@@ -205,7 +225,12 @@ impl Conversation {
                 }
                 let hosted = !matches!(
                     spec.kind.as_str(),
-                    "think" | "user_prompt" | "todo" | "calculator"
+                    "think"
+                        | "user_prompt"
+                        | "todo"
+                        | "calculator"
+                        | "model_picker"
+                        | "session_context"
                 );
                 if tools.contains_key(name) {
                     if hosted || host.contains_key(name) {
@@ -240,11 +265,15 @@ impl Conversation {
         Ok(())
     }
 
-    pub fn restart(&mut self) {
+    pub fn restart(&mut self, stamp: crate::session_context::Stamp) -> Result<(), String> {
         self.cancel();
+        if let Some(archive) = &mut self.archive {
+            archive.restart(stamp, &self.messages[self.instruction_count..])?;
+        }
         self.messages.truncate(self.instruction_count);
         self.scratchpad.truncate("Thoughts:".len());
-        // Go restart replaces the conversation, not the runtime's todo toolset.
+        // Go restart replaces the conversation, not its loaded agent and toolsets.
+        Ok(())
     }
 
     pub fn begin(&mut self, prompt: &str, id: &str) -> Result<Value, String> {
@@ -271,7 +300,7 @@ impl Conversation {
     }
 
     fn request(&self) -> Value {
-        let mut body = Value::Object(self.model_params.clone());
+        let mut body = Value::Object(self.picker.params().unwrap_or(&self.model_params).clone());
         body["messages"] = json!(self.messages);
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});
@@ -401,9 +430,13 @@ impl Conversation {
         let mut ids = BTreeSet::new();
         let mut wire_calls = Vec::with_capacity(calls.len());
         let mut replies = Vec::with_capacity(calls.len());
+        let mut selection = self.picker.active;
         for (index, (key, call)) in calls.iter().enumerate() {
             if *key != index as u64 || call.id.is_empty() || !ids.insert(&call.id) {
                 return Err("missing or duplicate tool call ID or index".into());
+            }
+            if !self.tools.contains_key(&call.name) {
+                return Err("missing or invalid tool name".into());
             }
             wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
             if let Some(read_only) = self.host.get(&call.name) {
@@ -428,17 +461,6 @@ impl Conversation {
                     reply["content"] = json!(self.scratchpad);
                     events.push(tool_result(&call.id, &call.name, &self.scratchpad, false));
                 }
-                "calculate" | "create_todo" | "create_todos" | "update_todos" | "list_todos" => {
-                    let result = if call.name == "calculate" {
-                        crate::calculator::calculate(&call.arguments)
-                    } else {
-                        self.todos.call(&call.name, &call.arguments)
-                    };
-                    let is_error = result.is_err();
-                    let output = result.unwrap_or_else(|error| error);
-                    events.push(tool_result(&call.id, &call.name, &output, is_error));
-                    reply["content"] = Value::String(output);
-                }
                 "user_prompt" => {
                     if call.arguments.len() > MAX_ELICITATION_BYTES {
                         return Err("elicitation argument size limit reached".into());
@@ -457,10 +479,39 @@ impl Conversation {
                         "schema":prompt.schema, "meta":meta, "server_elicitation_id":"", "mode":"", "url":""
                     }));
                 }
-                _ => return Err("missing or invalid tool name".into()),
+                _ => {
+                    let result = match call.name.as_str() {
+                        "change_model" => self.picker.change(&call.arguments, &mut selection),
+                        "revert_model" => {
+                            selection = None;
+                            Ok("Model reverted to the agent's default model".into())
+                        }
+                        "list_sessions" | "read_session" => {
+                            let archive = self
+                                .archive
+                                .as_ref()
+                                .ok_or("session history is not available in this runtime")?;
+                            if call.name == "list_sessions" {
+                                archive.list(&call.arguments)
+                            } else {
+                                archive.read(&call.arguments)
+                            }
+                        }
+                        "calculate" => crate::calculator::calculate(&call.arguments),
+                        "create_todo" | "create_todos" | "update_todos" | "list_todos" => {
+                            self.todos.call(&call.name, &call.arguments)
+                        }
+                        _ => return Err("missing or invalid tool name".into()),
+                    };
+                    let is_error = result.is_err();
+                    let output = result.unwrap_or_else(|error| error);
+                    events.push(tool_result(&call.id, &call.name, &output, is_error));
+                    reply["content"] = Value::String(output);
+                }
             }
             replies.push(reply);
         }
+        self.picker.active = selection;
         message["tool_calls"] = Value::Array(wire_calls);
         self.messages.push(message);
         self.messages.extend(replies);

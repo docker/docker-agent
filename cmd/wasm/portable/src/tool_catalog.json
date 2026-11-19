@@ -268,6 +268,52 @@
       }
     ]
   },
+  "model_picker": {
+    "instructions": "## Model Switching\n\nAvailable models: {AVAILABLE_MODELS}.\n\nUse `change_model` to switch to a model better suited for the current task (e.g., faster model for simple tasks, more capable model for complex reasoning).\nUse `revert_model` to return to the original model when done.",
+    "read_only": {
+      "change_model": true,
+      "revert_model": true
+    },
+    "strict": {
+      "change_model": true,
+      "revert_model": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Change the current model to one of the available models: {AVAILABLE_MODELS}. Use this when you need a different model for the current task.",
+          "name": "change_model",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "model": {
+                "description": "The model to switch to. Must be one of the available models.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Revert to the agent's original/default model. Use this after completing a task that required a different model.",
+          "name": "revert_model",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
   "plan": {
     "instructions": "## Plan Tools\n\nCollaborate on shared, named plans with other agents. Plans are stored in a\nglobal shared folder, so every agent using this toolset sees the same plans.\n\n- Use list_plans to discover existing plans.\n- Use read_plan to inspect a plan before acting on or changing it.\n- Use write_plan to create or update a plan by name. Writing replaces the whole\n  document, so read it first and preserve any content you want to keep. Set the\n  title and author (your agent name) so collaborators can see who made the\n  latest change. Each write bumps the revision number.\n- Use delete_plan to remove a plan once it is no longer needed.\n\n### Editing a large plan cheaply\n\nRelative import and export paths use your working directory; absolute paths\nare used as given. Plans themselves remain in the global shared folder.\n\nRe-sending the whole plan body on every edit is expensive. To avoid it:\n\n1. Call export_plan_to_file to write the current plan content to a file. The\n   content is written to disk and is NOT returned, so this costs no tokens.\n2. Edit that file in place with your filesystem tools.\n3. Call update_plan_from_file with the same path to commit the new content.\n\n### Status\n\nEach plan has a free-form status string (you define the vocabulary, e.g.\n\"idle\", \"in-progress\", \"blocked\", \"done\"). Use set_plan_status and\nget_plan_status to write and read it independently of the body, or pass status\nto write_plan / update_plan_from_file.\n\n### Concurrent edits (optimistic locking)\n\nReads return a revision number. When several sessions edit one plan, pass the\nrevision you last read as last_known_revision to write_plan, update_plan_from_file,\nset_plan_status or delete_plan. If the plan changed in the meantime the write is\nrejected with a version-conflict error: re-read the plan and retry.\n\nPlan names must be lowercase and may contain only letters, digits, '-' and '_'\n(for example \"release-2025\" or \"db_migration\").",
     "read_only": {

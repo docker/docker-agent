@@ -1,7 +1,10 @@
 mod calculator;
 mod config;
+mod go_json;
+mod model_picker;
 mod providers;
 mod responses;
+mod session_context;
 mod todo;
 mod turn;
 mod wire;
@@ -25,6 +28,7 @@ enum Command {
         agent: String,
         env: BTreeMap<String, String>,
         history: Vec<Value>,
+        stamp: session_context::Stamp,
     },
     Begin {
         session: u32,
@@ -60,6 +64,7 @@ enum Command {
     },
     Restart {
         session: u32,
+        stamp: session_context::Stamp,
     },
     Close {
         session: u32,
@@ -123,15 +128,23 @@ impl Core {
                 agent,
                 env,
                 history,
+                stamp,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
                 let toolsets = json!(spec.toolsets);
+                let archive = spec
+                    .toolsets
+                    .iter()
+                    .any(|ts| ts.kind == "session_context")
+                    .then(|| session_context::Archive::new(stamp));
                 let conv = Conversation::configured(
                     spec.model_params,
                     spec.instruction,
                     spec.toolsets,
                     spec.merge_messages,
                     history,
+                    spec.picker,
+                    archive,
                 )?;
                 self.next_id = self
                     .next_id
@@ -192,8 +205,8 @@ impl Core {
                 self.session(session)?.conversation.cancel();
                 Ok(Value::Null)
             }
-            Command::Restart { session } => {
-                self.session(session)?.conversation.restart();
+            Command::Restart { session, stamp } => {
+                self.session(session)?.conversation.restart(stamp)?;
                 Ok(Value::Null)
             }
             Command::Close { session } => {

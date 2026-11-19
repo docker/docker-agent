@@ -28,7 +28,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     if (typeof opts?.yaml !== 'string') throw new Error('options.yaml must be a string');
     validateDocuments(opts.documents);
     const host = createHost(opts, onEvent, stateless);
-    let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, history: history ?? [] });
+    let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, history: history ?? [], stamp: sessionStamp() });
     try { modelURL(handle.endpoint); }
     catch (e) { call('close', { session: handle.session }); throw e; }
     let active, batch, restarting = false, closing, ready;
@@ -164,7 +164,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         try {
           await stop();
           if (closing) throw new Error('session is closed');
-          call('restart', { session: handle.session });
+          call('restart', { session: handle.session, stamp: sessionStamp() });
           host.restart();
         } finally { restarting = false; }
       },
@@ -218,6 +218,16 @@ function validateDocuments(documents) {
       throw new Error(`options.documents: documents exceed the limit of ${maxDocumentBytes} bytes in total`);
     }
   }
+}
+
+// Match time.Local.Format(time.RFC3339) in the Go browser runtime.
+function sessionStamp() {
+  const now = new Date();
+  const minutes = -now.getTimezoneOffset();
+  const local = new Date(now.getTime() + minutes * 60_000).toISOString().slice(0, 19);
+  const pad = n => String(n).padStart(2, '0');
+  const zone = minutes === 0 ? 'Z' : `${minutes > 0 ? '+' : '-'}${pad(Math.floor(Math.abs(minutes) / 60))}:${pad(Math.abs(minutes) % 60)}`;
+  return { id: crypto.randomUUID(), created_at: local + zone };
 }
 
 function modelURL(endpoint) {
