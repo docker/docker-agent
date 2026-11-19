@@ -38,9 +38,9 @@ Nothing is installed on `globalThis` unless the host chooses to do so.
 | Area | Ported | Not yet ported |
 |---|---|---|
 | Config | Current-version config projection and named agents/models. `parseConfig`/`listAgents` can inspect local sub-agent and handoff references without starting a session. Instructions, model names and endpoints expand against the session env. | Historical versions, general Go config loading, reusable groups, permission policies and hooks |
-| Providers | OpenAI Chat Completions **and** streamed Responses (text/function calls). Explicit `api_type` or model-based selection; sampling fields, token caps, parallel tool flag; static HTTPS API-key aliases from the Go provider catalog, e.g. Groq and OpenRouter | Realtime, encrypted reasoning state, multimodal/hosted tools, OAuth/dynamic provider endpoints, retries/fallbacks, cost/catalog limits |
-| Sessions | `createSession`, multi-turn `send`, `abort`, `restart`, `close`; stateless `chat` with history. Host documents are validated but not sent or indexed. | Executing delegations/handoffs, compaction, persistence |
-| Tools | `think`, exact rational `calculator`, session-local `todo`, and `user_prompt`. Sessions answer questions by ID with `respondToElicitation`; `chat` awaits the callback's answer. No callback means decline. | Other toolsets, remote MCP, tool approvals, OAuth elicitation and optional RAG |
+| Providers | OpenAI Chat Completions **and** streamed Responses (text/function calls). Explicit `api_type` or model-based selection; sampling fields, token caps, parallel tool flag; static HTTPS API-key aliases from the Go provider catalog, e.g. Groq and OpenRouter; ordered fallbacks and per-agent cooldown | Realtime, encrypted reasoning state, multimodal/hosted tools, OAuth/dynamic provider endpoints, cost/catalog limits |
+| Sessions | `createSession`, multi-turn `send`, `abort`, `restart`, `close`; stateless `chat` with history; bounded local `sub_agents` and `handoffs`. Host documents are validated but not sent or indexed. | Remote agents, compaction, persistence |
+| Tools | `think`, exact rational `calculator`, session-local `todo`, `user_prompt`, `model_picker` and `session_context`. Single-agent sessions can also use guarded HTTP and MCP tools. Sessions answer questions by ID with `respondToElicitation`; `chat` awaits the callback's answer. No callback means decline. | Hosted tools in local teams, filesystem, shell and optional RAG |
 
 For example, a custom provider can set `api_type: openai_responses` (or
 `openai_chatcompletions`). The supported sampling fields are `temperature`,
@@ -55,8 +55,34 @@ can be inspected with `parseConfig`. They do not silently weaken settings.
 Tool rounds are bounded (8 per turn, 16 calls per round), and scratchpads,
 answers and todo lists have portable memory limits. Parallel tool results may
 appear in a different order than Go's completion-dependent scheduling.
-There is no network/file/command tool. A model call uses the explicit session
+A model call uses the explicit session
 credentials, never ambient environment or cookies, and does not follow redirects.
+
+### Model routing and tool isolation
+
+A transfer starts a fresh child history and returns its answer as a tool result.
+A handoff keeps the history but replaces the active instructions and tools.
+Only declared local edges are callable. A switch must be the only call in its
+batch; a turn allows 32 switches and 10 nested transfers.
+
+- Configure `fallback: {models: [backup], retries: 2, cooldown: 1m}` on the
+  agent that owns the chain. Retries and fallback are allowed before output on
+  the first model request of a turn (including a new transfer child), not on a
+  tool follow-up or an in-place handoff. A successful backup after a permanent
+  primary failure is pinned until cooldown expires. Each frame resumes its own
+  target; each target uses its own API, parameters, endpoint and credential.
+- A `model_picker` choice must keep the agent's provider, endpoint, API and
+  token key. A picker and a fallback model list on **the same agent** are not
+  supported. A parent picker and a child's fallback chain can be used together.
+- Hosted tool registrations, approvals and `session_context` archives belong to
+  a session, not an agent. If any reachable local agent uses a hosted toolset or
+  `session_context`, a team session is rejected before model or discovery I/O.
+  Single-agent sessions retain host tools across model fallback; completed tool
+  calls and elicitation answers are not re-executed.
+- All reachable model endpoints are validated when the session opens. A model
+  in a team or fallback chain that overrides its provider's origin must specify
+  its own `token_key` rather than redirect an inherited credential. When
+  switching to Responses, history that cannot be replayed losslessly is rejected.
 
 ## Keeping up with docker-agent
 
