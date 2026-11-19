@@ -96,6 +96,14 @@ test('stateless chat preserves history and aborts synchronously', async t => {
   assert.deepEqual(requests[0].messages.slice(-3), messages);
 });
 
+test('rejects unsupported developer turns and final-prompt attachments before fetch', async t => {
+  const { options, requests } = await mockModel(t, () => [chunk({ content: 'unexpected' }, 'stop')]);
+  const prompt = { role: 'user', content: 'go' };
+  await assert.rejects(api.chat({ ...options, messages: [{ role: 'developer', content: 'rule' }, prompt] }), /unsupported history role/);
+  await assert.rejects(api.chat({ ...options, messages: [{ ...prompt, multi_content: [{ type: 'text', text: 'extra' }] }] }), /final user prompt is text-only/);
+  assert.equal(requests.length, 0);
+});
+
 test('rejects missing credentials and unsupported capabilities before fetch', async () => {
   const yaml = config('https://example.invalid');
   await assert.rejects(api.createSession({ yaml }), /LOCAL_KEY/);

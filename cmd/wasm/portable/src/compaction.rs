@@ -251,7 +251,7 @@ impl Compactor {
         body.insert("stream_options".into(), json!({"include_usage":true}));
         let mut request = Value::Object(body);
         if merge {
-            crate::wire::merge_text_messages(&mut request);
+            crate::wire::merge_messages(&mut request);
         }
         Ok(Some((Prefix(boundary), request)))
     }

@@ -190,11 +190,16 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     async chat(opts, onEvent) {
       const messages = opts?.messages;
       if (!Array.isArray(messages)) throw new Error('messages must be an array');
-      if (messages.at(-1)?.role !== 'user') throw new Error('the last message must be from the user');
+      const last = messages.at(-1);
+      if (last?.role !== 'user') throw new Error('the last message must be from the user');
+      const parts = last.multi_content;
+      if (parts != null && (!Array.isArray(parts) || parts.length)) {
+        throw new Error('the final user prompt is text-only; attachments belong in prior history');
+      }
       const s = session(opts, onEvent, messages.slice(0, -1));
       currentChat?.abort();
       currentChat = s;
-      try { return await s.send(messages.at(-1).content); }
+      try { return await s.send(last.content); }
       finally {
         if (currentChat === s) currentChat = null;
         await s.close();

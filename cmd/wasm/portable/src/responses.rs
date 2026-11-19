@@ -44,15 +44,19 @@ pub fn request(mut chat: Value) -> Result<Value, String> {
     for m in array(&chat, "messages")? {
         let role = string(m, "role")?;
         match role {
-            "system" | "developer" => input.push(json!({
-                "role":role, "content":[{"type":"input_text", "text":string(m,"content")?}]
-            })),
-            "user" => input.push(json!({"role":role,"content":string(m,"content")?})),
+            "system" | "user" => {
+                match &m["content"] {
+                    Value::String(s) if role == "system" => input.push(json!({"role":role,"content":[{"type":"input_text","text":s}]})),
+                    // media::history supplies protocol-native arrays, not Chat Completions parts.
+                    content @ (Value::Array(_) | Value::String(_)) => input.push(json!({"role":role,"content":content})),
+                    _ => return Err("invalid message content".into()),
+                }
+            }
             "assistant" => {
                 // The default Go SSE path doesn't replay reasoning_content or opaque provider state.
                 if !m["content"].is_null() {
                     let text = string(m, "content")?;
-                    if !text.trim().is_empty() {
+                    if !text.trim().is_empty() || (m["tool_calls"].is_null() && m["reasoning_content"].is_null()) {
                         input.push(json!({"role":role,"content":text}));
                     }
                 }
@@ -68,7 +72,7 @@ pub fn request(mut chat: Value) -> Result<Value, String> {
                 }
             }
             "tool" => input.push(json!({
-                "type":"function_call_output", "call_id":string(m,"tool_call_id")?, "output":string(m,"content")?
+                "type":"function_call_output", "call_id":string(m,"tool_call_id")?, "output":m["content"]
             })),
             _ => return Err(format!("unsupported message role {role}")),
         }
@@ -627,7 +631,7 @@ mod tests {
             chat["model"] = model.into();
             assert_eq!(request(chat.clone()).unwrap()["reasoning"], expected);
         }
-        chat["messages"][0]["content"] = json!([{"type":"image_url"}]);
+        chat["messages"][0]["content"] = json!({"type":"image_url"});
         assert!(request(chat).is_err());
     }
 

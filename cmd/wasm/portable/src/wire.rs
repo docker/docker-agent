@@ -1,31 +1,51 @@
 use serde_json::{json, Value};
 
-// Generic Chat Completions gateways often reject consecutive system/user
-// messages. Responses and the first-party chat endpoint retain the boundaries.
-pub fn merge_text_messages(request: &mut Value) {
+// Generic Chat Completions gateways often reject consecutive system/user messages.
+// A multipart boundary flushes preceding strings as one text part, just like oaistream.
+pub fn merge_messages(request: &mut Value) {
     let Some(messages) = request["messages"].as_array_mut() else {
         return;
     };
-    let input = std::mem::take(messages);
-    for run in input.chunk_by(|a, b| a["role"] == b["role"]) {
-        let role = &run[0]["role"];
-        if run.len() > 1
-            && matches!(role.as_str(), Some("system" | "user"))
-            && run
+    let mut input = std::mem::take(messages);
+    for run in input.chunk_by_mut(|a, b| a["role"] == b["role"]) {
+        let role = run[0]["role"].clone();
+        if run.len() == 1
+            || !matches!(role.as_str(), Some("system" | "user"))
+            || run
                 .iter()
-                .all(|m| m["content"].is_string() && m.as_object().is_some_and(|o| o.len() == 2))
+                .any(|m| m.as_object().is_none_or(|o| o.len() != 2))
         {
-            let mut text = String::new();
-            for m in run {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(m["content"].as_str().unwrap());
-            }
-            messages.push(json!({"role":role, "content":text}));
-        } else {
-            messages.extend_from_slice(run);
+            messages.extend(run.iter_mut().map(Value::take));
+            continue;
         }
+        let mut parts = Vec::new();
+        let mut text = String::new();
+        for content in run.iter_mut().map(|m| m["content"].take()) {
+            match content {
+                Value::String(s) if !s.is_empty() => {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&s);
+                }
+                Value::Array(p) if !p.is_empty() => {
+                    if !text.is_empty() {
+                        parts.push(json!({"type":"text","text":std::mem::take(&mut text)}));
+                    }
+                    parts.extend(p);
+                }
+                _ => (),
+            }
+        }
+        let content: Value = if parts.is_empty() {
+            text.into()
+        } else {
+            if !text.is_empty() {
+                parts.push(json!({"type":"text","text":text}));
+            }
+            parts.into()
+        };
+        messages.push(json!({"role":role,"content":content}));
     }
 }
 
@@ -34,10 +54,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_merges_plain_text_in_the_same_role() {
+    fn does_not_merge_across_message_metadata() {
         let mut req = json!({"messages":[{"role":"system","content":"a"},{"role":"system","content":"b"},
             {"role":"user","content":"hi","name":"x"},{"role":"user","content":"there"}]});
-        merge_text_messages(&mut req);
+        merge_messages(&mut req);
         assert_eq!(
             req["messages"],
             json!([{"role":"system","content":"a\nb"},

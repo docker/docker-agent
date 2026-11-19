@@ -305,6 +305,7 @@ struct Model {
     compaction_threshold: Option<f64>,
     provider: String,
     model: String,
+    capabilities: Option<crate::media::Capabilities>,
     #[serde(default)]
     base_url: String,
     #[serde(default)]
@@ -344,6 +345,7 @@ pub struct Selected {
     pub picker: crate::model_picker::Picker,
     pub compaction: crate::compaction::Policy,
     pub model_params: Map<String, Value>,
+    pub capabilities: Option<crate::media::Capabilities>,
     pub endpoint: String,
     pub token: String,
     pub instruction: String,
@@ -756,6 +758,7 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             .clone()
     };
     Ok(Selected {
+        capabilities: primary.capabilities,
         compaction: compaction_policy(a, primary)?,
         picker,
         model_params: request.model_params,

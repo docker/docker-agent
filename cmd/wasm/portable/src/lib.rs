@@ -2,6 +2,7 @@ mod calculator;
 mod compaction;
 mod config;
 mod go_json;
+mod media;
 mod model_picker;
 mod providers;
 mod responses;
@@ -132,6 +133,12 @@ impl Core {
                 stamp,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
+                let history = media::history(
+                    history,
+                    spec.capabilities,
+                    spec.model_params["model"].as_str().expect("selected model"),
+                    spec.responses,
+                )?;
                 let toolsets = json!(spec.toolsets);
                 let archive = spec
                     .toolsets
