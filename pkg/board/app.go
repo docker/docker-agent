@@ -456,7 +456,10 @@ func (a *App) CreateCard(project Project, prompt string) (card *Card, err error)
 	// Launch from the repository: --worktree branches the new worktree from
 	// the repo's upstream base (detected, not assumed).
 	base := upstreamBase(a.ctx, project.Path)
-	if err := a.sessions.NewSession(sessionName, project.Path, agent, agentSession, socketPath(agentSession), worktreeName, base, prompt); err != nil {
+	if err := a.sessions.NewSession(sessionLaunch{
+		name: sessionName, workDir: project.Path, agent: agent, agentSession: agentSession,
+		listenSocket: socketPath(agentSession), worktreeName: worktreeName, worktreeBase: base, prompt: prompt,
+	}); err != nil {
 		return nil, fmt.Errorf("tmux session: %w", err)
 	}
 
