@@ -214,11 +214,11 @@ tasks:
       - node cmd/wasm/portable/parity/compare.mjs
 
   build-wasm-portable:
-    desc: Build the Go-runtime-free Rust browser agent (requires the wasm32-unknown-unknown Rust target)
+    desc: Build the Go-runtime-free Rust browser agent (requires the wasm32-unknown-unknown Rust target and Binaryen)
     cmds:
       - cargo build --locked --release --manifest-path cmd/wasm/portable/Cargo.toml --target wasm32-unknown-unknown --target-dir bin/portable-target
       - mkdir -p bin/wasm-portable
-      - cp bin/portable-target/wasm32-unknown-unknown/release/docker_agent_portable.wasm bin/wasm-portable/docker-agent.wasm
+      - wasm-opt -Oz --all-features bin/portable-target/wasm32-unknown-unknown/release/docker_agent_portable.wasm -o bin/wasm-portable/docker-agent.wasm
       - find cmd/wasm/portable -maxdepth 1 -name '*.mjs' ! -name '*_test.mjs' -exec cp {} bin/wasm-portable/ \;
       - cp cmd/wasm/portable/index.html bin/wasm-portable/
 

@@ -9,7 +9,8 @@ CI enforces a 2 MiB uncompressed budget for the Wasm **and all runtime JS**
 (the packed Go small module alone is 35.8 MiB on the reference toolchain).
 
 ```sh
-rustup target add wasm32-unknown-unknown  # Rust 1.90+ and Cargo
+# Requires Rust 1.90+, Cargo and Binaryen (`wasm-opt`; e.g. brew install binaryen).
+rustup target add wasm32-unknown-unknown
 task test-wasm-portable                 # or task build-wasm-portable
 python3 -m http.server --directory bin/wasm-portable 8000
 ```
@@ -63,7 +64,7 @@ or cookies, and refuse redirects. Tool calls are a separate trust boundary.
 
 - `toolProxy` is an **operator-trusted HTTPS proxy**. It receives configured
   tool credentials and must enforce destination IP policy at dial time and never
-  follow redirects. See the [Go bridge proxy contract](../README.md#createsessionoptions-onevent---promisesession).
+  follow redirects. See the [Go bridge proxy contract](../README.md#javascript-api).
   Without it, protected calls fail closed. `allow_private_ips: true` is an
   explicit opt-in to direct browser access, not an automatic fallback.
 - In `createSession`, handle `tool_confirmation` by calling `session.confirm({confirmationId: event.confirmationId,
