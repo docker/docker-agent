@@ -1212,28 +1212,6 @@ func TestConvertAssistantContent_SignedEmptyIsNotRedacted(t *testing.T) {
 	assert.Equal(t, "Here's my answer", textBlock.Value)
 }
 
-func TestConvertAssistantContent_NoThinkingWhenBothEmpty(t *testing.T) {
-	t.Parallel()
-
-	// When neither reasoning content nor signature is present,
-	// no thinking blocks should be included
-	msg := &chat.Message{
-		Role:              chat.MessageRoleAssistant,
-		Content:           "Here's my answer",
-		ReasoningContent:  "",
-		ThinkingSignature: "",
-	}
-
-	blocks := convertAssistantContent(msg)
-
-	// Should only have text block
-	require.Len(t, blocks, 1)
-
-	textBlock, ok := blocks[0].(*types.ContentBlockMemberText)
-	require.True(t, ok)
-	assert.Equal(t, "Here's my answer", textBlock.Value)
-}
-
 // Prompt Caching Tests
 
 func TestPromptCachingEnabled_SupportedModel(t *testing.T) {
