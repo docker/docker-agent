@@ -38,7 +38,7 @@ fn reasoning(model: &str, effort: &Value) -> Option<Value> {
     Some(reasoning)
 }
 
-pub fn request(chat: Value) -> Result<Value, String> {
+pub fn request(mut chat: Value) -> Result<Value, String> {
     let model = string(&chat, "model")?;
     let mut input = Vec::new();
     for m in array(&chat, "messages")? {
@@ -91,6 +91,15 @@ pub fn request(chat: Value) -> Result<Value, String> {
     }
     if let Some(params) = reasoning(model, &chat["reasoning_effort"]) {
         body["reasoning"] = params;
+    }
+
+    if let Some(format) = chat.get_mut("response_format") {
+        if format["type"] != "json_schema" || !format["json_schema"].is_object() {
+            return Err("unsupported response_format".into());
+        }
+        let mut schema = format["json_schema"].take();
+        schema["type"] = "json_schema".into();
+        body["text"]["format"] = schema;
     }
 
     let mut tools = Vec::new();
@@ -620,6 +629,19 @@ mod tests {
         }
         chat["messages"][0]["content"] = json!([{"type":"image_url"}]);
         assert!(request(chat).is_err());
+    }
+
+    #[test]
+    fn native_format_uses_text_instead_of_chat_response_format() {
+        let schema = json!({"type":"object", "properties":{"codes":{"type":"array","items":{"type":"string"}}}, "required":["codes"], "additionalProperties":false});
+        let chat = json!({"model":"test", "messages":[{"role":"user","content":"hi"}], "response_format":{
+            "type":"json_schema", "json_schema":{"name":"result","description":"Status codes","strict":true,"schema":schema}}});
+        let response = request(chat).unwrap();
+        assert!(response.get("response_format").is_none());
+        assert_eq!(
+            response["text"],
+            json!({"format":{"type":"json_schema", "name":"result", "description":"Status codes", "strict":true,"schema":schema}})
+        );
     }
 
     fn completed(output: Value) -> Value {

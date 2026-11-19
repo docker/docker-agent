@@ -224,6 +224,17 @@ async function run() {
   const busy = structuredClone(text);
   busy.at(-1).response.usage = { input_tokens: 1000, output_tokens: 25, total_tokens: 1025 };
   tests.compactResponses = await replay(api, 'compactResponses', compactResponses, [busy, text, text], turns, '/v1/responses');
+  const schema = { type: 'object', properties: { colors: { type: 'array', items: { type: 'string' } } },
+    required: ['colors'], additionalProperties: false };
+  const jsonAnswer = '{"colors":["blue"]}';
+  const withSchema = (yaml, options) => yaml.replace('model: local/test',
+    `model: local/test, structured_output: ${JSON.stringify({ name: 'palette', schema, ...options })}`);
+  const chatJSON = [piece({ role: 'assistant', content: jsonAnswer }, 'stop'), usage];
+  tests.structuredChat = await replay(api, 'structuredChat', withSchema(config, {}), [chatJSON, chatJSON], turns);
+  const responsesJSON = [{ ...text[0], delta: jsonAnswer }, fin([])];
+  tests.structuredResponses = await replay(api, 'structuredResponses',
+    withSchema(responses, { description: 'Chosen colors', strict: true, mode: 'native' }),
+    [responseTool, responsesJSON, responsesJSON], turns, '/v1/responses');
   tests.autoResponses = await replay(api, 'autoResponses', 'agents: {root: {model: openai/o3-mini, instruction: hi}}', [text], async ({ api, options, record, trace }) => {
     options.env = { OPENAI_API_KEY: 'fixture' };
     trace.results.push(await api.chat({ ...options, messages: [{ role: 'user', content: 'hi' }] }, record));
