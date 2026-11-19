@@ -5,8 +5,9 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-CI enforces a 2 MiB uncompressed budget for the Wasm **and all runtime JS**
-(the packed Go small module alone is 35.8 MiB on the reference toolchain).
+The measured release is **1.75 MiB uncompressed**, including all runtime JS,
+versus 35.8 MiB for the packed Go small module alone. CI enforces a 2 MiB
+budget for the Wasm and JS together.
 
 ```sh
 # Requires Rust 1.90+, Cargo and Binaryen (`wasm-opt`; e.g. brew install binaryen).
@@ -40,7 +41,7 @@ Nothing is installed on `globalThis` unless the host chooses to do so.
 | Area | Ported | Not yet ported |
 |---|---|---|
 | Config | Current schema: named agents/models, reusable `toolsets` / `use_toolsets`, named remote `mcps`, filters and instruction overrides, redaction, date/environment flags and supported builtin hooks. | Historical versions and filesystem-backed config sources are not part of the Go small target. Unknown options are errors. |
-| Providers | Streamed OpenAI Chat Completions and Responses, native JSON-schema output, token caps/penalties, service tier, media history, static and selected parameterized endpoints from the Go provider catalog. Azure, Copilot, Cloudflare and session-supplied Codex credentials have separate transport handling. | No ambient login or token storage, realtime/audio generation, encrypted reasoning replay or server-hosted Responses tools. |
+| Providers | Streamed OpenAI Chat Completions and Responses, native and tool-mode structured output, token caps/penalties, service tier, media history, static and selected parameterized endpoints from the Go provider catalog. Azure, Copilot, Cloudflare and session-supplied Codex credentials have separate transport handling. | No ambient login or token storage, realtime/audio generation, encrypted reasoning replay or server-hosted Responses tools. |
 | Sessions | Multi-turn send, local transfers/handoffs, ordered fallbacks, abort/restart/close, stateless chat, same-model foreground compaction using a declared `context_window`, and live selection between compatible models. | No disk persistence, compaction window discovery or provider-native compaction. |
 | Tools | `datetime`, `random`, `think`, `calculator`, `todo`, `plan`, `memory`, `model_picker`, `session_context`, `user_prompt`, `fetch`, `api` and remote MCP, including deferred discovery, TOON and approvals. In-memory stores survive restart but are isolated by handle. | No stdio, process or file tools. `openapi` and opt-in RAG are not part of Go small. |
 
@@ -90,6 +91,18 @@ the calculator and the session's shared plan; plan writes prompt for approval.
   Never synthesize it from an untrusted code/state pair. Unsupported servers,
   confidential clients and implicit flows are refused. Tokens are in memory only;
   there is no background refresh. The simple demo declines URL authorization.
+
+### Structured output
+
+`structured_output.mode: native` (the default) sends the configured JSON schema
+to the provider. In `mode: tool`, the portable runtime validates the arguments
+of an exclusive `__structured_output__` call against the original schema before
+returning its JSON. A mixed tool batch cannot finalize a turn. The local
+validator supports typed objects, arrays, string enums and length bounds, and
+bounded integers; use native mode for more complex schemas. It rejects unknown
+keywords, external references, regex constraints and compositions rather than
+ignoring them. Tool mode cannot be combined with team routing, active history
+limits, an agent iteration cap or per-tool model overrides.
 
 ### Attachments in `chat` history
 
