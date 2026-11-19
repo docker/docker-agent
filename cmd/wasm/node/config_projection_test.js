@@ -127,3 +127,11 @@ agents: {root: {model: m, welcome_message: Welcome, instruction: [One, '', 'Two 
   assert.deepEqual(api.parseConfig(yaml).models, { m: { provider: "openai", model: "test", base_url: "" } });
   assert.throws(() => api.parseConfig(yaml.replace("One, ''", "One, 42")), Error);
 });
+
+it('rejects missing and cyclic forced handoffs before execution', () => {
+  for (const yaml of [
+    'agents: {root: {model: openai/test, force_handoff: missing}}',
+    'agents: {root: {model: openai/test, force_handoff: root}}',
+    'agents: {a: {model: openai/test, force_handoff: b}, b: {model: openai/test, force_handoff: a}}',
+  ]) assert.throws(() => api.parseConfig(yaml), /force_handoff/);
+});

@@ -72,6 +72,8 @@ struct Agent {
     #[serde(default)]
     handoffs: Vec<String>,
     #[serde(default)]
+    force_handoff: String,
+    #[serde(default)]
     add_date: bool,
     #[serde(default)]
     add_environment_info: bool,
@@ -439,6 +441,7 @@ pub struct Selected {
     pub team_prompts: Vec<String>,
     pub sub_agents: Vec<String>,
     pub handoffs: Vec<String>,
+    pub force_handoff: String,
     pub shared_todo: bool,
     pub limits: crate::limits::Limits,
     pub tool_models: BTreeMap<String, Map<String, Value>>,
@@ -515,6 +518,22 @@ fn load(yaml: &str) -> Result<Config, String> {
             })?;
             cfg.models.insert(a.model.clone(), m);
         }
+    }
+    let mut finished = std::collections::BTreeSet::new();
+    for start in cfg.agents.keys() {
+        let mut path = std::collections::BTreeSet::new();
+        let mut node = start.as_str();
+        while !node.is_empty() && !finished.contains(node) {
+            if !path.insert(node) {
+                return Err(format!("force_handoff cycle involving agent {node:?}"));
+            }
+            node = &cfg
+                .agents
+                .get(node)
+                .ok_or_else(|| format!("unknown force_handoff agent {node:?}"))?
+                .force_handoff;
+        }
+        finished.extend(path);
     }
     for model in cfg.models.values() {
         validate_threshold(model.compaction_threshold)?;
@@ -825,7 +844,8 @@ pub fn team(
         .agents
         .get(entry)
         .ok_or_else(|| format!("agent {entry:?} not found"))?;
-    let team = !root.sub_agents.is_empty() || !root.handoffs.is_empty();
+    let team =
+        !root.sub_agents.is_empty() || !root.handoffs.is_empty() || !root.force_handoff.is_empty();
     let mut pending = vec![entry];
     let mut seen = std::collections::BTreeSet::new();
     let mut agents = Vec::new();
@@ -834,6 +854,9 @@ pub fn team(
             continue;
         }
         let a = &cfg.agents[name];
+        if !a.force_handoff.is_empty() {
+            pending.push(&a.force_handoff);
+        }
         pending.extend(a.sub_agents.iter().chain(&a.handoffs).map(String::as_str));
         agents.push(resolve(&cfg, name, a, env, team)?);
     }
@@ -860,6 +883,7 @@ fn resolve(
         && a.sub_agents
             .iter()
             .chain(&a.handoffs)
+            .chain(std::iter::once(&a.force_handoff).filter(|n| !n.is_empty()))
             .any(|n| !cfg.agents[n].readonly)
     {
         return Err("readonly agents cannot delegate or hand off to a writable agent".into());
@@ -1019,6 +1043,7 @@ fn resolve(
         team_prompts,
         sub_agents: a.sub_agents.clone(),
         handoffs: a.handoffs.clone(),
+        force_handoff: a.force_handoff.clone(),
         shared_todo,
         toolsets,
     })

@@ -106,6 +106,8 @@ async function run() {
   const teamFallback = team.replace('model: local/worker', 'model: local/worker, fallback: {models: [local/worker-backup]}');
   tests.transferFallback = await replay(api, 'transferFallback', teamFallback, [tool('transfer_task', { agent: 'helper', task: 'count' }),
     [{ error: { message: 'worker unavailable' } }], answer, answer], single);
+  const pipeline = config.replace('model: local/test', 'model: local/test, force_handoff: helper') + '  helper: {model: local/worker, instruction: Summarize}\n';
+  tests.forceHandoff = await replay(api, 'forceHandoff', pipeline, [answer, answer, answer], turns);
   tests.handoff = await replay(api, 'handoff', team, [tool('handoff', { agent: 'helper' }), answer, answer], turns);
   tests.think = await replay(api, 'think', config.replace('model: local/test', 'toolsets: [{type: think}], model: local/test'),
     [tool('think', { thought: 'a plan' }), answer, answer], turns);

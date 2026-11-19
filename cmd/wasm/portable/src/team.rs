@@ -54,6 +54,7 @@ pub struct Handoff {
 pub enum Switch {
     Transfer(Transfer),
     Handoff(Handoff),
+    Forced(String),
 }
 
 impl Switch {
@@ -102,7 +103,9 @@ impl Session {
             };
             agents.insert(spec.name.clone(), Rc::new(Profile::new(spec, todos)?));
         }
-        let profile = if !agents[&entry].spec.team_prompts.is_empty() {
+        let profile = if !agents[&entry].spec.team_prompts.is_empty()
+            || !agents[&entry].spec.force_handoff.is_empty()
+        {
             agents[&entry].clone()
         } else {
             agents.remove(&entry).unwrap()
@@ -328,7 +331,20 @@ impl Session {
     ) -> Result<Value, String> {
         let caller = &self.conversation.profile.spec;
         let from = &caller.name;
+        if let Switch::Forced(target) = switch {
+            if target != caller.force_handoff || self.switches >= MAX_SWITCHES {
+                return Err("invalid or excessive forced handoff".into());
+            }
+            self.switches += 1;
+            let profile = self.agents[&target].clone();
+            let note=format!("The agent {from} finished its response and the conversation was automatically handed off to you. Your available handoff agents and tools are specified in the system messages that follow. Only use those capabilities - do not attempt to use tools or hand off to agents that you see in the conversation history from previous agents, as those were available to different agents with different capabilities. Look at the conversation history for context, continue the work from where the previous agent stopped, and complete your part of the task.");
+            events.push(handoff(from, &target));
+            self.conversation.attempt = profile.spec.policy.begin(now);
+            self.conversation.forced(profile, note);
+            return self.conversation.request();
+        }
         let (target, allowed, name, action, list) = match &switch {
+            Switch::Forced(_) => unreachable!(),
             Switch::Handoff(Handoff { agent }) => (
                 agent,
                 &caller.handoffs,
@@ -375,6 +391,7 @@ impl Session {
         let profile = self.agents[target].clone();
         let switched = handoff(from, target);
         match switch {
+            Switch::Forced(_) => unreachable!(),
             Switch::Handoff(Handoff { agent }) => {
                 let note = handoff_note(from);
                 let changed = &agent != from;

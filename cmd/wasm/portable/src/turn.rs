@@ -367,6 +367,16 @@ impl Conversation {
         Ok(())
     }
 
+    pub fn forced(&mut self, profile: Rc<Profile>, note: String) {
+        self.change_profile(profile);
+        self.messages.push(json!({"role":"user","content":note}));
+        let t = self.active.as_mut().expect("forced continuation");
+        t.message_id = format!(
+            "{}:forced:{}:{}",
+            t.id, self.profile.spec.name, t.tool_rounds
+        );
+        t.tool_model_source = None;
+    }
     pub fn change_profile(&mut self, profile: Rc<Profile>) {
         self.grants.clear();
         self.tools = profile.tools.clone();
@@ -652,6 +662,10 @@ impl Conversation {
                 if turn.input != 0 || turn.output != 0 {
                     result["usage"] =
                         json!({"input_tokens":turn.input, "output_tokens":turn.output});
+                }
+                if !self.profile.spec.force_handoff.is_empty() {
+                    self.switch = Some(Switch::Forced(self.profile.spec.force_handoff.clone()));
+                    return Ok(json!({"events":events}));
                 }
                 events.push(json!({"type":"finish", "reason":"stop"}));
                 self.active = None;
