@@ -51,6 +51,8 @@ pub struct Toolset {
     pub readonly: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instruction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
     #[serde(flatten)]
     pub options: BTreeMap<String, Value>,
 }
@@ -113,7 +115,8 @@ impl Toolset {
                     .ok_or("mcp requires remote.url")?;
                 if remote
                     .get("url")
-                    .and_then(Value::as_str).is_none_or(|s| s.is_empty())
+                    .and_then(Value::as_str)
+                    .is_none_or(|s| s.is_empty())
                 {
                     return Err("mcp requires remote.url".into());
                 }
@@ -147,18 +150,24 @@ impl Toolset {
                 }
                 if ["name", "endpoint"].iter().any(|k| {
                     api.get(*k)
-                        .and_then(Value::as_str).is_none_or(|s| s.is_empty())
+                        .and_then(Value::as_str)
+                        .is_none_or(|s| s.is_empty())
                 }) {
                     return Err("api needs a name and endpoint".into());
                 }
             }
             _ => {}
         }
-        // Only project toolsets that do not require additional configuration.
+        if self.kind == "model_picker" && self.models.as_ref().is_none_or(Vec::is_empty) {
+            return Err("model_picker requires a non-empty models list".into());
+        }
+        if self.kind != "model_picker" && self.models.is_some() {
+            return Err("models can only be used with type 'model_picker'".into());
+        }
         match self.kind.as_str() {
             "api" | "mcp" | "calculator" | "datetime" | "fetch" | "file" | "filesystem"
             | "memory" | "plan" | "random" | "session_context" | "shell" | "tasks" | "think"
-            | "todo" | "user_prompt" => Ok(()),
+            | "todo" | "user_prompt" | "model_picker" => Ok(()),
             _ => Err(format!("unsupported toolset type {:?}", self.kind)),
         }
     }
@@ -196,7 +205,16 @@ struct Provider {
     parallel_tool_calls: Option<bool>,
 }
 
+struct ModelRequest<'a> {
+    model_params: Map<String, Value>,
+    endpoint: String,
+    token_key: &'a str,
+    responses: bool,
+    merge_messages: bool,
+}
+
 pub struct Selected {
+    pub picker: crate::model_picker::Picker,
     pub model_params: Map<String, Value>,
     pub endpoint: String,
     pub token: String,
@@ -243,21 +261,10 @@ fn load(yaml: &str) -> Result<Config, String> {
             }
         }
         if !cfg.models.contains_key(&a.model) {
-            let (provider, model) = a
-                .model
-                .split_once('/')
-                .filter(|(p, m)| !p.is_empty() && !m.is_empty())
-                .ok_or_else(|| {
-                    format!("agent {name:?} references non-existent model {:?}", a.model)
-                })?;
-            cfg.models.insert(
-                a.model.clone(),
-                Model {
-                    provider: provider.into(),
-                    model: model.into(),
-                    ..Model::default()
-                },
-            );
+            let m = inline_model(&a.model).ok_or_else(|| {
+                format!("agent {name:?} references non-existent model {:?}", a.model)
+            })?;
+            cfg.models.insert(a.model.clone(), m);
         }
     }
     for model in cfg.models.values() {
@@ -266,6 +273,17 @@ fn load(yaml: &str) -> Result<Config, String> {
         }
     }
     Ok(cfg)
+}
+
+fn inline_model(name: &str) -> Option<Model> {
+    let (provider, model) = name
+        .split_once('/')
+        .filter(|(p, m)| !p.is_empty() && !m.is_empty())?;
+    Some(Model {
+        provider: provider.into(),
+        model: model.into(),
+        ..Model::default()
+    })
 }
 
 fn agent_list(cfg: &Config, full: bool) -> Vec<Value> {
@@ -481,6 +499,8 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
                     | "api"
                     | "mcp"
                     | "fetch"
+                    | "model_picker"
+                    | "session_context"
             ) {
                 return Err(format!("unsupported toolset type {:?}", ts.kind));
             }
@@ -511,7 +531,78 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         cfg.agents.get(agent)
     }
     .ok_or_else(|| format!("agent {agent:?} not found"))?;
-    let m = &cfg.models[&a.model];
+    let primary = &cfg.models[&a.model];
+    let request = resolve_model(&cfg, primary, env, !a.toolsets.is_empty())?;
+    let mut picker = crate::model_picker::Picker::default();
+    for ts in a.toolsets.iter().filter(|ts| ts.kind == "model_picker") {
+        if !picker.choices.is_empty() {
+            return Err("multiple model_picker toolsets are not supported".into());
+        }
+        for name in ts.models.as_ref().expect("validated picker") {
+            if picker.choices.contains_key(name) {
+                return Err(format!("duplicate model_picker choice {name:?}"));
+            }
+            let inline;
+            let m = if let Some(m) = cfg.models.get(name) {
+                m
+            } else {
+                inline = inline_model(name)
+                    .filter(|_| !name.contains(','))
+                    .ok_or_else(|| format!("unsupported model_picker model {name:?}"))?;
+                &inline
+            };
+            // Do not reuse the open handle's Authorization header at a new destination.
+            if m.provider != primary.provider {
+                return Err("model_picker cannot switch providers".into());
+            }
+            let target = resolve_model(&cfg, m, env, true)?;
+            if target.endpoint != request.endpoint
+                || target.responses != request.responses
+                || target.token_key != request.token_key
+                || target.merge_messages != request.merge_messages
+            {
+                return Err(
+                    "model_picker cannot change the model endpoint, API or credential".into(),
+                );
+            }
+            picker.choices.insert(name.clone(), target.model_params);
+        }
+    }
+    let token = if request.token_key.is_empty() {
+        String::new()
+    } else {
+        env.get(request.token_key)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{} environment variable is required", request.token_key))?
+            .clone()
+    };
+    Ok(Selected {
+        picker,
+        model_params: request.model_params,
+        endpoint: request.endpoint,
+        responses: request.responses,
+        merge_messages: request.merge_messages,
+        token,
+        instruction: instruction(&a.instruction, env),
+        toolsets: a
+            .toolsets
+            .iter()
+            .cloned()
+            .map(|mut ts| {
+                ts.readonly |= a.readonly;
+                ts.instruction = instruction(&ts.instruction, env);
+                ts
+            })
+            .collect(),
+    })
+}
+
+fn resolve_model<'a>(
+    cfg: &'a Config,
+    m: &'a Model,
+    env: &BTreeMap<String, String>,
+    tools: bool,
+) -> Result<ModelRequest<'a>, String> {
     let p = cfg.providers.get(&m.provider);
     let builtin = crate::providers::lookup(&m.provider).filter(|_| p.is_none());
     let default_base = builtin.map_or("https://api.openai.com/v1", |b| b.base_url.as_str());
@@ -526,9 +617,14 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         None => builtin.is_some_and(|b| b.auto_responses) && supports_responses_api(&id),
     };
     let custom = p.is_some();
+    let key = first_nonempty([
+        &m.token_key,
+        p.map_or("", |p| p.token_key.as_str()),
+        default_key,
+    ]);
     let default_provider = Provider::default();
     let p = p.unwrap_or(&default_provider);
-    let key = first_nonempty([&m.token_key, &p.token_key, default_key]);
+
     let base = expand_model_field(
         first_nonempty([&m.base_url, &p.base_url, default_base]),
         env,
@@ -536,14 +632,6 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     if id.trim().is_empty() || base.trim().is_empty() {
         return Err("model and endpoint must not expand to an empty string".into());
     }
-    let token = if key.is_empty() {
-        String::new()
-    } else {
-        env.get(key)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| format!("{key} environment variable is required"))?
-            .clone()
-    };
     let merge_messages = !responses
         && (custom
             || builtin.is_some_and(|b| b.merge_consecutive_messages)
@@ -553,24 +641,12 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     } else {
         "chat/completions"
     };
-    let think = !a.toolsets.is_empty();
-    Ok(Selected {
-        model_params: model_params(id, m, p, think)?,
+    Ok(ModelRequest {
+        model_params: model_params(id, m, p, tools)?,
         endpoint: format!("{}/{route}", base.trim_end_matches('/')),
         responses,
         merge_messages,
-        token,
-        instruction: instruction(&a.instruction, env),
-        toolsets: a
-            .toolsets
-            .iter()
-            .cloned()
-            .map(|mut ts| {
-                ts.readonly |= a.readonly;
-                ts.instruction = instruction(&ts.instruction, env);
-                ts
-            })
-            .collect(),
+        token_key: key,
     })
 }
 

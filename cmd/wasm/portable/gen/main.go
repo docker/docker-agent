@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/datetime"
 	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
 	"github.com/docker/docker-agent/pkg/tools/builtin/memory"
+	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 	"github.com/docker/docker-agent/pkg/tools/builtin/random"
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
@@ -43,8 +44,9 @@ func generate(ctx context.Context, w io.Writer) error {
 	for key, ts := range map[string]tools.ToolSet{
 		"calculator": calculator.New(), "think": think.New(), "todo": todo.New(), "user_prompt": userprompt.New(),
 		"datetime": datetime.New(), "random": random.New(), "session_context": sessioncontext.New(), "fetch": fetch.New(),
-		"memory": memory.New(inmemory.New()),
-		"plan":   teamloader.WithToolsExcludeFilter(plan.New(plan.WithStorage(plan.NewMemoryStorage())), plan.ToolNameUpdatePlanFromFile, plan.ToolNameExportPlanToFile),
+		"model_picker": modelpicker.New([]string{"{AVAILABLE_MODELS}"}),
+		"memory":       memory.New(inmemory.New()),
+		"plan":         teamloader.WithToolsExcludeFilter(plan.New(plan.WithStorage(plan.NewMemoryStorage())), plan.ToolNameUpdatePlanFromFile, plan.ToolNameExportPlanToFile),
 	} {
 		defs, err := ts.Tools(ctx)
 		if err != nil {
