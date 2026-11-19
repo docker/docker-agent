@@ -110,7 +110,7 @@ test('rejects missing credentials and unsupported capabilities before fetch', as
   for (const type of ['mcp', 'shell', 'filesystem', 'openapi']) {
     await assert.rejects(api.createSession({ yaml: yaml.replace('type: think', `type: ${type}`), env: { LOCAL_KEY: 'k' } }));
   }
-  await assert.rejects(api.createSession({ yaml: yaml + 'permissions: {}\n', env: { LOCAL_KEY: 'k' } }));
+  await assert.rejects(api.createSession({ yaml: yaml + 'permissions: {unknown: []}\n', env: { LOCAL_KEY: 'k' } }));
 });
 
 test('a broken stream rejects, emits an error, and releases the turn', async t => {

@@ -33,9 +33,10 @@ test('rejected, allowed, and cancelled API writes are bound to their actual turn
   const session = await api.createSession(options, e => { if (e.type === 'tool_confirmation') requested.resolve(e); });
   t.after(() => session.close());
   const denied = session.send('reject');
-  assert.equal((await requested.promise).name,'save_note');
+  const first = await requested.promise;
+  assert.equal(first.name,'save_note');
   assert.equal(writes.length,0);
-  await session.confirm(false,'declined');
+  await session.confirm({confirmationId:first.confirmationId, decision:'reject'},'declined');
   await denied;
   assert.match(bodies.at(-1).messages.at(-1).content,/declined/);
   assert.equal(writes.length,0);
@@ -48,8 +49,8 @@ test('rejected, allowed, and cancelled API writes are bound to their actual turn
   assert.equal(writes.length,0);
   requested = Promise.withResolvers();
   const approved = session.send('accept');
-  await requested.promise;
-  await session.confirm(true);
+  const last = await requested.promise;
+  await session.confirm({confirmationId:last.confirmationId, decision:'approve'});
   assert.equal((await approved).message.content,'ok');
   assert.deepEqual(writes,[{note:'test'}]);
 });

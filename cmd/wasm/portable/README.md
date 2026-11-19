@@ -66,8 +66,9 @@ or cookies, and refuse redirects. Tool calls are a separate trust boundary.
   follow redirects. See the [Go bridge proxy contract](../README.md#createsessionoptions-onevent---promisesession).
   Without it, protected calls fail closed. `allow_private_ips: true` is an
   explicit opt-in to direct browser access, not an automatic fallback.
-- In `createSession`, handle `tool_confirmation` with `session.confirm(true)` or
-  `session.confirm('reject', reason)`. A `chat` callback returns the decision.
+- In `createSession`, handle `tool_confirmation` by calling `session.confirm({confirmationId: event.confirmationId,
+  decision: 'approve'})` (or `'reject'`). The ID prevents a delayed UI response
+  from approving a different call. A `chat` callback returns the decision.
   Declining must not perform the call. Only enable `autoApprove` on trusted configs.
 - MCP tool catalogs are obtained over guarded HTTP. Treat server instructions
   and tool output as untrusted. The streamable HTTP client supports JSON and

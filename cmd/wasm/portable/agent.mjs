@@ -26,17 +26,16 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
   function session(opts, onEvent, history) {
     const stateless = history !== undefined;
     if (typeof opts?.yaml !== 'string') throw new Error('options.yaml must be a string');
+    if ('safety' in opts || 'permissions' in opts) throw new Error('portable safety and permissions must be configured in YAML');
     validateDocuments(opts.documents);
     const host = createHost(opts, onEvent, stateless);
-    let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, history: history ?? [], stamp: sessionStamp() });
+    let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, auto_approve: opts.autoApprove === true, history: history ?? [], stamp: sessionStamp() });
     try {
       prepareModelTransport(handle.transport);
     } catch (e) { call('close', { session: handle.session }); throw e; }
     let active, batch, restarting = false, closing, ready;
     async function prepare(signal) {
-      const sets = await host.prepare(handle.toolsets, signal);
-      signal.throwIfAborted();
-      if (sets.length) call('registerTools', {session:handle.session, sets});
+      await host.prepare(handle.toolsets, signal, sets => call('registerTools', {session:handle.session, sets}));
     }
     const pending = new Set();
 
@@ -71,22 +70,32 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       // A direct abort can reject this promise while a host operation is awaiting I/O.
       replies.catch(() => {});
       try {
-        for (const event of events) {
-          signal.throwIfAborted();
-          if (event.type === 'host_call') {
-            const result = await host.execute(event, signal, emit);
-            signal.throwIfAborted();
-            settle(call('hostResult', {session:handle.session, id:event.id, name:event.name, ...result}));
-          } else if (event.type === 'elicitation') {
-            const id = event.id;
-            pending.add(id);
-            if (typeof onEvent !== 'function') answer({ id, action:'decline' });
-            else if (stateless) answerFromCallback(event, id);
-            else emit(event);
-          } else emit(event);
-        }
+        await deliver(events, signal);
         return await replies;
       } finally { pending.clear(); batch = null; }
+    }
+    async function deliver(events, signal) {
+      for (const event of events) {
+        signal.throwIfAborted();
+        if (event.type === 'approval') {
+          const answer = await host.approval(event, signal);
+          signal.throwIfAborted();
+          const next = call('confirm', {session:handle.session, token:event.token, ...answer});
+          await deliver(next.events, signal);
+          if (next.error) batch.reject(new Error(next.error));
+          else if (!next.waiting) batch.resolve(next.request);
+        } else if (event.type === 'host_call') {
+          const result = await host.execute(event, signal, emit);
+          signal.throwIfAborted();
+          settle(call('hostResult', {session:handle.session, token:event.token, ...result}));
+        } else if (event.type === 'elicitation') {
+          const id = event.id;
+          pending.add(id);
+          if (typeof onEvent !== 'function') answer({ id, action:'decline' });
+          else if (stateless) answerFromCallback(event, id);
+          else emit(event);
+        } else emit(event);
+      }
     }
     async function answerFromCallback(event, id) {
       try {
@@ -176,7 +185,6 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           await stop();
           if (closing) throw new Error('session is closed');
           call('restart', { session: handle.session, stamp: sessionStamp() });
-          host.restart();
         } finally { restarting = false; }
       },
       close() {

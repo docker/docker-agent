@@ -69,6 +69,59 @@
       }
     ]
   },
+  "deferred": {
+    "instructions": "## Deferred Tools\n\nUse search_tool to discover additional tools by keyword (e.g., \"remote\", \"read\", \"write\"). Use add_tool to activate a discovered tool.",
+    "read_only": {
+      "add_tool": true,
+      "search_tool": true
+    },
+    "strict": {
+      "add_tool": true,
+      "search_tool": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Search for available deferred tools by name or description. Use this to discover tools that can be activated.",
+          "name": "search_tool",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "query": {
+                "description": "Search query to find tools by name or description (case-insensitive)",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Activate a deferred tool by name, making it available for use. Use search_tool first to find available tools.",
+          "name": "add_tool",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "The name of the tool to activate",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
   "fetch": {
     "instructions": "## Fetch Tool\n\nFetch HTTP/HTTPS URLs; respects robots.txt.",
     "read_only": {
