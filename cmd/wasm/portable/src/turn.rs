@@ -292,7 +292,6 @@ impl Conversation {
                     continue;
                 }
                 let hidden = all || names.iter().any(|n| n == name);
-                withheld |= hidden;
                 let profile = (hosted, hidden, spec.toon.matches(name));
                 if let Some(previous) = seen.insert(name.to_owned(), profile) {
                     if hosted || previous != profile {
@@ -314,7 +313,7 @@ impl Conversation {
                     tool,
                 );
             }
-            // Free-form source instructions can describe filtered or deferred tools.
+            // Do not disclose tools hidden by policy. Deferred tools, unlike filtered tools, are discoverable.
             let custom = !spec.instruction.is_empty()
                 && !spec.instruction.contains("{ORIGINAL_INSTRUCTIONS}");
             if !text.is_empty() && (!withheld || custom) {

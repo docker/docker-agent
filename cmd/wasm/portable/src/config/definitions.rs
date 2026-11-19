@@ -25,7 +25,9 @@ fn validate_remote(remote: &Value) -> Result<(), String> {
     for (key, val) in map {
         let valid = match key.as_str() {
             "url" => true,
-            "transport_type" => matches!(val.as_str(), Some("streamable" | "streamable-http")),
+            "transport_type" => {
+                matches!(val.as_str(), Some("streamable" | "streamable-http" | "sse"))
+            }
             "standalone_sse" => val == false,
             "headers" => val
                 .as_object()

@@ -197,6 +197,10 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
     return new Response(redacted);
   });
   tests.dynamicContext = await replay(api,'dynamicContext',config.replace('model: local/test','add_date: true, add_environment_info: true, model: local/test'),[answer,answer],turns);
+  const deferred = config.replace('model: local/test', 'toolsets: [{type: think, defer: true}], model: local/test');
+  tests.discovery = await replay(api, 'discovery', deferred, [tool('search_tool',{query:'think'}),tool('add_tool',{name:'think'}),tool('think',{thought:'plan'}),answer],single);
+  const compactTodo = config.replace('model: local/test','toolsets: [{type: todo, toon: create_todo}], model: local/test');
+  tests.toon = await replay(api, 'toon', compactTodo, [tool('create_todo',{description:'one'}),answer],single);
   const question = config.replace('model: local/test', 'toolsets: [{type: user_prompt}], model: local/test');
   tests.ask = await replay(api, 'ask', question, [tool('user_prompt', { message: 'Which color?', title: 'Color', schema: { type: 'string' } }), answer],
     async ({ api, options, record, trace }) => {
