@@ -85,6 +85,14 @@ impl Session {
         history: Vec<Value>,
     ) -> Result<Self, String> {
         let (entry, specs) = crate::config::team(yaml, agent, env)?;
+        let team = specs.iter().any(|s| !s.team_prompts.is_empty());
+        if team
+            && specs
+                .iter()
+                .any(|s| s.toolsets.iter().any(|ts| ts.hosted()))
+        {
+            return Err("host toolsets with local delegation or handoff are not supported".into());
+        }
         let shared = Rc::new(RefCell::new(crate::todo::Todos::default()));
         let mut agents = BTreeMap::new();
         for spec in specs {
@@ -95,8 +103,13 @@ impl Session {
             };
             agents.insert(spec.name.clone(), Rc::new(Profile::new(spec, todos)?));
         }
+        let profile = if team {
+            agents[&entry].clone()
+        } else {
+            agents.remove(&entry).unwrap()
+        };
         Ok(Self {
-            conversation: Conversation::open(agents[&entry].clone(), history)?,
+            conversation: Conversation::open(profile, history)?,
             agents,
             parents: vec![],
             responses: None,
@@ -108,8 +121,16 @@ impl Session {
     pub fn endpoints(&self) -> Vec<&str> {
         self.agents
             .values()
+            .chain(std::iter::once(&self.conversation.profile))
             .map(|a| a.spec.endpoint.as_str())
             .collect()
+    }
+
+    pub fn register(&mut self, sets: &[crate::turn::HostSet]) -> Result<(), String> {
+        if !self.agents.is_empty() {
+            return Err("host toolsets are not supported in local teams".into());
+        }
+        self.conversation.register(sets)
     }
 
     pub fn begin(&mut self, prompt: &str, id: &str) -> Result<Value, String> {

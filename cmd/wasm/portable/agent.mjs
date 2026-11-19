@@ -1,3 +1,4 @@
+import { createHost } from './host.mjs';
 // The module owns config, conversation history, tool execution and turn decisions.
 // Only browser I/O and the asynchronous lifetime of a session live here.
 const encoder = new TextEncoder();
@@ -26,13 +27,16 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     const stateless = history !== undefined;
     if (typeof opts?.yaml !== 'string') throw new Error('options.yaml must be a string');
     validateDocuments(opts.documents);
-    for (const key of ['toolProxy', 'oauthRedirectURI']) {
-      if (opts[key] != null) throw new Error(`options.${key} is not supported by the portable profile`);
-    }
+    const host = createHost(opts, onEvent, stateless);
     let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, history: history ?? [] });
     try { handle.endpoints.forEach(modelURL); }
     catch (e) { call('close', { session: handle.session }); throw e; }
-    let active, batch, restarting = false, closing;
+    let active, batch, restarting = false, closing, ready;
+    async function prepare(signal) {
+      const sets = await host.prepare(handle.toolsets, signal);
+      signal.throwIfAborted();
+      if (sets.length) call('registerTools', {session:handle.session, sets});
+    }
     const pending = new Set();
 
     function emit(event) {
@@ -52,31 +56,36 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       if (typeof id !== 'string' || !id) throw new Error('respondToElicitation: id is required');
       if (!pending.has(id)) throw new Error('no pending elicitation with that ID');
       const next = call('answerElicitation', { session: handle.session, id, action, content });
-      if (!pending.delete(id)) throw new Error('elicitation is no longer pending');
-      if (!next.waiting) batch.resolve(next.request);
-      for (const event of next.events) emit(event);
+      pending.delete(id);
+      settle(next);
     }
 
+    function settle(next) {
+      for (const event of next.events) emit(event);
+      if (!next.waiting) batch.resolve(next.request);
+    }
     async function elicit(events, signal) {
       const replies = new Promise((resolve, reject) => { batch = { resolve, reject }; });
+      // A direct abort can reject this promise while a host operation is awaiting I/O.
+      replies.catch(() => {});
       try {
         for (const event of events) {
-          if (signal.aborted) break;
-          if (event.type !== 'elicitation') { emit(event); continue; }
-          // Register before onEvent, including for synchronously answered prompts.
-          const id = event.id;
-          pending.add(id);
-          if (typeof onEvent !== 'function') answer({ id, action: 'decline' });
-          else if (stateless) answerFromCallback(event, id);
-          else emit(event);
+          signal.throwIfAborted();
+          if (event.type === 'host_call') {
+            const result = await host.execute(event, signal, emit);
+            signal.throwIfAborted();
+            settle(call('hostResult', {session:handle.session, id:event.id, name:event.name, ...result}));
+          } else if (event.type === 'elicitation') {
+            const id = event.id;
+            pending.add(id);
+            if (typeof onEvent !== 'function') answer({ id, action:'decline' });
+            else if (stateless) answerFromCallback(event, id);
+            else emit(event);
+          } else emit(event);
         }
         return await replies;
-      } finally {
-        pending.clear();
-        batch = null;
-      }
+      } finally { pending.clear(); batch = null; }
     }
-
     async function answerFromCallback(event, id) {
       try {
         const reply = await onEvent(event);
@@ -94,6 +103,9 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     async function run(prompt, signal) {
       const session = handle.session;
       try {
+        signal.throwIfAborted();
+        if (!ready) { ready = prepare(signal); }
+        await ready;
         signal.throwIfAborted();
         let request = call('begin', { session, prompt, id: crypto.randomUUID() });
         for (;;) {
@@ -157,16 +169,18 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           await stop();
           if (closing) throw new Error('session is closed');
           call('restart', { session: handle.session });
+          host.restart();
         } finally { restarting = false; }
       },
       close() {
-        return closing ??= stop().then(() => {
+        return closing ??= stop().then(async () => {
+          await host.close();
           call('close', { session: handle.session });
           handle = onEvent = null;
         });
       },
-      async confirm() { throw new Error(closing ? 'session is closed' : 'no tool confirmation is pending'); },
-      async respondToElicitation(reply) { answer(reply); },
+      async confirm(reply, reason) { if (closing) throw new Error('session is closed'); host.confirm(reply, reason); },
+      async respondToElicitation(reply) { if (!host.respond(reply)) answer(reply); },
     };
   }
 

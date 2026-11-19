@@ -73,6 +73,8 @@ test('a missing credential, unsafe target route, ambiguous todo scope or unsuppo
     [{ ...opts, yaml: opts.yaml.replace('https://child.invalid', 'http://child.invalid') }, /model endpoint/],
     [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, toolsets: [{type: todo}, {type: todo, shared: true}]}') }, /todo/],
     [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, permissions: {deny: [think]}}') }, /permissions/],
+    [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, toolsets: [{type: fetch}]}') }, /host toolsets/],
+    [{ ...opts, yaml: opts.yaml.replace('sub_agents:', 'toolsets: [{type: plan}], sub_agents:') }, /host toolsets/],
     [{ ...opts, yaml: opts.yaml.replace('worker/child}', 'worker/child, force_handoff: root}') }, /force_handoff/],
     [{ ...opts, yaml: opts.yaml.replace('[helper]', '[docker.io/remote]') }, /external agent/],
   ]) await assert.rejects(api.createSession(o), error);

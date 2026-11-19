@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, readdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join, dirname } from 'node:path';
 import { test, before } from 'node:test';
@@ -54,7 +54,7 @@ async function mockModel(t, script) {
 test('the complete runtime is under 2 MiB and has no Go, WASI or other host imports', async () => {
   const bytes = readFileSync(artifact);
   assert.deepEqual(WebAssembly.Module.imports(await WebAssembly.compile(bytes)), []);
-  const size = bytes.length + statSync(join(dirname(artifact), 'agent.mjs')).size;
+  const size = bytes.length + readdirSync(dirname(artifact)).filter(f => f.endsWith('.mjs')).reduce((n, f) => n + statSync(join(dirname(artifact), f)).size, 0);
   assert.ok(size < 2 * 1024 * 1024, `${size} bytes including the JS host`);
 });
 
@@ -99,7 +99,7 @@ test('stateless chat preserves history and aborts synchronously', async t => {
 test('rejects missing credentials and unsupported capabilities before fetch', async () => {
   const yaml = config('https://example.invalid');
   await assert.rejects(api.createSession({ yaml }), /LOCAL_KEY/);
-  for (const type of ['mcp', 'shell', 'fetch', 'openapi']) {
+  for (const type of ['mcp', 'shell', 'filesystem', 'openapi']) {
     await assert.rejects(api.createSession({ yaml: yaml.replace('type: think', `type: ${type}`), env: { LOCAL_KEY: 'k' } }));
   }
   await assert.rejects(api.createSession({ yaml: yaml + 'permissions: {}\n', env: { LOCAL_KEY: 'k' } }));

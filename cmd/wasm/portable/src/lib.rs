@@ -39,6 +39,17 @@ enum Command {
     End {
         session: u32,
     },
+    RegisterTools {
+        session: u32,
+        sets: Vec<turn::HostSet>,
+    },
+    HostResult {
+        session: u32,
+        id: String,
+        name: String,
+        output: String,
+        is_error: bool,
+    },
     AnswerElicitation {
         session: u32,
         id: String,
@@ -84,7 +95,7 @@ impl Core {
                     .next_id
                     .checked_add(1)
                     .ok_or("session ID space exhausted")?;
-                let handle = json!({"session":self.next_id, "endpoints":session.endpoints()});
+                let handle = json!({"session":self.next_id, "endpoints":session.endpoints(), "toolsets":session.conversation.profile.spec.toolsets});
                 self.sessions.insert(self.next_id, session);
                 Ok(handle)
             }
@@ -95,6 +106,21 @@ impl Core {
             } => self.session(session)?.begin(&prompt, &id),
             Command::Chunk { session, chunk } => self.session(session)?.chunk(chunk),
             Command::End { session } => self.session(session)?.end(),
+            Command::RegisterTools { session, sets } => {
+                self.session(session)?.register(&sets)?;
+                Ok(Value::Null)
+            }
+            Command::HostResult {
+                session,
+                id,
+                name,
+                output,
+                is_error,
+            } => {
+                let s = self.session(session)?;
+                let n = s.conversation.host_result(&id, &name, output, is_error)?;
+                s.next(n)
+            }
             Command::AnswerElicitation {
                 session,
                 id,
