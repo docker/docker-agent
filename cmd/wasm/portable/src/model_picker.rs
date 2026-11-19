@@ -1,12 +1,13 @@
-//! Only pre-resolved request bodies can be selected. The host's transport never changes.
+//! Picker choices change request parameters, not the current agent's transport.
 use crate::go_json::{read_string, scalar};
 use indexmap::IndexMap;
 use serde_json::{Map, Value};
+use std::cell::Cell;
 
 #[derive(Default)]
 pub struct Picker {
     pub choices: IndexMap<String, Map<String, Value>>,
-    pub active: Option<usize>,
+    pub active: Cell<Option<usize>>,
 }
 
 impl Picker {
@@ -34,7 +35,7 @@ impl Picker {
     }
 
     pub fn params(&self) -> Option<&Map<String, Value>> {
-        self.choices.get_index(self.active?).map(|(_, v)| v)
+        self.choices.get_index(self.active.get()?).map(|(_, v)| v)
     }
 
     pub fn change(&self, args: &str, selection: &mut Option<usize>) -> Result<String, String> {

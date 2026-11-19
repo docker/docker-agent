@@ -60,6 +60,20 @@ pub struct Toolset {
 }
 
 impl Toolset {
+    pub fn hosted(&self) -> bool {
+        !matches!(
+            self.kind.as_str(),
+            "calculator"
+                | "think"
+                | "todo"
+                | "user_prompt"
+                | "transfer_task"
+                | "handoff"
+                | "model_picker"
+                | "session_context"
+        )
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.shared && self.kind != "todo" {
             return Err("shared can only be used with type 'todo'".into());
@@ -207,7 +221,13 @@ struct Provider {
     parallel_tool_calls: Option<bool>,
 }
 
+#[derive(Default)]
 pub struct Selected {
+    pub name: String,
+    pub team_prompts: Vec<String>,
+    pub sub_agents: Vec<String>,
+    pub handoffs: Vec<String>,
+    pub shared_todo: bool,
     pub picker: crate::model_picker::Picker,
     pub models: Vec<Target>,
     pub policy: crate::fallback::Policy,
@@ -472,12 +492,14 @@ fn first_nonempty(values: [&str; 3]) -> &str {
     values.into_iter().find(|s| !s.is_empty()).unwrap_or("")
 }
 
-pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
+pub fn team(
+    yaml: &str,
+    entry: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(String, Vec<Selected>), String> {
     let cfg = load(yaml)?;
     for (name, a) in &cfg.agents {
         for (enabled, field) in [
-            (!a.sub_agents.is_empty(), "sub_agents"),
-            (!a.handoffs.is_empty(), "handoffs"),
             (a.add_date, "add_date"),
             (a.add_environment_info, "add_environment_info"),
         ] {
@@ -525,17 +547,87 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             return Err(format!("unsupported provider {:?}", m.provider));
         }
     }
-    let a = if agent.is_empty() {
-        cfg.agents
-            .get("root")
-            .or_else(|| cfg.agents.first().map(|(_, a)| a))
+    let entry = if entry.is_empty() {
+        if cfg.agents.contains_key("root") {
+            "root"
+        } else {
+            cfg.agents.first().unwrap().0
+        }
     } else {
-        cfg.agents.get(agent)
+        entry
+    };
+    let root = cfg
+        .agents
+        .get(entry)
+        .ok_or_else(|| format!("agent {entry:?} not found"))?;
+    let team = !root.sub_agents.is_empty() || !root.handoffs.is_empty();
+    let mut pending = vec![entry];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut agents = Vec::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name) {
+            continue;
+        }
+        let a = &cfg.agents[name];
+        pending.extend(a.sub_agents.iter().chain(&a.handoffs).map(String::as_str));
+        agents.push(resolve(&cfg, name, a, env, team)?);
     }
-    .ok_or_else(|| format!("agent {agent:?} not found"))?;
+    Ok((entry.into(), agents))
+}
+
+#[cfg(test)]
+pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
+    Ok(team(yaml, agent, env)?.1.remove(0))
+}
+
+fn resolve(
+    cfg: &Config,
+    name: &str,
+    a: &Agent,
+    env: &BTreeMap<String, String>,
+    team: bool,
+) -> Result<Selected, String> {
+    if team && a.toolsets.iter().any(Toolset::hosted) {
+        return Err("host toolsets with local delegation or handoff are not supported".into());
+    }
+    if team && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
+        return Err("session_context with local delegation or handoff is not supported".into());
+    }
+    let mut toolsets = a.toolsets.clone();
+    for ts in &mut toolsets {
+        ts.readonly |= a.readonly;
+        ts.instruction = instruction(&ts.instruction, env);
+    }
+    let mut todos = a.toolsets.iter().filter(|ts| ts.kind == "todo");
+    let shared_todo = todos.next().is_some_and(|ts| ts.shared);
+    if todos.any(|ts| ts.shared != shared_todo) {
+        return Err(format!(
+            "agent {name:?}: mixing shared and private todo toolsets is not supported"
+        ));
+    }
+    let mut team_prompts = Vec::new();
+    for (tool, targets) in [("transfer_task", &a.sub_agents), ("handoff", &a.handoffs)] {
+        if !targets.is_empty() {
+            toolsets.push(Toolset {
+                kind: tool.into(),
+                ..Default::default()
+            });
+            let mut roster = String::new();
+            for target in targets {
+                use std::fmt::Write;
+                writeln!(
+                    roster,
+                    "Name: {target} | Description: {}",
+                    instruction(&cfg.agents[target].description, env)
+                )
+                .unwrap();
+            }
+            team_prompts.push(crate::team::prompt(tool, &roster, &targets.join(", ")));
+        }
+    }
     let primary = &cfg.models[&a.model];
     let chain = !a.fallback.models.is_empty();
-    let request = resolve_model(&cfg, primary, env, !a.toolsets.is_empty(), chain)?;
+    let request = resolve_model(cfg, primary, env, !toolsets.is_empty(), chain || team)?;
     let mut picker = crate::model_picker::Picker::default();
     for ts in a.toolsets.iter().filter(|ts| ts.kind == "model_picker") {
         if chain {
@@ -563,7 +655,7 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             if m.provider != primary.provider {
                 return Err("model_picker cannot switch providers".into());
             }
-            let target = resolve_model(&cfg, m, env, true, false)?;
+            let target = resolve_model(cfg, m, env, true, team)?;
             if target.endpoint != request.endpoint
                 || target.responses != request.responses
                 || target.token_key != request.token_key
@@ -586,23 +678,19 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
                 inline_model(name).ok_or_else(|| format!("fallback model {name:?} not found"))?;
             &inline
         };
-        models.push(resolve_model(&cfg, m, env, !a.toolsets.is_empty(), true)?);
+        models.push(resolve_model(cfg, m, env, !toolsets.is_empty(), true)?);
     }
     Ok(Selected {
         picker,
         models,
         policy: a.fallback.policy(),
         instruction: instruction(&a.instruction, env),
-        toolsets: a
-            .toolsets
-            .iter()
-            .cloned()
-            .map(|mut ts| {
-                ts.readonly |= a.readonly;
-                ts.instruction = instruction(&ts.instruction, env);
-                ts
-            })
-            .collect(),
+        name: name.into(),
+        team_prompts,
+        sub_agents: a.sub_agents.clone(),
+        handoffs: a.handoffs.clone(),
+        shared_todo,
+        toolsets,
     })
 }
 
@@ -611,7 +699,7 @@ fn resolve_model(
     m: &Model,
     env: &BTreeMap<String, String>,
     tools: bool,
-    chain: bool,
+    multi_target: bool,
 ) -> Result<Target, String> {
     let p = cfg.providers.get(&m.provider);
     let builtin = crate::providers::lookup(&m.provider).filter(|_| p.is_none());
@@ -661,26 +749,27 @@ fn resolve_model(
     };
     let model_id = format!("{provider_id}/{id}");
     let params = model_params(id, m, p, tools)?;
-    if chain
+    if multi_target
         && responses
         && ["frequency_penalty", "presence_penalty"]
             .iter()
             .any(|k| params.contains_key(*k))
     {
         return Err(
-            "Responses does not support frequency_penalty or presence_penalty in a fallback chain"
+            "Responses does not support frequency_penalty or presence_penalty when switching model targets"
                 .into(),
         );
     }
     // An override on one model must not redirect an inherited provider key to another origin.
-    let key_base = if chain && !m.base_url.is_empty() && m.token_key.is_empty() && !key.is_empty() {
-        Some(expand_model_field(
-            first_nonempty([&p.base_url, default_base, ""]),
-            env,
-        )?)
-    } else {
-        None
-    };
+    let key_base =
+        if multi_target && !m.base_url.is_empty() && m.token_key.is_empty() && !key.is_empty() {
+            Some(expand_model_field(
+                first_nonempty([&p.base_url, default_base, ""]),
+                env,
+            )?)
+        } else {
+            None
+        };
     Ok(Target {
         id: model_id,
         model_params: params,

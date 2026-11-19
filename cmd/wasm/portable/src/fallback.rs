@@ -1,5 +1,6 @@
 use serde::{de::Error, Deserialize, Deserializer};
 use serde_json::Value;
+use std::cell::Cell;
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -24,10 +25,7 @@ impl Config {
             } else {
                 self.cooldown_ns as f64 / 1e6
             },
-            current: 0,
-            attempt: 0,
-            pin_on_success: false,
-            pinned: None,
+            pinned: Cell::new(None),
         }
     }
 }
@@ -104,10 +102,20 @@ fn parse_duration(text: &str) -> Option<u64> {
 pub struct Policy {
     retries: u32,
     cooldown_ms: f64,
+    pinned: Cell<Option<(usize, f64)>>,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Config::default().policy()
+    }
+}
+
+#[derive(Default)]
+pub struct Attempt {
     pub current: usize,
     attempt: u32,
     pin_on_success: bool,
-    pinned: Option<(usize, f64)>,
 }
 
 pub enum Decision {
@@ -117,17 +125,21 @@ pub enum Decision {
 }
 
 impl Policy {
-    pub fn begin(&mut self, now_ms: f64) {
-        self.current = self
-            .pinned
-            .filter(|&(_, until)| now_ms < until)
-            .map_or(0, |(model, _)| model);
-        self.attempt = 0;
-        self.pin_on_success = false;
+    pub fn begin(&self, now_ms: f64) -> Attempt {
+        Attempt {
+            current: self
+                .pinned
+                .get()
+                .filter(|&(_, until)| now_ms < until)
+                .map_or(0, |(i, _)| i),
+            ..Default::default()
+        }
     }
+}
 
-    pub fn fail(&mut self, transient: bool, count: usize) -> Decision {
-        if transient && self.attempt < self.retries {
+impl Attempt {
+    pub fn fail(&mut self, policy: &Policy, transient: bool, count: usize) -> Decision {
+        if transient && self.attempt < policy.retries {
             let delay = (200 << self.attempt.min(4)).min(2000);
             self.attempt += 1;
             return Decision::Retry(delay);
@@ -141,12 +153,14 @@ impl Policy {
         Decision::Switch
     }
 
-    pub fn success(&mut self, now_ms: f64) {
+    pub fn success(&mut self, policy: &Policy, now_ms: f64) {
         if self.current == 0 {
-            self.pinned = None;
+            policy.pinned.set(None);
         }
         if self.pin_on_success {
-            self.pinned = Some((self.current, now_ms + self.cooldown_ms));
+            policy
+                .pinned
+                .set(Some((self.current, now_ms + policy.cooldown_ms)));
             self.pin_on_success = false;
         }
     }

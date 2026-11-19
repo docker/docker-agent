@@ -146,7 +146,10 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             signal.throwIfAborted();
             continue;
           }
-          for (const event of next.events) emit(event);
+          for (const event of next.events) {
+            signal.throwIfAborted();
+            emit(event);
+          }
           if (next.result) return next.result;
           signal.throwIfAborted();
           request = next.request;

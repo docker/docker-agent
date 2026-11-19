@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/calculator"
 	"github.com/docker/docker-agent/pkg/tools/builtin/datetime"
 	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
+	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
 	"github.com/docker/docker-agent/pkg/tools/builtin/memory"
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
@@ -23,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
 	"github.com/docker/docker-agent/pkg/tools/builtin/think"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
+	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 	"github.com/docker/docker-agent/pkg/tools/builtin/userprompt"
 )
 
@@ -43,6 +45,7 @@ func generate(ctx context.Context, w io.Writer) error {
 	catalog := make(map[string]entry)
 	for key, ts := range map[string]tools.ToolSet{
 		"calculator": calculator.New(), "think": think.New(), "todo": todo.New(), "user_prompt": userprompt.New(),
+		"handoff": handoff.New(), "transfer_task": transfertask.New(),
 		"datetime": datetime.New(), "random": random.New(), "session_context": sessioncontext.New(), "fetch": fetch.New(),
 		"model_picker": modelpicker.New([]string{"{AVAILABLE_MODELS}"}),
 		"memory":       memory.New(inmemory.New()),

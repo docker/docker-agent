@@ -6,6 +6,7 @@ mod model_picker;
 mod providers;
 mod responses;
 mod session_context;
+mod team;
 mod todo;
 mod turn;
 mod wire;
@@ -13,7 +14,7 @@ mod wire;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{cell::RefCell, collections::BTreeMap};
-use turn::Conversation;
+use team::Session;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -85,104 +86,6 @@ struct Core {
     next_id: u32,
 }
 
-struct Session {
-    conversation: Conversation,
-    models: Vec<config::Target>,
-    policy: fallback::Policy,
-    responses: Option<responses::Stream>,
-    replayable: bool,
-}
-
-impl Session {
-    fn request(&mut self, mut body: Value) -> Result<Value, String> {
-        let index = self.policy.current;
-        let target = &self.models[index];
-        body.as_object_mut().expect("model request").extend(
-            self.conversation
-                .picker
-                .params()
-                .unwrap_or(&target.model_params)
-                .clone(),
-        );
-        if target.merge_messages {
-            wire::merge_text_messages(&mut body);
-        }
-        self.responses = target.responses.then(responses::Stream::default);
-        if target.responses {
-            if self.models.len() > 1 {
-                fallback::check_responses_history(&body)?;
-            }
-            body = responses::request(body)?;
-        }
-        Ok(
-            json!({"endpoint":target.endpoint, "token":target.token, "responses":target.responses, "body":body}),
-        )
-    }
-
-    fn next(&mut self, mut next: Value) -> Result<Value, String> {
-        if let Some(body) = next.get_mut("request") {
-            *body = self.request(body.take())?;
-        }
-        Ok(next)
-    }
-
-    fn chunk(&mut self, chunk: Value) -> Result<Value, String> {
-        let failure = if self.responses.is_some() {
-            responses::failure(&chunk)
-        } else {
-            chunk.get("error").filter(|e| !e.is_null()).map(|e| {
-                (
-                    e,
-                    format!("error receiving from stream: received error while streaming: {e}"),
-                )
-            })
-        };
-        if let Some((error, reason)) = failure {
-            self.replayable &= chunk["response"]["output"]
-                .as_array()
-                .is_none_or(Vec::is_empty)
-                && chunk["choices"].as_array().is_none_or(Vec::is_empty);
-            let transient = fallback::retryable(fallback::status(error), &reason);
-            return self.failure(reason, transient);
-        }
-        self.replayable &= fallback::prelude(&chunk, self.responses.is_some());
-        let mut events = Vec::new();
-        if let Some(stream) = &mut self.responses {
-            for c in stream.push(chunk)? {
-                events.extend(self.conversation.chunk(c)?);
-            }
-        } else {
-            events = self.conversation.chunk(chunk)?;
-        }
-        Ok(json!({"events":events}))
-    }
-
-    fn failure(&mut self, reason: String, transient: bool) -> Result<Value, String> {
-        let previous = self.policy.current;
-        let decision = if self.replayable {
-            self.policy.fail(transient, self.models.len())
-        } else {
-            fallback::Decision::Stop
-        };
-        let mut next = match decision {
-            fallback::Decision::Retry(delay) => json!({"delay":delay}),
-            fallback::Decision::Switch => json!({"event":{"type":"fallback", "attempt":1,
-                "from":self.models[previous].id, "to":self.models[self.policy.current].id, "reason":reason}}),
-            fallback::Decision::Stop => {
-                self.conversation.fail();
-                let prefix = if self.models.len() > 1 && self.replayable {
-                    "all models failed"
-                } else {
-                    "model failed"
-                };
-                return Err(format!("{prefix}: {reason}"));
-            }
-        };
-        next["request"] = self.request(self.conversation.request())?;
-        Ok(next)
-    }
-}
-
 impl Core {
     fn session(&mut self, id: u32) -> Result<&mut Session, String> {
         self.sessions
@@ -201,53 +104,25 @@ impl Core {
                 history,
                 stamp,
             } => {
-                let spec = config::select(&yaml, &agent, &env)?;
-                let toolsets = json!(spec.toolsets);
-                let archive = spec
-                    .toolsets
-                    .iter()
-                    .any(|ts| ts.kind == "session_context")
-                    .then(|| session_context::Archive::new(stamp));
-                let conv = Conversation::configured(
-                    spec.instruction,
-                    spec.toolsets,
-                    history,
-                    spec.picker,
-                    archive,
-                )?;
+                let session = Session::open(&yaml, &agent, &env, history, stamp)?;
                 self.next_id = self
                     .next_id
                     .checked_add(1)
                     .ok_or("session ID space exhausted")?;
-                let targets: Vec<_> = spec
-                    .models
-                    .iter()
-                    .map(|t| json!({"endpoint":t.endpoint, "keyBase":t.key_base}))
-                    .collect();
-                self.sessions.insert(
-                    self.next_id,
-                    Session {
-                        conversation: conv,
-                        models: spec.models,
-                        policy: spec.policy,
-                        responses: None,
-                        replayable: false,
-                    },
-                );
-                Ok(json!({"session": self.next_id, "targets":targets, "toolsets":toolsets}))
+                let handle = json!({
+                    "session": self.next_id,
+                    "targets": session.targets(),
+                    "toolsets": session.conversation.profile.spec.toolsets,
+                });
+                self.sessions.insert(self.next_id, session);
+                Ok(handle)
             }
             Command::Begin {
                 session,
                 prompt,
                 id,
                 now,
-            } => {
-                let s = self.session(session)?;
-                let request = s.conversation.begin(&prompt, &id)?;
-                s.policy.begin(now);
-                s.replayable = true;
-                s.request(request)
-            }
+            } => self.session(session)?.begin(&prompt, &id, now),
             Command::Chunk { session, chunk } => self.session(session)?.chunk(chunk),
             Command::Failure {
                 session,
@@ -257,15 +132,9 @@ impl Core {
                 let transient = status.is_none() || fallback::retryable(status, &reason);
                 self.session(session)?.failure(reason, transient)
             }
-            Command::End { session, now } => {
-                let s = self.session(session)?;
-                let next = s.conversation.end()?;
-                s.replayable = false; // Never restart a turn after executing its tools.
-                s.policy.success(now);
-                s.next(next)
-            }
+            Command::End { session, now } => self.session(session)?.end(now),
             Command::RegisterTools { session, sets } => {
-                self.session(session)?.conversation.configure_tools(&sets)?;
+                self.session(session)?.register(&sets)?;
                 Ok(Value::Null)
             }
             Command::HostResult {
@@ -290,11 +159,13 @@ impl Core {
                 s.next(next)
             }
             Command::Cancel { session } => {
-                self.session(session)?.conversation.cancel();
+                self.session(session)?.cancel();
                 Ok(Value::Null)
             }
             Command::Restart { session, stamp } => {
-                self.session(session)?.conversation.restart(stamp)?;
+                let s = self.session(session)?;
+                s.cancel();
+                s.conversation.restart(stamp)?;
                 Ok(Value::Null)
             }
             Command::Close { session } => {

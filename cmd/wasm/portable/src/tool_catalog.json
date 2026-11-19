@@ -124,6 +124,37 @@
       }
     ]
   },
+  "handoff": {
+    "instructions": "",
+    "read_only": {
+      "handoff": true
+    },
+    "strict": {
+      "handoff": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Use this function to hand off the conversation to the selected agent.",
+          "name": "handoff",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "agent": {
+                "description": "The name of the agent to hand off the conversation to.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "agent"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
   "memory": {
     "instructions": "## Memory Tools\n\nYou have memory scoped to this session: it survives turns and a restart of the session, but is lost when the session is closed, a new session is created or the page is reloaded. Use it silently: never mention memory operations in your replies (no \"I'll remember that\", \"stored\", \"saved\", \"noted\", \"I searched my memory\"). Just act on what you recall or store.\n\nRECALL: Before acting on a request or answering a question that depends on prior context — preferences, past decisions, or personal facts like \"what's my name?\" — call search_memories first. Skip this only for simple greetings and self-contained informational questions.\n\nSTORE: Scan each user message for durable facts worth keeping — preferences, corrections, project conventions, tech stack, environment, constraints, and decisions — including details mentioned in passing. Corrections (\"use alpine instead\") are preferences; store them. Capture every distinct fact. Never store secrets, tokens, or transient debugging details.\n\n- Use search_memories with keywords/category for targeted lookup; use get_memories only for a full dump\n- Use update_memory to revise existing entries instead of adding duplicates; use add_memory only for genuinely new information\n- Organize with categories: \"preference\", \"fact\", \"project\", \"decision\", \"environment\", \"correction\"",
     "read_only": {
@@ -733,6 +764,47 @@
             "additionalProperties": false,
             "properties": {},
             "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "transfer_task": {
+    "instructions": "",
+    "read_only": {
+      "transfer_task": true
+    },
+    "strict": {
+      "transfer_task": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Use this function to transfer a task to the selected team member.\n            You must provide a clear and concise description of the task the member should achieve AND the expected output.",
+          "name": "transfer_task",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "agent": {
+                "description": "The name of the agent to transfer the task to.",
+                "type": "string"
+              },
+              "task": {
+                "description": "A clear and concise description of the task the member should achieve.",
+                "type": "string"
+              },
+              "expected_output": {
+                "description": "The expected output from the member (optional).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "agent",
+              "task",
+              "expected_output"
+            ],
             "type": "object"
           }
         },
