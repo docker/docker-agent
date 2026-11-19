@@ -81,6 +81,7 @@ struct Core {
 
 struct Session {
     conversation: Conversation,
+    chatgpt: bool,
     responses: Option<responses::Stream>,
 }
 
@@ -88,7 +89,11 @@ impl Session {
     fn request(&mut self, body: Value) -> Result<Value, String> {
         if let Some(stream) = &mut self.responses {
             *stream = responses::Stream::default();
-            responses::request(body)
+            let mut request = responses::request(body)?;
+            if self.chatgpt {
+                providers::apply_chatgpt_policy(&mut request);
+            }
+            Ok(request)
         } else {
             Ok(body)
         }
@@ -163,11 +168,12 @@ impl Core {
                     self.next_id,
                     Session {
                         conversation: conv,
+                        chatgpt: spec.transport.chatgpt,
                         responses: spec.responses.then(responses::Stream::default),
                     },
                 );
                 Ok(
-                    json!({"session": self.next_id, "endpoint": spec.endpoint, "token": spec.token, "responses":spec.responses,"toolsets":toolsets}),
+                    json!({"session": self.next_id, "transport": spec.transport, "responses":spec.responses,"toolsets":toolsets}),
                 )
             }
             Command::Begin {
