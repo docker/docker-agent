@@ -1,5 +1,6 @@
 mod calculator;
 mod config;
+mod fallback;
 mod providers;
 mod responses;
 mod todo;
@@ -28,6 +29,7 @@ enum Command {
     },
     Begin {
         session: u32,
+        now: f64,
         prompt: String,
         id: String,
     },
@@ -35,8 +37,14 @@ enum Command {
         session: u32,
         chunk: Value,
     },
+    Failure {
+        session: u32,
+        reason: String,
+        status: Option<u16>,
+    },
     End {
         session: u32,
+        now: f64,
     },
     AnswerElicitation {
         session: u32,
@@ -63,17 +71,30 @@ struct Core {
 
 struct Session {
     conversation: Conversation,
+    models: Vec<config::Target>,
+    policy: fallback::Policy,
     responses: Option<responses::Stream>,
+    replayable: bool,
 }
 
 impl Session {
-    fn request(&mut self, body: Value) -> Result<Value, String> {
-        if let Some(stream) = &mut self.responses {
-            *stream = responses::Stream::default();
-            responses::request(body)
-        } else {
-            Ok(body)
+    fn request(&mut self, mut body: Value) -> Result<Value, String> {
+        let index = self.policy.current;
+        let target = &self.models[index];
+        body.as_object_mut()
+            .expect("model request")
+            .extend(target.model_params.clone());
+        if target.merge_messages {
+            wire::merge_text_messages(&mut body);
         }
+        self.responses = target.responses.then(responses::Stream::default);
+        if target.responses {
+            if self.models.len() > 1 {
+                fallback::check_responses_history(&body)?;
+            }
+            body = responses::request(body)?;
+        }
+        Ok(json!({"target":index, "body":body}))
     }
 
     fn next(&mut self, mut next: Value) -> Result<Value, String> {
@@ -84,6 +105,25 @@ impl Session {
     }
 
     fn chunk(&mut self, chunk: Value) -> Result<Value, String> {
+        let failure = if self.responses.is_some() {
+            responses::failure(&chunk)
+        } else {
+            chunk.get("error").filter(|e| !e.is_null()).map(|e| {
+                (
+                    e,
+                    format!("error receiving from stream: received error while streaming: {e}"),
+                )
+            })
+        };
+        if let Some((error, reason)) = failure {
+            self.replayable &= chunk["response"]["output"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+                && chunk["choices"].as_array().is_none_or(Vec::is_empty);
+            let transient = fallback::retryable(fallback::status(error), &reason);
+            return self.failure(reason, transient);
+        }
+        self.replayable &= fallback::prelude(&chunk, self.responses.is_some());
         let mut events = Vec::new();
         if let Some(stream) = &mut self.responses {
             for c in stream.push(chunk)? {
@@ -92,7 +132,32 @@ impl Session {
         } else {
             events = self.conversation.chunk(chunk)?;
         }
-        Ok(Value::Array(events))
+        Ok(json!({"events":events}))
+    }
+
+    fn failure(&mut self, reason: String, transient: bool) -> Result<Value, String> {
+        let previous = self.policy.current;
+        let decision = if self.replayable {
+            self.policy.fail(transient, self.models.len())
+        } else {
+            fallback::Decision::Stop
+        };
+        let mut next = match decision {
+            fallback::Decision::Retry(delay) => json!({"delay":delay}),
+            fallback::Decision::Switch => json!({"event":{"type":"fallback", "attempt":1,
+                "from":self.models[previous].id, "to":self.models[self.policy.current].id, "reason":reason}}),
+            fallback::Decision::Stop => {
+                self.conversation.fail();
+                let prefix = if self.models.len() > 1 && self.replayable {
+                    "all models failed"
+                } else {
+                    "model failed"
+                };
+                return Err(format!("{prefix}: {reason}"));
+            }
+        };
+        next["request"] = self.request(self.conversation.request())?;
+        Ok(next)
     }
 }
 
@@ -114,41 +179,50 @@ impl Core {
                 history,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
-                let conv = Conversation::new(
-                    spec.model_params,
-                    spec.instruction,
-                    &spec.toolsets,
-                    spec.merge_messages,
-                    history,
-                )?;
+                let conv = Conversation::new(spec.instruction, &spec.toolsets, history)?;
                 self.next_id = self
                     .next_id
                     .checked_add(1)
                     .ok_or("session ID space exhausted")?;
+                let targets: Vec<_> = spec.models.iter().map(|t| json!({"endpoint":t.endpoint, "token":t.token, "responses":t.responses, "keyBase":t.key_base})).collect();
                 self.sessions.insert(
                     self.next_id,
                     Session {
                         conversation: conv,
-                        responses: spec.responses.then(responses::Stream::default),
+                        models: spec.models,
+                        policy: spec.policy,
+                        responses: None,
+                        replayable: false,
                     },
                 );
-                Ok(
-                    json!({"session": self.next_id, "endpoint": spec.endpoint, "token": spec.token, "responses":spec.responses}),
-                )
+                Ok(json!({"session": self.next_id, "targets":targets}))
             }
             Command::Begin {
                 session,
                 prompt,
                 id,
+                now,
             } => {
                 let s = self.session(session)?;
                 let request = s.conversation.begin(&prompt, &id)?;
+                s.policy.begin(now);
+                s.replayable = true;
                 s.request(request)
             }
             Command::Chunk { session, chunk } => self.session(session)?.chunk(chunk),
-            Command::End { session } => {
+            Command::Failure {
+                session,
+                reason,
+                status,
+            } => {
+                let transient = status.is_none() || fallback::retryable(status, &reason);
+                self.session(session)?.failure(reason, transient)
+            }
+            Command::End { session, now } => {
                 let s = self.session(session)?;
                 let next = s.conversation.end()?;
+                s.replayable = false; // Never restart a turn after executing its tools.
+                s.policy.success(now);
                 s.next(next)
             }
             Command::AnswerElicitation {

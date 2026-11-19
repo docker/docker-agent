@@ -30,8 +30,14 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       if (opts[key] != null) throw new Error(`options.${key} is not supported by the portable profile`);
     }
     let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, history: history ?? [] });
-    try { modelURL(handle.endpoint); }
-    catch (e) { call('close', { session: handle.session }); throw e; }
+    try {
+      for (const target of handle.targets) {
+        const url = modelURL(target.endpoint);
+        if (target.keyBase != null && url.origin !== modelURL(target.keyBase).origin) {
+          throw new Error('cross-origin model endpoint in fallback chain requires an explicit model token_key');
+        }
+      }
+    } catch (e) { call('close', { session: handle.session }); throw e; }
     let active, batch, restarting = false, closing;
     const pending = new Set();
 
@@ -95,35 +101,44 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       const session = handle.session;
       try {
         signal.throwIfAborted();
-        let body = call('begin', { session, prompt, id: crypto.randomUUID() });
+        let request = call('begin', { session, prompt, id: crypto.randomUUID(), now: performance.now() });
         for (;;) {
-          const response = await fetch(handle.endpoint, {
-            method: 'POST', redirect: 'error', credentials: 'omit', signal,
-            headers: { 'Content-Type': 'application/json', ...(handle.token && { Authorization: `Bearer ${handle.token}` }) },
-            body: JSON.stringify(body),
-          });
-          if (!response.ok) {
-            await response.body?.cancel();
-            throw new Error(`model request failed: HTTP ${response.status}`);
-          }
-          for await (const chunk of sse(response, handle.responses)) {
-            signal.throwIfAborted();
-            for (const event of call('chunk', { session, chunk })) {
+          signal.throwIfAborted();
+          const target = handle.targets[request.target];
+          let outcome;
+          try {
+            const response = await modelFetch(target, request.body, signal);
+            for await (const chunk of sse(response, target.responses)) {
               signal.throwIfAborted();
-              emit(event);
+              const step = call('chunk', { session, chunk });
+              if (step.request) { outcome = step; break; }
+              for (const event of step.events) {
+                signal.throwIfAborted();
+                emit(event);
+              }
             }
+          } catch (e) {
+            signal.throwIfAborted();
+            if (!(e instanceof TransportError)) throw e;
+            outcome = call('failure', { session, status: e.status, reason: e.message });
           }
           signal.throwIfAborted();
-          const next = call('end', { session });
+          if (outcome) {
+            if (outcome.event) emit(outcome.event);
+            if (outcome.delay) await backoff(outcome.delay, signal);
+            request = outcome.request;
+            continue;
+          }
+          const next = call('end', { session, now: performance.now() });
           if (next.waiting) {
-            body = await elicit(next.events, signal);
+            request = await elicit(next.events, signal);
             signal.throwIfAborted();
             continue;
           }
           for (const event of next.events) emit(event);
           if (next.result) return next.result;
           signal.throwIfAborted();
-          body = next.request;
+          request = next.request;
         }
       } catch (e) {
         call('cancel', { session });
@@ -215,6 +230,61 @@ function modelURL(endpoint) {
   return url;
 }
 
+class TransportError extends Error {
+  constructor(message, status) { super(message); this.status = status; }
+}
+
+async function modelFetch(target, body, signal) {
+  const init = {
+    method: 'POST', redirect: 'error', credentials: 'omit', signal,
+    headers: { 'Content-Type': 'application/json', ...(target.token && { Authorization: `Bearer ${target.token}` }) },
+    body: JSON.stringify(body),
+  };
+  let response;
+  try { response = await fetch(target.endpoint, init); }
+  catch (e) { throw new TransportError(`model request failed: ${e.message}`); }
+  if (!response.ok) {
+    const detail = await errorDetail(response);
+    throw new TransportError(`model request failed: HTTP ${response.status}${detail ? `: ${detail}` : ''}`, response.status);
+  }
+  return response;
+}
+
+// Use the provider diagnostic, not an unbounded proxy error page, in fallback events.
+async function errorDetail(response) {
+  if (!response.body || !response.headers.get('Content-Type')?.includes('application/json')) {
+    await response.body?.cancel();
+    return '';
+  }
+  const reader = response.body.getReader();
+  const utf8 = new TextDecoder();
+  let text = '', bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if ((bytes += value.byteLength) > 8192) return '';
+      text += utf8.decode(value, { stream: true });
+    }
+    const body = JSON.parse(text + utf8.decode());
+    const detail = body?.error?.message ?? body?.message;
+    return typeof detail === 'string' ? detail : '';
+  } catch { return ''; }
+  finally { try { await reader.cancel(); } finally { reader.releaseLock(); } }
+}
+
+function backoff(base, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }, base * (0.9 + 0.2 * Math.random()));
+    function abort() { clearTimeout(timer); reject(signal.reason); }
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
 async function* sse(response, responses) {
   if (!response.body || !/^text\/event-stream(?:;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
     await response.body?.cancel();
@@ -225,7 +295,7 @@ async function* sse(response, responses) {
   let pending = '', data = [], total = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await reader.read().catch(e => { throw new TransportError(e.message); });
       total += value?.byteLength ?? 0;
       if (total > maxResponse) throw new Error('model response too large');
       pending += utf8.decode(value, { stream: !done });
@@ -244,7 +314,7 @@ async function* sse(response, responses) {
           if (responses && ['response.completed', 'response.done', 'response.incomplete'].includes(chunk.type)) return;
         }
       }
-      if (done) throw new Error('model stream ended before [DONE]');
+      if (done) throw new TransportError('model stream ended before [DONE]');
     }
   } finally {
     try { await reader.cancel(); } finally { reader.releaseLock(); }

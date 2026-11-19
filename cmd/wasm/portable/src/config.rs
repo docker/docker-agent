@@ -22,6 +22,8 @@ struct Config {
 struct Agent {
     model: String,
     #[serde(default)]
+    fallback: crate::fallback::Config,
+    #[serde(default)]
     description: String,
     #[serde(default)]
     instruction: String,
@@ -94,13 +96,31 @@ struct Provider {
 }
 
 pub struct Selected {
+    pub models: Vec<Target>,
+    pub policy: crate::fallback::Policy,
+    pub instruction: String,
+    pub toolsets: Vec<String>,
+}
+
+pub struct Target {
+    pub id: String,
     pub model_params: Map<String, Value>,
     pub endpoint: String,
     pub token: String,
-    pub instruction: String,
-    pub toolsets: Vec<String>,
+    pub key_base: Option<String>,
     pub responses: bool,
     pub merge_messages: bool,
+}
+
+fn inline_model(reference: &str) -> Option<Model> {
+    let (p, m) = reference
+        .split_once('/')
+        .filter(|(p, m)| !p.is_empty() && !m.is_empty())?;
+    Some(Model {
+        provider: p.into(),
+        model: m.into(),
+        ..Model::default()
+    })
 }
 
 fn load(yaml: &str) -> Result<Config, String> {
@@ -140,21 +160,10 @@ fn load(yaml: &str) -> Result<Config, String> {
             }
         }
         if !cfg.models.contains_key(&a.model) {
-            let (provider, model) = a
-                .model
-                .split_once('/')
-                .filter(|(p, m)| !p.is_empty() && !m.is_empty())
-                .ok_or_else(|| {
-                    format!("agent {name:?} references non-existent model {:?}", a.model)
-                })?;
-            cfg.models.insert(
-                a.model.clone(),
-                Model {
-                    provider: provider.into(),
-                    model: model.into(),
-                    ..Model::default()
-                },
-            );
+            let model = inline_model(&a.model).ok_or_else(|| {
+                format!("agent {name:?} references non-existent model {:?}", a.model)
+            })?;
+            cfg.models.insert(a.model.clone(), model);
         }
     }
     for model in cfg.models.values() {
@@ -398,9 +407,44 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         cfg.agents.get(agent)
     }
     .ok_or_else(|| format!("agent {agent:?} not found"))?;
-    let m = &cfg.models[&a.model];
-    let p = cfg.providers.get(&m.provider);
+    let mut models = Vec::new();
+    for reference in std::iter::once(&a.model).chain(&a.fallback.models) {
+        let inline;
+        let m = match cfg.models.get(reference) {
+            Some(m) => m,
+            None => {
+                inline = inline_model(reference)
+                    .ok_or_else(|| format!("fallback model {reference:?} not found"))?;
+                &inline
+            }
+        };
+        models.push(target(
+            m,
+            cfg.providers.get(&m.provider),
+            env,
+            !a.toolsets.is_empty(),
+            !a.fallback.models.is_empty(),
+        )?);
+    }
+    Ok(Selected {
+        models,
+        policy: a.fallback.policy(),
+        instruction: instruction(&a.instruction, env),
+        toolsets: a.toolsets.iter().map(|ts| ts.kind.clone()).collect(),
+    })
+}
+
+fn target(
+    m: &Model,
+    p: Option<&Provider>,
+    env: &BTreeMap<String, String>,
+    tools: bool,
+    chain: bool,
+) -> Result<Target, String> {
     let builtin = crate::providers::lookup(&m.provider).filter(|_| p.is_none());
+    if p.is_none() && builtin.is_none() {
+        return Err(format!("unsupported provider {:?}", m.provider));
+    }
     let default_base = builtin.map_or("https://api.openai.com/v1", |b| b.base_url.as_str());
     let default_key = builtin.map_or("", |b| b.token_env_vars[0].as_str());
     // Go resolves a custom provider's default protocol before expanding the model.
@@ -440,21 +484,57 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     } else {
         "chat/completions"
     };
-    let think = !a.toolsets.is_empty();
-    Ok(Selected {
-        model_params: model_params(id, m, p, think)?,
+    let provider_id = if p.provider.is_empty() {
+        &m.provider
+    } else {
+        &p.provider
+    };
+    let model_id = format!("{provider_id}/{id}");
+    let params = model_params(id, m, p, tools)?;
+    if chain
+        && responses
+        && ["frequency_penalty", "presence_penalty"]
+            .iter()
+            .any(|k| params.contains_key(*k))
+    {
+        return Err(
+            "Responses does not support frequency_penalty or presence_penalty in a fallback chain"
+                .into(),
+        );
+    }
+    // An override on one model must not redirect an inherited provider key to another origin.
+    let key_base = if chain && !m.base_url.is_empty() && m.token_key.is_empty() && !key.is_empty() {
+        Some(expand_model_field(
+            first_nonempty([&p.base_url, default_base, ""]),
+            env,
+        )?)
+    } else {
+        None
+    };
+    Ok(Target {
+        id: model_id,
+        model_params: params,
         endpoint: format!("{}/{route}", base.trim_end_matches('/')),
         responses,
         merge_messages,
         token,
-        instruction: instruction(&a.instruction, env),
-        toolsets: a.toolsets.iter().map(|ts| ts.kind.clone()).collect(),
+        key_base,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn primary_params(cfg: &str, agent: &str, env: &BTreeMap<String, String>) -> Value {
+        Value::Object(
+            select(cfg, agent, env)
+                .unwrap()
+                .models
+                .remove(0)
+                .model_params,
+        )
+    }
 
     #[test]
     fn strict_loader() {
@@ -496,7 +576,7 @@ agents:
     #[test]
     fn model_options_override_provider_defaults_field_by_field() {
         let env = BTreeMap::from([("MODEL".into(), "gpt-5".into())]);
-        let select_params = |name| Value::Object(select(CONFIG, name, &env).unwrap().model_params);
+        let select_params = |name| primary_params(CONFIG, name, &env);
         assert_eq!(
             select_params("root"),
             json!({"model":"openai/gpt-5", "temperature":0,
@@ -522,7 +602,7 @@ agents:
     fn openrouter_stays_on_chat_completions_for_newer_models() {
         let cfg = "models: {m: {provider: openrouter, model: openai/gpt-4.1-mini, max_tokens: 12}}\nagents: {root: {model: m}}";
         let env = BTreeMap::from([("OPENROUTER_API_KEY".into(), "key".into())]);
-        let params = Value::Object(select(cfg, "", &env).unwrap().model_params);
+        let params = primary_params(cfg, "", &env);
         assert_eq!(
             params,
             json!({"model":"openai/gpt-4.1-mini", "max_completion_tokens":12})
@@ -532,8 +612,7 @@ agents:
     #[test]
     fn omitted_and_nonpositive_token_caps_are_not_sent() {
         let yaml = "providers: {local: {}}\nagents: {root: {model: local/test}}";
-        let params =
-            |cfg: &str| Value::Object(select(cfg, "", &BTreeMap::new()).unwrap().model_params);
+        let params = |cfg: &str| primary_params(cfg, "", &BTreeMap::new());
         assert_eq!(params(yaml), json!({"model":"test"}));
         for cap in [0, -1] {
             let cfg = format!("providers: {{local: {{max_tokens: 42}}}}\nmodels: {{m: {{provider: local, model: test, max_tokens: {cap}}}}}\nagents: {{root: {{model: m}}}}");
@@ -581,16 +660,22 @@ agents:
             ("${TOKEN_KEY}".into(), "secret".into()),
         ]);
         let s = select(cfg, "root", &env).unwrap();
-        assert_eq!(s.endpoint, "http://localhost:8080/v1/chat/completions");
-        assert_eq!(s.model_params["model"], "org/$LITERAL");
-        assert_eq!(s.token, "secret"); // token_key is a name, not a template.
+        assert_eq!(
+            s.models[0].endpoint,
+            "http://localhost:8080/v1/chat/completions"
+        );
+        assert_eq!(s.models[0].model_params["model"], "org/$LITERAL");
+        assert_eq!(s.models[0].token, "secret"); // token_key is a name, not a template.
         env.remove("HOST");
         assert!(select(cfg, "root", &env).err().unwrap().contains("HOST"));
         env.insert(" MODEL ".into(), "other".into());
         env.insert("BASE".into(), "https://example.invalid".into());
         let s = select(cfg, "other", &env).unwrap();
-        assert_eq!(s.model_params["model"], "other");
-        assert_eq!(s.endpoint, "https://example.invalid/v2/chat/completions");
+        assert_eq!(s.models[0].model_params["model"], "other");
+        assert_eq!(
+            s.models[0].endpoint,
+            "https://example.invalid/v2/chat/completions"
+        );
         assert!(expand_model_field("${env.PATH}", &env)
             .unwrap_err()
             .contains("PATH"));
@@ -630,7 +715,9 @@ agents:
             "providers: {local: {api_type: openai_responses}}\nagents: {root: {model: local/test}}",
         ] {
             let selected = select(cfg, "", &env).unwrap();
-            assert!(selected.responses && selected.endpoint.ends_with("/responses"));
+            assert!(
+                selected.models[0].responses && selected.models[0].endpoint.ends_with("/responses")
+            );
         }
         let cfg = "providers: {local: {max_tokens: 9007199254740993}}\nagents: {root: {model: local/test}}";
         assert!(select(cfg, "", &BTreeMap::new())
@@ -647,10 +734,13 @@ agents:
         ]);
         let cfg = "version: 16\nproviders: {local: {base_url: 'http://localhost:8001/v1'}}\nagents:\n  helper: {model: openai/other}\n  root: {model: local/org/name, instruction: '${env.WHO} ${x} ${wrap(${env.WHO})} ${env.ABSENT}'}";
         let s = select(cfg, "", &env).unwrap();
-        assert_eq!(s.model_params["model"], "org/name");
-        assert_eq!(s.token, "");
+        assert_eq!(s.models[0].model_params["model"], "org/name");
+        assert_eq!(s.models[0].token, "");
         assert_eq!(s.instruction, "Ada ${x} ${wrap(${env.WHO})} ");
-        assert_eq!(select(cfg, "helper", &env).unwrap().token, "secret");
+        assert_eq!(
+            select(cfg, "helper", &env).unwrap().models[0].token,
+            "secret"
+        );
         assert!(select(cfg, "missing", &env).is_err());
     }
 }

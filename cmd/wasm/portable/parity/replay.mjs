@@ -94,6 +94,8 @@ async function run() {
       trace.results.push(await s.send('try again'));
     } finally { await s.close(); }
   });
+  tests.fallback = await replay(api, 'fallback', config.replace('model: local/test', 'model: local/test, fallback: {models: [local/backup]}'),
+    [[{ error: { message: 'primary is down' } }], answer, answer], turns);
   tests.streamError = await replay(api, 'streamError', config, [[{ error: { message: 'fixture model error' } }], answer], async ({ api, options, record, trace }) => {
     const s = await api.createSession(options, record);
     try {

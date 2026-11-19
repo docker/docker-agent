@@ -29,9 +29,7 @@ pub fn response_strict(name: &str) -> Result<bool, String> {
 type Tools = IndexMap<&'static str, &'static Value>;
 
 pub struct Conversation {
-    model_params: Map<String, Value>,
     tools: Tools,
-    merge_messages: bool,
     messages: Vec<Value>,
     instruction_count: usize,
     todos: crate::todo::Todos,
@@ -90,10 +88,8 @@ struct Call {
 
 impl Conversation {
     pub fn new(
-        model_params: Map<String, Value>,
         instruction: String,
         toolsets: &[String],
-        merge_messages: bool,
         mut history: Vec<Value>,
     ) -> Result<Self, String> {
         validate_history(&history)?;
@@ -124,8 +120,6 @@ impl Conversation {
                 .map(|text| json!({"role":"system", "content":text})),
         );
         Ok(Self {
-            model_params,
-            merge_messages,
             tools,
             messages: history,
             instruction_count,
@@ -164,17 +158,12 @@ impl Conversation {
         Ok(self.request())
     }
 
-    fn request(&self) -> Value {
-        let mut body = Value::Object(self.model_params.clone());
-        body["messages"] = json!(self.messages);
-        body["stream"] = true.into();
-        body["stream_options"] = json!({"include_usage": true});
+    pub fn request(&self) -> Value {
+        let mut body =
+            json!({"messages":self.messages,"stream":true,"stream_options":{"include_usage":true}});
         if !self.tools.is_empty() {
             body["tool_choice"] = "auto".into();
             body["tools"] = Value::Array(self.tools.values().map(|tool| (*tool).clone()).collect());
-        }
-        if self.merge_messages {
-            crate::wire::merge_text_messages(&mut body);
         }
         body
     }
@@ -184,16 +173,16 @@ impl Conversation {
         if !turn.pending.is_empty() {
             return Err("waiting for elicitation".into());
         }
-        if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
-            // Preserve admitted user messages and completed tools on a model error.
-            self.active = None;
-            return Err(format!("model failed: error receiving from stream: received error while streaming: {error}"));
-        }
         let result = turn.step.chunk(chunk, &turn.message_id, &self.tools);
         if result.is_err() {
             self.cancel();
         }
         result
+    }
+
+    // Unlike user cancellation, provider failure retains admitted input and completed tools.
+    pub fn fail(&mut self) {
+        self.active = None;
     }
 
     pub fn cancel(&mut self) {
@@ -580,16 +569,10 @@ fn validate_history(history: &[Value]) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn model(name: &str) -> Map<String, Value> {
-        Map::from_iter([("model".into(), name.into())])
-    }
-
     fn conversation(toolsets: &[&str]) -> Conversation {
         Conversation::new(
-            model("model"),
             "be concise".into(),
             &toolsets.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            true,
             vec![],
         )
         .unwrap()
@@ -624,8 +607,7 @@ mod tests {
             json!({"role":"assistant", "tool_calls":[{"id":"old", "type":"function", "function":{"name":"old-tool", "arguments":"{}"}}]}),
             json!({"role":"tool", "tool_call_id":"old", "content":"prior output"}),
         ];
-        let mut c =
-            Conversation::new(model("test"), "sys".into(), &[], true, history.clone()).unwrap();
+        let mut c = Conversation::new("sys".into(), &[], history.clone()).unwrap();
         let request = c.begin("hello", "turn-id").unwrap();
         assert_eq!(
             request["messages"][0],
@@ -636,7 +618,6 @@ mod tests {
             request["messages"][4],
             json!({"role":"user", "content":"hello"})
         );
-        assert_eq!(request["model"], "test");
         assert_eq!(request["stream"], true);
         assert_eq!(request["stream_options"]["include_usage"], true);
         assert!(request.get("tools").is_none());
@@ -670,14 +651,7 @@ mod tests {
             vec![assistant.clone()],
             vec![assistant, tool.clone(), tool],
         ] {
-            assert!(Conversation::new(
-                model("model"),
-                String::new(),
-                &["think".into()],
-                true,
-                history
-            )
-            .is_err());
+            assert!(Conversation::new(String::new(), &["think".into()], history).is_err());
         }
     }
 
@@ -723,19 +697,20 @@ mod tests {
             events[4],
             json!({"type":"tool_result", "id":"b", "name":"think", "output":"Thoughts:\nA\nB", "is_error":false})
         );
-        let m = &next["request"]["messages"];
-        assert_eq!(m[2]["reasoning_content"], "why");
-        assert_eq!(m[2]["content"], "planning");
+        let m = next["request"]["messages"].as_array().unwrap();
+        let [assistant, first, second] = m.last_chunk::<3>().unwrap();
+        assert_eq!(assistant["reasoning_content"], "why");
+        assert_eq!(assistant["content"], "planning");
         assert_eq!(
-            m[2]["tool_calls"][0],
+            assistant["tool_calls"][0],
             json!({"id":"a", "type":"function", "function":{"name":"think", "arguments":r#"{"thought":"A"}"#}})
         );
         assert_eq!(
-            m[3],
+            *first,
             json!({"role":"tool", "content":"Thoughts:\nA", "tool_call_id":"a"})
         );
         assert_eq!(
-            m[4],
+            *second,
             json!({"role":"tool", "content":"Thoughts:\nA\nB", "tool_call_id":"b"})
         );
         let text = c
@@ -843,10 +818,8 @@ mod tests {
     #[test]
     fn official_openai_keeps_system_messages_separate_and_deduplicates_advertised_tools() {
         let mut c = Conversation::new(
-            model("model"),
             "agent".into(),
             &["user_prompt".into(), "think".into(), "user_prompt".into()],
-            false,
             vec![],
         )
         .unwrap();
