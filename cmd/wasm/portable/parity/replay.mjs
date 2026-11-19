@@ -369,6 +369,13 @@ agents:`)
   }
   tests.media = await replay(api, 'media', mediaConfig, [answer], mediaHistory);
   tests.mediaResponses = await replay(api, 'mediaResponses', mediaConfig.replace('provider: openai,', 'provider: openai, api_type: openai_responses,'), [text], mediaHistory, '/v1/responses');
+  // Actual failover, not the text fallback used for unsupported modalities below.
+  const withMediaBackup = mediaConfig.replace('  capable:', '  backup: {provider: local, model: backup, capabilities: {image: true, pdf: true, audio: true}}\n  capable:')
+    .replace('model: capable', 'model: capable, fallback: {models: [backup]}');
+  tests.mediaFailoverChat = await replay(api, 'mediaFailoverChat', withMediaBackup,
+    [[{ error: { message: 'vision primary unavailable' } }], answer], mediaHistory);
+  tests.mediaFailoverResponses = await replay(api, 'mediaFailoverResponses', withMediaBackup.replace('provider: openai,', 'provider: openai, api_type: openai_responses,'),
+    [[{ type:'response.failed', response:{id:'failed',status:'failed',error:{code:'invalid_request',message:'vision primary unavailable'}} }], text], mediaHistory, '/v1/responses');
   tests.mediaNoCaps = await replay(api, 'mediaNoCaps', config, [answer], mediaHistory);
   async function mediaFallback({ api, options, record, trace }) {
     const messages = [

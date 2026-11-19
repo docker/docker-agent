@@ -462,7 +462,7 @@ impl Target {
             .expect("configured model")
     }
 
-    fn media_projection(&self) -> (crate::media::Capabilities, bool) {
+    pub(super) fn media_projection(&self) -> (crate::media::Capabilities, bool) {
         crate::media::Capabilities::projection(self.capabilities, self.model())
     }
 }

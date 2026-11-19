@@ -207,3 +207,46 @@ test('HTTP and streaming diagnostics cannot expose a target credential in fallba
   assert.deepEqual(events.map(e => e.type), ['fallback', 'error']);
   assert.doesNotMatch(JSON.stringify(events), /first-token|second-token/);
 });
+
+const imageHistory = [
+  { role: 'user', multi_content: [{ type: 'document', document: { name: 'small.gif', mime_type: 'image/gif', source: { inline_data: 'R0lGODlhAQABAAAAACwAAAAAAQABAAA=' } } }] },
+  { role: 'user', content: 'describe the image' },
+];
+
+function visionConfig(backup, protocol = 'openai_chatcompletions') {
+  return `providers:
+  p: {provider: openai, base_url: https://primary.invalid/v1, token_key: FIRST}
+  b: {provider: openai, base_url: https://backup.invalid/v1, token_key: SECOND, api_type: ${protocol}}
+models:
+  first: {provider: p, model: vision, capabilities: {image: true}}
+  second: {provider: b, model: vision-backup, capabilities: ${backup}}
+agents: {root: {model: first, fallback: {models: [second]}}}`;
+}
+
+test('compatible fallback replays the image bytes but never the primary credentials', async t => {
+  const requests = script(t, () => error(429, 'unavailable'), () => stream([piece({ content: 'backup described it' }, 'stop')]));
+  const events = [];
+  const result = await api.chat({ yaml: visionConfig('{image: true}'), env: options.env, messages: imageHistory }, e => events.push(e));
+  assert.equal(result.message.content, 'backup described it');
+  assert.deepEqual(requests.map(r => [r.body.model, r.auth, r.url]), [
+    ['vision', 'Bearer first-token', 'https://primary.invalid/v1/chat/completions'],
+    ['vision-backup', 'Bearer second-token', 'https://backup.invalid/v1/chat/completions'],
+  ]);
+  assert.deepEqual(requests[1].body.messages, requests[0].body.messages);
+  assert.ok(requests[1].body.messages.some(m => Array.isArray(m.content) && m.content.some(p => p.image_url?.url === 'data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=')));
+  assert.equal(events.filter(e => e.type === 'fallback').length, 1);
+});
+
+test('checks every fallback media projection before making even the primary request', async t => {
+  const requests = script(t);
+  const base = visionConfig('{image: true}');
+  for (const yaml of [
+    visionConfig('{image: false}'),
+    visionConfig('{image: true}', 'openai_responses'),
+    base.replace('[second]', '[second, b/text-only]'),
+    // An absent override can enable legacy image URLs for Claude but not other models.
+    base.replace('model: vision, capabilities: {image: true}', 'model: claude-vision').replace('model: vision-backup, capabilities: {image: true}', 'model: text-only'),
+  ]) await assert.rejects(api.chat({ yaml, env: options.env, messages: imageHistory }), /multipart history/);
+  await assert.rejects(api.chat({ yaml: base, env: options.env, messages: [{ role: 'user', multi_content: [{ type: 'image_url', image_url: { url: 'file:///tmp/image.png' } }] }, imageHistory.at(-1)] }), /image URL/);
+  assert.equal(requests.length, 0);
+});

@@ -113,12 +113,20 @@ impl Session {
         let primary = &profile.spec.models[0];
         let team = !profile.spec.team_prompts.is_empty() || !profile.spec.force_handoff.is_empty();
         let routing = team || profile.spec.models.len() > 1;
+        // Seed history is projected once. Never reuse Chat parts on Responses or
+        // a projection that admits media the next model would have stripped.
         if routing
             && history
                 .iter()
                 .any(|m| m["multi_content"].as_array().is_some_and(|p| !p.is_empty()))
         {
-            return Err("cannot replay multipart history across model targets".into());
+            let incompatible = profile.spec.models.iter().skip(1).any(|m| {
+                m.responses != primary.responses
+                    || m.media_projection() != primary.media_projection()
+            });
+            if team || incompatible {
+                return Err("multipart history requires a single agent and fallback models with the same API and media capabilities".into());
+            }
         }
         if routing
             && primary.responses
@@ -218,14 +226,13 @@ impl Session {
         let failure = if self.responses.is_some() {
             responses::failure(&chunk)
         } else {
-            chunk.get("error").filter(|e| !e.is_null()).map(|e| {
-                (
-                    e,
-                    format!("error receiving from stream: received error while streaming: {e}"),
-                )
-            })
+            chunk
+                .get("error")
+                .filter(|e| !e.is_null())
+                .map(|e| (e, format!("received error while streaming: {e}")))
         };
-        if let Some((error, reason)) = failure {
+        if let Some((error, detail)) = failure {
+            let reason = format!("error receiving from stream: {detail}");
             self.replayable &= chunk["response"]["output"]
                 .as_array()
                 .is_none_or(Vec::is_empty)
