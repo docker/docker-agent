@@ -299,6 +299,18 @@ func (r *Catalog) AvailableModels(ctx context.Context, agentName string) []Model
 	return choices
 }
 
+// Gateway and DMR discovery compare literal refs; models.dev uses canonical provider IDs.
+func configuredModelRefs(models map[string]latest.ModelConfig) map[string]bool {
+	refs := make(map[string]bool, len(models)*2)
+	for name, cfg := range models {
+		refs[name] = true
+		if cfg.Provider != "" && cfg.Model != "" {
+			refs[cfg.Provider+"/"+cfg.Model] = true
+		}
+	}
+	return refs
+}
+
 // buildCatalogChoices builds ModelChoice entries from the models.dev catalog,
 // filtered by supported providers and available credentials.
 func (r *Catalog) buildCatalogChoices(ctx context.Context) []ModelChoice {

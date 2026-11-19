@@ -39,13 +39,7 @@ func (r *Catalog) buildDMRChoices(ctx context.Context) []ModelChoice {
 		return nil
 	}
 
-	existingRefs := make(map[string]bool, len(r.Config.Models)*2)
-	for name, cfg := range r.Config.Models {
-		existingRefs[name] = true
-		if cfg.Provider != "" && cfg.Model != "" {
-			existingRefs[cfg.Provider+"/"+cfg.Model] = true
-		}
-	}
+	existingRefs := configuredModelRefs(r.Config.Models)
 
 	choices := make([]ModelChoice, 0, len(ids))
 	for _, model := range ids {
