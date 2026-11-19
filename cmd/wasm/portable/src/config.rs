@@ -28,6 +28,8 @@ struct Config {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Agent {
+    #[serde(flatten)]
+    limits: crate::limits::Limits,
     model: String,
     session_compaction: Option<bool>,
     redact_secrets: Option<bool>,
@@ -193,6 +195,8 @@ fn load_instruction<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error>
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Toolset {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
     #[serde(default, rename = "type")]
     pub kind: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -355,6 +359,8 @@ struct ModelRequest {
 }
 
 pub struct Selected {
+    pub limits: crate::limits::Limits,
+    pub tool_models: BTreeMap<String, Map<String, Value>>,
     pub picker: crate::model_picker::Picker,
     pub compaction: crate::compaction::Policy,
     pub hooks: crate::hooks::Hooks,
@@ -387,6 +393,7 @@ fn load(yaml: &str) -> Result<Config, String> {
         if name.trim().is_empty() {
             return Err("empty agent name".into());
         }
+        a.limits.validate()?;
         validate_threshold(a.compaction_threshold)?;
         for (kind, targets) in [("sub-agent", &a.sub_agents), ("handoff agent", &a.handoffs)] {
             for target in targets {
@@ -646,7 +653,21 @@ fn compaction_policy(a: &Agent, m: &Model) -> Result<crate::compaction::Policy, 
 pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
     let cfg = load(yaml)?;
     for (name, a) in &cfg.agents {
-        compaction_policy(a, &cfg.models[&a.model])?;
+        let primary = &cfg.models[&a.model];
+        compaction_policy(a, primary)?;
+        a.limits.check_round_limit()?;
+        let overrides = a.toolsets.iter().any(|ts| !ts.model.is_empty());
+        if a.limits.limits_history() || a.limits.max_iterations > 0 || overrides {
+            if primary.context_window.is_some() && a.session_compaction != Some(false) {
+                return Err("history/iteration limits and tool model overrides require session_compaction: false when a context_window is declared".into());
+            }
+            if a.model.contains(',') || primary.model.contains(',') {
+                return Err("history/iteration limits and tool model overrides require a single primary model".into());
+            }
+        }
+        if a.limits.limits_history() && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
+            return Err("history limits are not supported with session_context".into());
+        }
         for (enabled, field) in [
             (!a.sub_agents.is_empty(), "sub_agents"),
             (!a.handoffs.is_empty(), "handoffs"),
@@ -725,6 +746,47 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
         !a.toolsets.is_empty(),
         a.structured_output.as_ref(),
     )?;
+    let compatible = |name: &str, feature: &str| -> Result<ModelRequest, String> {
+        let inline;
+        let m = if let Some(m) = cfg.models.get(name) {
+            m
+        } else {
+            inline = inline_model(name)
+                .filter(|_| !name.contains(','))
+                .ok_or_else(|| format!("unsupported {feature} model {name:?}"))?;
+            &inline
+        };
+        // Do not reuse the open handle's Authorization header at a new destination.
+        if m.context_window != primary.context_window
+            || m.compaction_threshold != primary.compaction_threshold
+        {
+            return Err(format!("{feature} cannot change compaction policy"));
+        }
+        if m.provider != primary.provider {
+            return Err(format!("{feature} cannot switch providers"));
+        }
+        let target = resolve_model(&cfg, m, env, true, a.structured_output.as_ref())?;
+        if target.transport != request.transport
+            || target.responses != request.responses
+            || target.merge_messages != request.merge_messages
+        {
+            return Err(format!(
+                "{feature} cannot change the model endpoint, API or credential"
+            ));
+        }
+        Ok(target)
+    };
+    let mut tool_models = BTreeMap::new();
+    for ts in &a.toolsets {
+        let name = &ts.model;
+        if name.is_empty() || tool_models.contains_key(name) {
+            continue;
+        }
+        if name.contains(',') || cfg.models.get(name).is_some_and(|m| m.model.contains(',')) {
+            return Err("toolset model overrides cannot use multi-model references".into());
+        }
+        tool_models.insert(name.clone(), compatible(name, "toolset")?.model_params);
+    }
     let mut picker = crate::model_picker::Picker::default();
     for ts in a.toolsets.iter().filter(|ts| ts.kind == "model_picker") {
         if !picker.choices.is_empty() {
@@ -734,37 +796,13 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             if picker.choices.contains_key(name) {
                 return Err(format!("duplicate model_picker choice {name:?}"));
             }
-            let inline;
-            let m = if let Some(m) = cfg.models.get(name) {
-                m
-            } else {
-                inline = inline_model(name)
-                    .filter(|_| !name.contains(','))
-                    .ok_or_else(|| format!("unsupported model_picker model {name:?}"))?;
-                &inline
-            };
-            // Do not reuse the open handle's Authorization header at a new destination.
-            if m.context_window != primary.context_window
-                || m.compaction_threshold != primary.compaction_threshold
-            {
-                return Err("model_picker cannot change compaction policy".into());
-            }
-            if m.provider != primary.provider {
-                return Err("model_picker cannot switch providers".into());
-            }
-            let target = resolve_model(&cfg, m, env, true, a.structured_output.as_ref())?;
-            if target.transport != request.transport
-                || target.responses != request.responses
-                || target.merge_messages != request.merge_messages
-            {
-                return Err(
-                    "model_picker cannot change the model endpoint, API or credential".into(),
-                );
-            }
+            let target = compatible(name, "model_picker")?;
             picker.choices.insert(name.clone(), target.model_params);
         }
     }
     Ok(Selected {
+        limits: a.limits,
+        tool_models,
         hooks: a.hooks.clone().with_defaults(
             a.redact_secrets.unwrap_or(true),
             a.add_date,

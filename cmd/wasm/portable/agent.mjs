@@ -62,9 +62,11 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     }
 
     function settle(next) {
+      // A terminal delta and finish must follow every other event in this batch.
+      if (next.result) { batch.resolve(next); return; }
       for (const event of next.events) emit(event);
       if (next.error) batch.reject(new Error(next.error));
-      else if (!next.waiting) batch.resolve(next.request);
+      else if (!next.waiting) batch.resolve({ request: next.request, events: [] });
     }
     async function elicit(events, signal) {
       const replies = new Promise((resolve, reject) => { batch = { resolve, reject }; });
@@ -136,11 +138,10 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             }
           }
           signal.throwIfAborted();
-          const next = call('end', { session });
+          let next = call('end', { session });
           if (next.waiting) {
-            body = await elicit(next.events, signal);
+            next = await elicit(next.events, signal);
             signal.throwIfAborted();
-            continue;
           }
           for (const event of next.events) emit(event);
           if (next.error) throw new Error(next.error);

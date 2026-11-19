@@ -1,11 +1,11 @@
 use crate::compaction::{Compactor, Prefix, Undo, Usage};
+use crate::limits::MAX_TOOL_ROUNDS;
 use indexmap::IndexMap;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
-const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_PARALLEL_CALLS: u64 = 16;
 // Every think result repeats the scratchpad and becomes part of the next request.
 const MAX_SCRATCHPAD_BYTES: usize = 64 * 1024;
@@ -37,6 +37,9 @@ pub struct HostSet {
 }
 
 pub struct Conversation {
+    pub limits: crate::limits::Limits,
+    pub tool_models: BTreeMap<String, Map<String, Value>>,
+    tool_model_sources: BTreeMap<String, usize>,
     picker: crate::model_picker::Picker,
     archive: Option<crate::session_context::Archive>,
     pub compaction: Compactor,
@@ -56,6 +59,7 @@ pub struct Conversation {
 }
 
 struct Turn {
+    tool_model_source: Option<usize>,
     context_before: u64,
     summarizing: Option<Prefix>,
     original: Option<Undo>,
@@ -69,6 +73,20 @@ struct Turn {
     step: Step,
     pending: BTreeMap<String, usize>,
     host_pending: BTreeMap<String, usize>,
+}
+
+impl Turn {
+    fn waiting(&self) -> bool {
+        !self.pending.is_empty() || !self.host_pending.is_empty()
+    }
+
+    fn result(&self, message: Value) -> Value {
+        let mut result = json!({"message":message});
+        if self.input != 0 || self.output != 0 {
+            result["usage"] = json!({"input_tokens": self.input, "output_tokens": self.output});
+        }
+        result
+    }
 }
 
 #[derive(Deserialize)]
@@ -139,6 +157,9 @@ impl Conversation {
         archive: Option<crate::session_context::Archive>,
     ) -> Result<Self, String> {
         let mut c = Self {
+            limits: Default::default(),
+            tool_models: BTreeMap::new(),
+            tool_model_sources: BTreeMap::new(),
             hooks: crate::hooks::Hooks::default(),
             compaction: Compactor::default(),
             model_params,
@@ -165,6 +186,7 @@ impl Conversation {
             return Err("cannot change tools during a turn".into());
         }
         let mut tools = Tools::new();
+        let mut tool_model_sources = BTreeMap::new();
         let mut host = BTreeMap::new();
         let mut categories = BTreeMap::new();
         let mut instructions = Vec::new();
@@ -237,7 +259,11 @@ impl Conversation {
                         | "session_context"
                 );
                 if tools.contains_key(name) {
-                    if hosted || host.contains_key(name) {
+                    if hosted
+                        || host.contains_key(name)
+                        || !spec.model.is_empty()
+                        || tool_model_sources.contains_key(name)
+                    {
                         return Err(format!("duplicate tool name {name:?}"));
                     }
                     continue;
@@ -255,6 +281,9 @@ impl Conversation {
                     host.insert(name.into(), read_only);
                     categories.insert(name.to_owned(), spec.kind.clone());
                 }
+                if !spec.model.is_empty() {
+                    tool_model_sources.insert(name.to_owned(), index);
+                }
                 tools.insert(name.to_owned(), tool.clone());
             }
         }
@@ -265,6 +294,7 @@ impl Conversation {
                 .map(|text| json!({"role":"system","content":text})),
         );
         self.instruction_count = instructions.len();
+        self.tool_model_sources = tool_model_sources;
         self.tools = tools;
         self.host = host;
         self.categories = categories;
@@ -294,6 +324,7 @@ impl Conversation {
         self.active = Some(Turn {
             summarizing: None,
             original: None,
+            tool_model_source: None,
             context_before: self.compaction.context_tokens,
             messages_before: self.messages.len(),
             scratchpad_before: self.scratchpad.len(),
@@ -339,7 +370,7 @@ impl Conversation {
         date: Option<String>,
     ) -> Result<Value, String> {
         let turn = self.active.as_ref().ok_or("no active turn")?;
-        if !turn.pending.is_empty() {
+        if turn.waiting() {
             return Err("waiting for elicitation".into());
         }
         let mut messages = self.messages.clone();
@@ -356,8 +387,15 @@ impl Conversation {
                 pos += 1;
             }
         }
-        self.hooks.rewrite_messages(&mut messages)?;
-        let mut body = Value::Object(self.picker.params().unwrap_or(&self.model_params).clone());
+        self.limits.project(&mut messages, &self.hooks)?;
+        let params = if let Some(index) = turn.tool_model_source {
+            self.tool_models
+                .get(&self.specs[index].model)
+                .ok_or("unresolved tool model")?
+        } else {
+            self.picker.params().unwrap_or(&self.model_params)
+        };
+        let mut body = Value::Object(params.clone());
         body["messages"] = messages.into();
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});
@@ -373,7 +411,7 @@ impl Conversation {
 
     pub fn chunk(&mut self, chunk: Value) -> Result<Vec<Value>, String> {
         let turn = self.active.as_mut().ok_or("no active turn")?;
-        if !turn.pending.is_empty() || !turn.host_pending.is_empty() {
+        if turn.waiting() {
             return Err("waiting for elicitation".into());
         }
         if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
@@ -411,11 +449,7 @@ impl Conversation {
     }
 
     pub fn end(&mut self) -> Result<Value, String> {
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|t| !t.pending.is_empty() || !t.host_pending.is_empty())
-        {
+        if self.active.as_ref().is_some_and(Turn::waiting) {
             return Err("waiting for elicitation".into());
         }
         let result = self.finish_step();
@@ -479,8 +513,7 @@ impl Conversation {
         match step.finish.as_deref() {
             None => Err("incomplete stream: missing finish_reason".into()),
             Some("stop") if step.calls.is_empty() => {
-                let mut result =
-                    json!({"message":{"role":"assistant", "content":message["content"]}});
+                let result = turn.result(json!({"role":"assistant", "content":message["content"]}));
                 if message["content"]
                     .as_str()
                     .is_some_and(|s| !s.trim().is_empty())
@@ -489,10 +522,6 @@ impl Conversation {
                     self.messages.push(message);
                 } else {
                     self.compaction.truncate(self.messages.len());
-                }
-                if turn.input != 0 || turn.output != 0 {
-                    result["usage"] =
-                        json!({"input_tokens":turn.input, "output_tokens":turn.output});
                 }
                 events.push(json!({"type":"finish", "reason":"stop"}));
                 self.active = None;
@@ -522,6 +551,9 @@ impl Conversation {
         let mut ids = BTreeSet::new();
         let mut wire_calls = Vec::with_capacity(calls.len());
         let mut replies = Vec::with_capacity(calls.len());
+        turn.tool_model_source = calls
+            .values()
+            .find_map(|call| self.tool_model_sources.get(&call.name).copied());
         let mut selection = self.picker.active;
         for (index, (key, mut call)) in calls.into_iter().enumerate() {
             if key != index as u64 || call.id.is_empty() || !ids.insert(call.id.clone()) {
@@ -614,7 +646,7 @@ impl Conversation {
                     self.hooks
                         .tool_result(&call.name, category, result.unwrap_or_else(|e| e))?;
                 events.push(tool_result(&call.id, &call.name, &output, is_error));
-                reply["content"] = output.into();
+                reply["content"] = self.limits.stored_content(output, &self.hooks)?;
             }
             replies.push(reply);
         }
@@ -625,10 +657,23 @@ impl Conversation {
         Ok(self.after_tools(events))
     }
 
-    fn after_tools(&mut self, events: Vec<Value>) -> Value {
+    fn after_tools(&mut self, mut events: Vec<Value>) -> Value {
         let turn = self.active.as_ref().expect("active tool round");
-        if !turn.pending.is_empty() || !turn.host_pending.is_empty() {
+        if turn.waiting() {
             return json!({"events":events, "waiting":true});
+        }
+        let limit = self.limits.max_iterations;
+        if limit > 0 && turn.tool_rounds >= limit as usize {
+            let text = format!(
+                "Execution stopped after reaching the configured max_iterations limit ({limit})."
+            );
+            let message = json!({"role":"assistant", "content":text});
+            self.messages.push(message.clone());
+            events.push(json!({"type":"delta", "content":text, "message_id":turn.message_id}));
+            let result = turn.result(message);
+            events.push(json!({"type":"finish", "reason":"stop"}));
+            self.active = None;
+            return json!({"events":events, "result":result});
         }
         if let Some(limit) = self
             .hooks
@@ -659,14 +704,15 @@ impl Conversation {
             return Err("tool result exceeds 16 MiB".into());
         }
         let turn = self.active.as_mut().ok_or("no active turn")?;
-        let index = turn.host_pending.remove(id).ok_or("unknown host call")?;
+        let &index = turn.host_pending.get(id).ok_or("unknown host call")?;
         let output = self.hooks.tool_result(
             name,
             self.categories.get(name).map_or("", String::as_str),
             output,
         )?;
         let event = tool_result(id, name, &output, is_error);
-        self.messages[index]["content"] = output.into();
+        self.messages[index]["content"] = self.limits.stored_content(output, &self.hooks)?;
+        turn.host_pending.remove(id);
         Ok(self.after_tools(vec![event]))
     }
 
@@ -700,7 +746,7 @@ impl Conversation {
             .as_str()
             .expect("reserved tool message");
         let event = tool_result(call_id, "user_prompt", &output, action != "accept");
-        reply["content"] = Value::String(output);
+        reply["content"] = self.limits.stored_content(output, &self.hooks)?;
         turn.pending.remove(id);
         Ok(self.after_tools(vec![event]))
     }

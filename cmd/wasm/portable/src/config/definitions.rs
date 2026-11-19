@@ -108,6 +108,9 @@ pub(super) fn resolve(cfg: &mut Config) -> Result<(), String> {
         if ts.kind != "mcp" || ts.options.contains_key("ref") {
             return Err(format!("mcps.{name}: requires a remote MCP definition"));
         }
+        if !ts.model.is_empty() {
+            return Err(format!("mcps.{name}: set model on the referencing toolset"));
+        }
         if ts.readonly {
             // applyMCPDefaults does not inherit readonly. Never silently drop it.
             return Err(format!(

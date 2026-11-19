@@ -79,6 +79,11 @@ async function run() {
   tests.modelPicker = await replay(api, 'modelPicker', picker, [tool('change_model', { model: 'careful' }), answer,
     tool('change_model', { model: 'off-list' }), tool('list_sessions', {}), tool('read_session', { session_id: '-1' }),
     tool('change_model', { model: 'local/fast' }), tool('revert_model', {}), answer], turns);
+  const limited = config.replace('model: local/test', 'model: local/test, num_history_items: 2, toolsets: [{type: think}]');
+  tests.historyLimit = await replay(api, 'historyLimit', limited, [tool('think', { thought: 'private assistant work' }), answer, answer], turns);
+  const override = config.replace('agents:', 'models: {cheap: {provider: local, model: fast, max_tokens: 37}}\nagents:')
+    .replace('model: local/test', 'model: local/test, toolsets: [{type: think, model: cheap}, {type: calculator}]');
+  tests.toolModel = await replay(api, 'toolModel', override, [tool('think', { thought: 'plan' }), tool('calculate', { expression: '2+2' }), answer, answer], turns);
   const compact = config.replace('agents:', 'models:\n  small: {provider: local, model: test, context_window: 2048, compaction_threshold: 0.5}\nagents:')
     .replace('model: local/test', 'model: small, session_compaction: true, redact_secrets: false, toolsets: [{type: think}]');
   const highUsage = { choices: [], usage: { prompt_tokens: 1000, completion_tokens: 25, total_tokens: 1025 } };

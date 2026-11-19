@@ -79,7 +79,7 @@ export function createHost(opts, onEvent, stateless) {
       } else if (['mcp','fetch','api'].includes(spec.type)) {
         const { toolFetch, httpTools } = await import('./http-tools.mjs');
         const clean = { ...spec };
-        for (const key of ['readonly', 'tools', 'instruction']) delete clean[key]; // enforced by Wasm registration
+        for (const key of ['readonly', 'tools', 'instruction', 'model']) delete clean[key]; // enforced by Wasm registration
         const set = spec.type === 'mcp'
           ? await (await import('./mcp.mjs')).openMCP(clean, env, proxy, signal, { toolFetch, elicit, oauthRedirectURI:opts.oauthRedirectURI })
           : await httpTools(clean, env, proxy);

@@ -3,6 +3,7 @@ mod compaction;
 mod config;
 mod go_json;
 mod hooks;
+mod limits;
 mod media;
 mod model_picker;
 mod providers;
@@ -147,6 +148,8 @@ impl Core {
                 stamp,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
+                spec.limits
+                    .check_seed(&history, !spec.tool_models.is_empty())?;
                 let history = media::history(
                     history,
                     spec.capabilities,
@@ -168,6 +171,8 @@ impl Core {
                     spec.picker,
                     archive,
                 )?;
+                conv.limits = spec.limits;
+                conv.tool_models = spec.tool_models;
                 conv.compaction.policy = spec.compaction;
                 let dynamic = json!({"addDate":spec.hooks.add_date,"addEnvironmentInfo":spec.hooks.add_environment_info});
                 conv.hooks = spec.hooks;
