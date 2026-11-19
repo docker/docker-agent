@@ -22,6 +22,8 @@ struct Config {
 struct Agent {
     model: String,
     #[serde(default)]
+    fallback: crate::fallback::Config,
+    #[serde(default)]
     description: String,
     #[serde(default)]
     instruction: String,
@@ -205,21 +207,21 @@ struct Provider {
     parallel_tool_calls: Option<bool>,
 }
 
-struct ModelRequest<'a> {
-    model_params: Map<String, Value>,
-    endpoint: String,
-    token_key: &'a str,
-    responses: bool,
-    merge_messages: bool,
-}
-
 pub struct Selected {
     pub picker: crate::model_picker::Picker,
+    pub models: Vec<Target>,
+    pub policy: crate::fallback::Policy,
+    pub instruction: String,
+    pub toolsets: Vec<Toolset>,
+}
+
+pub struct Target {
+    pub id: String,
     pub model_params: Map<String, Value>,
     pub endpoint: String,
     pub token: String,
-    pub instruction: String,
-    pub toolsets: Vec<Toolset>,
+    token_key: String,
+    pub key_base: Option<String>,
     pub responses: bool,
     pub merge_messages: bool,
 }
@@ -532,9 +534,15 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     }
     .ok_or_else(|| format!("agent {agent:?} not found"))?;
     let primary = &cfg.models[&a.model];
-    let request = resolve_model(&cfg, primary, env, !a.toolsets.is_empty())?;
+    let chain = !a.fallback.models.is_empty();
+    let request = resolve_model(&cfg, primary, env, !a.toolsets.is_empty(), chain)?;
     let mut picker = crate::model_picker::Picker::default();
     for ts in a.toolsets.iter().filter(|ts| ts.kind == "model_picker") {
+        if chain {
+            return Err(
+                "model_picker with fallback models on the same agent is not supported".into(),
+            );
+        }
         if !picker.choices.is_empty() {
             return Err("multiple model_picker toolsets are not supported".into());
         }
@@ -555,7 +563,7 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             if m.provider != primary.provider {
                 return Err("model_picker cannot switch providers".into());
             }
-            let target = resolve_model(&cfg, m, env, true)?;
+            let target = resolve_model(&cfg, m, env, true, false)?;
             if target.endpoint != request.endpoint
                 || target.responses != request.responses
                 || target.token_key != request.token_key
@@ -568,21 +576,22 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
             picker.choices.insert(name.clone(), target.model_params);
         }
     }
-    let token = if request.token_key.is_empty() {
-        String::new()
-    } else {
-        env.get(request.token_key)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| format!("{} environment variable is required", request.token_key))?
-            .clone()
-    };
+    let mut models = vec![request];
+    for name in &a.fallback.models {
+        let inline;
+        let m = if let Some(m) = cfg.models.get(name) {
+            m
+        } else {
+            inline =
+                inline_model(name).ok_or_else(|| format!("fallback model {name:?} not found"))?;
+            &inline
+        };
+        models.push(resolve_model(&cfg, m, env, !a.toolsets.is_empty(), true)?);
+    }
     Ok(Selected {
         picker,
-        model_params: request.model_params,
-        endpoint: request.endpoint,
-        responses: request.responses,
-        merge_messages: request.merge_messages,
-        token,
+        models,
+        policy: a.fallback.policy(),
         instruction: instruction(&a.instruction, env),
         toolsets: a
             .toolsets
@@ -597,14 +606,18 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     })
 }
 
-fn resolve_model<'a>(
-    cfg: &'a Config,
-    m: &'a Model,
+fn resolve_model(
+    cfg: &Config,
+    m: &Model,
     env: &BTreeMap<String, String>,
     tools: bool,
-) -> Result<ModelRequest<'a>, String> {
+    chain: bool,
+) -> Result<Target, String> {
     let p = cfg.providers.get(&m.provider);
     let builtin = crate::providers::lookup(&m.provider).filter(|_| p.is_none());
+    if p.is_none() && builtin.is_none() {
+        return Err(format!("unsupported provider {:?}", m.provider));
+    }
     let default_base = builtin.map_or("https://api.openai.com/v1", |b| b.base_url.as_str());
     let default_key = builtin.map_or("", |b| b.token_env_vars[0].as_str());
     // Go resolves a custom provider's default protocol before expanding the model.
@@ -641,18 +654,65 @@ fn resolve_model<'a>(
     } else {
         "chat/completions"
     };
-    Ok(ModelRequest {
-        model_params: model_params(id, m, p, tools)?,
+    let provider_id = if p.provider.is_empty() {
+        &m.provider
+    } else {
+        &p.provider
+    };
+    let model_id = format!("{provider_id}/{id}");
+    let params = model_params(id, m, p, tools)?;
+    if chain
+        && responses
+        && ["frequency_penalty", "presence_penalty"]
+            .iter()
+            .any(|k| params.contains_key(*k))
+    {
+        return Err(
+            "Responses does not support frequency_penalty or presence_penalty in a fallback chain"
+                .into(),
+        );
+    }
+    // An override on one model must not redirect an inherited provider key to another origin.
+    let key_base = if chain && !m.base_url.is_empty() && m.token_key.is_empty() && !key.is_empty() {
+        Some(expand_model_field(
+            first_nonempty([&p.base_url, default_base, ""]),
+            env,
+        )?)
+    } else {
+        None
+    };
+    Ok(Target {
+        id: model_id,
+        model_params: params,
         endpoint: format!("{}/{route}", base.trim_end_matches('/')),
         responses,
         merge_messages,
-        token_key: key,
+        token_key: key.into(),
+        token: if key.is_empty() {
+            String::new()
+        } else {
+            env.get(key)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| format!("{key} environment variable is required"))?
+                .clone()
+        },
+        key_base,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn primary_params(cfg: &str, agent: &str, env: &BTreeMap<String, String>) -> Value {
+        Value::Object(
+            select(cfg, agent, env)
+                .unwrap()
+                .models
+                .remove(0)
+                .model_params,
+        )
+    }
 
     #[test]
     fn strict_loader() {
@@ -694,7 +754,7 @@ agents:
     #[test]
     fn model_options_override_provider_defaults_field_by_field() {
         let env = BTreeMap::from([("MODEL".into(), "gpt-5".into())]);
-        let select_params = |name| Value::Object(select(CONFIG, name, &env).unwrap().model_params);
+        let select_params = |name| primary_params(CONFIG, name, &env);
         assert_eq!(
             select_params("root"),
             json!({"model":"openai/gpt-5", "temperature":0,
@@ -720,7 +780,7 @@ agents:
     fn openrouter_stays_on_chat_completions_for_newer_models() {
         let cfg = "models: {m: {provider: openrouter, model: openai/gpt-4.1-mini, max_tokens: 12}}\nagents: {root: {model: m}}";
         let env = BTreeMap::from([("OPENROUTER_API_KEY".into(), "key".into())]);
-        let params = Value::Object(select(cfg, "", &env).unwrap().model_params);
+        let params = primary_params(cfg, "", &env);
         assert_eq!(
             params,
             json!({"model":"openai/gpt-4.1-mini", "max_completion_tokens":12})
@@ -730,8 +790,7 @@ agents:
     #[test]
     fn omitted_and_nonpositive_token_caps_are_not_sent() {
         let yaml = "providers: {local: {}}\nagents: {root: {model: local/test}}";
-        let params =
-            |cfg: &str| Value::Object(select(cfg, "", &BTreeMap::new()).unwrap().model_params);
+        let params = |cfg: &str| primary_params(cfg, "", &BTreeMap::new());
         assert_eq!(params(yaml), json!({"model":"test"}));
         for cap in [0, -1] {
             let cfg = format!("providers: {{local: {{max_tokens: 42}}}}\nmodels: {{m: {{provider: local, model: test, max_tokens: {cap}}}}}\nagents: {{root: {{model: m}}}}");
@@ -779,16 +838,22 @@ agents:
             ("${TOKEN_KEY}".into(), "secret".into()),
         ]);
         let s = select(cfg, "root", &env).unwrap();
-        assert_eq!(s.endpoint, "http://localhost:8080/v1/chat/completions");
-        assert_eq!(s.model_params["model"], "org/$LITERAL");
-        assert_eq!(s.token, "secret"); // token_key is a name, not a template.
+        assert_eq!(
+            s.models[0].endpoint,
+            "http://localhost:8080/v1/chat/completions"
+        );
+        assert_eq!(s.models[0].model_params["model"], "org/$LITERAL");
+        assert_eq!(s.models[0].token, "secret"); // token_key is a name, not a template.
         env.remove("HOST");
         assert!(select(cfg, "root", &env).err().unwrap().contains("HOST"));
         env.insert(" MODEL ".into(), "other".into());
         env.insert("BASE".into(), "https://example.invalid".into());
         let s = select(cfg, "other", &env).unwrap();
-        assert_eq!(s.model_params["model"], "other");
-        assert_eq!(s.endpoint, "https://example.invalid/v2/chat/completions");
+        assert_eq!(s.models[0].model_params["model"], "other");
+        assert_eq!(
+            s.models[0].endpoint,
+            "https://example.invalid/v2/chat/completions"
+        );
         assert!(expand_model_field("${env.PATH}", &env)
             .unwrap_err()
             .contains("PATH"));
@@ -828,7 +893,9 @@ agents:
             "providers: {local: {api_type: openai_responses}}\nagents: {root: {model: local/test}}",
         ] {
             let selected = select(cfg, "", &env).unwrap();
-            assert!(selected.responses && selected.endpoint.ends_with("/responses"));
+            assert!(
+                selected.models[0].responses && selected.models[0].endpoint.ends_with("/responses")
+            );
         }
         let cfg = "providers: {local: {max_tokens: 9007199254740993}}\nagents: {root: {model: local/test}}";
         assert!(select(cfg, "", &BTreeMap::new())
@@ -845,10 +912,13 @@ agents:
         ]);
         let cfg = "version: 16\nproviders: {local: {base_url: 'http://localhost:8001/v1'}}\nagents:\n  helper: {model: openai/other}\n  root: {model: local/org/name, instruction: '${env.WHO} ${x} ${wrap(${env.WHO})} ${env.ABSENT}'}";
         let s = select(cfg, "", &env).unwrap();
-        assert_eq!(s.model_params["model"], "org/name");
-        assert_eq!(s.token, "");
+        assert_eq!(s.models[0].model_params["model"], "org/name");
+        assert_eq!(s.models[0].token, "");
         assert_eq!(s.instruction, "Ada ${x} ${wrap(${env.WHO})} ");
-        assert_eq!(select(cfg, "helper", &env).unwrap().token, "secret");
+        assert_eq!(
+            select(cfg, "helper", &env).unwrap().models[0].token,
+            "secret"
+        );
         assert!(select(cfg, "missing", &env).is_err());
     }
 }
