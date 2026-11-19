@@ -29,8 +29,9 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     validateDocuments(opts.documents);
     const host = createHost(opts, onEvent, stateless);
     let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, history: history ?? [], stamp: sessionStamp() });
-    try { modelURL(handle.endpoint); }
-    catch (e) { call('close', { session: handle.session }); throw e; }
+    try {
+      prepareModelTransport(handle.transport);
+    } catch (e) { call('close', { session: handle.session }); throw e; }
     let active, batch, restarting = false, closing, ready;
     async function prepare(signal) {
       const sets = await host.prepare(handle.toolsets, signal);
@@ -110,9 +111,9 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         signal.throwIfAborted();
         let body = call('begin', { session, prompt, id: crypto.randomUUID() });
         for (;;) {
-          const response = await fetch(handle.endpoint, {
+          const response = await fetch(handle.transport.endpoint, {
             method: 'POST', redirect: 'error', credentials: 'omit', signal,
-            headers: { 'Content-Type': 'application/json', ...(handle.token && { Authorization: `Bearer ${handle.token}` }) },
+            headers: handle.transport.headers,
             body: JSON.stringify(body),
           });
           if (!response.ok) {
@@ -237,13 +238,22 @@ function sessionStamp() {
   return { id: crypto.randomUUID(), created_at: local + zone };
 }
 
-function modelURL(endpoint) {
-  const url = new URL(endpoint);
+function prepareModelTransport(target) {
+  let url;
+  try { url = new URL(target.endpoint); }
+  catch { throw new Error('invalid model endpoint'); }
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && local))) {
     throw new Error('model endpoint must be HTTPS (or HTTP loopback) without credentials, query or fragment');
   }
-  return url;
+  if (target.azure_default_key && !(url.protocol === 'https:' && !url.port &&
+      ['.openai.azure.com', '.services.ai.azure.com'].some(suffix => url.hostname.endsWith(suffix)))) {
+    throw new Error('AZURE_API_KEY requires an Azure resource endpoint; use a dedicated token_key for other endpoints');
+  }
+  for (const [key, value] of Object.entries(target.query)) url.searchParams.append(key, value);
+  target.endpoint = url.href;
+  target.headers['Content-Type'] = 'application/json';
+  if (target.chatgpt) target.headers.session_id = crypto.randomUUID();
 }
 
 async function* sse(response, responses) {
