@@ -94,7 +94,7 @@ require (
 	golang.org/x/term v0.48.0
 	golang.org/x/tools v0.53.0
 	google.golang.org/adk/v2 v2.4.0
-	google.golang.org/genai v1.79.0
+	google.golang.org/genai v1.79.1
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/dnaeon/go-vcr.v4 v4.0.8
 	gotest.tools/v3 v3.5.2
