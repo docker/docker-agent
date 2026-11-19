@@ -1,6 +1,7 @@
 use crate::compaction::{Compactor, Prefix, Undo, Usage};
 use crate::discovery::{self, Discovery, Tool};
 use crate::permission::{self, Verdict};
+use crate::structured_output;
 use crate::{config::Selected, team::Switch};
 use indexmap::IndexMap;
 use serde::{de::DeserializeOwned, Deserialize};
@@ -92,6 +93,7 @@ struct Turn {
     id: String,
     message_id: String,
     tool_rounds: usize,
+    reminders: usize,
     input: u64,
     output: u64,
     step: Step,
@@ -252,6 +254,11 @@ impl Catalog {
                     .as_str()
                     .ok_or("invalid function name")?;
                 permission::validate_tool(name)?;
+                if agent.output_tool.is_some() && name == structured_output::NAME {
+                    return Err(format!(
+                        "tool name {name:?} is reserved for tool-mode structured output"
+                    ));
+                }
                 if dynamic
                     && CATALOG
                         .values()
@@ -332,6 +339,20 @@ impl Catalog {
             if all_visible {
                 instructions.push(helpers.instructions.clone());
             }
+        }
+        if let Some(output) = &agent.output_tool {
+            tools.insert(
+                structured_output::NAME.into(),
+                Tool {
+                    definition: output.definition.clone(),
+                    target: Target {
+                        host: None,
+                        source: None,
+                        safe: true,
+                    },
+                    toon: false,
+                },
+            );
         }
         Ok(Self {
             instructions: instructions
@@ -444,6 +465,7 @@ impl Conversation {
             id: id.into(),
             message_id: id.into(),
             tool_rounds: 0,
+            reminders: 0,
             input: 0,
             output: 0,
             step: Step::default(),
@@ -523,6 +545,9 @@ impl Conversation {
                     .ok_or("missing or invalid dynamic prompt")?;
                 messages.push(json!({"role":"system","content":text}));
             }
+        }
+        if turn.reminders > 0 {
+            messages.push(json!({"role":"system", "content":structured_output::REMINDER}));
         }
         messages.extend_from_slice(&self.messages);
         self.profile
@@ -679,8 +704,7 @@ impl Conversation {
         match step.finish.as_deref() {
             None => Err("incomplete stream: missing finish_reason".into()),
             Some("stop") if step.calls.is_empty() => {
-                let mut result =
-                    json!({"message":{"role":"assistant", "content":message["content"]}});
+                let content = message["content"].clone();
                 if message["content"]
                     .as_str()
                     .is_some_and(|s| !s.trim().is_empty())
@@ -690,17 +714,21 @@ impl Conversation {
                 } else {
                     self.compaction.truncate(self.messages.len());
                 }
-                if turn.input != 0 || turn.output != 0 {
-                    result["usage"] =
-                        json!({"input_tokens":turn.input, "output_tokens":turn.output});
+                if self.profile.spec.output_tool.is_some() {
+                    let reminders = turn.reminders;
+                    let model = self.params()["model"].as_str().unwrap();
+                    if let Some(error) = structured_output::stop_error(model, reminders) {
+                        self.messages
+                            .push(json!({"role":"assistant", "content":error}));
+                        self.active = None;
+                        return Ok(json!({"events":events,"error":error}));
+                    }
+                    let turn = self.active.as_mut().unwrap();
+                    turn.reminders += 1;
+                    turn.message_id = format!("{}:reminder:{}", turn.id, turn.reminders);
+                    return Ok(self.continue_turn(events));
                 }
-                if !self.profile.spec.force_handoff.is_empty() {
-                    self.switch = Some(Switch::Forced(self.profile.spec.force_handoff.clone()));
-                    return Ok(json!({"events":events}));
-                }
-                events.push(json!({"type":"finish", "reason":"stop"}));
-                self.active = None;
-                Ok(json!({"events":events, "result":result}))
+                Ok(self.finish(content, events))
             }
             Some("stop" | "tool_calls") if !step.calls.is_empty() => {
                 if turn.tool_rounds >= MAX_TOOL_ROUNDS {
@@ -716,9 +744,23 @@ impl Conversation {
         }
     }
 
+    fn finish(&mut self, content: Value, mut events: Vec<Value>) -> Value {
+        if !self.profile.spec.force_handoff.is_empty() {
+            self.switch = Some(Switch::Forced(self.profile.spec.force_handoff.clone()));
+            return json!({"events":events});
+        }
+        let turn = self.active.take().expect("active turn");
+        let mut result = json!({"message":{"role":"assistant", "content":content}});
+        if turn.input != 0 || turn.output != 0 {
+            result["usage"] = json!({"input_tokens":turn.input, "output_tokens":turn.output});
+        }
+        events.push(json!({"type":"finish", "reason":"stop"}));
+        json!({"events":events, "result":result})
+    }
+
     fn execute_calls(
         &mut self,
-        calls: BTreeMap<u64, Call>,
+        mut calls: BTreeMap<u64, Call>,
         mut message: Value,
         mut events: Vec<Value>,
     ) -> Result<Value, String> {
@@ -738,6 +780,12 @@ impl Conversation {
             }
             if !self.profile.catalog.borrow().tools.contains_key(&call.name) {
                 return Err("missing or invalid tool name".into());
+            }
+            if call.name == structured_output::NAME
+                && self.profile.spec.output_tool.is_some()
+                && call.arguments.len() > structured_output::MAX_ARGS
+            {
+                return Err("structured output arguments exceed 64 KiB".into());
             }
             wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
         }
@@ -761,6 +809,39 @@ impl Conversation {
             .all(|c| matches!(c.name.as_str(), "random_int" | "get_datetime"));
         turn.tool_model_source = None;
         turn.selection = self.profile.spec.picker.active.get();
+        let exclusive = calls.len() == 1;
+        if let Some(output) = &self.profile.spec.output_tool {
+            // Go records intercepted replies first; none can reach approval, hooks or host dispatch.
+            let mut final_answer = None;
+            calls.retain(|_, call| {
+                if call.name != structured_output::NAME {
+                    return true;
+                }
+                let result = output.call(&call.arguments, exclusive);
+                let error = result.is_err();
+                let content = result.unwrap_or_else(|e| e);
+                events.push(call.event());
+                events.push(tool_result(&call.id, &call.name, &content, error));
+                self.messages
+                    .push(json!({"role":"tool", "tool_call_id":call.id, "content":content}));
+                if !error {
+                    final_answer = Some(content);
+                }
+                false
+            });
+            if let Some(content) = final_answer {
+                let visible = content
+                    .split_once("<tool_call>")
+                    .map_or(content.as_str(), |(text, _)| text);
+                events.push(json!({"type":"delta", "message_id":format!("{}:output", turn.id), "content":visible}));
+                self.messages
+                    .push(json!({"role":"assistant", "content":content}));
+                if let Some(error) = self.repetition_error() {
+                    return Ok(json!({"events":events,"error":error}));
+                }
+                return Ok(self.finish(content.into(), events));
+            }
+        }
         for call in calls.into_values() {
             let index = self.messages.len();
             self.messages
@@ -768,7 +849,7 @@ impl Conversation {
             turn.queue.push_back(Invocation { call, index });
         }
         self.drain_calls(&mut events)?;
-        Ok(self.after_tools(events))
+        Ok(self.continue_turn(events))
     }
 
     fn drain_calls(&mut self, events: &mut Vec<Value>) -> Result<(), String> {
@@ -844,7 +925,7 @@ impl Conversation {
             self.reject(op, text, &mut events);
         }
         self.drain_calls(&mut events)?;
-        Ok(self.after_tools(events))
+        Ok(self.continue_turn(events))
     }
 
     fn reject(&mut self, op: Invocation, reason: String, events: &mut Vec<Value>) {
@@ -877,9 +958,7 @@ impl Conversation {
             turn.host_pending.insert(token, reply);
             return Ok(());
         }
-        events.push(
-            json!({"type":"tool_call", "id":call.id, "name":call.name, "args":call.arguments}),
-        );
+        events.push(call.event());
         let result = match call.name.as_str() {
             "handoff" | "transfer_task" => {
                 self.switch = Some(Switch::parse(&call.name, &call.arguments)?);
@@ -934,7 +1013,12 @@ impl Conversation {
                     } else {
                         let (output, activated) = discovery.add(&arg)?;
                         if let Some(tool) = activated {
-                            tools.insert(arg, tool.clone());
+                            // The internal output tool follows all user tools, including newly activated ones.
+                            if self.profile.spec.output_tool.is_some() {
+                                tools.shift_insert(tools.len() - 1, arg, tool.clone());
+                            } else {
+                                tools.insert(arg, tool.clone());
+                            }
                         }
                         Ok(output)
                     }
@@ -1046,26 +1130,33 @@ impl Conversation {
         Ok(event)
     }
 
-    fn after_tools(&mut self, mut events: Vec<Value>) -> Value {
+    fn repetition_error(&mut self) -> Option<String> {
+        let turn = self.active.as_mut().unwrap();
+        if !turn.exempt_batch && !turn.current_calls.is_empty() {
+            turn.consecutive = if turn.previous_calls == turn.current_calls {
+                turn.consecutive + 1
+            } else {
+                1
+            };
+            turn.previous_calls = std::mem::take(&mut turn.current_calls);
+            if turn.consecutive >= self.profile.spec.limits.repetition_limit() {
+                let reason=format!("Agent terminated: detected {} consecutive identical calls to {}. This indicates a degenerate loop where the model is not making progress.",turn.consecutive,turn.previous_calls[0].0);
+                self.active = None;
+                return Some(reason);
+            }
+        }
+        None
+    }
+
+    fn continue_turn(&mut self, mut events: Vec<Value>) -> Value {
         if self.switch.is_some() {
             return json!({"events":events});
         }
         if self.active.as_ref().is_some_and(Turn::waiting) {
             json!({"events":events, "waiting":true})
         } else {
-            let turn = self.active.as_mut().unwrap();
-            if !turn.exempt_batch && !turn.current_calls.is_empty() {
-                turn.consecutive = if turn.previous_calls == turn.current_calls {
-                    turn.consecutive + 1
-                } else {
-                    1
-                };
-                turn.previous_calls = std::mem::take(&mut turn.current_calls);
-                if turn.consecutive >= self.profile.spec.limits.repetition_limit() {
-                    let reason=format!("Agent terminated: detected {} consecutive identical calls to {}. This indicates a degenerate loop where the model is not making progress.",turn.consecutive,turn.previous_calls[0].0);
-                    self.active = None;
-                    return json!({"events":events,"error":reason});
-                }
+            if let Some(error) = self.repetition_error() {
+                return json!({"events":events,"error":error});
             }
             let t = self.active.as_ref().expect("active tool round");
             let max = self.profile.spec.limits.max_iterations;
@@ -1087,7 +1178,7 @@ impl Conversation {
             if let Some(limit) = self.profile.spec.hooks.max_calls.filter(|&n| {
                 self.active
                     .as_ref()
-                    .is_some_and(|t| t.tool_rounds >= n as usize)
+                    .is_some_and(|t| t.tool_rounds + t.reminders >= n as usize)
             }) {
                 self.active = None;
                 return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
@@ -1111,7 +1202,7 @@ impl Conversation {
         let turn = self.active.as_mut().ok_or("no active turn")?;
         let reply = turn.host_pending.remove(token).ok_or("unknown host call")?;
         let event = self.complete(reply, output, is_error)?;
-        Ok(self.after_tools(vec![event]))
+        Ok(self.continue_turn(vec![event]))
     }
 
     pub fn answer(
@@ -1137,7 +1228,7 @@ impl Conversation {
             .remove(id)
             .ok_or("no pending elicitation with that ID")?;
         let event = self.complete(reply, output, action != "accept")?;
-        Ok(self.after_tools(vec![event]))
+        Ok(self.continue_turn(vec![event]))
     }
 }
 
@@ -1219,6 +1310,10 @@ impl Step {
 }
 
 impl Call {
+    fn event(&self) -> Value {
+        json!({"type":"tool_call", "id":self.id, "name":self.name, "args":self.arguments})
+    }
+
     fn append(&mut self, fragment: &Value, tools: &Tools) -> Result<Option<Value>, String> {
         if string(fragment, "type")?.is_some_and(|t| t != "function") {
             return Err("unsupported tool call type".into());

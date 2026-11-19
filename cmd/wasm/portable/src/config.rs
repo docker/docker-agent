@@ -1,5 +1,6 @@
 use crate::permission::{Permissions, Policy, Safety};
 use crate::providers::{self, Options, Transport};
+use crate::structured_output::OutputTool;
 use indexmap::IndexMap;
 use serde::{de::Error, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Number, Value};
@@ -101,9 +102,6 @@ struct StructuredOutput {
 
 impl StructuredOutput {
     fn check_session(&self, model: &str, env: &BTreeMap<String, String>) -> Result<(), String> {
-        if matches!(self.mode, OutputMode::Tool) {
-            return Err("tool mode is not supported in portable sessions".into());
-        }
         if self.name.is_empty()
             || self.name.len() > 64
             || !self
@@ -114,7 +112,9 @@ impl StructuredOutput {
             return Err("name must be 1-64 ASCII letters, digits, hyphens or underscores".into());
         }
         let id = expand_model_field(model, env)?;
-        if needs_claude_schema_instruction(&id) {
+        if matches!(self.mode, OutputMode::Native)
+            && claude_name(&id.trim().to_ascii_lowercase()).is_some()
+        {
             return Err(format!(
                 "the Claude schema instruction for {id:?} is not supported in portable sessions"
             ));
@@ -191,18 +191,22 @@ fn output_schema<'de, D: Deserializer<'de>>(de: D) -> Result<Value, D::Error> {
 }
 
 // Go adds a schema instruction on both OpenAI protocols for modelinfo.IsClaude(nil, id).
-fn needs_claude_schema_instruction(model: &str) -> bool {
-    let id = model.trim().to_ascii_lowercase();
-    let mut segments = id.rsplit('/');
+pub fn claude_name(normalized: &str) -> Option<&str> {
+    let mut segments = normalized.rsplit('/');
     let name = segments.next().unwrap();
     if segments.next() == Some("openai") {
-        return false;
+        return None;
     }
-    name.starts_with("claude-")
-        || name.starts_with("anthropic.claude-")
-        || name.split_once('.').is_some_and(|(region, rest)| {
-            !region.is_empty() && rest.starts_with("anthropic.claude-")
-        })
+    [
+        Some(name),
+        name.strip_prefix("anthropic."),
+        name.split_once('.')
+            .filter(|(region, _)| !region.is_empty())
+            .and_then(|(_, rest)| rest.strip_prefix("anthropic.")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|s| s.starts_with("claude-"))
 }
 
 fn load_instruction<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -422,6 +426,7 @@ struct Provider {
 
 #[derive(Default)]
 pub struct Selected {
+    pub output_tool: Option<OutputTool>,
     pub tool_policy: Policy,
     pub name: String,
     pub team_prompts: Vec<String>,
@@ -761,6 +766,7 @@ pub fn team(
     env: &BTreeMap<String, String>,
 ) -> Result<(String, Vec<Selected>), String> {
     let cfg = load(yaml)?;
+    let mut output_tools = BTreeMap::new();
     for (name, a) in &cfg.agents {
         let primary = &cfg.models[&a.model];
         compaction_policy(a, primary)?;
@@ -778,6 +784,11 @@ pub fn team(
             return Err("history limits are not supported with session_context".into());
         }
         if let Some(output) = &a.structured_output {
+            if matches!(output.mode, OutputMode::Tool) {
+                let tool = OutputTool::new(&output.name, &output.description, &output.schema)
+                    .map_err(|e| format!("agents.{name}.structured_output: {e}"))?;
+                output_tools.insert(name.as_str(), tool);
+            }
             output
                 .check_session(&cfg.models[&a.model].model, env)
                 .map_err(|e| format!("agents.{name}.structured_output: {e}"))?;
@@ -844,7 +855,14 @@ pub fn team(
             pending.push(&a.force_handoff);
         }
         pending.extend(a.sub_agents.iter().chain(&a.handoffs).map(String::as_str));
-        agents.push(resolve(&cfg, name, a, env, team)?);
+        agents.push(resolve(
+            &cfg,
+            name,
+            a,
+            env,
+            team,
+            output_tools.remove(name),
+        )?);
     }
     Ok((entry.into(), agents))
 }
@@ -860,7 +878,11 @@ fn resolve(
     a: &Agent,
     env: &BTreeMap<String, String>,
     team: bool,
+    output_tool: Option<OutputTool>,
 ) -> Result<Selected, String> {
+    if team && output_tool.is_some() {
+        return Err("tool-mode structured output with local teams is not supported".into());
+    }
     if team && a.redact_secrets == Some(false) {
         return Err("disabling secret redaction within local teams is not supported".into());
     }
@@ -914,18 +936,20 @@ fn resolve(
     }
     let primary = &cfg.models[&a.model];
     let chain = !a.fallback.models.is_empty();
-    if (chain || team)
-        && (a.limits.limits_history()
-            || a.limits.max_iterations > 0
-            || a.toolsets.iter().any(|ts| !ts.model.is_empty()))
-    {
+    let limited_or_overridden = a.limits.limits_history()
+        || a.limits.max_iterations > 0
+        || a.toolsets.iter().any(|ts| !ts.model.is_empty());
+    if output_tool.is_some() && limited_or_overridden {
+        return Err("tool-mode structured output with history limits, max_iterations or toolset model overrides is not supported".into());
+    }
+    if (chain || team) && limited_or_overridden {
         return Err(
             "history limits and toolset model overrides with teams or fallback are not supported"
                 .into(),
         );
     }
-    let resolve_target =
-        |m: &Model| resolve_model(cfg, m, a, env, !toolsets.is_empty(), chain || team);
+    let has_tools = output_tool.is_some() || !toolsets.is_empty();
+    let resolve_target = |m: &Model| resolve_model(cfg, m, a, env, has_tools, chain || team);
     let request = resolve_target(primary)?;
     let compatible = |name: &str, feature: &str| -> Result<Target, String> {
         let inline;
@@ -1005,6 +1029,7 @@ fn resolve(
     Ok(Selected {
         limits: a.limits,
         tool_models,
+        output_tool,
         hooks: a.hooks.clone().with_defaults(
             a.redact_secrets.unwrap_or(true),
             a.add_date,
@@ -1112,7 +1137,9 @@ fn resolve_model(
     let mut params = model_params(id, m, p, tools, compaction)?;
     if let Some(output) = &a.structured_output {
         output.check_session(&m.model, env)?;
-        params.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":output.name,"description":output.description,"strict":output.strict,"schema":output.schema}}));
+        if matches!(output.mode, OutputMode::Native) {
+            params.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":output.name,"description":output.description,"strict":output.strict,"schema":output.schema}}));
+        }
     }
     if multi_target
         && responses
@@ -1230,14 +1257,8 @@ agents:
     }
 
     #[test]
-    fn rejects_unimplemented_output_modes_and_claude_fallback_before_open() {
+    fn rejects_native_claude_fallback_before_open() {
         let cfg = "providers: {local: {}}\nagents:\n  root: {model: local/test}\n  other: {model: 'local/$MODEL', structured_output: {mode: native, name: output, schema: {type: object, properties: {}}}}";
-        let tool = cfg.replace("mode: native", "mode: tool");
-        assert!(list(&tool).is_ok());
-        assert!(select(&tool, "root", &BTreeMap::new())
-            .err()
-            .unwrap()
-            .contains("tool mode"));
         for model in [
             " claude-opus-4.8 ",
             "org/anthropic/CLAUDE-sonnet",

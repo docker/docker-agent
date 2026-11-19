@@ -206,7 +206,7 @@ impl Session {
             if spec.models.len() > 1 || self.team {
                 fallback::check_responses_history(&body)?;
             }
-            body = responses::request(body)?;
+            body = responses::request(body, spec.output_tool.as_ref())?;
             if target.transport.chatgpt {
                 crate::providers::apply_chatgpt_policy(&mut body);
             }

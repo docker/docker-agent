@@ -38,7 +38,10 @@ fn reasoning(model: &str, effort: &Value) -> Option<Value> {
     Some(reasoning)
 }
 
-pub fn request(mut chat: Value) -> Result<Value, String> {
+pub fn request(
+    mut chat: Value,
+    output_tool: Option<&crate::structured_output::OutputTool>,
+) -> Result<Value, String> {
     let model = string(&chat, "model")?;
     let mut input = Vec::new();
     for m in array(&chat, "messages")? {
@@ -117,7 +120,9 @@ pub fn request(mut chat: Value) -> Result<Value, String> {
             return Err(format!("missing parameters for tool {name}"));
         }
         // Strictness is determined from the original Go schema, before normalization.
-        let strict = crate::turn::response_strict(name);
+        let strict = output_tool
+            .filter(|_| name == crate::structured_output::NAME)
+            .map_or_else(|| crate::turn::response_strict(name), |t| t.strict);
         tools.push(json!({
             "type":"function", "name":name, "description":string(f,"description")?,
             "parameters":f["parameters"], "strict":strict
@@ -609,7 +614,7 @@ mod tests {
                 {"type":"function","function":{"name":"user_prompt","description":"Ask!","parameters":prompt}}]
         });
         assert_eq!(
-            request(chat).unwrap(),
+            request(chat, None).unwrap(),
             json!({
                 "model":"gpt-5","stream":true,"max_output_tokens":350,"temperature":0,"top_p":0.8,
                 "parallel_tool_calls":false,"tool_choice":"auto","reasoning":{"summary":"detailed","effort":"high"},
@@ -631,7 +636,7 @@ mod tests {
         let mut chat = json!({"model":"gpt-4.1", "messages":[{"role":"user","content":"hi"}],
             "tools":[],"parallel_tool_calls":true,"max_tokens":32});
         assert_eq!(
-            request(chat.clone()).unwrap(),
+            request(chat.clone(), None).unwrap(),
             json!({"model":"gpt-4.1","input":[{"role":"user","content":"hi"}],"max_output_tokens":32,"stream":true})
         );
         for (model, expected) in [
@@ -645,10 +650,10 @@ mod tests {
             ("gpt-6abc", Value::Null),
         ] {
             chat["model"] = model.into();
-            assert_eq!(request(chat.clone()).unwrap()["reasoning"], expected);
+            assert_eq!(request(chat.clone(), None).unwrap()["reasoning"], expected);
         }
         chat["messages"][0]["content"] = json!({"type":"image_url"});
-        assert!(request(chat).is_err());
+        assert!(request(chat, None).is_err());
     }
 
     #[test]
@@ -656,7 +661,7 @@ mod tests {
         let schema = json!({"type":"object", "properties":{"codes":{"type":"array","items":{"type":"string"}}}, "required":["codes"], "additionalProperties":false});
         let chat = json!({"model":"test", "messages":[{"role":"user","content":"hi"}], "response_format":{
             "type":"json_schema", "json_schema":{"name":"result","description":"Status codes","strict":true,"schema":schema}}});
-        let response = request(chat).unwrap();
+        let response = request(chat, None).unwrap();
         assert!(response.get("response_format").is_none());
         assert_eq!(
             response["text"],

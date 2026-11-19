@@ -333,3 +333,55 @@ test('restart during child MCP discovery closes the partial session and retries 
   await s.close();
   assert.deepEqual(closed,['1','2']);
 });
+
+const outputName = '__structured_output__';
+const output = { mode: 'tool', name: 'report', strict: true,
+  schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } };
+
+test('only the internal output call bypasses filters, approval and tool transforms', async t => {
+  const secret = 'dckr_pat_' + 'A'.repeat(27);
+  const final = call(outputName, {text:secret});
+  const requests = replay(t, [[final, final], [[outputName, '{']], [final, call('think', {thought:'ask'})], [final]]);
+  const yaml = config([{type:'think'}], {permissions:{deny:[outputName], ask:['think']}},
+    {structured_output:output, readonly:true});
+  const events = [];
+  const result = await api.chat({yaml, messages}, e => {
+    events.push(e);
+    if (e.type === 'tool_confirmation') return false;
+  });
+  assert.deepEqual(names(requests[0]), ['think', outputName]);
+  assert.ok(requests.every(r => !r.response_format));
+  assert.deepEqual(events.filter(e => e.type === 'tool_confirmation').map(e => e.name), ['think']);
+  const replies = events.filter(e => e.type === 'tool_result' && e.name === outputName);
+  assert.deepEqual(replies.map(e => e.is_error), [true,true,true,true,false]);
+  assert.match(replies[2].output, /not valid JSON/);
+  assert.equal(replies.at(-1).output, final[1]);
+  assert.equal(result.message.content, final[1]);
+  assert.equal(events.filter(e => e.type === 'finish').length, 1);
+  // before_llm_call redaction still applies to replayed messages, not to the local final answer.
+  assert.ok(!JSON.stringify(requests.slice(1)).includes(secret));
+});
+
+test('reserved output name cannot be reintroduced through host discovery', async t => {
+  const requests = replay(t, []);
+  for (const settings of [{}, {defer:true}, {readonly:true}]) {
+    const yaml = config([post(outputName, 'wrong', settings)], {}, {structured_output:output});
+    await assert.rejects(api.chat({yaml, messages}), /reserved for tool-mode structured output/);
+  }
+  assert.deepEqual(requests, []);
+});
+
+test('unsupported tool schemas fail before fetch even on unselected agents', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', () => assert.fail('schema or model fetch'));
+  for (const child of [{$ref:'https://schema.invalid'}, {$ref:'#'}, {type:'string',pattern:'x{99999999}'}, {type:'string',format:'uri'}]) {
+    const schema = {type:'object', properties:{nested:{type:'array',items:child}}};
+    const agents = {root:{model:'local/test'}, nested:{model:'local/test', structured_output:{...output, schema}}};
+    await assert.rejects(api.createSession({yaml:config([], {agents})}), /structured_output/);
+  }
+  const agents = {root:{model:'local/test', handoffs:['child']}, child:{model:'local/test', structured_output:output}};
+  await assert.rejects(api.createSession({yaml:config([], {agents})}), /tool-mode structured output with local teams/);
+  for (const field of [{max_iterations:1}, {max_tool_result_tokens:1}, {num_history_items:1}, {toolsets:[{type:'think',model:'local/cheap'}]}]) {
+    await assert.rejects(api.createSession({yaml:config([], {}, {structured_output:output,...field})}), /tool-mode structured output with history limits/);
+  }
+  assert.equal(fetch.mock.callCount(), 0);
+});
