@@ -96,6 +96,12 @@ async function run() {
         trace.results.push(await s.send('continue'));
       } finally { await s.close(); }
     });
+  // With compaction explicitly disabled, crossing the threshold must retain history on the pinned fallback.
+  const chain = await (await fetch('/fallback-compaction.yaml')).text();
+  const disabled = chain.replace('$MODEL_URL', `${location.origin}/v1`)
+    .replace('session_compaction: true', 'session_compaction: false');
+  tests.compactionDisabledFallback = await replay(api, 'compactionDisabledFallback', disabled,
+    [[{ error: { message: 'primary unavailable' } }], [piece({ content: 'first answer' }, 'stop'), highUsage], answer], turns);
   const toolAtBoundary = [...tool('think', { thought: 'plan' }).slice(0, -1),
     { choices: [], usage: { prompt_tokens: 1022, completion_tokens: 2, total_tokens: 1024 } }];
   tests.compactAfterTools = await replay(api, 'compactAfterTools', compact, [toolAtBoundary,

@@ -16,6 +16,7 @@ const files = new Map([
   ...readdirSync(join(root, 'bin/wasm-portable')).filter(f => f.endsWith('.mjs')).map(f => ['/' + f, [join(root, 'bin/wasm-portable', f), 'text/javascript']]),
   ['/docker-agent.wasm', [join(root, 'bin/wasm-portable/docker-agent.wasm'), 'application/wasm']],
   ['/replay.mjs', [new URL('./replay.mjs', import.meta.url), 'text/javascript']],
+  ['/fallback-compaction.yaml', [new URL('../testdata/fallback-compaction.yaml', import.meta.url), 'text/plain']],
 ]);
 
 async function capture(runtime) {
