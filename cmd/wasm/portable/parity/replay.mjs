@@ -157,6 +157,48 @@ async function run() {
   const combined = config.replace('model: local/test', 'toolsets: [{type: user_prompt}, {type: think}, {type: calculator}], model: local/test');
   tests.toolOrder = await replay(api, 'toolOrder', combined, [answer, answer], turns);
   tests.responses = await replay(api, 'responses', responses, [responseTool, text, text], turns, '/v1/responses');
+  const mediaConfig = config.replace('agents:', `models:
+  capable: {provider: local, model: test, capabilities: {image: true, pdf: true, audio: true}}
+agents:`)
+    .replace('model: local/test', 'model: capable');
+  const doc = (name, mime_type, source) => ({ type: 'document', document: { name, mime_type, source } });
+  const note = doc('Note.txt', 'text/plain', { inline_text: 'body </DOCUMENT-NOTE-TXT-TEXT-PLAIN x> end' });
+  const image = doc('tiny.gif', 'image/gif', { inline_data: 'R0lGODlhAQABAAAAACwAAAAAAQABAAA=' });
+  const pdf = doc('page.pdf', 'application/pdf', { inline_data: btoa('%PDF-1.7\nmock') });
+  const wav = doc('note.wav', 'audio/wav', { inline_data: btoa('RIFFmockWAVEdata') });
+  const remote = { type: 'image_url', image_url: { url: 'https://example.invalid/a.png', detail: 'low' } };
+  const part = text => ({ type: 'text', text });
+  async function mediaHistory({ api, options, record, trace }) {
+    const messages = [
+      { role: 'system', content: 'fallback', multi_content: [part('rules'), part(' ')] },
+      { role: 'user', multi_content: [note, image, remote, pdf, wav, part('describe')] },
+      { role: 'assistant', content: 'alternate', multi_content: [part('checking')], tool_calls: ['a', 'b'].map(id =>
+        ({ type: 'function', id, function: { name: 'lookup', arguments: '{}' } })) },
+      { role: 'tool', tool_call_id: 'a', content: 'fallback', multi_content: [part('result'), image, note] },
+      { role: 'tool', tool_call_id: 'b', content: 'caption', multi_content: [remote] },
+      { role: 'user', content: 'continue' },
+    ];
+    trace.results.push(await api.chat({ ...options, messages }, record));
+  }
+  tests.media = await replay(api, 'media', mediaConfig, [answer], mediaHistory);
+  tests.mediaResponses = await replay(api, 'mediaResponses', mediaConfig.replace('provider: openai,', 'provider: openai, api_type: openai_responses,'), [text], mediaHistory, '/v1/responses');
+  tests.mediaNoCaps = await replay(api, 'mediaNoCaps', config, [answer], mediaHistory);
+  async function mediaFallback({ api, options, record, trace }) {
+    const messages = [
+      { role: 'user', content: 'image fallback', multi_content: [image] },
+      { role: 'assistant', content: 'caption', multi_content: [image] },
+      { role: 'user', content: 'PDF fallback', multi_content: [pdf] },
+      { role: 'assistant', multi_content: [image] },
+      { role: 'system', multi_content: [image] },
+      { role: 'assistant', multi_content: [part('text part only')] },
+      { role: 'user', multi_content: [wav] },
+      { role: 'assistant', content: 'text field', multi_content: [part('text part')] },
+      { role: 'user', content: 'continue' },
+    ];
+    trace.results.push(await api.chat({ ...options, messages }, record));
+  }
+  tests.mediaFallback = await replay(api, 'mediaFallback', config, [answer], mediaFallback);
+  tests.mediaFallbackResponses = await replay(api, 'mediaFallbackResponses', mediaConfig.replace('provider: openai,', 'provider: openai, api_type: openai_responses,'), [text], mediaFallback, '/v1/responses');
   tests.autoResponses = await replay(api, 'autoResponses', 'agents: {root: {model: openai/o3-mini, instruction: hi}}', [text], async ({ api, options, record, trace }) => {
     options.env = { OPENAI_API_KEY: 'fixture' };
     trace.results.push(await api.chat({ ...options, messages: [{ role: 'user', content: 'hi' }] }, record));

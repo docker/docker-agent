@@ -96,7 +96,6 @@ impl Conversation {
         merge_messages: bool,
         mut history: Vec<Value>,
     ) -> Result<Self, String> {
-        validate_history(&history)?;
         let mut tools = Tools::new();
         let mut instructions = Vec::new();
         if !instruction.is_empty() {
@@ -174,7 +173,7 @@ impl Conversation {
             body["tools"] = Value::Array(self.tools.values().map(|tool| (*tool).clone()).collect());
         }
         if self.merge_messages {
-            crate::wire::merge_text_messages(&mut body);
+            crate::wire::merge_messages(&mut body);
         }
         body
     }
@@ -528,54 +527,6 @@ fn string<'a>(object: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
     }
 }
 
-fn validate_history(history: &[Value]) -> Result<(), String> {
-    let mut pending = BTreeSet::new();
-    for message in history {
-        let role = message["role"].as_str().ok_or("missing history role")?;
-        if role == "tool" {
-            let id = message["tool_call_id"]
-                .as_str()
-                .ok_or("missing tool_call_id in history")?;
-            if !pending.remove(id) {
-                return Err("unexpected tool result in history".into());
-            }
-        } else if !pending.is_empty() {
-            return Err("missing tool results in history".into());
-        }
-        if !message["tool_calls"].is_null() {
-            if role != "assistant" {
-                return Err("only assistant messages can have tool_calls".into());
-            }
-            for call in message["tool_calls"]
-                .as_array()
-                .ok_or("invalid tool_calls history")?
-            {
-                let id = call["id"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .ok_or("missing tool ID in history")?;
-                if !pending.insert(id)
-                    || call["type"] != "function"
-                    || call["function"]["name"].as_str().is_none_or(str::is_empty)
-                    || !call["function"]["arguments"].is_string()
-                {
-                    return Err("invalid historical function call".into());
-                }
-            }
-        }
-        if !matches!(role, "user" | "assistant" | "system" | "developer" | "tool")
-            || !(message["content"].is_string()
-                || (!pending.is_empty() && role == "assistant" && message["content"].is_null()))
-        {
-            return Err("invalid text message in history".into());
-        }
-    }
-    if !pending.is_empty() {
-        return Err("missing tool results in history".into());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,14 +621,7 @@ mod tests {
             vec![assistant.clone()],
             vec![assistant, tool.clone(), tool],
         ] {
-            assert!(Conversation::new(
-                model("model"),
-                String::new(),
-                &["think".into()],
-                true,
-                history
-            )
-            .is_err());
+            assert!(crate::media::history(history, None, "model", false).is_err());
         }
     }
 

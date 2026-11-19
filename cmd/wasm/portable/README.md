@@ -5,7 +5,7 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module handles `fetch`, SSE framing, cancellation and the JavaScript API.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The module and its JS host together are about 747 KiB uncompressed (Rust
+The module and its JS host together are about 830 KiB uncompressed (Rust
 1.90, release build), versus 35.8 MiB for the Go small module alone.
 
 ```sh
@@ -38,8 +38,8 @@ Nothing is installed on `globalThis` unless the host chooses to do so.
 | Area | Ported | Not yet ported |
 |---|---|---|
 | Config | Current-version config projection and named agents/models. `parseConfig`/`listAgents` can inspect local sub-agent and handoff references without starting a session. Instructions, model names and endpoints expand against the session env. | Historical versions, general Go config loading, reusable groups, permission policies and hooks |
-| Providers | OpenAI Chat Completions **and** streamed Responses (text/function calls). Explicit `api_type` or model-based selection; sampling fields, token caps, parallel tool flag; static HTTPS API-key aliases from the Go provider catalog, e.g. Groq and OpenRouter | Realtime, encrypted reasoning state, multimodal/hosted tools, OAuth/dynamic provider endpoints, retries/fallbacks, cost/catalog limits |
-| Sessions | `createSession`, multi-turn `send`, `abort`, `restart`, `close`; stateless `chat` with history. Host documents are validated but not sent or indexed. | Executing delegations/handoffs, compaction, persistence |
+| Providers | OpenAI Chat Completions **and** streamed Responses (text/function calls). Explicit `api_type` or model-based selection; sampling fields, token caps, parallel tool flag; static HTTPS API-key aliases from the Go provider catalog, e.g. Groq and OpenRouter | Realtime, encrypted reasoning state, media output, hosted tools, OAuth/dynamic provider endpoints, retries/fallbacks, cost/catalog limits |
+| Sessions | `createSession`, multi-turn `send`, `abort`, `restart`, `close`; stateless `chat` with multimodal history (below). Host documents are validated but not sent or indexed. | Executing delegations/handoffs, compaction, persistence |
 | Tools | `think`, exact rational `calculator`, session-local `todo`, and `user_prompt`. Sessions answer questions by ID with `respondToElicitation`; `chat` awaits the callback's answer. No callback means decline. | Other toolsets, remote MCP, tool approvals, OAuth elicitation and optional RAG |
 
 For example, a custom provider can set `api_type: openai_responses` (or
@@ -57,6 +57,43 @@ answers and todo lists have portable memory limits. Parallel tool results may
 appear in a different order than Go's completion-dependent scheduling.
 There is no network/file/command tool. A model call uses the explicit session
 credentials, never ambient environment or cookies, and does not follow redirects.
+
+### Attachments in `chat` history
+
+Use the Go bridge's `multi_content` on **prior** messages, not OpenAI wire-format
+arrays in `content`. For example, declare `capabilities: {image: true, pdf: true}`
+on a named model and pass this history to `chat`:
+
+```js
+messages: [
+  { role: 'user', multi_content: [
+    { type: 'text', text: 'Here is the invoice.' },
+    { type: 'document', document: { name: 'invoice.pdf', mime_type: 'application/pdf',
+      source: { inline_data: base64PDF } } },
+  ] },
+  { role: 'user', content: 'What is the total?' },
+]
+```
+
+- User and tool history can carry `document` with `inline_text` or canonical
+  base64 `inline_data` (PNG, JPEG, GIF, WebP, PDF). WAV and MP3 are supported
+  with `audio: true` on **Chat Completions only**. Text documents need no
+  capability flag. As in Go small, the model catalog is empty; do not rely
+  on a model name to enable binary documents. Undeclared modalities and audio
+  on Responses are not sent. System and assistant history replay text, not files.
+- Legacy `image_url` parts accept HTTPS URLs without credentials/fragments or
+  base64 raster image data URLs. URLs are sent to the **provider**; the browser
+  does not fetch, inspect or upload remote files. Tool replies stay grouped
+  before their attachment messages (Chat), or retain the attachments under the
+  corresponding `function_call_output` (Responses).
+- `session.send` and the final user prompt are text-only. Portable rejects
+  final-prompt attachments rather than silently dropping them. `developer` is
+  not a Go `chat.Message` role; use `system`. No `file_id`, paths, artifacts,
+  video, direct `input_audio` parts or audio output.
+- Portable validates base64 and binary signatures (not full file integrity).
+  Use an ASCII basename, a MIME type without parameters, and at most 5 MiB per
+  attachment and 16 MiB total per history (including text-envelope overhead),
+  1,024 parts and 4,096 messages. HTTPS image URLs are limited to 8 KiB.
 
 ## Keeping up with docker-agent
 

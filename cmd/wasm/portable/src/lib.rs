@@ -1,5 +1,6 @@
 mod calculator;
 mod config;
+mod media;
 mod providers;
 mod responses;
 mod todo;
@@ -114,6 +115,12 @@ impl Core {
                 history,
             } => {
                 let spec = config::select(&yaml, &agent, &env)?;
+                let history = media::history(
+                    history,
+                    spec.capabilities,
+                    spec.model_params["model"].as_str().expect("selected model"),
+                    spec.responses,
+                )?;
                 let conv = Conversation::new(
                     spec.model_params,
                     spec.instruction,

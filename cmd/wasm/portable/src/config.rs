@@ -66,6 +66,7 @@ impl Toolset {
 struct Model {
     provider: String,
     model: String,
+    capabilities: Option<crate::media::Capabilities>,
     #[serde(default)]
     base_url: String,
     #[serde(default)]
@@ -95,6 +96,7 @@ struct Provider {
 
 pub struct Selected {
     pub model_params: Map<String, Value>,
+    pub capabilities: Option<crate::media::Capabilities>,
     pub endpoint: String,
     pub token: String,
     pub instruction: String,
@@ -442,6 +444,7 @@ pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result
     };
     let think = !a.toolsets.is_empty();
     Ok(Selected {
+        capabilities: m.capabilities,
         model_params: model_params(id, m, p, think)?,
         endpoint: format!("{}/{route}", base.trim_end_matches('/')),
         responses,
