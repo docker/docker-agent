@@ -1,8 +1,11 @@
 use crate::compaction::{Compactor, Prefix, Undo, Usage};
+use crate::{config::Selected, team::Switch};
 use indexmap::IndexMap;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Map, Value};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 use std::sync::LazyLock;
 
 const MAX_TOOL_ROUNDS: usize = 8;
@@ -36,22 +39,23 @@ pub struct HostSet {
     pub tools: Vec<Value>,
 }
 
-pub struct Conversation {
-    picker: crate::model_picker::Picker,
-    archive: Option<crate::session_context::Archive>,
-    pub compaction: Compactor,
-    pub hooks: crate::hooks::Hooks,
-    model_params: Map<String, Value>,
+pub struct Profile {
+    pub spec: Selected,
     tools: Tools,
     host: BTreeMap<String, bool>,
     categories: BTreeMap<String, String>,
-    specs: Vec<crate::config::Toolset>,
-    agent_instruction: String,
-    merge_messages: bool,
+    instructions: Vec<Value>,
+    todos: Rc<RefCell<crate::todo::Todos>>,
+}
+
+pub struct Conversation {
+    pub profile: Rc<Profile>,
+    pub attempt: crate::fallback::Attempt,
+    pub archive: Option<crate::session_context::Archive>,
+    compaction: Compactor,
     messages: Vec<Value>,
-    instruction_count: usize,
-    todos: crate::todo::Todos,
-    scratchpad: String,
+    scratchpads: BTreeMap<String, String>,
+    pub switch: Option<Switch>,
     active: Option<Turn>,
 }
 
@@ -60,7 +64,8 @@ struct Turn {
     summarizing: Option<Prefix>,
     original: Option<Undo>,
     messages_before: usize,
-    scratchpad_before: usize,
+    scratchpads_before: BTreeMap<String, usize>,
+    profile_before: Rc<Profile>,
     id: String,
     message_id: String,
     tool_rounds: usize,
@@ -102,76 +107,29 @@ struct Call {
     announced: bool,
 }
 
-impl Conversation {
-    #[cfg(test)]
-    pub fn new(
-        model_params: Map<String, Value>,
-        instruction: String,
-        toolsets: &[String],
-        merge_messages: bool,
-        history: Vec<Value>,
-    ) -> Result<Self, String> {
-        let specs = toolsets
-            .iter()
-            .map(|kind| crate::config::Toolset {
-                kind: kind.clone(),
-                ..Default::default()
-            })
-            .collect();
-        Self::configured(
-            model_params,
-            instruction,
-            specs,
-            merge_messages,
-            history,
-            Default::default(),
-            None,
-        )
-    }
-
-    pub fn configured(
-        model_params: Map<String, Value>,
-        instruction: String,
-        specs: Vec<crate::config::Toolset>,
-        merge_messages: bool,
-        history: Vec<Value>,
-        picker: crate::model_picker::Picker,
-        archive: Option<crate::session_context::Archive>,
-    ) -> Result<Self, String> {
-        let mut c = Self {
-            hooks: crate::hooks::Hooks::default(),
-            compaction: Compactor::default(),
-            model_params,
-            picker,
-            archive,
+impl Profile {
+    pub fn new(spec: Selected, todos: Rc<RefCell<crate::todo::Todos>>) -> Result<Self, String> {
+        let mut profile = Self {
+            spec,
+            todos,
+            instructions: vec![],
             tools: Tools::new(),
             host: BTreeMap::new(),
             categories: BTreeMap::new(),
-            specs,
-            agent_instruction: instruction,
-            messages: history,
-            merge_messages,
-            instruction_count: 0,
-            todos: crate::todo::Todos::default(),
-            scratchpad: "Thoughts:".into(),
-            active: None,
         };
-        c.configure_tools(&[])?;
-        Ok(c)
+        profile.configure_tools(&[])?;
+        Ok(profile)
     }
 
-    pub fn configure_tools(&mut self, external: &[HostSet]) -> Result<(), String> {
-        if self.active.is_some() {
-            return Err("cannot change tools during a turn".into());
-        }
+    fn configure_tools(&mut self, external: &[HostSet]) -> Result<(), String> {
         let mut tools = Tools::new();
         let mut host = BTreeMap::new();
         let mut categories = BTreeMap::new();
-        let mut instructions = Vec::new();
-        if !self.agent_instruction.is_empty() {
-            instructions.push(self.agent_instruction.clone());
+        let mut instructions = self.spec.team_prompts.clone();
+        if !self.spec.instruction.is_empty() {
+            instructions.push(self.spec.instruction.clone());
         }
-        for (index, spec) in self.specs.iter().enumerate() {
+        for (index, spec) in self.spec.toolsets.iter().enumerate() {
             let def = CATALOG.get(&spec.kind);
             let ext = external.iter().find(|x| x.index == index);
             let dynamic = matches!(spec.kind.as_str(), "api" | "mcp" | "fetch");
@@ -183,7 +141,7 @@ impl Conversation {
                 (e.instructions.as_str(), e.tools.as_slice())
             } else if let Some(d) = def {
                 if spec.kind == "model_picker" {
-                    picker_metadata = self.picker.metadata(&d.instructions, &d.tools);
+                    picker_metadata = self.spec.picker.metadata(&d.instructions, &d.tools);
                     (picker_metadata.0.as_str(), picker_metadata.1.as_slice())
                 } else {
                     (d.instructions.as_str(), d.tools.as_slice())
@@ -227,15 +185,7 @@ impl Conversation {
                 {
                     continue;
                 }
-                let hosted = !matches!(
-                    spec.kind.as_str(),
-                    "think"
-                        | "user_prompt"
-                        | "todo"
-                        | "calculator"
-                        | "model_picker"
-                        | "session_context"
-                );
+                let hosted = spec.hosted();
                 if tools.contains_key(name) {
                     if hosted || host.contains_key(name) {
                         return Err(format!("duplicate tool name {name:?}"));
@@ -258,29 +208,77 @@ impl Conversation {
                 tools.insert(name.to_owned(), tool.clone());
             }
         }
-        self.messages.splice(
-            0..self.instruction_count,
-            instructions
-                .iter()
-                .map(|text| json!({"role":"system","content":text})),
-        );
-        self.instruction_count = instructions.len();
+        self.instructions = instructions
+            .into_iter()
+            .map(|text| json!({"role":"system", "content":text}))
+            .collect();
         self.tools = tools;
         self.host = host;
         self.categories = categories;
         Ok(())
     }
+}
+
+impl Conversation {
+    pub fn open(profile: Rc<Profile>, messages: Vec<Value>) -> Self {
+        Self {
+            profile,
+            attempt: Default::default(),
+            archive: None,
+            compaction: Compactor::default(),
+            messages,
+            scratchpads: BTreeMap::new(),
+            active: None,
+            switch: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn new(
+        instruction: String,
+        toolsets: &[String],
+        merge: bool,
+        history: Vec<Value>,
+    ) -> Result<Self, String> {
+        let mut spec = crate::config::select(
+            "providers: {p: {}}\nagents: {root: {model: p/test}}",
+            "",
+            &BTreeMap::new(),
+        )?;
+        spec.models[0].merge_messages = merge;
+        spec.hooks = Default::default();
+        spec.instruction = instruction;
+        spec.toolsets = toolsets
+            .iter()
+            .map(|kind| crate::config::Toolset {
+                kind: kind.clone(),
+                ..Default::default()
+            })
+            .collect();
+        Ok(Self::open(
+            Rc::new(Profile::new(spec, Default::default())?),
+            history,
+        ))
+    }
+
+    pub fn register(&mut self, sets: &[HostSet]) -> Result<(), String> {
+        if self.active.is_some() {
+            return Err("cannot change tools during a turn".into());
+        }
+        Rc::get_mut(&mut self.profile)
+            .ok_or("cannot register shared host tools")?
+            .configure_tools(sets)
+    }
 
     pub fn restart(&mut self, stamp: crate::session_context::Stamp) -> Result<(), String> {
         self.cancel();
         if let Some(archive) = &mut self.archive {
-            archive.restart(stamp, &self.messages[self.instruction_count..])?;
+            archive.restart(stamp, &self.messages)?;
         }
-        self.messages.truncate(self.instruction_count);
+        self.messages.clear();
+        self.scratchpads.clear();
         self.compaction.truncate(0);
         self.compaction.context_tokens = 0;
-        self.scratchpad.truncate("Thoughts:".len());
-        // Go restart replaces the conversation, not its loaded agent and toolsets.
         Ok(())
     }
 
@@ -296,7 +294,12 @@ impl Conversation {
             original: None,
             context_before: self.compaction.context_tokens,
             messages_before: self.messages.len(),
-            scratchpad_before: self.scratchpad.len(),
+            scratchpads_before: self
+                .scratchpads
+                .iter()
+                .map(|(k, s)| (k.clone(), s.len()))
+                .collect(),
+            profile_before: Rc::clone(&self.profile),
             id: id.into(),
             message_id: id.into(),
             tool_rounds: 0,
@@ -310,14 +313,33 @@ impl Conversation {
         self.prepare_request()
     }
 
+    pub fn target(&self) -> &crate::config::Target {
+        &self.profile.spec.models[self.attempt.current]
+    }
+
+    fn params(&self) -> &Map<String, Value> {
+        self.profile
+            .spec
+            .picker
+            .params()
+            .unwrap_or(&self.target().model_params)
+    }
+
+    pub fn summarizing(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|t| t.summarizing.is_some())
+    }
+
     fn prepare_request(&mut self) -> Result<Value, String> {
+        self.compaction.policy = self.target().compaction;
         if let Some((prefix, mut request)) =
             self.compaction
-                .plan(&self.messages, &self.model_params, self.merge_messages)?
+                .plan(&self.messages, self.params(), self.target().merge_messages)?
         {
             self.active.as_mut().expect("active turn").summarizing = Some(prefix);
             if let Some(msgs) = request["messages"].as_array_mut() {
-                self.hooks.rewrite_messages(msgs)?;
+                self.profile.spec.hooks.rewrite_messages(msgs)?;
             }
             Ok(request)
         } else {
@@ -325,8 +347,8 @@ impl Conversation {
         }
     }
 
-    fn request(&self) -> Result<Value, String> {
-        if self.hooks.add_date || self.hooks.add_environment_info {
+    pub fn request(&self) -> Result<Value, String> {
+        if self.profile.spec.hooks.add_date || self.profile.spec.hooks.add_environment_info {
             // The host samples context only when it is actually about to fetch.
             return Ok(Value::Null);
         }
@@ -339,33 +361,32 @@ impl Conversation {
         date: Option<String>,
     ) -> Result<Value, String> {
         let turn = self.active.as_ref().ok_or("no active turn")?;
-        if !turn.pending.is_empty() {
+        if !turn.pending.is_empty() || !turn.host_pending.is_empty() {
             return Err("waiting for elicitation".into());
         }
-        let mut messages = self.messages.clone();
-        let mut pos = self.instruction_count;
+        let mut messages = self.profile.instructions.clone();
         for (enabled, text) in [
-            (self.hooks.add_environment_info, environment),
-            (self.hooks.add_date, date),
+            (self.profile.spec.hooks.add_environment_info, environment),
+            (self.profile.spec.hooks.add_date, date),
         ] {
             if enabled {
                 let text = text
                     .filter(|s| !s.is_empty() && s.len() <= 4096)
                     .ok_or("missing or invalid dynamic prompt")?;
-                messages.insert(pos, json!({"role":"system","content":text}));
-                pos += 1;
+                messages.push(json!({"role":"system","content":text}));
             }
         }
-        self.hooks.rewrite_messages(&mut messages)?;
-        let mut body = Value::Object(self.picker.params().unwrap_or(&self.model_params).clone());
+        messages.extend_from_slice(&self.messages);
+        self.profile.spec.hooks.rewrite_messages(&mut messages)?;
+        let mut body = Value::Object(self.params().clone());
         body["messages"] = messages.into();
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});
-        if !self.tools.is_empty() {
+        if !self.profile.tools.is_empty() {
             body["tool_choice"] = "auto".into();
-            body["tools"] = Value::Array(self.tools.values().cloned().collect());
+            body["tools"] = Value::Array(self.profile.tools.values().cloned().collect());
         }
-        if self.merge_messages {
+        if self.target().merge_messages {
             crate::wire::merge_messages(&mut body);
         }
         Ok(body)
@@ -376,26 +397,27 @@ impl Conversation {
         if !turn.pending.is_empty() || !turn.host_pending.is_empty() {
             return Err("waiting for elicitation".into());
         }
-        if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
-            // Preserve admitted user messages and completed tools on a model error.
-            if turn.summarizing.is_some() {
-                self.cancel();
-            } else {
-                self.active = None;
-            }
-            return Err(format!("model failed: error receiving from stream: received error while streaming: {error}"));
-        }
         let result = if turn.summarizing.is_some() {
             turn.step
                 .chunk(chunk, &turn.message_id, &Tools::new())
                 .map(|_| Vec::new())
         } else {
-            turn.step.chunk(chunk, &turn.message_id, &self.tools)
+            turn.step
+                .chunk(chunk, &turn.message_id, &self.profile.tools)
         };
         if result.is_err() {
             self.cancel();
         }
         result
+    }
+
+    // Unlike user cancellation, provider failure retains admitted input and completed tools.
+    pub fn fail(&mut self) {
+        if self.summarizing() {
+            self.cancel();
+        } else {
+            self.active = None;
+        }
     }
 
     pub fn cancel(&mut self) {
@@ -406,7 +428,17 @@ impl Conversation {
             self.compaction.truncate(turn.messages_before);
             self.compaction.context_tokens = turn.context_before;
             self.messages.truncate(turn.messages_before);
-            self.scratchpad.truncate(turn.scratchpad_before);
+            self.profile = turn.profile_before;
+            self.attempt = Default::default();
+            self.scratchpads
+                .retain(|name, pad| match turn.scratchpads_before.get(name) {
+                    Some(&n) => {
+                        pad.truncate(n);
+                        true
+                    }
+                    None => false,
+                });
+            self.switch = None;
         }
     }
 
@@ -466,7 +498,7 @@ impl Conversation {
             turn.output += output;
             events.push(json!({
                 "type": "usage", "input_tokens": input, "output_tokens": output,
-                "context_length": input + output, "context_limit": self.compaction.policy.window, "cost": 0
+                "context_length": input + output, "context_limit": self.profile.spec.models[self.attempt.current].compaction.window, "cost": 0
             }));
         }
         let mut message = json!({"role":"assistant"});
@@ -522,19 +554,32 @@ impl Conversation {
         let mut ids = BTreeSet::new();
         let mut wire_calls = Vec::with_capacity(calls.len());
         let mut replies = Vec::with_capacity(calls.len());
-        let mut selection = self.picker.active;
+        let picker = &self.profile.spec.picker;
+        let mut selection = picker.active.get();
+        if calls.len() != 1
+            && calls
+                .values()
+                .any(|c| matches!(c.name.as_str(), "handoff" | "transfer_task"))
+        {
+            return Err("team tools must be called alone, not in a parallel batch".into());
+        }
         for (index, (key, mut call)) in calls.into_iter().enumerate() {
             if key != index as u64 || call.id.is_empty() || !ids.insert(call.id.clone()) {
                 return Err("missing or duplicate tool call ID or index".into());
             }
-            if !self.tools.contains_key(&call.name) {
-                return Err("missing or invalid tool name".into());
+            if !self.profile.tools.contains_key(call.name.as_str()) {
+                return Err("missing or unavailable tool name".into());
             }
-            wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
-            if self.hooks.rewrite_input(&call.name, &mut call.arguments)? {
+            if self
+                .profile
+                .spec
+                .hooks
+                .rewrite_input(&call.name, &mut call.arguments)?
+            {
                 events.push(json!({"type":"warning", "message":format!("redact_secrets: redacted secret material from arguments of tool {:?}", call.name)}));
             }
-            if let Some(read_only) = self.host.get(&call.name) {
+            wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
+            if let Some(read_only) = self.profile.host.get(&call.name) {
                 turn.host_pending
                     .insert(call.id.clone(), self.messages.len() + 1 + index);
                 events.push(json!({"type":"host_call","id":call.id,"name":call.name,"args":call.arguments,"readOnly":read_only}));
@@ -546,19 +591,31 @@ impl Conversation {
             );
             let mut reply = json!({"role":"tool", "tool_call_id":call.id});
             let result = match call.name.as_str() {
+                "handoff" | "transfer_task" => {
+                    self.switch = Some(Switch::parse(&call.name, &call.arguments)?);
+                    None
+                }
                 "think" => {
                     let Think { thought } = call.parse()?;
-                    if self.scratchpad.len() + 1 + thought.len() > MAX_SCRATCHPAD_BYTES {
+                    let scratchpad = self
+                        .scratchpads
+                        .entry(self.profile.spec.name.clone())
+                        .or_insert_with(|| "Thoughts:".into());
+                    if scratchpad.len() + 1 + thought.len() > MAX_SCRATCHPAD_BYTES {
                         return Err("think scratchpad size limit reached".into());
                     }
-                    self.scratchpad.push('\n');
-                    self.scratchpad.push_str(&thought);
-                    Some(("think", Ok(self.scratchpad.clone())))
+                    scratchpad.push('\n');
+                    scratchpad.push_str(&thought);
+                    Some(("think", Ok(scratchpad.clone())))
                 }
                 "calculate" => Some(("calculator", crate::calculator::calculate(&call.arguments))),
-                "create_todo" | "create_todos" | "update_todos" | "list_todos" => {
-                    Some(("todo", self.todos.call(&call.name, &call.arguments)))
-                }
+                "create_todo" | "create_todos" | "update_todos" | "list_todos" => Some((
+                    "todo",
+                    self.profile
+                        .todos
+                        .borrow_mut()
+                        .call(&call.name, &call.arguments),
+                )),
                 "user_prompt" => {
                     if call.arguments.len() > MAX_ELICITATION_BYTES {
                         return Err("elicitation argument size limit reached".into());
@@ -580,7 +637,7 @@ impl Conversation {
                 }
                 _ => {
                     let result = match call.name.as_str() {
-                        "change_model" => self.picker.change(&call.arguments, &mut selection),
+                        "change_model" => picker.change(&call.arguments, &mut selection),
                         "revert_model" => {
                             selection = None;
                             Ok("Model reverted to the agent's default model".into())
@@ -610,19 +667,51 @@ impl Conversation {
             };
             if let Some((category, result)) = result {
                 let is_error = result.is_err();
-                let output =
-                    self.hooks
-                        .tool_result(&call.name, category, result.unwrap_or_else(|e| e))?;
+                let output = self.profile.spec.hooks.tool_result(
+                    &call.name,
+                    category,
+                    result.unwrap_or_else(|e| e),
+                )?;
                 events.push(tool_result(&call.id, &call.name, &output, is_error));
                 reply["content"] = output.into();
             }
             replies.push(reply);
         }
-        self.picker.active = selection;
+        picker.active.set(selection);
         message["tool_calls"] = Value::Array(wire_calls);
         self.messages.push(message);
         self.messages.extend(replies);
+        if self.switch.is_some() {
+            return Ok(json!({"events":events}));
+        }
         Ok(self.after_tools(events))
+    }
+
+    pub fn include_usage(&mut self, usage: &Value) {
+        let turn = self.active.as_mut().expect("suspended caller");
+        turn.input += usage["input_tokens"].as_u64().unwrap_or(0);
+        turn.output += usage["output_tokens"].as_u64().unwrap_or(0);
+    }
+
+    pub fn complete_switch(
+        &mut self,
+        name: &str,
+        output: String,
+        error: bool,
+    ) -> Result<Value, String> {
+        let output = self.profile.spec.hooks.tool_result(name, name, output)?;
+        let reply = self
+            .messages
+            .last_mut()
+            .expect("reserved team tool message");
+        let event = tool_result(
+            reply["tool_call_id"].as_str().unwrap(),
+            name,
+            &output,
+            error,
+        );
+        reply["content"] = Value::String(output);
+        Ok(event)
     }
 
     fn after_tools(&mut self, events: Vec<Value>) -> Value {
@@ -631,6 +720,8 @@ impl Conversation {
             return json!({"events":events, "waiting":true});
         }
         if let Some(limit) = self
+            .profile
+            .spec
             .hooks
             .max_calls
             .filter(|&n| turn.tool_rounds >= n as usize)
@@ -660,9 +751,9 @@ impl Conversation {
         }
         let turn = self.active.as_mut().ok_or("no active turn")?;
         let index = turn.host_pending.remove(id).ok_or("unknown host call")?;
-        let output = self.hooks.tool_result(
+        let output = self.profile.spec.hooks.tool_result(
             name,
-            self.categories.get(name).map_or("", String::as_str),
+            self.profile.categories.get(name).map_or("", String::as_str),
             output,
         )?;
         let event = tool_result(id, name, &output, is_error);
@@ -693,6 +784,8 @@ impl Conversation {
             return Err("elicitation answer size limit reached".into());
         }
         let output = self
+            .profile
+            .spec
             .hooks
             .tool_result("user_prompt", "user_prompt", output)?;
         let reply = &mut self.messages[index];
@@ -847,13 +940,8 @@ fn string<'a>(object: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
 mod tests {
     use super::*;
 
-    fn model(name: &str) -> Map<String, Value> {
-        Map::from_iter([("model".into(), name.into())])
-    }
-
     fn conversation(toolsets: &[&str]) -> Conversation {
         Conversation::new(
-            model("model"),
             "be concise".into(),
             &toolsets.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             true,
@@ -891,8 +979,7 @@ mod tests {
             json!({"role":"assistant", "tool_calls":[{"id":"old", "type":"function", "function":{"name":"old-tool", "arguments":"{}"}}]}),
             json!({"role":"tool", "tool_call_id":"old", "content":"prior output"}),
         ];
-        let mut c =
-            Conversation::new(model("test"), "sys".into(), &[], true, history.clone()).unwrap();
+        let mut c = Conversation::new("sys".into(), &[], false, history.clone()).unwrap();
         let request = c.begin("hello", "turn-id").unwrap();
         assert_eq!(
             request["messages"][0],
@@ -937,7 +1024,7 @@ mod tests {
             vec![assistant.clone()],
             vec![assistant, tool.clone(), tool],
         ] {
-            assert!(crate::media::history(history, None, "model", false).is_err());
+            assert!(crate::media::history(history, None, "model", false, false).is_err());
         }
     }
 
@@ -983,19 +1070,20 @@ mod tests {
             events[4],
             json!({"type":"tool_result", "id":"b", "name":"think", "output":"Thoughts:\nA\nB", "is_error":false})
         );
-        let m = &next["request"]["messages"];
-        assert_eq!(m[2]["reasoning_content"], "why");
-        assert_eq!(m[2]["content"], "planning");
+        let m = next["request"]["messages"].as_array().unwrap();
+        let [assistant, first, second] = m.last_chunk::<3>().unwrap();
+        assert_eq!(assistant["reasoning_content"], "why");
+        assert_eq!(assistant["content"], "planning");
         assert_eq!(
-            m[2]["tool_calls"][0],
+            assistant["tool_calls"][0],
             json!({"id":"a", "type":"function", "function":{"name":"think", "arguments":r#"{"thought":"A"}"#}})
         );
         assert_eq!(
-            m[3],
+            *first,
             json!({"role":"tool", "content":"Thoughts:\nA", "tool_call_id":"a"})
         );
         assert_eq!(
-            m[4],
+            *second,
             json!({"role":"tool", "content":"Thoughts:\nA\nB", "tool_call_id":"b"})
         );
         let text = c
@@ -1059,7 +1147,7 @@ mod tests {
                 .and_then(|_| c.end())
                 .is_err());
             assert_eq!(c.messages, saved);
-            assert_eq!(c.scratchpad, "Thoughts:");
+            assert!(c.scratchpads.is_empty());
         }
     }
 
@@ -1088,7 +1176,7 @@ mod tests {
                 .chunk(chunk(delta, Some("tool_calls")))
                 .and_then(|_| c.end())
                 .is_err());
-            assert_eq!(c.scratchpad, "Thoughts:");
+            assert!(c.scratchpads.is_empty());
         }
         let mut c = conversation(&[]);
         c.begin("go", "go").unwrap();
@@ -1103,7 +1191,6 @@ mod tests {
     #[test]
     fn official_openai_keeps_system_messages_separate_and_deduplicates_advertised_tools() {
         let mut c = Conversation::new(
-            model("model"),
             "agent".into(),
             &["user_prompt".into(), "think".into(), "user_prompt".into()],
             false,
@@ -1198,7 +1285,7 @@ mod tests {
     #[test]
     fn max_calls_checks_between_rounds_including_pending_elicitations() {
         let mut c = conversation(&["user_prompt", "think"]);
-        c.hooks = crate::hooks::Hooks::try_from(
+        Rc::get_mut(&mut c.profile).unwrap().spec.hooks = crate::hooks::Hooks::try_from(
             json!({"before_llm_call":{"type":"builtin","command":"max_iterations","args":["1"]}}),
         )
         .unwrap();
@@ -1232,7 +1319,8 @@ mod tests {
     #[test]
     fn dynamic_context_is_transient_and_redacted_on_each_model_call() {
         let mut c = conversation(&["think"]);
-        c.hooks = crate::hooks::Hooks::default().with_defaults(true, true, true);
+        Rc::get_mut(&mut c.profile).unwrap().spec.hooks =
+            crate::hooks::Hooks::default().with_defaults(true, true, true);
         let secret = format!("dckr_pat_{}", "a".repeat(27));
         assert_eq!(c.begin(&secret, "a").unwrap(), Value::Null);
         assert!(c.prepare(None, None).is_err());
@@ -1280,7 +1368,7 @@ mod tests {
         ))
         .unwrap();
         assert!(c.end().unwrap_err().contains("iteration limit"));
-        assert_eq!(c.scratchpad, "Thoughts:");
+        assert!(c.scratchpads.is_empty());
         c.begin("retry", "retry").unwrap();
         let args = json!({"thought":"x".repeat(MAX_SCRATCHPAD_BYTES)}).to_string();
         c.chunk(chunk(

@@ -104,6 +104,26 @@ pub struct Transport {
     token_key: String,
 }
 
+impl Transport {
+    // Provider diagnostics can echo request headers, including opaque credentials with no known pattern.
+    pub fn safe_diagnostic(&self, reason: String) -> Result<String, String> {
+        for value in [
+            self.headers
+                .get("Authorization")
+                .and_then(|h| h.strip_prefix("Bearer ")),
+            self.headers.get("ChatGPT-Account-Id").map(String::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if reason.contains(value) {
+                return Ok("provider diagnostic contained credentials".into());
+            }
+        }
+        Ok(crate::hooks::redact(&reason)?.unwrap_or(reason))
+    }
+}
+
 impl Builtin {
     pub fn scoped(&self) -> bool {
         matches!(

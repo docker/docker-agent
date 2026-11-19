@@ -30,6 +30,10 @@ impl Policy {
         })
     }
 
+    pub fn enabled(self) -> bool {
+        self.threshold.is_some()
+    }
+
     pub fn clamp(&self, cap: i64) -> i64 {
         if self.window == 0 {
             cap
@@ -242,6 +246,7 @@ impl Compactor {
         input.extend(prefix.iter().map(|e| e.message.clone()));
         input.push(json!({"role":"user", "content":USER}));
         let mut body = params.clone();
+        body.remove("response_format");
         body.remove("tool_choice");
         body.remove("parallel_tool_calls");
         let key = crate::config::cap_key(params["model"].as_str().expect("configured model"));

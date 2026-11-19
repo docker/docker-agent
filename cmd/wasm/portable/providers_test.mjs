@@ -154,15 +154,7 @@ test('a fallback cannot carry Copilot credentials into a ChatGPT request', async
     return success(url, init);
   });
   const cfg = 'agents: {root: {model: github-copilot/gpt-4o, fallback: {models: [chatgpt/gpt-5]}}}';
-  let session;
-  try { session = await api.createSession({ yaml: cfg, env }); }
-  catch (err) {
-    // Builds without fallback must reject it before any request, not silently run the primary.
-    if (!portable) throw err;
-    assert.match(err.message, /unknown field `fallback`/);
-    assert.equal(failed, false);
-    return;
-  }
+  const session = await api.createSession({ yaml: cfg, env });
   t.after(() => session.close());
   assert.equal((await session.send('hi')).message.content, 'ok');
   assert.equal(failed, true);

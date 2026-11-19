@@ -30,7 +30,9 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     const host = createHost(opts, onEvent, stateless);
     let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, history: history ?? [], stamp: sessionStamp() });
     try {
-      prepareModelTransport(handle.transport);
+      for (const targets of Object.values(handle.targets)) {
+        for (const { transport, keyBase } of targets) prepareModelTransport(transport, keyBase);
+      }
     } catch (e) { call('close', { session: handle.session }); throw e; }
     let active, batch, restarting = false, closing, ready;
     async function prepare(signal) {
@@ -109,44 +111,57 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         if (!ready) { ready = prepare(signal).catch(e => { ready = undefined; throw e; }); }
         await ready;
         signal.throwIfAborted();
-        let body = call('begin', { session, prompt, id: crypto.randomUUID() });
-        let environment;
+        let request = call('begin', { session, prompt, id: crypto.randomUUID(), now: performance.now() });
         for (;;) {
-          if (body === null) {
+          signal.throwIfAborted();
+          if (request.dynamic) {
             const { dynamicPrompt } = await import('./clock.mjs');
             signal.throwIfAborted();
-            if (handle.dynamic.addEnvironmentInfo) environment ??= dynamicPrompt({ add_environment_info: true })[0];
-            const date = handle.dynamic.addDate ? dynamicPrompt({ add_date: true })[0] : undefined;
-            body = call('prepare', { session, environment, date });
+            const { addEnvironmentInfo, addDate } = request.dynamic;
+            request = call('prepare', { session,
+              environment: addEnvironmentInfo ? dynamicPrompt({ add_environment_info: true })[0] : undefined,
+              date: addDate ? dynamicPrompt({ add_date: true })[0] : undefined,
+            });
           }
-          const response = await fetch(handle.transport.endpoint, {
-            method: 'POST', redirect: 'error', credentials: 'omit', signal,
-            headers: handle.transport.headers,
-            body: JSON.stringify(body),
-          });
-          if (!response.ok) {
-            await response.body?.cancel();
-            throw new Error(`model request failed: HTTP ${response.status}`);
-          }
-          for await (const chunk of sse(response, handle.responses)) {
-            signal.throwIfAborted();
-            for (const event of call('chunk', { session, chunk })) {
+          let outcome;
+          try {
+            const { transport } = handle.targets[request.agent][request.target];
+            const response = await modelFetch(transport, request.body, signal);
+            for await (const chunk of sse(response, request.responses)) {
               signal.throwIfAborted();
-              emit(event);
+              const step = call('chunk', { session, chunk });
+              if (step.request) { outcome = step; break; }
+              for (const event of step.events) {
+                signal.throwIfAborted();
+                emit(event);
+              }
             }
+          } catch (e) {
+            signal.throwIfAborted();
+            if (!(e instanceof TransportError)) throw e;
+            outcome = call('failure', { session, status: e.status, reason: e.message });
           }
           signal.throwIfAborted();
-          const next = call('end', { session });
+          if (outcome) {
+            if (outcome.event) emit(outcome.event);
+            if (outcome.delay) await backoff(outcome.delay, signal);
+            request = outcome.request;
+            continue;
+          }
+          const next = call('end', { session, now: performance.now() });
           if (next.waiting) {
-            body = await elicit(next.events, signal);
+            request = await elicit(next.events, signal);
             signal.throwIfAborted();
             continue;
           }
-          for (const event of next.events) emit(event);
+          for (const event of next.events) {
+            signal.throwIfAborted();
+            emit(event);
+          }
           if (next.error) throw new Error(next.error);
           if (next.result) return next.result;
           signal.throwIfAborted();
-          body = next.request;
+          request = next.request;
         }
       } catch (e) {
         call('cancel', { session });
@@ -246,13 +261,21 @@ function sessionStamp() {
   return { id: crypto.randomUUID(), created_at: local + zone };
 }
 
-function prepareModelTransport(target) {
+function modelURL(endpoint) {
   let url;
-  try { url = new URL(target.endpoint); }
+  try { url = new URL(endpoint); }
   catch { throw new Error('invalid model endpoint'); }
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && local))) {
     throw new Error('model endpoint must be HTTPS (or HTTP loopback) without credentials, query or fragment');
+  }
+  return url;
+}
+
+function prepareModelTransport(target, keyBase) {
+  const url = modelURL(target.endpoint);
+  if (keyBase != null && url.origin !== modelURL(keyBase).origin) {
+    throw new Error('cross-origin model endpoint requires an explicit model token_key');
   }
   if (target.azure_default_key && !(url.protocol === 'https:' && !url.port &&
       ['.openai.azure.com', '.services.ai.azure.com'].some(suffix => url.hostname.endsWith(suffix)))) {
@@ -262,6 +285,61 @@ function prepareModelTransport(target) {
   target.endpoint = url.href;
   target.headers['Content-Type'] = 'application/json';
   if (target.chatgpt) target.headers.session_id = crypto.randomUUID();
+}
+
+class TransportError extends Error {
+  constructor(message, status) { super(message); this.status = status; }
+}
+
+async function modelFetch({ endpoint, headers }, body, signal) {
+  const init = {
+    method: 'POST', redirect: 'error', credentials: 'omit', signal,
+    headers,
+    body: JSON.stringify(body),
+  };
+  let response;
+  try { response = await fetch(endpoint, init); }
+  catch (e) { throw new TransportError(`model request failed: ${e.message}`); }
+  if (!response.ok) {
+    const detail = await errorDetail(response);
+    throw new TransportError(`model request failed: HTTP ${response.status}${detail ? `: ${detail}` : ''}`, response.status);
+  }
+  return response;
+}
+
+// Use the provider diagnostic, not an unbounded proxy error page, in fallback events.
+async function errorDetail(response) {
+  if (!response.body || !response.headers.get('Content-Type')?.includes('application/json')) {
+    await response.body?.cancel();
+    return '';
+  }
+  const reader = response.body.getReader();
+  const utf8 = new TextDecoder();
+  let text = '', bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if ((bytes += value.byteLength) > 8192) return '';
+      text += utf8.decode(value, { stream: true });
+    }
+    const body = JSON.parse(text + utf8.decode());
+    const detail = body?.error?.message ?? body?.message;
+    return typeof detail === 'string' ? detail : '';
+  } catch { return ''; }
+  finally { try { await reader.cancel(); } finally { reader.releaseLock(); } }
+}
+
+function backoff(base, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }, base * (0.9 + 0.2 * Math.random()));
+    function abort() { clearTimeout(timer); reject(signal.reason); }
+    signal.addEventListener('abort', abort, { once: true });
+  });
 }
 
 async function* sse(response, responses) {
@@ -274,7 +352,7 @@ async function* sse(response, responses) {
   let pending = '', data = [], total = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await reader.read().catch(e => { throw new TransportError(e.message); });
       total += value?.byteLength ?? 0;
       if (total > maxResponse) throw new Error('model response too large');
       pending += utf8.decode(value, { stream: !done });
@@ -293,7 +371,7 @@ async function* sse(response, responses) {
           if (responses && ['response.completed', 'response.done', 'response.incomplete'].includes(chunk.type)) return;
         }
       }
-      if (done) throw new Error('model stream ended before [DONE]');
+      if (done) throw new TransportError('model stream ended before [DONE]');
     }
   } finally {
     try { await reader.cancel(); } finally { reader.releaseLock(); }
