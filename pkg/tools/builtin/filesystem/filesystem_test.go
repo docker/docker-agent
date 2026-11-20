@@ -534,6 +534,75 @@ func TestFilesystemTool_EditFile(t *testing.T) {
 	assert.Nil(t, result.Meta)
 }
 
+// Files checked out with CRLF line endings (Git for Windows' default
+// core.autocrlf) are read back to the model with CRLF, but models send
+// LF-only oldText, so every multi-line edit used to fail with "old text not
+// found". The edit now matches with the file's line endings and keeps them.
+func TestFilesystemTool_EditFileCRLF(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		original string
+		edit     Edit
+		want     string
+		wantErr  string
+	}{
+		{
+			name:     "LF edit applies to a CRLF file and keeps CRLF",
+			original: "package main\r\n\r\nfunc main() {\r\n	println(\"hi\")\r\n}\r\n",
+			edit:     Edit{OldText: "func main() {\n	println(\"hi\")", NewText: "func main() {\n	println(\"bye\")\n	println(\"!\")"},
+			want:     "package main\r\n\r\nfunc main() {\r\n	println(\"bye\")\r\n	println(\"!\")\r\n}\r\n",
+		},
+		{
+			name:     "CRLF edit still applies as sent",
+			original: "a\r\nb\r\nc\r\n",
+			edit:     Edit{OldText: "a\r\nb", NewText: "x\r\ny"},
+			want:     "x\r\ny\r\nc\r\n",
+		},
+		{
+			name:     "single-line edit in a CRLF file is unchanged",
+			original: "a\r\nb\r\n",
+			edit:     Edit{OldText: "b", NewText: "B"},
+			want:     "a\r\nB\r\n",
+		},
+		{
+			name:     "LF file is not converted",
+			original: "a\nb\nc\n",
+			edit:     Edit{OldText: "a\nb", NewText: "x\ny"},
+			want:     "x\ny\nc\n",
+		},
+		{
+			name:     "text missing from a CRLF file still fails",
+			original: "a\r\nb\r\n",
+			edit:     Edit{OldText: "a\nc", NewText: "x"},
+			wantErr:  "old text not found",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			tool := New(tmpDir)
+			require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "f.txt"), []byte(tc.original), 0o644))
+
+			result, err := tool.handleEditFile(t.Context(), EditFileArgs{Path: "f.txt", Edits: []Edit{tc.edit}})
+			require.NoError(t, err)
+
+			after, err := os.ReadFile(filepath.Join(tmpDir, "f.txt"))
+			require.NoError(t, err)
+			if tc.wantErr != "" {
+				assert.True(t, result.IsError)
+				assert.Contains(t, result.Output, tc.wantErr)
+				assert.Equal(t, tc.original, string(after))
+				return
+			}
+			assert.False(t, result.IsError, result.Output)
+			assert.Equal(t, tc.want, string(after))
+		})
+	}
+}
+
 // An empty oldText is never a meaningful edit: strings.Contains(s, "") is always
 // true and strings.Replace(s, "", new, 1) inserts at offset 0, so without a guard
 // the file is silently prepended to and the tool still reports success.
