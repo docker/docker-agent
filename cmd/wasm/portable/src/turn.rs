@@ -1449,17 +1449,7 @@ impl Step {
         {
             return Err("refusal or legacy function_call is not supported".into());
         }
-        let reasoning = string(delta, "reasoning_content")?
-            .filter(|s| !s.is_empty())
-            .or(string(delta, "reasoning")?);
-        if let Some(s) = reasoning.filter(|s| !s.is_empty()) {
-            self.reasoning.push_str(s);
-            events.push(json!({"type":"delta", "message_id":id, "reasoning":s}));
-        }
-        if let Some(s) = string(delta, "content")?.filter(|s| !s.is_empty()) {
-            self.text.push_str(s);
-            events.push(json!({"type":"delta", "message_id":id, "content":s}));
-        }
+        // Like Go, report a chunk's tool-call fragments before its text.
         if !delta["tool_calls"].is_null() {
             for fragment in delta["tool_calls"]
                 .as_array()
@@ -1481,6 +1471,17 @@ impl Step {
                     events.push(event);
                 }
             }
+        }
+        let reasoning = string(delta, "reasoning_content")?
+            .filter(|s| !s.is_empty())
+            .or(string(delta, "reasoning")?);
+        if let Some(s) = reasoning.filter(|s| !s.is_empty()) {
+            self.reasoning.push_str(s);
+            events.push(json!({"type":"delta", "message_id":id, "reasoning":s}));
+        }
+        if let Some(s) = string(delta, "content")?.filter(|s| !s.is_empty()) {
+            self.text.push_str(s);
+            events.push(json!({"type":"delta", "message_id":id, "content":s}));
         }
         self.finish = string(choice, "finish_reason")?.map(str::to_owned);
         Ok(events)
@@ -1661,11 +1662,12 @@ mod tests {
                 None,
             ))
             .unwrap();
-        assert_eq!(events[0]["message_id"], "turn");
         assert_eq!(
-            events[2],
+            events[0],
             json!({"type":"tool_call_delta", "id":"a", "name":"think", "arguments":r#"{"thought":"#})
         );
+        assert_eq!(events[1]["reasoning"], "why");
+        assert_eq!(events[2]["message_id"], "turn");
         let events = c
             .chunk(chunk(
                 json!({"tool_calls":[
