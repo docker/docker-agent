@@ -114,19 +114,28 @@ impl Session {
         yaml: &str,
         agent: &str,
         env: &BTreeMap<String, String>,
-        history: Vec<Value>,
+        history: Option<Vec<Value>>,
         stamp: session_context::Stamp,
         auto_approve: bool,
     ) -> Result<Self, String> {
-        let (entry, specs) = crate::config::team(yaml, agent, env)?;
+        // Only one-shot chat supplies seed history (which may be empty).
+        let (entry, specs, plain_history) =
+            crate::config::team(yaml, agent, env, history.is_some())?;
+        let history = history.unwrap_or_default();
         let multipart = history
             .iter()
             .any(|m| m["multi_content"].as_array().is_some_and(|p| !p.is_empty()));
-        // Stripped multipart system content can look like plain text after projection.
-        if (multipart || history.iter().any(|m| !m["name"].is_null()))
-            && specs.iter().any(|s| s.has_schema_instruction())
-        {
-            return Err("Claude schema instructions require unnamed text-only history".into());
+        // Projections can erase names and transform attachment text before per-agent redaction.
+        if multipart || history.iter().any(|m| !m["name"].is_null()) {
+            if specs.iter().any(|s| s.has_schema_instruction()) {
+                return Err("Claude schema instructions require unnamed text-only history".into());
+            }
+            if plain_history {
+                return Err(
+                    "team output tools and redaction opt-outs require unnamed text-only history"
+                        .into(),
+                );
+            }
         }
         let shared = Rc::new(RefCell::new(crate::todo::Todos::default()));
         let mut agents = BTreeMap::new();

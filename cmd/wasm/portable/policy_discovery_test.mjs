@@ -424,7 +424,10 @@ test('unsupported tool schemas fail before fetch even on unselected agents', asy
     await assert.rejects(api.createSession({yaml:config([], {agents})}), /structured_output/);
   }
   const agents = {root:{model:'local/test', handoffs:['child']}, child:{model:'local/test', structured_output:output}};
-  await assert.rejects(api.createSession({yaml:config([], {agents})}), /tool-mode structured output with local teams/);
+  const handoff = await api.createSession({yaml:config([], {agents})});
+  await handoff.close();
+  agents.root = {model:'local/test', sub_agents:['child']};
+  await assert.rejects(api.createSession({yaml:config([], {agents})}), /tool-mode structured output inside transfer_task/);
   for (const field of [{max_iterations:1}, {max_tool_result_tokens:1}, {num_history_items:1}, {toolsets:[{type:'think',model:'local/cheap'}]}]) {
     await assert.rejects(api.createSession({yaml:config([], {}, {structured_output:output,...field})}), /tool-mode structured output with history limits/);
   }

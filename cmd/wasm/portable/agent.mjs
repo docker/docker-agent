@@ -29,7 +29,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     if ('safety' in opts || 'permissions' in opts) throw new Error('portable safety and permissions must be configured in YAML');
     validateDocuments(opts.documents);
     let host = createHost(opts, onEvent, stateless);
-    let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, auto_approve: opts.autoApprove === true, history: history ?? [], stamp: sessionStamp() });
+    let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, auto_approve: opts.autoApprove === true, history, stamp: sessionStamp() });
     try {
       for (const { targets } of Object.values(handle.profiles)) {
         for (const { transport, keyBase } of targets) prepareModelTransport(transport, keyBase);

@@ -673,8 +673,8 @@ agents: {root: {model: ordinary, ${smallSummary && !failed ? 'compaction_model: 
   const schema = { type: 'object', properties: { colors: { type: 'array', items: { type: 'string' } } },
     required: ['colors'], additionalProperties: false };
   const jsonAnswer = '{"colors":["blue"]}';
-  const withSchema = (yaml, options) => yaml.replace('model: local/test',
-    `model: local/test, structured_output: ${JSON.stringify({ name: 'palette', schema, ...options })}`);
+  const withSchema = (yaml, options, model = 'local/test') => yaml.replace(`model: ${model}`,
+    `model: ${model}, structured_output: ${JSON.stringify({ name: 'palette', schema, ...options })}`);
   const chatJSON = [piece({ role: 'assistant', content: jsonAnswer }, 'stop'), usage];
   tests.structuredChat = await replay(api, 'structuredChat', withSchema(config, {}), [chatJSON, chatJSON], turns);
   const responsesJSON = [{ ...text[0], delta: jsonAnswer }, fin([])];
@@ -715,9 +715,38 @@ agents: {root: {model: ordinary, ${smallSummary && !failed ? 'compaction_model: 
   const output = '__structured_output__';
   const final = tool(output, JSON.parse(jsonAnswer));
   const palette = withSchema(local(['think']), { mode: 'tool', description: 'Chosen colors' });
+  const toolMode = {mode: 'tool'};
+  const childOutput = yaml => withSchema(yaml, {...toolMode, description: 'Worker palette'}, 'local/worker');
+  const boundedChild = childOutput(limitedTeam('', 'max_iterations: 2, session_compaction: false,'));
+  const bounced = withSchema(handoffOnly(limitedTeam('', 'handoffs: [root],')), toolMode);
+  const secretReply = [piece({content: secret}, 'stop'), usage];
+  const secretTask = tool('transfer_task', {agent: 'helper', task: secret});
+  for (const [name, yaml, replies, drive = turns] of [
+    ['teamOutputDelegate', boundedChild, [delegate(), answer, final, [piece({content: '  '}, 'stop'), usage], answer]],
+    ['teamOutputDelegateCap', boundedChild, [delegate(), answer, answer, answer, answer]],
+    ['teamOutputCaller', withSchema(team, toolMode), [answer, delegate(), answer, final, final]],
+    ['teamOutputHandoffReset', bounced, [answer, pass(), pass('root'), answer, answer, final, final]],
+    ['teamOutputHandoffFailure', childOutput(handoffOnly(team)), [pass(), answer, answer, answer, final], rejectsThenRecovers],
+    ['teamOutputForced', childOutput(withSchema(pipeline, toolMode)), [answer, final, answer, final, final]],
+    ['teamOutputForcedCap', withSchema(limitedPipeline('max_iterations: 3, session_compaction: false,', ''), toolMode), [answer, final, ponder('cap'), answer]],
+    ['teamRedactionHandoff', handoffOnly(limitedTeam('redact_secrets: false,', 'handoffs: [root],')),
+      [ponder(secret), pass(), ponder(secret, 'redacted'), pass('root'), answer],
+      async ({api, options, record, trace}) => trace.results.push(await api.chat({...options, messages: [{role: 'user', content: secret}]}, record))],
+    ['teamRedactionTransferIn', limitedTeam('redact_secrets: false,', '').replace(', handoffs: [helper]', ''),
+      [secretTask, ponder(secret), secretReply, answer], sends([secret])],
+    ['teamRedactionTransferOut', limitedTeam('', 'redact_secrets: false,').replace(', handoffs: [helper]', ''),
+      [secretTask, ponder(secret), secretReply, answer], sends([secret])],
+  ]) tests[name] = await replay(api, name, yaml, replies, drive);
+  const workerResponses = withSchema(responsesHelper('', 'max_iterations: 2, session_compaction: false,'), toolMode, 'spare/worker');
+  tests.teamOutputDelegateResponses = await replay(api, 'teamOutputDelegateResponses', workerResponses,
+    [delegate(), text, responseCall({...fn, name: output}, jsonAnswer), answer], withSpareKey(single),
+    ['/v1/chat/completions', '/v1/responses', '/v1/responses', '/v1/chat/completions']);
   // The ordinary tool is first on the wire; Go intercepts and rejects the output call before dispatch.
   const mixed = [['think', '{"thought":"plan"}'], [output, jsonAnswer]].map(([name, args], index) =>
     ({ index, id: `mixed_${index}`, type: 'function', function: { name, arguments: args } }));
+  const mixedTransfer = [{...mixed[0], function: {name: 'transfer_task', arguments: '{"agent":"helper","task":"count"}'}}, mixed[1]];
+  tests.teamOutputMixedTransfer = await replay(api, 'teamOutputMixedTransfer', withSchema(team, toolMode),
+    [[piece({tool_calls: mixedTransfer}, 'tool_calls'), usage], answer, final], single);
   tests.outputTool = await replay(api, 'outputTool', palette, [answer, rawTool(output, '{"colors":'), tool(output, {}),
     [piece({ tool_calls: mixed }, 'tool_calls'), usage], final, final], turns);
   const toolFailure = async ({ api, options, record, trace }) => {

@@ -104,7 +104,7 @@ struct Turn {
     message_id: String,
     tool_rounds: usize,
     reminders: usize,
-    forced: usize,
+    iterations: usize,
     // Whether this agent's previous model call in the run used tools.
     after_tools: bool,
     input: u64,
@@ -542,16 +542,12 @@ impl Conversation {
     }
 
     pub fn forced(&mut self, profile: Rc<Profile>, note: String) {
-        self.profile = profile;
+        self.hand_off(profile);
         self.messages.push(json!({"role":"user","content":note}));
-        let t = self.active.as_mut().expect("forced continuation");
-        t.message_id = format!(
-            "{}:forced:{}:{}",
-            t.id, self.profile.spec.name, t.tool_rounds
-        );
-        t.tool_model_source = None;
-        t.forced += 1;
-        t.after_tools = false;
+        self.active
+            .as_mut()
+            .expect("forced continuation")
+            .tool_model_source = None;
     }
     pub fn restart(&mut self, stamp: crate::session_context::Stamp) -> Result<(), String> {
         self.cancel();
@@ -612,7 +608,7 @@ impl Conversation {
             message_id: id.into(),
             tool_rounds: 0,
             reminders: 0,
-            forced: 0,
+            iterations: 0,
             after_tools: false,
             input: 0,
             output: 0,
@@ -965,6 +961,7 @@ impl Conversation {
                 "context_limit": self.profile.spec.context_window(), "cost": 0
             }));
         }
+        turn.iterations += 1;
         let mut message = json!({"role":"assistant"});
         if !step.text.is_empty() || step.calls.is_empty() {
             message["content"] = Value::String(step.text);
@@ -996,7 +993,6 @@ impl Conversation {
                     }
                     let turn = self.active.as_mut().unwrap();
                     turn.reminders += 1;
-                    turn.message_id = format!("{}:reminder:{}", turn.id, turn.reminders);
                     return Ok(self.continue_turn(events));
                 }
                 Ok(self.finish(events))
@@ -1007,7 +1003,6 @@ impl Conversation {
                 }
                 turn.tool_rounds += 1;
                 turn.after_tools = true;
-                turn.message_id = format!("{}:{}", turn.id, turn.tool_rounds);
                 self.execute_calls(step.calls, message, events)
             }
             None => Err("incomplete stream: missing finish_reason".into()),
@@ -1032,13 +1027,14 @@ impl Conversation {
     }
 
     pub fn hand_off(&mut self, profile: Rc<Profile>) {
-        // Go forgets the previous agent's tool activity.
+        // Tool activity and reminders belong to the acting agent, not the frame.
         if let Some(turn) = self
             .active
             .as_mut()
             .filter(|_| !Rc::ptr_eq(&self.profile, &profile))
         {
             turn.after_tools = false;
+            turn.reminders = 0;
         }
         self.profile = profile;
     }
@@ -1073,8 +1069,11 @@ impl Conversation {
         let mut unavailable = BTreeSet::new();
         let mut malformed = Vec::with_capacity(calls.len());
         let mut wire_calls = Vec::with_capacity(calls.len());
-        if calls.len() != 1
-            && calls.values().any(|c| {
+        let mut dispatched = calls.values().filter(|c| {
+            self.profile.spec.output_tool.is_none() || c.name != structured_output::NAME
+        });
+        if dispatched.clone().count() > 1
+            && dispatched.any(|c| {
                 matches!(c.name.as_str(), "transfer_task" | "handoff")
                     && self.profile.catalog.borrow().tools.contains_key(&c.name)
             })
@@ -1152,7 +1151,7 @@ impl Conversation {
                 let visible = content
                     .split_once("<tool_call>")
                     .map_or(content.as_str(), |(text, _)| text);
-                events.push(json!({"type":"delta", "message_id":format!("{}:output", turn.id), "content":visible}));
+                events.push(json!({"type":"delta", "message_id":format!("{}:output", turn.message_id), "content":visible}));
                 self.messages
                     .push(json!({"role":"assistant", "content":content}));
                 if let Some(error) = self.repetition_error() {
@@ -1578,19 +1577,15 @@ impl Conversation {
 
     pub fn at_cap(&self) -> bool {
         let max = self.frame.max_iterations as usize;
-        max > 0 && self.iterations() >= max
-    }
-
-    // Reminders and forced handoffs are model calls without a tool round.
-    fn iterations(&self) -> usize {
-        let t = self.active.as_ref().expect("active turn");
-        t.tool_rounds + t.reminders + t.forced
+        max > 0 && self.active.as_ref().expect("active turn").iterations >= max
     }
 
     // Go checks the session cap, then the acting agent's hook, before each model call.
     pub fn resume(&mut self, mut events: Vec<Value>) -> Value {
-        let t = self.active.as_ref().expect("active turn");
-        if self.at_cap() {
+        let capped = self.at_cap();
+        let t = self.active.as_mut().expect("active turn");
+        t.message_id = format!("{}:{}", t.id, t.iterations);
+        if capped {
             let max = self.frame.max_iterations;
             let text = format!(
                 "Execution stopped after reaching the configured max_iterations limit ({max})."
@@ -1606,20 +1601,18 @@ impl Conversation {
             self.active = None;
             return json!({"events":events,"result":result});
         }
-        let calls = self.iterations();
         if let Some(limit) = self
             .profile
             .spec
             .hooks
             .max_calls
-            .filter(|&n| calls >= n as usize)
+            .filter(|&n| t.iterations >= n as usize)
         {
             self.active = None;
             return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
         }
         if self.profile.spec.separate_model_attempts {
             // A later cancellation or projection error must not erase completed tool effects.
-            let t = self.active.as_mut().expect("active tool round");
             t.messages_before = self.messages.len();
             t.scratchpads_before = self
                 .scratchpads

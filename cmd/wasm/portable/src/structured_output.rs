@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 pub const NAME: &str = "__structured_output__";
 pub const REMINDER: &str = "Reminder: this conversation requires structured output. Do not answer in plain text. Call the __structured_output__ tool with your final answer as arguments matching its JSON schema; a valid call ends the turn.";
-const MAX_REMINDERS: usize = 2;
+pub const MAX_REMINDERS: usize = 2;
 pub const MAX_ARGS: usize = 64 * 1024;
 const MAX_SCHEMA_NODES: usize = 128;
 const MAX_DEPTH: usize = 16;
