@@ -87,12 +87,19 @@ enum Command {
         remember: bool,
         reason: String,
     },
+    PollBatch {
+        session: u32,
+    },
     HostResult {
         agent: String,
         session: u32,
         token: String,
         output: String,
         is_error: bool,
+    },
+    ValidateElicitation {
+        action: String,
+        content: Option<serde_json::Map<String, Value>>,
     },
     AnswerElicitation {
         session: u32,
@@ -206,6 +213,11 @@ impl Core {
                     .confirm(&token, approved, remember, &reason)?;
                 s.advance(next, now)
             }
+            Command::PollBatch { session } => {
+                let s = self.session(session)?;
+                let n = s.conversation.poll_batch()?;
+                s.next(n)
+            }
             Command::HostResult {
                 agent,
                 session,
@@ -226,6 +238,10 @@ impl Core {
                 let s = self.session(session)?;
                 let next = s.conversation.answer(&id, &action, content)?;
                 s.next(next)
+            }
+            Command::ValidateElicitation { action, content } => {
+                turn::Conversation::answer_output(&action, content)?;
+                Ok(Value::Null)
             }
             Command::Cancel { session } => {
                 self.session(session)?.cancel();

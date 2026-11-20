@@ -37,7 +37,6 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       host.configure(handle.profiles);
     } catch (e) { call('close', { session: handle.session }); throw e; }
     let active, batch, restarting = false, closing;
-    const pending = new Set();
 
     function emit(event) {
       if (typeof onEvent !== 'function') return;
@@ -46,69 +45,153 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     function report(e) { console.warn('docker-agent: onEvent failed', e); }
     function abort() {
       active?.controller.abort();
-      pending.clear();
-      batch?.reject(new Error('chat aborted'));
+      batch?.wake();
     }
 
-    function answer(reply) {
-      if (closing) throw new Error('session is closed');
-      const { id, action, content } = reply ?? {};
-      if (typeof id !== 'string' || !id) throw new Error('respondToElicitation: id is required');
-      if (!pending.has(id)) throw new Error('no pending elicitation with that ID');
-      const next = call('answerElicitation', { session: handle.session, id, action, content });
-      pending.delete(id);
-      settle(next);
+    // For batches outside the scheduler's envelope, retain the original host-order delivery.
+    async function serialBatch(next, signal) {
+      const session = handle.session, pending = new Set(), finished = Promise.withResolvers();
+      const owner = new AbortController();
+      signal = AbortSignal.any([signal, owner.signal]);
+      const settle = step => {
+        if (step.result) { finished.resolve(step); return; }
+        for (const event of step.events) emit(event);
+        if (!step.waiting) finished.resolve({...step, events:[]});
+      };
+      function answer(reply) {
+        const { id, action, content } = reply ?? {};
+        if (typeof id !== 'string' || !id) throw new Error('respondToElicitation: id is required');
+        if (signal.aborted || !pending.has(id)) throw new Error('no pending elicitation with that ID');
+        const step = call('answerElicitation', {session, id, action, content});
+        pending.delete(id);
+        settle(step);
+      }
+      async function deliver(step) {
+        for (const e of step.events) {
+          signal.throwIfAborted();
+          if (e.type === 'host_call') {
+            emit({type:'tool_call', id:e.id, name:e.name, args:e.args});
+            const result = await host.execute(e, signal);
+            signal.throwIfAborted();
+            settle(call('hostResult', {session, agent:e.agent, token:e.token, ...result}));
+          } else if (e.type === 'approval') {
+            const reply = await host.approval(e, signal);
+            signal.throwIfAborted();
+            await deliver(call('confirm', {session, now:performance.now(), agent:e.agent, token:e.token, ...reply}));
+          } else if (e.type === 'elicitation') {
+            const id = e.id;
+            pending.add(id);
+            if (typeof onEvent !== 'function') answer({id,action:'decline'});
+            else if (!stateless) emit(e);
+            else void (async () => {
+              try {
+                const reply = await onEvent(e);
+                if (!signal.aborted) answer({id, action:typeof reply === 'string' ? reply : reply === true ? 'accept' : reply?.action, content:reply?.content});
+              } catch { if (!signal.aborted && pending.has(id)) answer({id,action:'decline'}); }
+            })().catch(finished.reject);
+          } else emit(e);
+        }
+        if (!step.waiting) finished.resolve({...step, events:[]});
+      }
+      batch = {answer, wake:() => finished.reject(new Error('chat aborted'))};
+      finished.promise.catch(() => {}); // abort can reject during host I/O
+      try { await deliver(next); return await finished.promise; }
+      finally { owner.abort(); batch = null; }
     }
 
-    function settle(next) {
-      // A terminal delta and finish must follow every other event in this batch.
-      if (next.result) { batch.resolve(next); return; }
-      for (const event of next.events) emit(event);
-      if (next.error) batch.reject(new Error(next.error));
-      else if (!next.waiting) batch.resolve({ request: next.request, events: [] });
-    }
-    async function elicit(events, signal) {
-      const replies = new Promise((resolve, reject) => { batch = { resolve, reject }; });
-      // A direct abort can reject this promise while a host operation is awaiting I/O.
-      replies.catch(() => {});
-      try {
-        await deliver(events, signal);
-        return await replies;
-      } finally { pending.clear(); batch = null; }
-    }
-    async function deliver(events, signal) {
-      for (const event of events) {
-        signal.throwIfAborted();
-        if (event.type === 'approval') {
-          const answer = await host.approval(event, signal);
-          signal.throwIfAborted();
-          const next = call('confirm', {now:performance.now(),session:handle.session, agent:event.agent, token:event.token, ...answer});
-          await deliver(next.events, signal);
-          if (next.error) batch.reject(new Error(next.error));
-          else if (next.result) batch.resolve({...next,events:[]});
-          else if (!next.waiting) batch.resolve({request:next.request,events:[]});
-        } else if (event.type === 'host_call') {
-          const result = await host.execute(event, signal, emit);
-          signal.throwIfAborted();
-          settle(call('hostResult', {session:handle.session, agent:event.agent, token:event.token, ...result}));
-        } else if (event.type === 'elicitation') {
-          const id = event.id;
-          pending.add(id);
-          if (typeof onEvent !== 'function') answer({ id, action:'decline' });
-          else if (stateless) answerFromCallback(event, id);
-          else emit(event);
-        } else emit(event);
+    // Drive runnable calls before consuming a callback answer. Only a plain chat answer
+    // can wake Go before its parked stderr writers; promises and session replies need JS.
+    async function driveBatch(next, signal) {
+      const owner = new AbortController();
+      signal = AbortSignal.any([signal, owner.signal]);
+      const session = handle.session, ready = [], external = [], visible = [], pending = new Set();
+      let wake, blocked = false, live = true, justUnlocked = false;
+      const notify = () => wake?.();
+      function schedule(queue, job) {
+        if (!live || signal.aborted) return;
+        queue.push(job);
+        notify();
       }
-    }
-    async function answerFromCallback(event, id) {
-      try {
-        const reply = await onEvent(event);
-        if (!pending.has(id)) return;
-        const action = typeof reply === 'string' ? reply : reply === true ? 'accept' : reply?.action;
-        answer({ id, action, content: reply?.content });
-      } catch {
-        if (pending.has(id)) answer({ id, action: 'decline' });
+      function resume(value, job, interactive) {
+        let then;
+        try { then = value?.then; } catch { value = undefined; }
+        if (typeof then !== 'function') { schedule(ready, () => job(value)); return; }
+        if (interactive && stateless) blocked = true;
+        Promise.resolve(value).then(result => schedule(external, () => {
+          if (interactive && stateless) blocked = false;
+          return job(result);
+        }), error => schedule(external, () => {
+          if (!interactive) throw error;
+          blocked = false;
+          return job(undefined);
+        }));
       }
+      function publish() {
+        while (!blocked && visible.length) {
+          signal.throwIfAborted();
+          const event = visible.shift();
+          if (event.type === 'approval') {
+            resume(host.approval(event, signal), reply => {
+              justUnlocked = true;
+              return call('confirm', {now:performance.now(), session, agent:event.agent, token:event.token, ...reply});
+            }, true);
+          } else if (event.type === 'elicitation') {
+            const id = event.id;
+            pending.add(id);
+            if (typeof onEvent !== 'function' || stateless) {
+              let value;
+              try { value = onEvent?.(event); } catch { /* Decline a failed callback. */ }
+              resume(value, reply => {
+                pending.delete(id);
+                try {
+                  const action = typeof reply === 'string' ? reply : reply === true ? 'accept' : reply?.action;
+                  return call('answerElicitation', {session, id, action, content:reply?.content});
+                } catch { return call('answerElicitation', {session, id, action:'decline'}); }
+              }, true);
+            } else emit(event);
+          } else emit(event);
+        }
+      }
+      batch = {wake:notify, answer(reply) {
+        const { id, action, content } = reply ?? {};
+        if (typeof id !== 'string' || !id) throw new Error('respondToElicitation: id is required');
+        if (!pending.has(id) || signal.aborted) throw new Error('no pending elicitation with that ID');
+        // Snapshot and validate now; the session reply becomes runnable only when Go is idle.
+        const args = JSON.parse(JSON.stringify({session, id, action, content}));
+        call('validateElicitation', args);
+        pending.delete(id);
+        schedule(external, () => call('answerElicitation', args));
+      }};
+      try {
+        for (;;) {
+          let atomic;
+          for (const event of next.events) {
+            signal.throwIfAborted();
+            if (event.type === 'host_call') {
+              visible.push({type:'tool_call', id:event.id, name:event.name, args:event.args});
+              publish();
+              const result = host.execute(event, signal);
+              const done = reply => call('hostResult', {session, agent:event.agent, token:event.token, ...reply});
+              if (event.network) resume(result, done, false);
+              else atomic = done(result);
+            } else visible.push(event);
+          }
+          publish();
+          if (!next.waiting) return {...next, events:[]};
+          if (atomic) { next = atomic; continue; }
+          signal.throwIfAborted();
+          // Unlock wakes one mutex waiter, not the entire line of approvals.
+          const poll = (next.unlocked && justUnlocked) || (!ready.length && (next.unlocked || next.logged));
+          justUnlocked = false;
+          if (poll) next = call('pollBatch', { session });
+          else if (ready.length) next = ready.shift()();
+          else {
+            if (!external.length) await new Promise(resolve => { wake = resolve; });
+            signal.throwIfAborted();
+            next = external.shift()();
+          }
+        }
+      } finally { live = false; batch = null; owner.abort(); }
     }
     async function stop() {
       abort();
@@ -177,7 +260,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             continue;
           }
           if (next.waiting) {
-            next = await elicit(next.events, signal);
+            next = await (next.serial ? serialBatch : driveBatch)(next, signal);
             signal.throwIfAborted();
           }
           for (const event of next.events) {
@@ -230,7 +313,10 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       async confirm(reply, reason) { if (closing) throw new Error('session is closed'); host.confirm(reply, reason); },
       async respondToElicitation(reply) {
         if (closing) throw new Error('session is closed');
-        if (!host.respond(reply)) answer(reply);
+        if (!host.respond(reply)) {
+          if (!batch) throw new Error('no pending elicitation with that ID');
+          batch.answer(reply);
+        }
       },
     };
   }

@@ -26,6 +26,7 @@ async function capture(runtime) {
   const server = createServer(async (req, res) => {
     try {
       if (req.method === 'POST' && req.url === '/trace') {
+        req.setEncoding('utf8');
         let text = '';
         for await (const chunk of req) text += chunk;
         const { tests, error } = JSON.parse(text);

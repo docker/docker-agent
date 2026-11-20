@@ -1,5 +1,7 @@
 import { httpTools, proxyURL, toolFetch } from './http-tools.mjs';
 import { prepareMCP } from './mcp.mjs';
+import { localTools } from './local-tools.mjs';
+import { clockTool } from './clock.mjs';
 
 // Each live session has its own native resources, tool bindings, and outstanding questions.
 export function createHost(opts, onEvent, stateless) {
@@ -18,42 +20,46 @@ export function createHost(opts, onEvent, stateless) {
     if (reply?.confirmationId !== waiter.token && !(reply?.confirmationId === undefined && delivering === waiter)) {
       throw new Error('confirmationId must match the pending tool confirmation');
     }
-    decide(waiter, reply, reason);
+    waiter.resolve(decide(waiter.name, reply, reason));
+    confirmation = null;
   }
-  function decide(waiter, reply, reason) {
+  function decide(name, reply, reason) {
     const decision = typeof reply === 'boolean' ? reply ? 'approve' : 'reject' : typeof reply === 'string' ? reply : reply?.decision;
     if (!['reject','approve','approve_tool','approve_balanced','approve_autonomous'].includes(decision)) throw new Error(`unknown decision ${JSON.stringify(decision)}`);
-    if (decision === 'approve_tool' && reply?.toolName !== waiter.name) throw new Error('approve_tool requires toolName matching pending tool');
+    if (decision === 'approve_tool' && reply?.toolName !== name) throw new Error('approve_tool requires toolName matching pending tool');
     // Broader modes authorize this invocation. Do not infer an always-allow rule
     // for other tools from the current tool's safety classification.
     const result = { approved: decision !== 'reject', reason: String(reason ?? reply?.reason ?? '').trim() };
     if (decision === 'approve_tool') result.remember = true;
-    confirmation = null;
-    waiter.resolve(result);
+    return result;
   }
-  async function approval({ agent, name, args, id, token }, signal) {
+  function approval({ agent, name, args, id, token }, signal) {
     signal.throwIfAborted();
     if (typeof onEvent !== 'function') return { approved:false, reason:'' };
+    const event = { type:'tool_confirmation', id, name, args, ...(profiles.size > 1 && {agent}), ...(!stateless && {confirmationId:token}) };
+    if (stateless) {
+      const decision = reply => {
+        try { return decide(name, reply ?? false); }
+        catch { return decide(name, false); }
+      };
+      try {
+        const reply = dispatch(event);
+        return typeof reply?.then === 'function' ? Promise.resolve(reply).then(decision, () => decision(false)) : decision(reply);
+      } catch { return decision(false); }
+    }
     const { promise, resolve, reject } = Promise.withResolvers();
     const waiter = { resolve, name, token, signal };
-    confirmation = waiter;
+    confirmation = delivering = waiter;
+    let reply;
+    try { reply = dispatch(event); } finally { delivering = null; }
+    Promise.resolve(reply).catch(() => {});
     const abort = () => reject(new Error('chat aborted'));
     signal.addEventListener('abort', abort, { once: true });
-    try {
-      signal.throwIfAborted();
-      delivering = waiter;
-      let reply;
-      try { reply = dispatch({ type:'tool_confirmation', id, name, args, ...(profiles.size > 1 && {agent}), ...(!stateless && {confirmationId:token}) }); }
-      finally { delivering = null; }
-      if (stateless) Promise.resolve(reply).then(v => {
-        if (confirmation === waiter && !signal.aborted) decide(waiter, v ?? false);
-      }).catch(() => { if (confirmation === waiter && !signal.aborted) decide(waiter, false); });
-      else Promise.resolve(reply).catch(() => {});
-      return await promise;
-    } finally {
+    if (signal.aborted) abort();
+    return promise.finally(() => {
       signal.removeEventListener('abort', abort);
       if (confirmation === waiter) confirmation = null;
-    }
+    });
   }
   async function elicit(event, signal) {
     if (typeof onEvent !== 'function') return { action: 'decline' };
@@ -81,12 +87,9 @@ export function createHost(opts, onEvent, stateless) {
       const bindings = new Map(), sources = [];
       for (const [index, spec] of toolsets.entries()) {
         if (spec.type === 'memory' || spec.type === 'plan') {
-          bindings.set(index, async (...args) => {
-            local ??= (await import('./local-tools.mjs')).localTools();
-            return local.call(...args);
-          });
+          bindings.set(index, (...args) => (local ??= localTools()).call(...args));
         } else if (spec.type === 'datetime' || spec.type === 'random') {
-          bindings.set(index, async (name, args) => (await import('./clock.mjs')).clockTool(name, args));
+          bindings.set(index, clockTool);
         } else if (['mcp', 'fetch', 'api'].includes(spec.type)) {
           const { readonly, tools, instruction, model, ...config } = spec;
           if (spec.type === 'mcp') {
@@ -124,21 +127,22 @@ export function createHost(opts, onEvent, stateless) {
       throw error;
     }
   }
-  async function execute(internal, signal, emit) {
-    const event = { type:'tool_call', id:internal.id, name:internal.name, args:internal.args };
+  function execute(internal, signal) {
     signal.throwIfAborted();
-    emit(event);
-    signal.throwIfAborted();
-    try {
-      const fn = profiles.get(internal.agent)?.bindings.get(internal.source);
-      if (!fn) throw new Error(`unavailable host tool ${event.name}`);
-      const result = await fn(internal.name, internal.input ?? internal.args, signal);
+    function validate(result) {
       if (typeof result.output !== 'string' || typeof result.is_error !== 'boolean') throw new Error('invalid host tool result');
       return result;
-    } catch (e) {
+    }
+    function failed(e) {
       signal.throwIfAborted();
       return { output:e.message || String(e), is_error:true };
     }
+    try {
+      const fn = profiles.get(internal.agent)?.bindings.get(internal.source);
+      if (!fn) throw new Error(`unavailable host tool ${internal.name}`);
+      const result = fn(internal.name, internal.input ?? internal.args, signal);
+      return internal.network ? result.then(validate).catch(failed) : validate(result);
+    } catch (e) { return failed(e); }
   }
   return { configure, open, approval, execute, confirm, respond, async close() {
     profiles.clear(); local = null;

@@ -47,11 +47,81 @@ test('mandatory asks gate pure Rust writes; argument denies survive overlapping 
     if (e.type === 'tool_confirmation') return JSON.parse(e.args).description === 'approved';
   });
   assert.deepEqual(events.filter(e => e.type === 'tool_confirmation').map(e => e.id), ['call-2', 'call-3']);
-  assert.deepEqual(events.filter(e => e.type === 'tool_call').map(e => e.id), ['call-3', 'call-4']);
+  assert.deepEqual(events.filter(e => e.type === 'tool_call').map(e => e.id), ['call-4', 'call-3']);
   assert.match(requests[1].messages.at(-5).content, /denied/);
   assert.match(requests[1].messages.at(-4).content, /denied/);
-  assert.match(requests[1].messages.at(-3).content, /rejected/);
-  assert.deepEqual(JSON.parse(lastOutput(requests[1])).todos, [{id:'todo_1',description:'approved',status:'pending'}]);
+  assert.equal(JSON.parse(requests[1].messages.at(-3).content).todos.length, 0);
+  assert.match(requests[1].messages.at(-2).content, /rejected/);
+  assert.deepEqual(JSON.parse(lastOutput(requests[1])).all_todos, [{id:'todo_1',description:'approved',status:'pending'}]);
+});
+
+for (const mode of ['plain', 'thenable', 'session']) {
+  test(`a ${mode} approval orders a batched write against parked loggers`, {timeout:5000}, async t => {
+    const yaml = config([{type:'memory'}, {type:'think'}]);
+    const requests = replay(t, [[call('nope', {}), call('delete_memory', {id:'m'}), call('think', {})], null]);
+    const events = [];
+    let session;
+    function record(e) {
+      events.push(e);
+      if (e.type !== 'tool_confirmation') return;
+      if (mode === 'session') return session.confirm(true);
+      return mode === 'plain' ? true : {then(resolve) { resolve(true); }};
+    }
+    if (mode === 'session') {
+      session = await api.createSession({yaml}, record);
+      try { await session.send('go'); } finally { await session.close(); }
+    } else await api.chat({yaml, messages}, record);
+    const order = mode === 'plain' ? ['call-2','call-1','call-0'] : ['call-2','call-0','call-1'];
+    assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.id), order);
+    assert.deepEqual(requests[1].messages.slice(-3).map(m => m.tool_call_id), order);
+  });
+}
+
+test('overlapping API calls commit in completion order, not launch order', {timeout:5000}, async t => {
+  const started = [], release = Promise.withResolvers();
+  const requests = replay(t, [[call('slow',{}),call('fast',{})], null], async req => {
+    started.push(req.url);
+    if (req.url.endsWith('/slow')) await release.promise;
+    return new Response('ok');
+  });
+  const yaml = config([post('slow','slow'), post('fast','fast')]);
+  await api.chat({yaml, messages, autoApprove:true}, e => {
+    if (e.type === 'tool_result' && e.name === 'fast') release.resolve();
+  });
+  assert.deepEqual(started, ['https://tool.invalid/slow','https://tool.invalid/fast']);
+  assert.deepEqual(requests[1].messages.slice(-2).map(m => m.tool_call_id), ['call-1','call-0']);
+});
+
+test('session elicitation at delivery does not overtake a parked logger', async t => {
+  const requests = replay(t, [[call('unknown',{}),call('user_prompt',{message:'Choose'}),call('think',{})], null]);
+  const yaml = config([{type:'user_prompt'}, {type:'think'}]);
+  const s = await api.createSession({yaml}, e => {
+    if (e.type === 'elicitation') return s.respondToElicitation({id:e.id, action:'decline'});
+  });
+  try { await s.send('go'); } finally { await s.close(); }
+  assert.deepEqual(requests[1].messages.slice(-3).map(m => m.tool_call_id), ['call-2','call-0','call-1']);
+});
+
+test('network batches with competing interactive waits retain sequential dispatch', async t => {
+  const events = [];
+  const requests = replay(t, [[call('delete_memory',{id:'m'}), call('save',{}), call('think',{})], null], () => new Response('ok'));
+  const yaml = config([{type:'memory'}, post('save','save'), {type:'think'}]);
+  await api.chat({yaml, messages}, async e => {events.push(e); return true;});
+  assert.deepEqual(events.filter(e => e.type === 'tool_confirmation').map(e => e.id), ['call-0','call-1']);
+  assert.deepEqual(requests[1].messages.slice(-3).map(m => m.tool_call_id), ['call-0','call-1','call-2']);
+});
+
+test('a serial fallback still delivers sibling elicitations without waiting for the first answer', {timeout:5000}, async t => {
+  const requests = replay(t, [[call('user_prompt',{message:'first'}), call('user_prompt',{message:'second'}), call('save',{})], null], () => new Response('ok'));
+  const yaml = config([{type:'user_prompt'}, post('save','save')]);
+  const first = Promise.withResolvers();
+  await api.chat({yaml, messages, autoApprove:true}, e => {
+    if (e.type !== 'elicitation') return;
+    if (e.message === 'first') return first.promise;
+    first.resolve('decline');
+    return 'accept';
+  });
+  assert.deepEqual(requests[1].messages.slice(-3).map(m => m.tool_call_id), ['call-0','call-1','call-2']);
 });
 
 test('a stale decision cannot resume a later turn with the same model call ID', {timeout:5000}, async t => {
@@ -139,8 +209,8 @@ test('malformed arguments still need approval, then come back as the decoder\'s 
   assert.equal(result.message.content, 'done');
   assert.deepEqual(events.filter(e => e.type === 'tool_confirmation').map(e => e.args), ['{"memory": "x', '[1]', '{"memory":"kept"}']);
   assert.deepEqual(requests[1].messages.slice(-3).map(m => m.content), [
-    'Error calling tool: unexpected end of JSON input',
     '{"plans":[]}',
+    'Error calling tool: unexpected end of JSON input',
     'Error calling tool: json: cannot unmarshal array into Go value of type memory.AddMemoryArgs',
   ]);
   assert.match(lastOutput(requests[2]), /^Memory added successfully/);

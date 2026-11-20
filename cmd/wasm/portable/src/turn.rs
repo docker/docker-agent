@@ -113,8 +113,13 @@ struct Turn {
     queue: VecDeque<Invocation>,
     selection: Option<usize>,
     confirmation: Option<(String, Invocation)>,
+    approval_queue: VecDeque<Invocation>,
+    logged: Vec<(Reply, String)>,
+    prompts: Vec<Value>,
     pending: BTreeMap<String, Reply>,
     host_pending: BTreeMap<String, Reply>,
+    atomic_host: Option<String>,
+    serial_batch: bool,
 }
 
 impl Turn {
@@ -126,21 +131,36 @@ impl Turn {
     }
 
     fn waiting(&self) -> bool {
-        self.confirmation.is_some() || !self.pending.is_empty() || !self.host_pending.is_empty()
+        !self.approval_queue.is_empty()
+            || self.confirmation.is_some()
+            || !self.pending.is_empty()
+            || !self.host_pending.is_empty()
     }
 }
 
 struct Invocation {
     call: Call,
-    index: usize,
+    slot: usize,
     // Whether the tool was advertised for this step, before any activation in the same batch.
     available: bool,
     // Go's complaint about arguments that are not JSON; the tool reports it.
     malformed: Option<String>,
 }
 
+impl Invocation {
+    fn rejected(self) -> Reply {
+        Reply {
+            id: self.call.id,
+            name: self.call.name,
+            toon: false,
+            slot: self.slot,
+        }
+    }
+}
+
 struct Reply {
-    index: usize,
+    slot: usize,
+    id: String,
     name: String,
     toon: bool,
 }
@@ -300,6 +320,55 @@ struct Call {
     name: String,
     arguments: String,
     announced: bool,
+}
+
+// Schedule only network calls known to reach I/O, not synchronous decoder or policy failures.
+// This is a fast-path hint; dispatch still validates arguments and enforces approval and egress.
+fn simple_network_call(spec: &crate::config::Toolset, arguments: &str) -> bool {
+    if spec.options.get("allow_private_ips") != Some(&Value::Bool(true)) {
+        return false;
+    }
+    // MCP can initiate its own elicitation from inside the transport.
+    if spec.kind == "mcp" || spec.options.contains_key("headers") {
+        return false;
+    }
+    let empty = arguments.trim().is_empty() || arguments.trim() == "{}";
+    if spec.kind == "api" {
+        let api = &spec.options["api_config"];
+        return empty
+            && api["required"].as_array().is_none_or(Vec::is_empty)
+            && api["headers"].is_null()
+            && api["endpoint"]
+                .as_str()
+                .is_some_and(|url| !url.contains('$'));
+    }
+    if arguments.len() > 16384
+        || arguments.contains('\\')
+        || spec.options.contains_key("blocked_domains")
+        || spec.options.contains_key("allowed_domains")
+    {
+        return false;
+    }
+    let Ok(Value::Object(args)) = serde_json::from_str::<Value>(arguments) else {
+        return false;
+    };
+    let Some([url]) = args
+        .get("urls")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+    else {
+        return false;
+    };
+    args.len() == 1
+        && arguments.matches("\"urls\"").count() == 1
+        && url
+            .as_str()
+            .and_then(|s| s.parse::<http::Uri>().ok())
+            .is_some_and(|uri| {
+                matches!(uri.scheme_str(), Some("http" | "https"))
+                    && uri.host().is_some_and(|h| !h.is_empty())
+                    && uri.authority().is_some_and(|a| !a.as_str().contains('@'))
+            })
 }
 
 impl Profile {
@@ -619,6 +688,9 @@ impl Conversation {
             run_number: self.run_number,
             queue: VecDeque::new(),
             confirmation: None,
+            approval_queue: VecDeque::new(),
+            logged: Vec::new(),
+            prompts: Vec::new(),
             selection: self.profile.spec.picker.active.get(),
             tool_model_source: None,
             summarizing: None,
@@ -643,6 +715,8 @@ impl Conversation {
             step: Step::default(),
             pending: BTreeMap::new(),
             host_pending: BTreeMap::new(),
+            atomic_host: None,
+            serial_batch: false,
         });
         self.messages.push(json!({"role":"user", "content":prompt}));
         self.prepare_request()
@@ -1094,7 +1168,9 @@ impl Conversation {
     ) -> Result<Value, String> {
         let mut model_source = None;
         let mut ids = BTreeSet::new();
-        let mut unavailable = BTreeSet::new();
+        let mut network = false;
+        let mut serial = false;
+        let mut interactive = 0;
         let mut malformed = Vec::with_capacity(calls.len());
         let mut wire_calls = Vec::with_capacity(calls.len());
         let mut dispatched = calls.values().filter(|c| {
@@ -1113,12 +1189,25 @@ impl Conversation {
             if *key != index as u64 || call.id.is_empty() || !ids.insert(&call.id) {
                 return Err("missing or duplicate tool call ID or index".into());
             }
-            match self.profile.catalog.borrow().tools.get(&call.name) {
+            if let Some(tool) = self.profile.catalog.borrow().tools.get(&call.name) {
                 // Go routes on offered calls in model order, including calls denied during dispatch.
-                Some(tool) => model_source = model_source.or(tool.target.model_source),
-                None => {
-                    unavailable.insert(call.name.clone());
+                model_source = model_source.or(tool.target.model_source);
+                if let Some(spec) = tool
+                    .target
+                    .host
+                    .map(|i| &self.profile.spec.toolsets[i])
+                    .filter(|s| matches!(s.kind.as_str(), "api" | "fetch" | "mcp"))
+                {
+                    network = true;
+                    if calls.len() > 1 && !simple_network_call(spec, &call.arguments) {
+                        serial = true;
+                    }
                 }
+                serial |= matches!(call.name.as_str(), "change_model" | "revert_model");
+                interactive += usize::from(
+                    call.name == "user_prompt"
+                        || self.profile.spec.tool_policy.may_ask(tool.target.safe),
+                );
             }
             // Go reads empty arguments as {}.
             let complaint = match call.arguments.as_str() {
@@ -1157,6 +1246,8 @@ impl Conversation {
         turn.tool_model_source = model_source;
         turn.selection = self.profile.spec.picker.active.get();
         let exclusive = calls.len() == 1;
+        // Picker log writes can interleave; multiple interactive replies can race network I/O.
+        turn.serial_batch = !exclusive && (serial || (network && interactive > 1));
         if let Some(output) = &self.profile.spec.output_tool {
             // Go records intercepted replies first; none can reach approval, hooks or host dispatch.
             let mut final_answer = None;
@@ -1188,17 +1279,20 @@ impl Conversation {
                 return Ok(self.finish(events));
             }
         }
+        let first_slot = self.messages.len();
         for (call, malformed) in calls.into_values().zip(malformed) {
             if self.profile.spec.output_tool.is_some() && call.name == structured_output::NAME {
                 continue;
             }
-            let index = self.messages.len();
-            self.messages
-                .push(json!({"role":"tool", "tool_call_id":call.id}));
-            let available = !unavailable.contains(&call.name);
+            let available = self.profile.catalog.borrow().tools.contains_key(&call.name);
+            let slot = first_slot + turn.queue.len();
+            if turn.serial_batch {
+                self.messages
+                    .push(json!({"role":"tool", "tool_call_id":call.id}));
+            }
             turn.queue.push_back(Invocation {
                 call,
-                index,
+                slot,
                 available,
                 malformed,
             });
@@ -1208,50 +1302,28 @@ impl Conversation {
     }
 
     fn drain_calls(&mut self, events: &mut Vec<Value>) -> Result<(), String> {
-        while let Some(mut op) = self.active.as_mut().unwrap().queue.pop_front() {
-            if !op.available {
-                // Go answers a hallucinated tool with an error the model can correct.
-                let reason = format!(
-                    "Tool '{}' is not available. You can only use the tools provided to you.",
-                    op.call.name
-                );
-                self.reject(op, reason, events)?;
+        loop {
+            let turn = self.active.as_mut().unwrap();
+            if turn.serial_batch && turn.confirmation.is_some() {
+                break;
+            }
+            // A local host call runs to completion before another Go goroutine can start.
+            if turn.atomic_host.is_some() {
+                break;
+            }
+            if let Some(op) = turn.queue.pop_front() {
+                self.start_call(op, events)?;
                 continue;
             }
-            // Like Go, input redaction only understands JSON; the message redaction still applies.
-            if op.malformed.is_none()
-                && self
-                    .profile
-                    .spec
-                    .hooks
-                    .rewrite_input(&op.call.name, &mut op.call.arguments)?
+            // The elicitation bridge delivers on a newly queued goroutine.
+            events.append(&mut turn.prompts);
+            if turn.confirmation.is_none()
+                && turn.pending.is_empty()
+                && turn.approval_queue.is_empty()
             {
-                events.push(json!({"type":"warning", "message":format!("redact_secrets: redacted secret material from arguments of tool {:?}", op.call.name)}));
+                self.flush_logs(events)?;
             }
-            let call = &op.call;
-            let safe = self.profile.catalog.borrow().tools[&call.name].target.safe;
-            match self.profile.spec.tool_policy.rules.verdict(
-                self.profile.spec.tool_policy.safety,
-                &call.name,
-                &call.arguments,
-                safe,
-            ) {
-                Verdict::Allow => self.dispatch(op, events)?,
-                Verdict::Deny(reason) => self.reject(op, reason, events)?,
-                Verdict::Ask
-                    if self.profile.spec.tool_policy.grantable()
-                        && self.profile.grants.borrow().contains(&call.name) =>
-                {
-                    self.dispatch(op, events)?
-                }
-                Verdict::Ask => {
-                    let turn = self.active.as_mut().unwrap();
-                    let token = turn.token("confirm", op.index);
-                    events.push(json!({"type":"approval", "agent":self.profile.spec.name, "id":call.id, "name":call.name, "args":call.arguments, "token":token}));
-                    turn.confirmation = Some((token, op));
-                    return Ok(());
-                }
-            }
+            break;
         }
         self.profile
             .spec
@@ -1259,6 +1331,57 @@ impl Conversation {
             .active
             .set(self.active.as_ref().unwrap().selection);
         Ok(())
+    }
+
+    fn start_call(&mut self, mut op: Invocation, events: &mut Vec<Value>) -> Result<(), String> {
+        if !op.available {
+            let reason = format!(
+                "Tool '{}' is not available. You can only use the tools provided to you.",
+                op.call.name
+            );
+            return self.logged_error(op.rejected(), reason, events);
+        }
+        // Like Go, input redaction only understands JSON; the message redaction still applies.
+        if op.malformed.is_none()
+            && self
+                .profile
+                .spec
+                .hooks
+                .rewrite_input(&op.call.name, &mut op.call.arguments)?
+        {
+            events.push(json!({"type":"warning", "message":format!("redact_secrets: redacted secret material from arguments of tool {:?}", op.call.name)}));
+        }
+        let call = &op.call;
+        let safe = self.profile.catalog.borrow().tools[&call.name].target.safe;
+        match self.profile.spec.tool_policy.rules.verdict(
+            self.profile.spec.tool_policy.safety,
+            &call.name,
+            &call.arguments,
+            safe,
+        ) {
+            Verdict::Allow => self.dispatch(op, events)?,
+            Verdict::Deny(reason) => self.reject(op, reason, events)?,
+            Verdict::Ask if self.granted(&op.call.name) => self.dispatch(op, events)?,
+            Verdict::Ask => {
+                if self.active.as_ref().unwrap().confirmation.is_some() {
+                    self.active.as_mut().unwrap().approval_queue.push_back(op);
+                } else {
+                    self.ask(op, events);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn granted(&self, name: &str) -> bool {
+        self.profile.spec.tool_policy.grantable() && self.profile.grants.borrow().contains(name)
+    }
+
+    fn ask(&mut self, op: Invocation, events: &mut Vec<Value>) {
+        let turn = self.active.as_mut().unwrap();
+        let token = turn.token("confirm", op.slot);
+        events.push(json!({"type":"approval", "agent":self.profile.spec.name, "id":op.call.id, "name":op.call.name, "args":op.call.arguments, "token":token}));
+        turn.confirmation = Some((token, op));
     }
 
     pub fn confirm(
@@ -1300,12 +1423,7 @@ impl Conversation {
         reason: String,
         events: &mut Vec<Value>,
     ) -> Result<(), String> {
-        let reply = Reply {
-            index: op.index,
-            name: op.call.name,
-            toon: false,
-        };
-        events.push(self.complete(reply, reason, true)?);
+        events.push(self.complete(op.rejected(), reason, true)?);
         Ok(())
     }
 
@@ -1317,7 +1435,8 @@ impl Conversation {
             (tool.target.host, tool.toon)
         };
         let reply = Reply {
-            index: op.index,
+            slot: op.slot,
+            id: call.id.clone(),
             name: call.name.clone(),
             toon,
         };
@@ -1344,7 +1463,7 @@ impl Conversation {
             };
             let output = format!("Error calling tool: {context}{complaint}");
             events.push(call.event());
-            events.push(self.complete(reply, output, true)?);
+            self.handler_result(reply, Err(output), events)?;
             return Ok(());
         }
         if let Some(source) = source {
@@ -1362,7 +1481,7 @@ impl Conversation {
                     Err(complaint) => {
                         events.push(call.event());
                         let output = format!("Error calling tool: {complaint}");
-                        events.push(self.complete(reply, output, true)?);
+                        self.handler_result(reply, Err(output), events)?;
                         return Ok(());
                     }
                 }
@@ -1370,8 +1489,12 @@ impl Conversation {
                 None
             };
             let turn = self.active.as_mut().unwrap();
-            let token = turn.token("host", op.index);
-            let mut event = json!({"type":"host_call", "agent":self.profile.spec.name, "id":call.id, "name":call.name, "args":call.arguments, "source":source, "token":token});
+            let token = turn.token("host", op.slot);
+            let network = matches!(kind, Some("api" | "fetch" | "mcp"));
+            if !network && !turn.serial_batch {
+                turn.atomic_host = Some(token.clone());
+            }
+            let mut event = json!({"type":"host_call", "agent":self.profile.spec.name, "id":call.id, "name":call.name, "args":call.arguments, "source":source, "network":network, "token":token});
             if let Some(input) = input {
                 event["input"] = input.into();
             }
@@ -1388,6 +1511,10 @@ impl Conversation {
                 }
                 match Switch::parse(&call.name, &call.arguments) {
                     Ok(switch) => {
+                        if !turn.serial_batch {
+                            self.messages
+                                .push(json!({"role":"tool", "tool_call_id":call.id}));
+                        }
                         self.switch = Some(switch);
                         return Ok(());
                     }
@@ -1427,11 +1554,16 @@ impl Conversation {
                 }
                 match Prompt::decode(&call.arguments)? {
                     Ok(prompt) => {
-                        let id = turn.token("prompt", op.index);
+                        let id = turn.token("prompt", op.slot);
                         turn.pending.insert(id.clone(), reply);
                         let meta = (!prompt.title.is_empty())
                             .then(|| json!({"cagent/title":prompt.title}));
-                        events.push(json!({"type":"elicitation", "id":id, "message":prompt.message, "schema":prompt.schema, "meta":meta, "server_elicitation_id":"", "mode":"", "url":""}));
+                        let prompts = if turn.serial_batch {
+                            &mut *events
+                        } else {
+                            &mut turn.prompts
+                        };
+                        prompts.push(json!({"type":"elicitation", "id":id, "message":prompt.message, "schema":prompt.schema, "meta":meta, "server_elicitation_id":"", "mode":"", "url":""}));
                         return Ok(());
                     }
                     Err(complaint) => Err(format!("Error calling tool: {complaint}")),
@@ -1498,8 +1630,47 @@ impl Conversation {
                 .call(&call.name, &call.arguments),
             _ => return Err("missing or invalid tool name".into()),
         };
-        let is_error = result.is_err();
-        events.push(self.complete(reply, result.unwrap_or_else(|e| e), is_error)?);
+        self.handler_result(reply, result, events)
+    }
+
+    fn handler_result(
+        &mut self,
+        reply: Reply,
+        result: Result<String, String>,
+        events: &mut Vec<Value>,
+    ) -> Result<(), String> {
+        match result {
+            Err(error) if error.starts_with("Error calling tool: ") => {
+                self.logged_error(reply, error, events)
+            }
+            result => {
+                let is_error = result.is_err();
+                events.push(self.complete(reply, result.unwrap_or_else(|e| e), is_error)?);
+                Ok(())
+            }
+        }
+    }
+
+    fn logged_error(
+        &mut self,
+        reply: Reply,
+        error: String,
+        events: &mut Vec<Value>,
+    ) -> Result<(), String> {
+        let turn = self.active.as_mut().unwrap();
+        if turn.serial_batch {
+            events.push(self.complete(reply, error, true)?);
+        } else {
+            turn.logged.push((reply, error));
+        }
+        Ok(())
+    }
+
+    // Browser stderr re-enters Go. Writers resume FIFO only once all runnable work is idle.
+    fn flush_logs(&mut self, events: &mut Vec<Value>) -> Result<(), String> {
+        for (reply, error) in std::mem::take(&mut self.active.as_mut().unwrap().logged) {
+            events.push(self.complete(reply, error, true)?);
+        }
         Ok(())
     }
 
@@ -1534,17 +1705,38 @@ impl Conversation {
         if is_error {
             self.active.as_mut().unwrap().exempt_batch = false;
         }
-        let message = &mut self.messages[reply.index];
-        let event = tool_result(
-            message["tool_call_id"].as_str().unwrap(),
-            &reply.name,
-            &output,
-            is_error,
-        );
-        message["content"] = self
+        let event = tool_result(&reply.id, &reply.name, &output, is_error);
+        let stored = self
             .frame
             .stored_content(output, &self.profile.spec.hooks)?;
+        if self.active.as_ref().unwrap().serial_batch {
+            self.messages[reply.slot]["content"] = stored;
+        } else {
+            self.messages
+                .push(json!({"role":"tool", "tool_call_id":reply.id, "content":stored}));
+        }
         Ok(event)
+    }
+
+    pub fn poll_batch(&mut self) -> Result<Value, String> {
+        let turn = self.active.as_mut().ok_or("no active turn")?;
+        if !turn.waiting() || turn.atomic_host.is_some() {
+            return Err("tool batch is not idle".into());
+        }
+        let mut events = Vec::new();
+        if turn.confirmation.is_none() {
+            if let Some(op) = turn.approval_queue.pop_front() {
+                if self.granted(&op.call.name) {
+                    self.dispatch(op, &mut events)?;
+                } else {
+                    self.ask(op, &mut events);
+                }
+                self.drain_calls(&mut events)?;
+                return Ok(self.continue_turn(events));
+            }
+        }
+        self.flush_logs(&mut events)?;
+        Ok(self.continue_turn(events))
     }
 
     pub fn include_usage(&mut self, usage: &Value) {
@@ -1599,8 +1791,9 @@ impl Conversation {
         if self.switch.is_some() {
             return json!({"events":events});
         }
-        if self.active.as_ref().is_some_and(Turn::waiting) {
-            return json!({"events":events, "waiting":true});
+        let turn = self.active.as_ref().expect("active turn");
+        if turn.waiting() {
+            return json!({"events":events, "waiting":true, "serial":turn.serial_batch, "logged":!turn.logged.is_empty(), "unlocked":turn.confirmation.is_none() && !turn.approval_queue.is_empty()});
         }
         if let Some(error) = self.repetition_error() {
             return json!({"events":events,"error":error});
@@ -1675,20 +1868,28 @@ impl Conversation {
         }
         let turn = self.active.as_mut().ok_or("no active turn")?;
         let reply = turn.host_pending.remove(token).ok_or("unknown host call")?;
-        let event = self.complete(reply, output, is_error)?;
-        Ok(self.continue_turn(vec![event]))
+        if turn.atomic_host.as_deref() == Some(token) {
+            turn.atomic_host = None;
+        }
+        let mut events = Vec::new();
+        self.handler_result(
+            reply,
+            if is_error { Err(output) } else { Ok(output) },
+            &mut events,
+        )?;
+        if !self.active.as_ref().unwrap().serial_batch {
+            self.drain_calls(&mut events)?;
+        }
+        Ok(self.continue_turn(events))
     }
 
-    pub fn answer(
-        &mut self,
-        id: &str,
+    pub fn answer_output(
         action: &str,
         content: Option<Map<String, Value>>,
-    ) -> Result<Value, String> {
+    ) -> Result<String, String> {
         if !matches!(action, "accept" | "decline" | "cancel") {
             return Err(format!("unknown elicitation action {action:?}"));
         }
-        let turn = self.active.as_mut().ok_or("no active turn")?;
         let mut response = json!({"action":action});
         if let Some(data) = content.filter(|c| !c.is_empty()) {
             response["content"] = Value::Object(data);
@@ -1697,12 +1898,26 @@ impl Conversation {
         if output.len() > MAX_ELICITATION_BYTES {
             return Err("elicitation answer size limit reached".into());
         }
+        Ok(output)
+    }
+
+    pub fn answer(
+        &mut self,
+        id: &str,
+        action: &str,
+        content: Option<Map<String, Value>>,
+    ) -> Result<Value, String> {
+        let output = Self::answer_output(action, content)?;
+        let turn = self.active.as_mut().ok_or("no active turn")?;
         let reply = turn
             .pending
             .remove(id)
             .ok_or("no pending elicitation with that ID")?;
-        let event = self.complete(reply, output, action != "accept")?;
-        Ok(self.continue_turn(vec![event]))
+        let mut events = vec![self.complete(reply, output, action != "accept")?];
+        if !self.active.as_ref().unwrap().serial_batch {
+            self.drain_calls(&mut events)?;
+        }
+        Ok(self.continue_turn(events))
     }
 }
 
@@ -2107,11 +2322,11 @@ mod tests {
             .filter(|e| e["type"] == "tool_result")
             .collect();
         assert_eq!(
-            results[0]["output"],
+            results[1]["output"],
             "Tool 'shell' is not available. You can only use the tools provided to you."
         );
-        assert_eq!(results[0]["is_error"], true);
-        assert_eq!(results[1]["output"], "Thoughts:\nok");
+        assert_eq!(results[1]["is_error"], true);
+        assert_eq!(results[0]["output"], "Thoughts:\nok");
         // Go accepts a stream that stops without a finish reason, or names one it cannot honor.
         c.chunk(chunk(json!({"content":"cut off"}), None)).unwrap();
         assert_eq!(c.end().unwrap()["result"]["message"]["content"], "cut off");
@@ -2136,7 +2351,16 @@ mod tests {
             c.chunk(chunk(json!({"tool_calls":calls}), Some("tool_calls")))
                 .unwrap();
             let next = c.end().unwrap();
-            let events = next["events"].as_array().unwrap();
+            let mut events = next["events"].as_array().unwrap().clone();
+            if next["logged"] == true {
+                events.extend(
+                    c.poll_batch().unwrap()["events"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .cloned(),
+                );
+            }
             // Every call is announced, even one whose arguments cannot be decoded.
             let announced = events.iter().filter(|e| e["type"] == "tool_call").count();
             assert_eq!(announced, arguments.len());
@@ -2253,6 +2477,44 @@ mod tests {
                 "go"
             ]
         );
+    }
+
+    #[test]
+    fn only_idle_log_writers_can_finish_while_approval_is_pending() {
+        let mut c = conversation(&["think", "memory"]);
+        c.begin("go", "turn").unwrap();
+        c.chunk(chunk(
+            json!({"tool_calls":[
+                call(0,"n","unknown","{}"), call(1,"m","delete_memory","{}"),
+                call(2,"b","think","bad"), call(3,"t","think","{}")
+            ]}),
+            Some("tool_calls"),
+        ))
+        .unwrap();
+        let step = c.end().unwrap();
+        let events = step["events"].as_array().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["m", "b", "t", "t"]
+        );
+        let token = events[0]["token"].as_str().unwrap();
+        assert!(c.confirm("wrong", true, true, "").is_err());
+        let idle = c.poll_batch().unwrap();
+        assert_eq!(idle["waiting"], true);
+        assert_eq!(idle["events"][0]["id"], "n");
+        assert_eq!(idle["events"][1]["id"], "b");
+        let end = c.confirm(token, false, false, "no").unwrap();
+        assert_eq!(end["events"][0]["type"], "tool_result");
+        let ids: Vec<_> = end["request"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["tool_call_id"].as_str())
+            .collect();
+        assert_eq!(ids, ["t", "n", "b", "m"]);
     }
 
     #[test]

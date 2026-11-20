@@ -65,8 +65,8 @@ test('session elicitation uses explicit replies and replays an ordered batch of 
   await assert.rejects(s.respondToElicitation({ id, action: 'decline' }), /pending/);
   assert.equal((await turn).message.content, 'done');
   assert.deepEqual(events.map(e => e.type), [
-    'tool_call_delta', 'tool_call_delta', 'tool_call_delta', 'tool_call', 'elicitation',
-    'tool_call', 'tool_result', 'tool_call', 'elicitation', 'tool_result', 'tool_result', 'delta', 'finish',
+    'tool_call_delta', 'tool_call_delta', 'tool_call_delta', 'tool_call',
+    'tool_call', 'tool_result', 'tool_call', 'elicitation', 'elicitation', 'tool_result', 'tool_result', 'delta', 'finish',
   ]);
   assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.is_error), [false, true, false]);
   const second = events.find(e => e.message === 'More?');
@@ -78,7 +78,7 @@ test('session elicitation uses explicit replies and replays an ordered batch of 
     assert.deepEqual(request.tools, [...catalog.user_prompt.tools, ...catalog.think.tools]);
     assert.equal(request.messages[0].content, `Hello\n${catalog.user_prompt.instructions}\n${catalog.think.instructions}`);
   }
-  const [assistant, accepted, think, cancelled] = requests[1].messages.slice(-4);
+  const [assistant, think, cancelled, accepted] = requests[1].messages.slice(-4);
   assert.equal('content' in assistant, false);
   assert.deepEqual(assistant.tool_calls.map(c => c.id), ['call_0', 'thought', 'call_2']);
   assert.deepEqual(accepted, { role: 'tool', tool_call_id: 'call_0', content: '{"action":"accept","content":{"color":"green"}}' });
