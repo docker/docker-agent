@@ -366,7 +366,7 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
   });
   tests.dynamicContext = await replay(api,'dynamicContext',config.replace('model: local/test','add_date: true, add_environment_info: true, model: local/test'),[answer,answer],turns);
   // Advance the wall clock after each request, leaving retry/cooldown timers monotonic.
-  async function datedReplay(name, yaml, replies, drive = turns) {
+  async function datedReplay(name, yaml, replies, drive = turns, endpoints) {
     tests[name] = await replay(api, name, yaml, replies, async args => {
       const Clock = globalThis.Date;
       const start = Clock.UTC(2030, 4, 2, 12) + new Clock().getTimezoneOffset() * 60_000;
@@ -374,7 +374,7 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
         constructor(...a) { super(...(a.length ? a : [start + args.trace.requests.length * 86_400_000])); }
       };
       try { await drive(args); } finally { globalThis.Date = Clock; }
-    });
+    }, endpoints);
   }
   const datedFallback = historyFallback.replace('num_history_items: 5', 'add_date: true, add_environment_info: true, num_history_items: 5');
   await datedReplay('dateDuringFailover', datedFallback,
@@ -429,6 +429,13 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
   spare: {provider: openai, api_type: ${spare}, base_url: ${location.origin}/backup, token_key: SPARE_KEY, max_tokens: 71}
 agents: {root: {model: local/test, instruction: 'Hello \${env.WHO}', ${historyLimits}, ${cap}
   session_compaction: false, fallback: {models: [spare/backup], retries: -1, cooldown: 1h}, toolsets: [{type: think}]}}`;
+  const datedHistoryCap = historyRoutes(chat, resp, 'max_iterations: 2, add_date: true,');
+  await datedReplay('datedCappedMixedHistory', datedHistoryCap,
+    [[{error:{message:'service unavailable'}}], responseTool, answer, answer], withSpareKey(turns),
+    ['/v1/chat/completions', '/backup/responses', '/v1/chat/completions', '/v1/chat/completions']);
+  const dates = tests.datedCappedMixedHistory.requests.map(({body}) =>
+    /Today's date: (\d{4}-\d{2}-\d{2})/.exec(JSON.stringify(body.messages ?? body.input))?.[1]);
+  if (dates.join() !== '2030-05-02,2030-05-02,2030-05-04,2030-05-05') throw new Error(`unexpected round dates: ${dates}`);
   const pathFor = protocol => protocol === chat ? 'chat/completions' : 'responses';
   function thought(protocol, id) {
     const args = JSON.stringify({ thought: `long thought ${id}` });
