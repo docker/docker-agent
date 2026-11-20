@@ -5,7 +5,7 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The measured release is **1,860,993 bytes (1.77 MiB) uncompressed**, including
+The measured release is **1,865,748 bytes (1.78 MiB) uncompressed**, including
 all nine runtime JS modules, versus 35.8 MiB for the packed Go small module
 alone. CI enforces a 2 MiB budget for the Wasm and JS together.
 
@@ -171,9 +171,9 @@ image, but a vision-capable backup receives the original image. A handoff keeps
 the conversation; `transfer_task` starts fresh and does **not** inherit the
 caller's attachments. On return the caller still has its history.
 
-Multipart history with active fallback compaction is not supported. Routed
-multipart history with named messages or `reasoning_content` is rejected before
-model I/O if a reachable target uses Responses. File IDs and opaque provider
+Multipart history with a dedicated summarizer or active fallback compaction is
+not supported. Routed multipart history with named messages or `reasoning_content`
+is rejected before model I/O if a reachable target uses Responses. File IDs and opaque provider
 state are not portable attachment formats.
 
 ### Routing and tool policy
@@ -188,14 +188,22 @@ output; it never retries a completed tool action to recover a model stream.
 `session_compaction` uses a foreground summary when a declared `context_window`
 and threshold warrant it. Summary requests honor the same outbound secret
 redaction as ordinary model requests, including an explicit `before_llm_call`
-redaction hook. No provider-native compaction or dedicated `compaction_model`.
+redaction hook. Provider-native compaction is not supported.
 
-A **single, tool-free agent** can compact across a fallback chain when every
-target uses the same API (Chat Completions or Responses), context window, and
-effective threshold. The summary goes to the **primary**, with its own
-credentials and parameters, even while ordinary calls are pinned to a backup.
-The continuation checks the cooldown again. Native structured output is
-restored on the continuation, not sent with the summary.
+A **single, tool-free agent** can use a named `compaction_model` for text-only
+history. An agent setting overrides the primary model's setting, which overrides
+its provider's default. Declare `context_window` on both models: the smaller
+window drives the compaction trigger and usage gauge, but the summarizer's own
+window determines how much history it receives and its output token cap. The
+summarizer can use a different endpoint, API, and token. It receives redacted
+history (unless redaction is disabled), **not** the ordinary output schema.
+See [the two-model example](../examples/small-compaction.yaml).
+
+The ordinary models in a compacting fallback chain must share their API,
+context window, and effective threshold. The summary goes to the dedicated
+model if set, otherwise to the **primary**. Neither choice changes the fallback
+cooldown. The continuation goes to the serving model with its own credentials,
+parameters, and native structured-output schema.
 
 If the summary provider returns an ordinary error, the browser reports the
 error, then drains the uncompressed continuation before `send` rejects. That
@@ -208,17 +216,24 @@ implemented.
 Picker/toolset model overrides must be transport-compatible. `session_context`
 reads only the originating handle's previous conversations and is unavailable
 inside a routed team. Teams reject readonly-to-writable routing and disabling
-secret redaction. Active compaction within a routed team, and history limits or
-per-tool model overrides combined with team/fallback routing, remain unsupported.
+secret redaction. Routed teams do not support active compaction or history
+limits. Per-tool model overrides cannot be combined with team/fallback routing.
 Teams share plan and memory within one handle, but each acting agent gets its
 own authorized tool catalog, MCP connection, credentials and grants. Teams are
 limited to ten nested transfers and 32 switches per user turn.
 
 `num_history_items`, `max_old_tool_call_tokens` and `max_tool_result_tokens`
 control the stored or transmitted history; they do not truncate a tool event
-just to hide it from the host. Agent `max_iterations` finishes normally at its
-limit, while the `before_llm_call` builtin `max_iterations` rejects the send
-before the next model call. With a single agent, `fallback.models` and explicit
+just to hide it from the host. A single agent can use all three limits on a
+**text-only Chat Completions fallback chain** with `session_compaction: false`.
+The backup receives the same capped tool result as the primary, without running
+the tool again. Trimming a call also removes its paired result from the request.
+This combination excludes Responses, multipart history, `session_context`,
+per-tool model overrides, tool-mode structured output, iteration limits, and
+`add_date` (flag or hook).
+
+Agent `max_iterations` finishes normally at its limit, while the `before_llm_call`
+builtin `max_iterations` rejects the send before the next model call. With a single agent, `fallback.models` and explicit
 `session_compaction: false`, either limit can be 1–8. If both are set to the
 same value, the agent cap stops normally before the hook would reject.
 
