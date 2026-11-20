@@ -1159,17 +1159,17 @@ agents:`)
   // Go advertises a denied tool, with its instructions, and refuses the call at dispatch.
   const stocked = local(['think', 'todo', 'memory']);
   const denying = list => `permissions: {deny: [${list}]}\n`;
-  const pair = (first, second) => [piece({role: 'assistant', tool_calls: [first, second].map(([name, args], index) =>
+  const batch = (...calls) => [piece({role: 'assistant', tool_calls: calls.map(([name, args], index) =>
     ({id: `call_${index}`, index, type: 'function', function: {name, arguments: args}}))}, 'tool_calls'), usage];
   const workers = routed.replace('instruction: Be precise', 'instruction: Be precise, toolsets: [{type: think}]');
   const narrowed = entry => config.replace('model: local/test', `toolsets: [${entry}, {type: think}], model: local/test`);
   for (const [name, yaml, replies] of [
     ['denyName', stocked + denying('think'), [tool('think', {thought: 'x'})]],
     ['denyNameCase', stocked + denying('THINK'), [tool('think', {thought: 'x'})]],
-    ['denyGlob', stocked + denying('"create_*", "thin?"'), [pair(['create_todo', '{"description":"d"}'], ['think', '{"thought":"x"}'])]],
+    ['denyGlob', stocked + denying('"create_*", "thin?"'), [batch(['create_todo', '{"description":"d"}'], ['think', '{"thought":"x"}'])]],
     ['denyBeforeDecoding', stocked + denying('think'), [rawTool('think', '{"thought": oops')]],
-    ['denyAllStillNamesUnknown', stocked + denying('"*"'), [pair(['think', '{"thought":"x"}'], ['nope', '{}'])]],
-    ['denyBesideAllowed', stocked + denying('think'), [pair(['think', '{"thought":"x"}'], ['create_todo', '{"description":"d"}'])]],
+    ['denyAllStillNamesUnknown', stocked + denying('"*"'), [batch(['think', '{"thought":"x"}'], ['nope', '{}'])]],
+    ['denyBesideAllowed', stocked + denying('think'), [batch(['think', '{"thought":"x"}'], ['create_todo', '{"description":"d"}'])]],
     ['denySecretArguments', stocked + denying('think'), [tool('think', {thought: 'ghp_' + 'a'.repeat(36)})]],
     ['denyHosted', stocked + denying('add_memory'), [tool('add_memory', {memory: 'm'})]],
     ['denyFetch', local(['fetch']) + denying('fetch'), [tool('fetch', {urls: ['https://tool.invalid/a']})]],
@@ -1189,6 +1189,34 @@ agents:`)
     ['emptiedInstructions', narrowed('{type: memory, tools: [nope]}'), [tool('think', {thought: 'x'})]],
     ['filteredCustomInstructions', narrowed('{type: memory, tools: [get_memories], instruction: "Mine. {ORIGINAL_INSTRUCTIONS} End."}'), [tool('get_memories', {})]],
   ]) tests[name] = await replay(api, name, yaml, [...replies, answer], approve);
+  const thinkCall = ['think', '{"thought":"plan"}'], badThink = ['think', '{"thought": oops'], absent = ['absent', '{}'];
+  const forget = ['delete_memory', '{"id":"unused"}'], badForget = ['delete_memory', '[1]'];
+  const memories = ['get_memories', '{}'], askUser = ['user_prompt', '{"message":"Choose"}'], greeting = ['greet', '{}'];
+  const localBatch = local(['think', 'memory', 'todo', 'user_prompt']);
+  const apiBatch = apiTool.replace('toolsets: [', 'toolsets: [{type: think}, ');
+  for (const [name, yaml, replies, drive = approve, service] of [
+    ['batchLocalHost', localBatch, [batch(memories, thinkCall, memories), answer]],
+    ['batchWaitingWriter', localBatch, [batch(absent, forget, badThink, thinkCall), answer]],
+    ['batchLoggedHandlers', localBatch, [batch(['update_memory', '{"id":"unknown"}'], badThink, thinkCall), answer]],
+    ['batchLogQueue', localBatch, [batch(badThink, absent, forget, ['update_todos', '{"updates":[{"id":"unknown","status":"completed"}]}']), answer]],
+    ['batchDenied', localBatch + denying('list_todos'), [batch(forget, ['list_todos', '{}'], thinkCall), answer]],
+    ['batchRejected', localBatch, [batch(forget, thinkCall, forget), answer], answering({decision:'reject', reason:'no'})],
+    ['batchGranted', localBatch, [batch(forget, askUser, badForget, forget), answer], answering({decision:'approve_tool', toolName:'delete_memory'})],
+    ['batchAutoApprove', localBatch, [batch(absent, forget, memories), answer], approved],
+    ['batchElicitation', localBatch, [batch(askUser, badForget, askUser, forget), answer]],
+    ['batchRedaction', localBatch, [batch(absent, ['think', JSON.stringify({thought:secret})], badForget), answer]],
+    ['batchHookLimit', localBatch.replace('model: local/test', `${callLimit(1)} model: local/test`), [batch(badThink, memories, thinkCall), answer], rejectsThenRecovers],
+    ['batchDiscovery', deferred, [batch(thinkCall, ['add_tool', '{"name":"think"}'], absent), tool('think',{}), answer]],
+    ['batchModelPicker', picker, [batch(['change_model', '{"model":"off-list"}'], ['revert_model', '{}']), answer]],
+    ['batchOutput', palette, [batch(badThink, [output, jsonAnswer], thinkCall), final]],
+    ['batchAfterHandoff', workers, [pass(), batch(absent, thinkCall), answer]],
+    ['batchInTransfer', workers, [delegate(), batch(badThink, thinkCall), answer, answer]],
+    ['batchApiThink', apiBatch, [batch(greeting, thinkCall), answer], single, greet],
+    ['batchApiPair', apiBatch, [batch(greeting, greeting), answer], single, greet],
+    ['batchFetchWrite', httpConfig({type:'fetch'}).replace('toolsets: [', 'toolsets: [{type: memory}, '),
+      [batch(['fetch', '{"urls":["https://tool.invalid/a"]}'], forget), answer], approved,
+      req => new Response(req.url.endsWith('/robots.txt') ? 'User-agent: *\nAllow: /' : 'page')],
+  ]) tests[name] = await replay(api, name, yaml, replies, drive, '/v1/chat/completions', service);
   return tests;
 }
 

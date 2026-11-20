@@ -81,6 +81,14 @@ impl Policy {
         Ok(true)
     }
 
+    // Conservative scheduling hint, never an approval decision.
+    pub fn may_ask(&self, safe: bool) -> bool {
+        self.safety != Safety::Restricted
+            && (!self.rules.ask.is_empty()
+                || self.safety == Safety::Strict
+                || (!safe && self.safety != Safety::Autonomous))
+    }
+
     pub fn grantable(&self) -> bool {
         self.safety == Safety::Legacy
             && self.rules.allow.is_empty()
