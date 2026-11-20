@@ -106,7 +106,7 @@ agents:
       case 1:
         t.mock.timers.setTime(day(3));
         await other.send('independent');
-        return new Response(null, {status:503});
+        return new Response(null, {status:503, headers:{'x-should-retry':'false'}});
       case 3: return new Response(null, {status:401});
       case 4:
         t.mock.timers.setTime(day(4));

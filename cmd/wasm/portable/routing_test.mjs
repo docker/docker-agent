@@ -22,7 +22,7 @@ async function endpoint(t, ...steps) {
     const step = steps[requests.length];
     requests.push({ path: req.url, method: req.method, auth: req.headers.authorization, body: JSON.parse(Buffer.concat(chunks)) });
     if (typeof step === 'number' || step === undefined) {
-      res.writeHead(step ?? 400).end();
+      res.writeHead(step ?? 400, {'Retry-After-Ms': '1'}).end();
     } else if (typeof step === 'string') {
       res.writeHead(200, { 'Content-Type': 'text/plain' }).end(step);
     } else {
@@ -90,8 +90,8 @@ permissions: {ask: [record]}`;
 
 test('fallback uses approved dynamic tools once and a failed follow-up retains the host result', async t => {
   const write = responseCall('record', {});
-  const primary = await endpoint(t, 429, 429);
-  const backup = await endpoint(t, write, 503, responseText('recovered'), write, responseText('denied'));
+  const primary = await endpoint(t, ...Array(6).fill(429));
+  const backup = await endpoint(t, write, 503, 503, 503, responseText('recovered'), write, responseText('denied'));
   const service = await endpoint(t, 'receipt-1');
   const opts = { yaml: `providers:
   p: {base_url: ${primary.url}, token_key: MODEL}
@@ -114,25 +114,26 @@ agents:
   await assert.rejects(s.send('record'), /503/);
   assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.output), ['receipt-1']);
   assert.equal((await s.send('recover')).message.content, 'recovered');
-  assert.equal(backup.requests[2].body.input.filter(m => m.type === 'function_call_output' && m.output === 'receipt-1').length, 1);
+  assert.equal(backup.requests[4].body.input.filter(m => m.type === 'function_call_output' && m.output === 'receipt-1').length, 1);
   assert.equal(backup.requests[0].body.tools[0].name, 'record');
   assert.equal(events.filter(e => e.type === 'tool_confirmation').length, 1);
   const other = await api.createSession(opts); // No callback: the first session's grant cannot authorize this call.
   t.after(() => other.close());
   await other.send('record');
-  assert.match(backup.requests[4].body.input.at(-1).output, /rejected/);
+  assert.match(backup.requests.at(-1).body.input.at(-1).output, /rejected/);
   assert.deepEqual(service.requests, [{ path: '/record', method: 'POST', auth: 'Bearer service-key', body: {} }]);
   checkRoute(primary, 'main', 'primary-key');
   checkRoute(backup, 'spare', 'backup-key', true);
-  assert.equal(primary.requests.length, 2);
-  assert.equal(backup.requests.length, 5);
+  assert.equal(primary.requests.length, 6);
+  assert.equal(backup.requests.length, 7);
+  assert.deepEqual(backup.requests.slice(1, 4), Array(3).fill(backup.requests[1]));
   assert.doesNotMatch(JSON.stringify(backup.requests.map(r => r.body)), /service-key/);
 });
 
 test('capped tool rounds recheck cooldown after approval; a failed continuation never repeats a write', async t => {
   let now = 0;
   t.mock.method(performance, 'now', () => now);
-  const primary = await endpoint(t, 401, 503, text('recovered'));
+  const primary = await endpoint(t, 401, 503, 503, 503, text('recovered'));
   const backup = await endpoint(t, responseCall('record', {}), 400);
   const service = await endpoint(t, 'one receipt');
   const yaml = `providers:
@@ -162,8 +163,8 @@ agents:
   assert.deepEqual(service.requests, [{path:'/record', method:'POST', auth:undefined, body:{}}]);
   assert.equal(primary.requests[1].body.messages.at(-1).content, 'one receipt');
   assert.equal(backup.requests[1].body.input.at(-1).output, 'one receipt');
-  assert.equal(primary.requests[2].body.messages.filter(m => m.role === 'tool' && m.content === 'one receipt').length, 1);
-  assert.deepEqual([primary.requests.length, backup.requests.length], [3, 2]);
+  assert.equal(primary.requests.at(-1).body.messages.filter(m => m.role === 'tool' && m.content === 'one receipt').length, 1);
+  assert.deepEqual([primary.requests.length, backup.requests.length], [5, 2]);
   checkRoute(primary, 'main', 'primary-key');
   checkRoute(backup, 'spare', 'backup-key', true);
 });

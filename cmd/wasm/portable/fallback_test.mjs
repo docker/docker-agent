@@ -28,7 +28,7 @@ const responses = () => stream([
   { type: 'response.output_text.delta', output_index: 0, delta: 'backup here' },
   { type: 'response.completed', response: { id: 'r', status: 'completed', output: [] } },
 ], false);
-const error = (status, message) => Response.json({ error: { message } }, { status });
+const error = (status, message, headers = {'Retry-After-Ms': '1'}) => Response.json({ error: { message } }, { status, headers });
 
 function script(t, ...steps) {
   const requests = [];
@@ -49,10 +49,11 @@ async function session(t, yaml = options.yaml, onEvent) {
 test('reports a fallback, changes wire format and credentials, and pins only until cooldown expires', async t => {
   let now = 0;
   t.mock.method(performance, 'now', () => now);
-  const requests = script(t, () => error(429, 'primary is down'), responses, responses, chat);
+  const requests = script(t, ...Array(3).fill(() => error(429, 'primary is down')), responses, responses, chat);
   const { s, events } = await session(t);
   assert.equal((await s.send('hi')).message.content, 'backup here');
-  const [p, b] = requests;
+  const [p, , , b] = requests;
+  assert.deepEqual(requests.slice(0, 3), [p, p, p]);
   assert.deepEqual([p.url, p.auth, b.url, b.auth], ['https://primary.invalid/v1/chat/completions', 'Bearer first-token', 'https://backup.invalid/v1/responses', 'Bearer second-token']);
   for (const r of requests) assert.deepEqual([r.credentials, r.redirect], ['omit', 'error']);
   assert.equal(p.body.temperature, 0.25);
@@ -64,24 +65,23 @@ test('reports a fallback, changes wire format and credentials, and pins only unt
   assert.deepEqual(b.body.input[2], { role: 'user', content: 'hi' });
   assert.deepEqual(b.body.tools.map(t => t.name), p.body.tools.map(t => t.function.name));
   assert.deepEqual(events.map(e => e.type), ['fallback', 'delta', 'finish']);
-  assert.deepEqual(events[0], { type: 'fallback', from: 'openai/primary', to: 'b/backup', attempt: 1, reason: 'model request failed: HTTP 429: primary is down' });
+  assert.deepEqual(events[0], { type: 'fallback', from: 'openai/primary', to: 'b/backup', attempt: 1, reason: 'error receiving from stream: HTTP 429: primary is down' });
   now = 59_999;
   await s.send('again');
-  assert.deepEqual(requests[2].body.input.slice(-2), [{ role: 'assistant', content: 'backup here' }, { role: 'user', content: 'again' }]);
+  assert.deepEqual(requests.at(-1).body.input.slice(-2), [{ role: 'assistant', content: 'backup here' }, { role: 'user', content: 'again' }]);
   now = 60_000;
   await s.send('recovered');
-  assert.deepEqual(requests.map(r => r.body.model), ['primary', 'backup', 'backup', 'primary']);
+  assert.deepEqual(requests.map(r => r.body.model), ['primary', 'primary', 'primary', 'backup', 'backup', 'primary']);
   assert.equal(events.filter(e => e.type === 'fallback').length, 1);
 });
 
 test('transient primary failure retries the identical request before switching, without pinning', async t => {
-  const requests = script(t, () => error(503, 'down'), () => error(500, 'down'), () => error(408, 'slow'), responses, chat);
+  const requests = script(t, ...[503, 500, 408].flatMap(status => Array(3).fill(() => error(status, 'down'))), responses, chat);
   const { s, events } = await session(t);
   await s.send('once');
   await s.send('twice');
-  assert.deepEqual(requests.map(r => r.body.model), ['primary', 'primary', 'primary', 'backup', 'primary']);
-  assert.deepEqual(requests[1], requests[0]);
-  assert.deepEqual(requests[2], requests[0]);
+  assert.deepEqual(requests.map(r => r.body.model), [...Array(9).fill('primary'), 'backup', 'primary']);
+  assert.deepEqual(requests.slice(0, 9), Array(9).fill(requests[0]));
   assert.equal(events.filter(e => e.type === 'fallback').length, 1);
 });
 
@@ -93,14 +93,31 @@ test('defaults also retry transient transport failure on a single model', async 
   assert.deepEqual(events.map(e => e.type), ['delta', 'finish']);
 });
 
+test('SDK waits prefer milliseconds, then seconds or HTTP-date, bounded to eight seconds', async t => {
+  const now = Date.UTC(2030, 0, 1);
+  const waits = [];
+  t.mock.method(Date, 'now', () => now);
+  const timer = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => {
+    waits.push(ms);
+    return timer(fn, 0, ...args);
+  });
+  const headers = [{'Retry-After-Ms':'12', 'Retry-After':'7'}, {'Retry-After':'0.125'},
+    {'Retry-After':new Date(now + 3000).toUTCString()}, {'Retry-After-Ms':'12000'}];
+  script(t, ...headers.flatMap(h => [() => error(409, 'conflict', h), chat]));
+  const { s } = await session(t);
+  for (const _ of headers) await s.send('again');
+  assert.deepEqual(waits, [12, 125, 3000, 8000]);
+});
+
 test('pre-output stream errors advance an ordered named/inline chain; final error is reported once', async t => {
   const requests = script(t,
     () => stream([piece({ role: 'assistant' }), { error: { message: 'primary is down' } }]),
     () => stream([{ type: 'response.created', response: { id: 'r', output: [] } }, { type: 'response.failed', response: { error: { code: 'server_error', message: 'backup down' } } }], false),
-    () => error(529, 'third down'));
+    ...Array(3).fill(() => error(529, 'third down')));
   const { s, events } = await session(t, options.yaml.replace('[backup]', '[backup, p/third], retries: -1'));
   await assert.rejects(s.send('hi'), /all models failed: .*529: third down/);
-  assert.deepEqual(requests.map(r => r.body.model), ['primary', 'backup', 'third']);
+  assert.deepEqual(requests.map(r => r.body.model), ['primary', 'backup', 'third', 'third', 'third']);
   assert.deepEqual(events.map(e => e.type), ['fallback', 'fallback', 'error']);
   assert.deepEqual(events.slice(0, 2).map(e => [e.from, e.to, e.attempt]), [['openai/primary', 'b/backup', 1], ['b/backup', 'openai/third', 1]]);
   assert.match(events[0].reason, /primary is down/);
@@ -118,24 +135,26 @@ for (const [name, delta] of Object.entries({ text: { content: 'partial' }, reaso
   });
 }
 
-test('a failure after a completed tool does not replay the model or tool and retains the result', async t => {
-  const requests = script(t, () => stream([piece({ tool_calls: [{ id: 'call', index: 0, type: 'function', function: { name: 'think', arguments: '{"thought":"one"}' } }] }, 'tool_calls')]), () => error(500, 'followup failed'), chat);
+test('SDK retries after a completed tool replay only the follow-up request and retain the result', async t => {
+  const requests = script(t, () => stream([piece({ tool_calls: [{ id: 'call', index: 0, type: 'function', function: { name: 'think', arguments: '{"thought":"one"}' } }] }, 'tool_calls')]), ...Array(3).fill(() => error(500, 'followup failed')), chat);
   const { s, events } = await session(t);
   await assert.rejects(s.send('think'), /followup failed/);
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 4);
+  assert.deepEqual(requests.slice(1), Array(3).fill(requests[1]));
   assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.output), ['Thoughts:\none']);
   assert.ok(!events.some(e => ['fallback', 'finish'].includes(e.type)));
   await s.send('recover');
-  assert.deepEqual(requests[2].body.messages.filter(m => m.role === 'tool'), [requests[1].body.messages.at(-1)]);
+  assert.deepEqual(requests[4].body.messages.filter(m => m.role === 'tool'), [requests[1].body.messages.at(-1)]);
 });
 
-test('abort while sleeping releases the turn without starting a retry', async t => {
-  const requests = script(t, () => error(503, 'down'), chat);
+for (const sdk of [true, false]) test(`abort during ${sdk ? 'SDK' : 'runtime'} backoff releases the turn without retrying`, async t => {
+  const headers = sdk ? {'Retry-After-Ms': '375'} : {'x-should-retry': 'false'};
+  const requests = script(t, () => error(503, 'down', headers), chat);
   const { s, events } = await session(t);
   const sleeping = Promise.withResolvers();
   const timer = globalThis.setTimeout;
   t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => {
-    if (ms >= 180 && ms <= 220) sleeping.resolve();
+    if (sdk ? ms === 375 : ms >= 180 && ms <= 220) sleeping.resolve();
     return timer(fn, ms, ...args);
   });
   const result = s.send('cancel');
@@ -241,7 +260,7 @@ agents: {root: {model: first, fallback: {models: [second]}}}`;
 }
 
 test('compatible fallback replays the image bytes but never the primary credentials', async t => {
-  const requests = script(t, () => error(429, 'unavailable'), () => stream([piece({ content: 'backup described it' }, 'stop')]));
+  const requests = script(t, () => error(429, 'unavailable', {'x-should-retry':'false'}), () => stream([piece({ content: 'backup described it' }, 'stop')]));
   const events = [];
   const result = await api.chat({ yaml: visionConfig('{image: true}'), env: options.env, messages: imageHistory }, e => events.push(e));
   assert.equal(result.message.content, 'backup described it');
@@ -281,4 +300,25 @@ test('checks malformed or unreplayable seed history before any model or discover
     [{ role: 'user', multi_content: [{ type: 'document', document: { name: 'bad.gif', mime_type: 'image/gif', source: {inline_data:'AA=='} } }] }, /signature/],
   ]) await assert.rejects(api.chat({ yaml, env: options.env, messages: [first, imageHistory.at(-1)] }), reason);
   assert.equal(requests.length, 0);
+});
+
+test('an unreadable HTTP diagnostic fails closed without discarding completed tools', async t => {
+  const tool = () => stream([piece({tool_calls: [{id:'a', index:0, type:'function', function:{name:'think', arguments:'{"thought":"kept"}'}}]}, 'tool_calls')]);
+  const requests = script(t, tool, () => new Response('x'.repeat(8193), {status:400}), chat);
+  const {s, events} = await session(t);
+  await assert.rejects(s.send('go'), /unsupported HTTP error body/);
+  await s.send('again');
+  assert.equal(requests[2].body.messages.find(m => m.role === 'tool').content, 'Thoughts:\nkept');
+  assert.equal(events.filter(e => e.type === 'tool_result').length, 1);
+  assert.ok(!events.some(e => e.type === 'fallback'));
+});
+
+test('body read and cancellation failures never bypass diagnostic redaction', async t => {
+  const broken = status => new Response(new ReadableStream({start(c) { c.error(new Error('first-token')); }}),
+    {status, headers:{'Retry-After-Ms':'1'}});
+  const requests = script(t, () => broken(503), () => broken(400));
+  const {s, events} = await session(t);
+  await assert.rejects(s.send('go'), {message:'unsupported HTTP error body'});
+  assert.equal(requests.length, 2);
+  assert.deepEqual(events, [{type:'error', message:'unsupported HTTP error body'}]);
 });

@@ -64,8 +64,9 @@ enum Command {
     Failure {
         now: f64,
         session: u32,
-        reason: String,
+        reason: Option<String>,
         status: Option<u16>,
+        endpoint: Option<String>,
     },
     End {
         session: u32,
@@ -173,12 +174,11 @@ impl Core {
                 session,
                 reason,
                 status,
+                endpoint,
                 now,
-            } => {
-                let transient = status.is_none() || fallback::retryable(status, &reason);
-                self.session(session)?
-                    .failure(reason, status, transient, now)
-            }
+            } => self
+                .session(session)?
+                .transport_failure(status, endpoint, reason, now),
             Command::End { session, now } => self.session(session)?.end(now),
             Command::RegisterTools {
                 session,

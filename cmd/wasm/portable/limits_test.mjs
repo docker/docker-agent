@@ -25,7 +25,7 @@ function intercept(t, rounds, output = reference.source) {
     requests.push(await req.json());
     assert.ok(rounds.length, 'unexpected model request');
     const calls = rounds.shift();
-    if (typeof calls === 'number') return new Response('unavailable', {status: calls});
+    if (typeof calls === 'number') return new Response('unavailable', {status: calls, headers: {'Retry-After-Ms': '1'}});
     const chunk = {choices: [{index: 0, delta: calls ? {tool_calls: calls} : {content: 'done'}, finish_reason: calls ? 'tool_calls' : 'stop'}]};
     const usage = {choices: [], usage: {prompt_tokens: 10, completion_tokens: 5}};
     return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(usage)}\n\ndata: [DONE]\n\n`, {headers: {'Content-Type': 'text/event-stream'}});
@@ -61,16 +61,16 @@ test('a blank tool result is stored as "(no output)" while its event keeps the r
 });
 
 test('transient failover spends one iteration and the next send starts fresh on primary', async t => {
-  const requests = intercept(t, [503, [call('echo')], [call('echo', {}, 'b')]]);
+  const requests = intercept(t, [503, 503, 503, [call('echo')], [call('echo', {}, 'b')]]);
   const yaml = config(`max_iterations: 1, session_compaction: false, fallback: {models: [local/backup], retries: -1}, toolsets: [${echo}]`);
   const s = await api.createSession(opts(yaml));
   try {
     assert.equal((await s.send('first')).message.content, reference.stop);
-    assert.deepEqual(requests.map(r => r.model), ['test', 'backup']);
+    assert.deepEqual(requests.map(r => r.model), ['test', 'test', 'test', 'backup']);
     assert.equal((await s.send('again')).message.content, reference.stop);
-    assert.equal(requests.length, 3);
-    assert.equal(requests[2].model, 'test');
-    assert.deepEqual(requests[2].messages.slice(-3).map(m => m.content), [reference.source, reference.stop, 'again']);
+    assert.equal(requests.length, 5);
+    assert.equal(requests.at(-1).model, 'test');
+    assert.deepEqual(requests.at(-1).messages.slice(-3).map(m => m.content), [reference.source, reference.stop, 'again']);
   } finally { await s.close(); }
 });
 
@@ -92,12 +92,12 @@ test('failed continuation retries the capped history, not the tool, and the next
 
 test('the maximum routed cap keeps eight tool results without a ninth model call', async t => {
   const calls = Array.from({length:8}, (_, i) => [call('think', {thought:`step ${i}`}, `id_${i}`)]);
-  const requests = intercept(t, [503, ...calls, null]);
+  const requests = intercept(t, [503, 503, 503, ...calls, null]);
   const yaml = config('max_iterations: 8, session_compaction: false, fallback: {models: [local/backup], retries: -1}, toolsets: [{type: think}]');
   const s = await api.createSession(opts(yaml));
   try {
     assert.match((await s.send('start')).message.content, /max_iterations limit \(8\)/);
-    assert.deepEqual(requests.map(r => r.model), ['test', 'backup', ...Array(7).fill('test')]);
+    assert.deepEqual(requests.map(r => r.model), ['test', 'test', 'test', 'backup', ...Array(7).fill('test')]);
     await s.send('new turn');
     assert.deepEqual(requests.at(-1).messages.filter(m => m.role === 'tool').map(m => m.tool_call_id),
       calls.map(([c]) => c.id));
