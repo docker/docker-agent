@@ -1,7 +1,7 @@
 //! Text-only projection of pkg/session's history limits. Stored history is not a request view.
 use crate::hooks::Hooks;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 pub const MAX_TOOL_ROUNDS: usize = 8;
@@ -12,7 +12,7 @@ pub struct Limits {
     pub max_iterations: u32,
     max_consecutive_tool_calls: u32,
     num_history_items: u32,
-    max_tool_result_tokens: i32,
+    pub max_tool_result_tokens: i32,
     max_old_tool_call_tokens: i32,
 }
 
@@ -107,18 +107,23 @@ impl Limits {
             });
             trim(messages, self.num_history_items as usize)?;
         }
-        if self.max_old_tool_call_tokens > 0 {
-            let mut budget = self.max_old_tool_call_tokens as usize;
+        if self.num_history_items > 0 || self.max_old_tool_call_tokens > 0 {
+            let mut budget = self.max_old_tool_call_tokens.max(0) as usize;
             for msg in messages.iter_mut().rev().filter(|m| m["role"] == "tool") {
-                let cost = msg["content"]
-                    .as_str()
-                    .ok_or("tool token limits require text results")?
-                    .len()
-                    / 4;
-                if cost > budget {
-                    msg["content"] = "[content truncated]".into();
+                if msg.get("content").is_none() {
+                    // Go synthesizes missing results after the old-tool budget, before the read-time cap.
+                    msg["content"] = "No result provided".into();
+                } else if self.max_old_tool_call_tokens > 0 {
+                    let cost = msg["content"]
+                        .as_str()
+                        .ok_or("tool token limits require text results")?
+                        .len()
+                        / 4;
+                    if cost > budget {
+                        msg["content"] = "[content truncated]".into();
+                    }
+                    budget = budget.saturating_sub(cost);
                 }
-                budget = budget.saturating_sub(cost);
             }
         }
         if self.max_tool_result_tokens > 0 {
@@ -147,6 +152,7 @@ fn trim(messages: &mut Vec<Value>, limit: usize) -> Result<(), String> {
     }
     let mut remove = count - limit;
     let mut ids = BTreeSet::new();
+    let mut pending = Vec::new();
     let mut kept = Vec::new();
     for msg in std::mem::take(messages) {
         if msg["role"] == "system" {
@@ -163,19 +169,20 @@ fn trim(messages: &mut Vec<Value>, limit: usize) -> Result<(), String> {
         {
             continue;
         } else {
-            // Go would drop the newer result too and synthesize a missing-result error.
-            if msg["tool_calls"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|c| c["id"].as_str().is_some_and(|id| ids.contains(id)))
-            {
-                return Err("num_history_items cannot trim across a reused tool call ID".into());
+            if msg["role"] != "tool" {
+                kept.append(&mut pending);
+                // Removing a reused ID also drops its newer result; Go synthesizes a replacement.
+                for call in msg["tool_calls"].as_array().into_iter().flatten() {
+                    if call["id"].as_str().is_some_and(|id| ids.contains(id)) {
+                        pending.push(json!({"role":"tool", "tool_call_id":call["id"]}));
+                    }
+                }
             }
             kept.push(msg);
         }
     }
     messages.append(&mut kept);
+    messages.append(&mut pending);
     Ok(())
 }
 

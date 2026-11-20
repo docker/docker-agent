@@ -12,7 +12,7 @@ pub struct Hooks {
     pub add_date: bool,
     pub add_environment_info: bool,
     pub max_calls: Option<u32>,
-    redact_messages: bool,
+    pub redact_messages: bool,
     redact_inputs: Vec<Matcher>,
     outputs: Vec<(Matcher, Transform)>,
 }

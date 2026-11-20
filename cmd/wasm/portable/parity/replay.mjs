@@ -606,6 +606,28 @@ agents: {root: {model: ordinary, ${smallSummary && !failed ? 'compaction_model: 
   const deliver = args => [{ type: 'response.output_item.added', output_index: 0, item: outputFn },
     { type: 'response.function_call_arguments.delta', output_index: 0, item_id: fn.id, delta: args },
     fin([{ ...outputFn, arguments: args, status: 'completed' }])];
+  for (const [protocol, suffix, plain] of [[chat, 'Chat', answer], [resp, 'Responses', text]]) {
+    const call = (name, args, id) => protocol === chat ? rawTool(name, args, id)
+      : responseCall({...fn, name, call_id: id}, args);
+    const finish = call(output, jsonAnswer, 'final');
+    const replayOutput = async (name, base, fields, replies, drive = turns) => {
+      name += suffix;
+      const yaml = withSchema(base, {mode: 'tool'}).replace('provider: openai,', `provider: openai, api_type: ${protocol},`)
+        .replace('model: local/test,', `model: local/test, session_compaction: false, ${fields},`);
+      tests[name] = await replay(api, name, yaml, replies, drive, `/v1/${pathFor(protocol)}`);
+    };
+    await replayOutput('outputReminderCap', config, 'max_iterations: 2', [plain, plain, plain, finish]);
+    await replayOutput('outputLimitedHistory', local(['think']), `${historyLimits}, redact_secrets: false`, [plain, thought(protocol, 'older'),
+      call(output, '{}', 'invalid'), call(output, '{"colors":["ultramarine"]}', 'final'), plain, call(output, jsonAnswer, 'again')]);
+    const denied = override + 'permissions: {deny: ["think:thought=blocked"]}\n';
+    const transient = protocol === chat ? [{error:{message:'service unavailable'}}] : responseError('service unavailable');
+    // Reusing the trimmed call ID drops the denied result, not the model override.
+    await replayOutput('outputToolModel', denied, 'max_iterations: 3, num_history_items: 4', [thought(protocol, 'work'), transient, finish,
+      call('think', '{"thought":"blocked"}', 'work'), plain, call(output, jsonAnswer, 'again')]);
+    const claudeOverride = override.replace('model: fast', 'model: claude-sonnet-5, capabilities: {image: false}');
+    await replayOutput('outputClaudeOverride', claudeOverride, 'max_iterations: 2',
+      [thought(protocol, 'plan'), plain, finish], toolFailure);
+  }
   const rowsSchema = { type: 'object', properties: { rows: { type: 'array', items: { $ref: '#/$defs/Row' } },
     featured: { $ref: '#/$defs/Row' } }, required: ['rows'], $defs: { Row: { $ref: '#/$defs/a~1~0b' },
     'a/~b': { type: 'object', properties: { value: { type: 'string' }, rank: { type: 'integer' } },

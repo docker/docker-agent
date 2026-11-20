@@ -440,6 +440,7 @@ struct Provider {
 #[derive(Default)]
 pub struct Selected {
     pub output_tool: Option<OutputTool>,
+    pub separate_model_attempts: bool,
     pub tool_policy: Policy,
     pub name: String,
     pub team_prompts: Vec<String>,
@@ -496,10 +497,6 @@ impl Selected {
         self.models[0]
             .compaction
             .effective_window(summary.compaction)
-    }
-
-    pub fn bounded_fallback(&self) -> bool {
-        self.models.len() > 1 && self.limits.needs_bounded_fallback(&self.hooks)
     }
 }
 
@@ -995,14 +992,31 @@ fn resolve(
     let primary = &cfg.models[&a.model];
     let history = a.limits.limits_history();
     let overrides = a.toolsets.iter().any(|ts| !ts.model.is_empty());
-    if output_tool.is_some() && (history || overrides || a.limits.max_iterations > 0) {
-        return Err("tool-mode structured output with history limits, max_iterations or toolset model overrides is not supported".into());
+    let hooks = a.hooks.clone().with_defaults(
+        a.redact_secrets.unwrap_or(true),
+        a.add_date,
+        a.add_environment_info,
+    );
+    let bounded_output =
+        output_tool.is_some() && (history || overrides || a.limits.max_iterations > 0);
+    if bounded_output {
+        if chain {
+            return Err("tool-mode structured output with history limits, max_iterations or toolset model overrides cannot use fallback models".into());
+        }
+        // Go may compact on overflow even without a declared context window.
+        if a.session_compaction != Some(false) {
+            return Err("tool-mode structured output with history limits, max_iterations or toolset model overrides requires session_compaction: false".into());
+        }
+        // Intercepted output bypasses tool transforms. A middle-out cut can defeat outgoing redaction.
+        if a.limits.max_tool_result_tokens > 0 && hooks.redact_messages {
+            return Err("tool-mode structured output with max_tool_result_tokens cannot safely truncate results before secret redaction".into());
+        }
     }
     if team && a.limits.max_iterations > 0 {
         return Err("agent max_iterations with local teams is not supported".into());
     }
-    // An overflow can start compaction in Go even without a declared context window.
-    if chain && a.limits.needs_bounded_fallback(&a.hooks) && a.session_compaction != Some(false) {
+    let bounded_fallback = chain && a.limits.needs_bounded_fallback(&a.hooks);
+    if bounded_fallback && a.session_compaction != Some(false) {
         return Err("bounded fallback requires session_compaction: false".into());
     }
     if chain
@@ -1151,11 +1165,8 @@ fn resolve(
         tool_models,
         summary_model,
         output_tool,
-        hooks: a.hooks.clone().with_defaults(
-            a.redact_secrets.unwrap_or(true),
-            a.add_date,
-            a.add_environment_info,
-        ),
+        separate_model_attempts: bounded_fallback || bounded_output,
+        hooks,
         tool_policy: Policy {
             rules: cfg.permissions.clone(),
             safety: if a.safety == Safety::Legacy {
