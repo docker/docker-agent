@@ -453,11 +453,10 @@ pub fn responses_prelude(chunk: &Value) -> bool {
 }
 
 pub fn check_responses_history(body: &Value) -> Result<(), String> {
-    // Chat history may contain names, opaque provider state or reasoning that
-    // the stateless Responses adapter cannot send to a different model.
+    // Stateless Responses omits plain reasoning deltas, never forwards opaque provider state.
     for m in body["messages"].as_array().expect("conversation messages") {
         let fields: &[&str] = match m["role"].as_str() {
-            Some("assistant") => &["role", "content", "tool_calls"],
+            Some("assistant") => &["role", "content", "tool_calls", "reasoning_content"],
             Some("tool") => &["role", "content", "tool_call_id"],
             _ => &["role", "content"],
         };

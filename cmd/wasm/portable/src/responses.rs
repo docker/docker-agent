@@ -17,27 +17,6 @@ fn array<'a>(obj: &'a Value, key: &str) -> Result<&'a [Value], String> {
     }
 }
 
-// Mirrors modelinfo.UsesReasoningEffort and the default effort for always-reasoning o-series.
-fn reasoning(model: &str, effort: &Value) -> Option<Value> {
-    let name = model.trim().rsplit('/').next()?.to_ascii_lowercase();
-    let o_series = ["o1", "o3", "o4"].iter().any(|p| name.starts_with(p));
-    let generation = name.strip_prefix("gpt-").unwrap_or("").split('-').next()?;
-    let (major, minor) = generation.split_once('.').unwrap_or((generation, "0"));
-    let future_gpt = [major, minor]
-        .iter()
-        .all(|s| (1..=2).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit()))
-        && major.parse::<u8>().is_ok_and(|n| n >= 6);
-    let gpt5 = name.starts_with("gpt-5") && !name.starts_with("gpt-5-chat");
-    if !(o_series || gpt5 || future_gpt) {
-        return None;
-    }
-    let mut reasoning = json!({"summary":"detailed"});
-    if let Some(effort) = effort.as_str().or(o_series.then_some("medium")) {
-        reasoning["effort"] = effort.into();
-    }
-    Some(reasoning)
-}
-
 pub fn request(
     mut chat: Value,
     output_tool: Option<&crate::structured_output::OutputTool>,
@@ -86,7 +65,7 @@ pub fn request(
     let mut body = json!({"model":model,"stream":true});
     body["input"] = input.into();
     // frequency_penalty, presence_penalty and stream_options are Chat-only.
-    for key in ["temperature", "top_p", "service_tier"] {
+    for key in ["temperature", "top_p", "service_tier", "reasoning"] {
         if !chat[key].is_null() {
             body[key] = chat[key].clone();
         }
@@ -95,9 +74,6 @@ pub fn request(
         if cap.as_u64().is_some_and(|n| n > 0) {
             body["max_output_tokens"] = cap.clone();
         }
-    }
-    if let Some(params) = reasoning(model, &chat["reasoning_effort"]) {
-        body["reasoning"] = params;
     }
 
     if let Some(format) = chat.get_mut("response_format") {
@@ -598,7 +574,7 @@ mod tests {
         let chat = json!({
             "model":"gpt-5", "stream":true, "stream_options":{"include_usage":true},
             "max_completion_tokens":350, "temperature":0, "top_p":0.8, "frequency_penalty":1, "presence_penalty":1,
-            "parallel_tool_calls":false, "reasoning_effort":"high",
+            "parallel_tool_calls":false, "reasoning":{"summary":"detailed","effort":"high"},
             "messages":[
                 {"role":"system","content":"instructions"},{"role":"system","content":"tools"},
                 {"role":"user","content":"hello"},{"role":"assistant","content":" ","reasoning_content":"hidden"},
@@ -635,19 +611,6 @@ mod tests {
             request(chat.clone(), None).unwrap(),
             json!({"model":"gpt-4.1","input":[{"role":"user","content":"hi"}],"max_output_tokens":32,"stream":true})
         );
-        for (model, expected) in [
-            (
-                "openai/O3-mini",
-                json!({"summary":"detailed","effort":"medium"}),
-            ),
-            ("gpt-5.1", json!({"summary":"detailed"})),
-            ("gpt-6.2-pro", json!({"summary":"detailed"})),
-            ("gpt-5-chat-latest", Value::Null),
-            ("gpt-6abc", Value::Null),
-        ] {
-            chat["model"] = model.into();
-            assert_eq!(request(chat.clone(), None).unwrap()["reasoning"], expected);
-        }
         chat["messages"][0]["content"] = json!({"type":"image_url"});
         assert!(request(chat, None).is_err());
     }

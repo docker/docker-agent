@@ -1,6 +1,7 @@
 //! Foreground LLM compaction (pkg/compaction and pkg/runtime/compactor).
+use crate::config::RequestModel;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 const MAX_OVERFLOW_RETRIES: u8 = 3;
@@ -256,7 +257,7 @@ impl Compactor {
     pub fn plan(
         &self,
         messages: &[Value],
-        params: &Map<String, Value>,
+        model: &RequestModel,
         summary_policy: Policy,
         merge: bool,
         previous: Option<&Prefix>,
@@ -346,15 +347,16 @@ impl Compactor {
         }
         input.extend(kept.iter().map(|e| e.message.clone()));
         input.push(json!({"role":"user", "content":USER}));
-        let mut body = params.clone();
+        let mut body = model.model_params.clone();
         body.remove("response_format");
         body.remove("tool_choice");
         body.remove("parallel_tool_calls");
-        let key = crate::config::cap_key(params["model"].as_str().expect("configured model"));
+        let key = crate::config::cap_key(model.name());
         body.insert(key.into(), summary_policy.clamp(cap as i64).into());
         body.insert("messages".into(), input.into());
         body.insert("stream".into(), true.into());
         body.insert("stream_options".into(), json!({"include_usage":true}));
+        model.apply_reasoning(&mut body, false, Some(cap as i64));
         let mut request = Value::Object(body);
         if merge {
             crate::wire::merge_messages(&mut request);
@@ -415,8 +417,12 @@ mod tests {
         }
     }
 
-    fn params() -> Map<String, Value> {
-        Map::from_iter([("model".into(), "test".into())])
+    fn params() -> RequestModel {
+        RequestModel {
+            model_params: serde_json::Map::from_iter([("model".into(), "test".into())]),
+            replay_reasoning: true,
+            ..Default::default()
+        }
     }
 
     #[test]

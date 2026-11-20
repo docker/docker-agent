@@ -182,3 +182,22 @@ test('HTTP diagnostics retain the Azure query but never project hidden envelope 
     assert.deepEqual(errors.splice(0), [{type: 'error', message}]);
   }
 });
+
+test('unsupported reasoning state and unbound model credentials fail before fetch', {skip: !portable}, async t => {
+  const requests = intercept(t);
+  for (const [cfg, reason] of [
+    [yaml('openai', 'o1', ', thinking_budget: 128'), /effort name/],
+    [yaml('openai', 'gpt-5', ', thinking_budget: adaptive'), /effort name/],
+    [yaml('openai', 'gpt-5', ', provider_opts: {preserve_reasoning: true}'), /encrypted Responses history/],
+    [yaml('openai', 'gpt-5.6-sol', '', ', toolsets: [{type: think, defer: true}]'), /deferred tool loads/],
+    [yaml('openai', 'gpt-4o', ', track_usage: false'), /stream termination/],
+    [yaml('ollama', 'test'), /dedicated token_key/],
+    ['agents: {root: {model: chatgpt/gpt-5, toolsets: [{type: model_picker, models: [chatgpt/gpt-5.2]}]}}', /ChatGPT client/],
+    ['agents: {root: {model: opencode/test, sub_agents: [child]}, child: {model: openai/test}}', /OpenCode in a team/],
+    [yaml('azure', 'test', ", base_url: 'https://r.openai.azure.com/${AZURE_API_KEY}'"), /cannot reference a credential/],
+    [yaml('openai', 'test', ', base_url: https://remote.invalid, token_key: AZURE_API_KEY'), /Azure resource/],
+    ['providers: {p: {base_url: https://one.invalid, token_key: OTHER}}\n' + yaml('p', 'test', ', base_url: https://two.invalid'), /cross-origin/],
+    [yaml('openai', 'test', ', base_url: https://other.invalid/one%2Ftwo, token_key: OTHER'), /endpoint path/],
+  ]) await assert.rejects(api.createSession({yaml: cfg, env: {...env, OPENCODE_API_KEY: 'fixture'}}), reason);
+  assert.equal(requests.length, 0);
+});

@@ -2,9 +2,9 @@
 
 The `chat*` browser replays compare the first request, streamed events, result,
 and the request after a tool result or second user turn. `chatRequest_*` forces
-Chat Completions even for families that normally select Responses. The o-series
-gets the reference's default `reasoning_effort: medium`; an explicit
-`thinking_budget` is still outside the admitted config.
+Chat Completions even for families that normally select Responses. See [model
+requests](model-requests.md) for explicit `thinking_budget`, provider defaults
+and reasoning replay.
 
 | Field | Interpretation |
 | --- | --- |

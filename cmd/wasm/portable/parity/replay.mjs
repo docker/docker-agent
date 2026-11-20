@@ -53,13 +53,20 @@ async function replay(api, name, yaml, replies, drive, endpoint = '/v1/chat/comp
       throw new Error(unexpected);
     }
     const chunks = replies[trace.requests.length];
-    trace.requests.push({ method: req.method, path: new URL(req.url).pathname,
-      authorization: req.headers.get('Authorization'), body: await req.json() });
+    const url = new URL(req.url), headers = Object.fromEntries(req.headers);
+    for (const [key, version] of [['session_id', '4'], ['x-opencode-session', '5']]) {
+      if (!(key in headers)) continue;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(headers[key]) || headers[key][14] !== version) throw new Error(`invalid ${key}`);
+      headers[key] = correlation(headers[key]);
+    }
+    // The two pages use different ephemeral loopback ports. Credential values here are scripted fixtures.
+    trace.requests.push({ method: req.method, origin: url.origin === location.origin ? 'self' : url.origin, path: url.pathname + url.search,
+      headers, body: await req.json() });
     if (!Array.isArray(chunks)) {
       const init = { status: chunks.status, headers: chunks.headers };
       return 'raw' in chunks ? new Response(chunks.raw, init) : Response.json(chunks.body, init);
     }
-    const isChat = expected.endsWith('/chat/completions');
+    const isChat = url.pathname.endsWith('/chat/completions');
     const stream = chunks.map(c => `data: ${JSON.stringify(isChat ? { id: 'completion', object: 'chat.completion.chunk', model: 'test', ...c } : c)}\r\n\r\n`).join('');
     return new Response(stream + (isChat ? 'data: [DONE]\r\n\r\n' : ''), { headers: { 'Content-Type': 'text/event-stream' } });
   };
@@ -690,7 +697,7 @@ agents: {root: {model: ordinary, ${smallSummary && !failed ? 'compaction_model: 
           if (failed) await next.then(() => {throw new Error('expected summary failure');}, e => trace.results.push(e.message));
           else trace.results.push(await next);
           trace.results.push(await s.send('afterwards'));
-          if (trace.requests[1].authorization !== 'Bearer summary-only' || JSON.stringify(trace.requests).includes(secret)) throw new Error('bad summary credentials or unredacted history');
+          if (trace.requests[1].headers.authorization !== 'Bearer summary-only' || JSON.stringify(trace.requests).includes(secret)) throw new Error('bad summary credentials or unredacted history');
         } finally { await s.close(); }
       }, [mainPath, summaryPath, mainPath, mainPath]);
   }
@@ -1404,6 +1411,89 @@ agents:`)
         .replace('model: local/test', 'model: m');
       tests[name] = await replay(api, name, yaml, tools ? [tool('think', {thought: 'plan'}), chatJSON, chatJSON] : [answer, answer], turns);
     }
+  }
+  const encryptedItem = {...reasoningItem, encrypted_content: 'opaque fixture', summary: [{type: 'summary_text', text: reasonDelta.delta}]};
+  const reasoningCall = [reasonDelta, doneItem(encryptedItem), ...responseTool.slice(0, -1), fin([encryptedItem, ...callFinished.response.output])];
+  const requestScripts = responses => responses ? [reasoningCall, text, text] : [[piece({reasoning: 'thinking'}), ...ponder('plan')], answer, answer];
+  const providerCatalog = await (await fetch('/providers.json')).json();
+  const aliases = {fireworks: 'fireworks-ai', together: 'togetherai', moonshot: 'moonshotai', 'opencode-zen': 'opencode'};
+  for (const p of providerCatalog.filter(p => p.api_type === 'openai')) {
+    for (const provider of [p.name, ...Object.keys(aliases).filter(k => aliases[k] === p.name)]) {
+      const name = `requestProvider_${provider}`, model = p.default_model ?? 'gpt-4o';
+      const responses = provider === 'chatgpt' || (p.auto_responses && model.startsWith('gpt-5'));
+      const azure = provider === 'azure';
+      const base = (p.base_url ?? 'https://fixture.openai.azure.com/openai/deployments/test')
+        .replace('${CLOUDFLARE_ACCOUNT_ID}', 'acct').replace('${CLOUDFLARE_GATEWAY_ID}', 'gw');
+      const yaml = JSON.stringify({agents: {root: {model: azure ? 'm' : `${provider}/${model}`, instruction: 'behave', toolsets: [{type: 'think'}]}},
+        models: azure ? {m: {provider, model, base_url: base, provider_opts: {api_version: 'v ~*&'}}} : {}});
+      tests[name] = await replay(api, name, yaml, requestScripts(responses), async args => {
+        for (const key of p.token_env_vars ?? []) args.options.env[key] = `fixture-${key}`;
+        Object.assign(args.options.env, {CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_GATEWAY_ID: 'gw'});
+        await turns(args);
+      }, base + (responses ? '/responses' : '/chat/completions') + (azure ? '?api-version=v+~%2A%26' : ''));
+    }
+  }
+  const requestBase = 'https://model.invalid/v1';
+  for (const responses of [false, true]) {
+    const api_type = responses ? 'openai_responses' : 'openai_chatcompletions';
+    const endpoint = requestBase + (responses ? '/responses' : '/chat/completions');
+    for (const [label, model, options, defaults, plain] of [
+      ['medium', 'o1', {}], ['expanded', '${env.MODEL}', {}], ['minimal', 'o4-mini', {thinking_budget: 'minimal'}],
+      ['low', 'gpt-5-mini', {thinking_budget: ' LOW '}], ['mediumExplicit', 'gpt-5.1', {thinking_budget: 'medium'}],
+      ['xhigh', 'gpt-5.2', {thinking_budget: 'xhigh'}], ['max', 'gpt-5.4', {thinking_budget: 'max'}],
+      ['maxPlain', 'gpt-5.4', {thinking_budget: 'max'}, {}, true], ['off', 'o3-mini', {thinking_budget: 0, max_tokens: -1}],
+      ['none', 'gpt-5.6-sol', {thinking_budget: 'none', max_tokens: 0}], ['uncapped', 'o1', {thinking_budget: 'none'}, {}, true],
+      ['sol', 'gpt-6-sol-2026-10-12', {thinking_budget: 'none', max_tokens: 12}], ['astra', 'gpt-6-astra', {thinking_budget: 0, max_tokens: 12}],
+      ['chatLatest', 'gpt-5-chat-latest', {thinking_budget: 'high'}], ['legacy', 'gpt-4.1', {thinking_budget: 1024}],
+      ['compatible', 'qwen3', {thinking_budget: 'adaptive/high', max_tokens: 9007199254740991, temperature: -2, top_p: 1.1}],
+      ['inherited', 'gpt-5.2', {max_tokens: 0, temperature: 0, provider_opts: {service_tier: 'flex'}},
+        {thinking_budget: 'high', max_tokens: 123, temperature: -1, top_p: 0, parallel_tool_calls: false, presence_penalty: -1, frequency_penalty: 2,
+          provider_opts: {service_tier: 'auto', replay_reasoning: false}}],
+      ['override', 'o1', {thinking_budget: 'low', provider_opts: {api_type, replay_reasoning: true}},
+        {api_type: responses ? 'openai_chatcompletions' : 'openai_responses', provider_opts: {replay_reasoning: false}, thinking_budget: 0}],
+      ['proxyState', 'o3', {provider_opts: {preserve_reasoning: true}, track_usage: !responses}],
+      ['underlyingCopilot', 'gpt-5', {token_key: 'LOCAL_KEY'}, {provider: 'github-copilot', provider_opts: {http_headers: {'copilot-integration-id': 'test'}}}],
+    ]) {
+      const name = `requestOptions_${responses ? 'responses' : 'chat'}_${label}`;
+      const yaml = JSON.stringify({providers: {p: {provider: 'openai', base_url: requestBase, token_key: 'LOCAL_KEY', api_type, ...defaults}},
+        models: {m: {provider: 'p', model, ...options}}, agents: {root: {model: 'm', instruction: 'behave', toolsets: plain ? [] : [{type: 'think'}]}}});
+      tests[name] = await replay(api, name, yaml, requestScripts(responses).slice(plain ? 1 : 0), async args => {
+        args.options.env.MODEL = 'o3-mini'; await turns(args);
+      }, endpoint);
+    }
+  }
+  const inherited = {api_type: 'openai_chatcompletions', base_url: requestBase, token_key: 'LOCAL_KEY', thinking_budget: 'high', max_tokens: 97};
+  const chosen = {provider: 'p', model: 'o3-mini', thinking_budget: 0, max_tokens: 2};
+  tests.requestNamedPrecedence = await replay(api, 'requestNamedPrecedence', JSON.stringify({providers: {p: inherited},
+    models: {'p/gpt-5': chosen}, agents: {root: {model: 'p/gpt-5', toolsets: [{type: 'think'}]}}}),
+    requestScripts(false), turns, requestBase + '/chat/completions');
+  for (const [name, agent, first] of [
+    ['requestPickerPrecedence', {toolsets: [{type: 'model_picker', models: ['next']}, {type: 'think'}]}, tool('change_model', {model: 'next'})],
+    ['requestFallbackPrecedence', {fallback: {models: ['next'], retries: -1}, toolsets: [{type: 'think'}]}, http(401)],
+  ]) {
+    const yaml = JSON.stringify({providers: {p: inherited}, models: {next: chosen}, agents: {root: {model: 'p/gpt-5', ...agent}}});
+    tests[name] = await replay(api, name, yaml, [first, ponder('plan'), answer, answer], turns, requestBase + '/chat/completions');
+  }
+  for (const [base, path] of [["path!'[]", 'path%21%27%5B%5D'], ["path!'[]/", "path!'[]"]]) {
+    const name = base.endsWith('/') ? 'requestPathRaw' : 'requestPathEscaped';
+    tests[name] = await replay(api, name, config.replace(`${location.origin}/v1`, JSON.stringify(`${requestBase}/${base}`)),
+      [answer, answer], turns, `${requestBase}/${path}/chat/completions`);
+  }
+  tests.requestDeferredOptOut = await replay(api, 'requestDeferredOptOut',
+    `models: {m: {provider: openai, model: gpt-5.4, thinking_budget: high, provider_opts: {supports_deferred_tools: false}}}\nagents: {root: {model: m, toolsets: [{type: think, defer: true}]}}`,
+    [responseCall({...fn, name: 'add_tool'}, '{"name":"think"}'), reasoningCall, text, text], async args => {
+      args.options.env.OPENAI_API_KEY = 'fixture'; await turns(args);
+    }, 'https://api.openai.com/v1/responses');
+  const routedReasoning = JSON.stringify({providers: {p: {base_url: requestBase, token_key: 'LOCAL_KEY'}},
+    models: {next: {provider: 'p', model: 'o4-mini', thinking_budget: 'high'}},
+    agents: {root: {model: 'p/gpt-5', fallback: {models: ['next'], retries: -1}, toolsets: [{type: 'think'}]}}});
+  tests.requestFallbackReasoning = await replay(api, 'requestFallbackReasoning', routedReasoning,
+    [http(401), reasoningCall, text, text], turns, requestBase + '/responses');
+  for (const provider of ['openai_chatcompletions', 'openai_responses']) {
+    const name = `requestProtocol_${provider}`;
+    const yaml = JSON.stringify({models: {m: {provider, model: 'o3-mini', base_url: requestBase + '//', token_key: 'LOCAL_KEY'}},
+      agents: {root: {model: 'm', toolsets: [{type: 'think'}]}}});
+    tests[name] = await replay(api, name, yaml, requestScripts(false), turns, requestBase + '//chat/completions');
   }
   // Go advertises a denied tool, with its instructions, and refuses the call at dispatch.
   const stocked = local(['think', 'todo', 'memory']);
