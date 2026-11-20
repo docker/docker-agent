@@ -3,6 +3,7 @@
 use serde_json::{json, Value};
 use serde_yaml_ng::Value as Instance;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 pub const NAME: &str = "__structured_output__";
 pub const REMINDER: &str = "Reminder: this conversation requires structured output. Do not answer in plain text. Call the __structured_output__ tool with your final answer as arguments matching its JSON schema; a valid call ends the turn.";
@@ -11,6 +12,7 @@ pub const MAX_ARGS: usize = 64 * 1024;
 const MAX_SCHEMA_NODES: usize = 128;
 const MAX_DEPTH: usize = 16;
 const MAX_EXPANDED_NODES: usize = 512;
+const MAX_ANY_OF: usize = 4;
 const NON_EXCLUSIVE: &str = "Structured output rejected: __structured_output__ must be the only tool call in the response. Finish any other tool use first, then call __structured_output__ alone with the final answer.";
 
 fn safe_integer(n: i64) -> bool {
@@ -157,6 +159,31 @@ fn parameters(
         }
         return Ok(s.clone());
     }
+    if let Some(branches) = s.get("anyOf") {
+        if s.as_object().unwrap().len() != 1 {
+            return Err("tool schema anyOf siblings are unsupported".into());
+        }
+        let branches = branches
+            .as_array()
+            .filter(|a| (2..=MAX_ANY_OF).contains(&a.len()))
+            .ok_or("tool schema anyOf requires 2-4 scalar alternatives")?;
+        let mut normalized = Vec::with_capacity(branches.len());
+        for branch in branches {
+            if !matches!(
+                branch["type"].as_str(),
+                Some("boolean" | "number" | "null" | "string")
+            ) || !branch
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|k| matches!(k.as_str(), "type" | "enum" | "title" | "description"))
+            {
+                return Err("unsupported tool schema anyOf alternative".into());
+            }
+            normalized.push(parameters(branch, depth + 1, left, strict)?);
+        }
+        return Ok(json!({"anyOf": normalized}));
+    }
     let ty = s["type"]
         .as_str()
         .ok_or("tool schema nodes require a single explicit type")?;
@@ -230,7 +257,8 @@ fn parameters(
         for (key, child) in props {
             check_name(key)?;
             let mut prop = parameters(child, depth + 1, left, strict)?;
-            if !required.contains(key.as_str()) {
+            // Go makes optional composition properties required without rewriting their branches.
+            if !required.contains(key.as_str()) && child.get("anyOf").is_none() {
                 if child["type"] == "null" {
                     return Err("optional null-only tool properties are unsupported".into());
                 }
@@ -317,6 +345,7 @@ impl Schema {
                 .into_iter()
                 .flat_map(|p| p.values())
                 .chain(s.get("items"))
+                .chain(s["anyOf"].as_array().into_iter().flatten())
             {
                 self.check_graph(child, depth + 1, stack, left)?;
             }
@@ -330,6 +359,9 @@ impl Schema {
             return self
                 .validate(&self.defs[pointer], v, path)
                 .map_err(|e| format!("validating {path}: {e}"));
+        }
+        if let Some(branches) = s["anyOf"].as_array() {
+            return validate_any_of(branches, v, path);
         }
         let ty = s["type"].as_str().unwrap();
         let bounds = |n: usize, min: &str, max: &str| {
@@ -404,6 +436,116 @@ impl Schema {
         }
         Ok(())
     }
+}
+
+fn validate_any_of(branches: &[Value], v: &Instance, path: &str) -> Result<(), String> {
+    let got = match v {
+        Instance::String(_) => "string",
+        Instance::Number(n) if n.as_f64().unwrap().fract() == 0.0 => "integer",
+        Instance::Number(_) => "number",
+        Instance::Null => "null",
+        Instance::Bool(_) => "boolean",
+        Instance::Sequence(_) => "array",
+        Instance::Mapping(_) => "object",
+        Instance::Tagged(_) => unreachable!("JSON instance"),
+    };
+    let matches_type = |b: &Value| b["type"] == got || (got == "integer" && b["type"] == "number");
+    if branches.iter().any(|b| {
+        matches_type(b)
+            && b["enum"]
+                .as_array()
+                .is_none_or(|a| a.iter().any(|x| x.as_str() == v.as_str()))
+    }) {
+        return Ok(());
+    }
+
+    // jsonschema-go joins diagnostics for *all* failed branches in declaration order.
+    let mut value = String::new();
+    if v.is_null() {
+        value.push_str("<invalid reflect.Value>");
+    } else {
+        write_go_value(&mut value, v);
+    }
+    let names = vec!["<anonymous schema>"; branches.len()].join(" ");
+    let mut error = format!("anyOf: did not validate against any of [{names}]:");
+    for (i, b) in branches.iter().enumerate() {
+        write!(error, "\nvalidating {path}/anyOf/{i}: ").unwrap();
+        if matches_type(b) {
+            let options: Vec<_> = b["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_str().unwrap())
+                .collect();
+            write!(
+                error,
+                "enum: {value} does not equal any of: [{}]",
+                options.join(" ")
+            )
+            .unwrap();
+        } else {
+            write!(error, "type: {value} has type {got:?}, want {}", b["type"]).unwrap();
+        }
+    }
+    Err(error)
+}
+
+// Go fmt's %v for a decoded JSON value. Map keys are sorted, strings unquoted.
+fn write_go_value(out: &mut String, v: &Instance) {
+    match v {
+        Instance::Null => out.push_str("<nil>"),
+        Instance::String(s) => out.push_str(s),
+        Instance::Bool(b) => write!(out, "{b}").unwrap(),
+        Instance::Number(n) => out.push_str(&go_float(n.as_f64().unwrap())),
+        Instance::Sequence(a) => {
+            out.push('[');
+            for (i, v) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                write_go_value(out, v);
+            }
+            out.push(']');
+        }
+        Instance::Mapping(m) => {
+            out.push_str("map[");
+            let mut fields: Vec<_> = m
+                .iter()
+                .map(|(k, v)| (k.as_str().expect("JSON key"), v))
+                .collect();
+            fields.sort_unstable_by_key(|&(k, _)| k);
+            for (i, (key, v)) in fields.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                write!(out, "{key}:").unwrap();
+                write_go_value(out, v);
+            }
+            out.push(']');
+        }
+        Instance::Tagged(_) => unreachable!("JSON instance"),
+    }
+}
+
+fn go_float(f: f64) -> String {
+    // Use JSON's shortest round-to-even digits with Go %g's exponent cutoffs and padding.
+    let text = serde_json::to_string(&f).unwrap();
+    if let Some((mantissa, exp)) = text.split_once('e') {
+        return format!("{mantissa}e{:+03}", exp.parse::<i32>().unwrap());
+    }
+    let decimal = text.strip_suffix(".0").unwrap_or(&text);
+    if f == 0.0 || (1e-4..1e6).contains(&f.abs()) {
+        return decimal.into();
+    }
+    let unsigned = decimal.trim_start_matches('-');
+    let point = unsigned.find('.').unwrap_or(unsigned.len());
+    let digits = unsigned.replace('.', "");
+    let significant = digits.trim_start_matches('0');
+    let exp = point as i32 - (digits.len() - significant.len()) as i32 - 1;
+    let (head, tail) = significant.trim_end_matches('0').split_at(1);
+    let sign = if f < 0.0 { "-" } else { "" };
+    let dot = if tail.is_empty() { "" } else { "." };
+    format!("{sign}{head}{dot}{tail}e{exp:+03}")
 }
 
 #[cfg(test)]
@@ -540,6 +682,111 @@ mod tests {
         ] {
             assert!(tool(&object(child.clone())).is_err(), "{child}");
         }
+    }
+
+    #[test]
+    fn scalar_any_of_preserves_branch_order_and_optional_property_on_wire() {
+        let choice = json!({"anyOf":[{"type":"string","enum":["skip"]},{"type":"number"},{"type":"null"},{"type":"string","title":"Label"}]});
+        let mut schema = object(json!({"type":"array","items":{"$ref":"#/$defs/Value"}}));
+        schema["properties"]["flag"] =
+            json!({"anyOf":[{"type":"boolean"},{"type":"string","enum":["auto"]}]});
+        schema["$defs"] = json!({"Value": choice});
+        let t = tool(&schema).unwrap();
+        assert!(t.strict);
+        let mut wire = schema.clone();
+        wire["required"] = json!(["flag", "x"]);
+        assert_eq!(t.definition["function"]["parameters"], wire);
+        assert_eq!(
+            t.call(r#"{ "x": ["skip", "label", null, 3, -2.50e+1] }"#, true)
+                .unwrap(),
+            r#"{"x":["skip","label",null,3,-2.50e+1]}"#
+        );
+        assert!(t.call(r#"{"x":[],"flag":true}"#, true).is_ok());
+        assert!(t
+            .call(r#"{"x":[],"flag":null}"#, true)
+            .unwrap_err()
+            .contains("type: <invalid reflect.Value> has type \"null\""));
+        assert_eq!(t.call(r#"{"x":[],"flag":"other"}"#, true).unwrap_err(), concat!(
+            "Structured output rejected: arguments do not match the \"report\" schema: validating root: ",
+            "validating /properties/flag: anyOf: did not validate against any of [<anonymous schema> <anonymous schema>]:\n",
+            "validating /properties/flag/anyOf/0: type: other has type \"string\", want \"boolean\"\n",
+            "validating /properties/flag/anyOf/1: enum: other does not equal any of: [auto]. Fix the arguments and call __structured_output__ again."
+        ));
+    }
+
+    #[test]
+    fn any_of_type_diagnostics_use_go_values() {
+        let t = tool(&object(
+            json!({"anyOf":[{"type":"boolean"},{"type":"string"}]}),
+        ))
+        .unwrap();
+        for (input, got, text) in [
+            ("null", "null", "<invalid reflect.Value>"),
+            ("-0", "integer", "-0"),
+            ("1.0", "integer", "1"),
+            ("9007199254740993", "integer", "9.007199254740992e+15"),
+            ("-9200000.125", "number", "-9.200000125e+06"),
+            ("0.0001", "number", "0.0001"),
+            ("-0.0000123", "number", "-1.23e-05"),
+            ("5e-324", "number", "5e-324"),
+            (
+                r#"{"z":true,"a":[null,"a b",1e56]}"#,
+                "object",
+                "map[a:[<nil> a b 1e+56] z:true]",
+            ),
+        ] {
+            let err = t.call(&format!(r#"{{"x":{input}}}"#), true).unwrap_err();
+            assert!(
+                err.contains(&format!("type: {text} has type {got:?}, want \"boolean\"")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_any_of_even_in_unused_definitions() {
+        let string = json!({"type":"string"});
+        for bad in [
+            json!({"anyOf":null}),
+            json!({"anyOf":[]}),
+            json!({"anyOf":[string]}),
+            json!({"anyOf":vec![string.clone(); MAX_ANY_OF + 1]}),
+            json!({"anyOf":[string,string],"description":"sibling"}),
+            json!({"anyOf":[string, true]}),
+            json!({"anyOf":[string, {}]}),
+            json!({"anyOf":[string, {"type":"integer"}]}),
+            json!({"anyOf":[string, {"type":"string","maxLength":1}]}),
+            json!({"anyOf":[string, {"type":"boolean","enum":[true]}]}),
+            json!({"anyOf":[string, {"type":"array","items":string}]}),
+            json!({"anyOf":[string, {"type":"object","properties":{}}]}),
+            json!({"anyOf":[string, {"$ref":"#/$defs/s"}]}),
+            json!({"anyOf":[string, {"anyOf":[string,string]}]}),
+            json!({"anyOf":[string, {"type":"string","not":string}]}),
+        ] {
+            let mut schema = object(string.clone());
+            schema["$defs"] = json!({"s": string, "unused": {"type":"array","items":bad}});
+            assert!(tool(&schema).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn any_of_branches_count_toward_schema_budgets() {
+        let union = json!({"anyOf":vec![json!({"type":"string"}); MAX_ANY_OF]});
+        let mut schema = object(union.clone());
+        for i in 0..MAX_SCHEMA_NODES / (MAX_ANY_OF + 1) {
+            schema["properties"][i.to_string()] = union.clone();
+        }
+        assert!(tool(&schema).err().unwrap().contains("node limit"));
+
+        let mut schema = object(json!({"$ref":"#/$defs/0"}));
+        schema["$defs"] = json!({"0":{"type":"object","properties":{}}, "leaf":union});
+        for i in 0..MAX_DEPTH {
+            schema["properties"][i.to_string()] = json!({"$ref":"#/$defs/0"});
+        }
+        for i in 0..5 {
+            schema["$defs"]["0"]["properties"][i.to_string()] = json!({"$ref":"#/$defs/leaf"});
+        }
+        assert!(tool(&schema).err().unwrap().contains("expansion budget"));
     }
 
     #[test]
