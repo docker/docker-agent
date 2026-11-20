@@ -1001,14 +1001,9 @@ fn resolve(
     if history && team {
         return Err("history limits with local teams are not supported".into());
     }
-    if chain && history {
-        if a.limits.max_iterations > 0 || a.hooks.max_calls.is_some() {
-            return Err("fallback history limits with an iteration limit are not supported".into());
-        }
-        // Go samples the date once per round, not once per fallback attempt.
-        if a.add_date || a.hooks.add_date {
-            return Err("fallback history limits with add_date are not supported".into());
-        }
+    // Go samples the date once per round, not once per fallback attempt.
+    if chain && history && (a.add_date || a.hooks.add_date) {
+        return Err("fallback history limits with add_date are not supported".into());
     }
     let has_tools = output_tool.is_some() || !toolsets.is_empty();
     let summary_name = first_nonempty([
@@ -1105,9 +1100,6 @@ fn resolve(
             &inline
         };
         models.push(resolve_target(m)?);
-    }
-    if chain && history && models.iter().any(|m| m.responses) {
-        return Err("fallback history limits require Chat Completions on every target".into());
     }
     if (team || chain) && models.iter().any(|m| m.compaction.enabled()) {
         let primary = &models[0];

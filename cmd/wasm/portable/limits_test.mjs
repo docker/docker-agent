@@ -165,16 +165,60 @@ test('fallback history limits reject incompatible configurations and seeds befor
     [config(`${fields}, toolsets: [{type: session_context}]`), /session_context/],
     [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],
     [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
-    [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}`), /history limits with an iteration limit/],
+    [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['9']}}`), /portable tool round limit/],
     [config(`${fields}, add_date: true`), /add_date/],
     [config(`${fields}, hooks: {turn_start: {type: builtin, command: add_date}}`), /add_date/],
-    [config(fields.replace('[local/backup]', '[local/backup, local/gpt-5]')), /Chat Completions on every target/],
   ]) await assert.rejects(api.createSession(opts(yaml)), reason);
   for (const field of ['num_history_items: 1', 'max_tool_result_tokens: 4', 'max_old_tool_call_tokens: 3']) {
     const options = opts(config(`${field}, ${route}`));
     await assert.rejects(api.chat({...options, messages: seed('text', [{type:'text', text:'part'}])}), /text-only history/);
   }
   assert.equal(requests.length, 0);
+});
+
+test('Responses fallback re-encodes a trimmed tool pair without replaying its tool', async t => {
+  const requests = [];
+  const output = [{type: 'response.output_text.delta', item_id: 'm', output_index: 0, delta: 'done'},
+    {type: 'response.completed', response: {id: 'r', status: 'completed', output: []}}];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const req = new Request(url, init);
+    requests.push({url: req.url, auth: req.headers.get('Authorization'), body: await req.json()});
+    if (requests.length === 1) return new Response('invalid model', {status: 404});
+    return new Response(output.map(e => `data: ${JSON.stringify(e)}\n\n`).join(''), {headers: {'Content-Type': 'text/event-stream'}});
+  });
+  const yaml = config('num_history_items: 5, max_tool_result_tokens: 4, session_compaction: false, fallback: {models: [backup]}',
+    'models: {backup: {provider: local, model: gpt-5, base_url: https://backup.invalid/v1, token_key: SPARE}}');
+  const messages = [{role: 'user', content: 'one'}, {role: 'assistant', tool_calls: [call('echo', {}, 'cut')]},
+    {role: 'tool', tool_call_id: 'cut', content: 'removed'}, {role: 'user', content: 'two'}, ...seed(reference.source)];
+  const result = await api.chat({yaml, env: {KEY: 'first', SPARE: 'second'}, messages});
+  assert.equal(result.message.content, 'done');
+  assert.deepEqual(requests.map(r => [r.url, r.auth]), [
+    ['https://model.invalid/v1/chat/completions', 'Bearer first'], ['https://backup.invalid/v1/responses', 'Bearer second'],
+  ]);
+  const [chat, responses] = requests.map(r => r.body);
+  assert.deepEqual(chat.messages.filter(m => m.role === 'user').map(m => m.content), ['one\ntwo', 'go']);
+  assert.deepEqual(chat.messages.filter(m => m.role === 'tool'), [{role: 'tool', tool_call_id: 'a', content: reference.stored_result}]);
+  assert.deepEqual(responses.input.filter(m => m.role !== 'system'), [
+    {role: 'user', content: 'one'}, {role: 'user', content: 'two'},
+    {type: 'function_call', call_id: 'a', name: 'echo', arguments: '{}'},
+    {type: 'function_call_output', call_id: 'a', output: reference.stored_result}, {role: 'user', content: 'go'},
+  ]);
+});
+
+test('history-limited routes reject multipart and unreplayable seeds before opening any target', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', () => { throw new Error('unexpected request'); });
+  const yaml = config('num_history_items: 1, max_iterations: 2, session_compaction: false, fallback: {models: [local/backup, local/gpt-5]}, toolsets: [{type: mcp, remote: {url: https://tool.invalid/mcp}}]');
+  const messages = seed('text fallback');
+  for (const [fields, reason] of [
+    [{multi_content: [{type: 'image_url', image_url: {url: 'https://image.invalid/secret'}}]}, /text-only/],
+    [{name: 'caller'}, /named or reasoning/],
+    [{reasoning_content: 'private'}, /named or reasoning/],
+    [{openai_response: {}}, /provider state/],
+  ]) {
+    const history = [{...messages[0], ...fields}, ...messages.slice(1)];
+    await assert.rejects(api.chat({...opts(yaml), messages: history}), reason);
+  }
+  assert.equal(fetch.mock.callCount(), 0);
 });
 
 test('routed iteration cap rejects incompatible settings before any request', async t => {
@@ -187,7 +231,6 @@ test('routed iteration cap rejects incompatible settings before any request', as
     [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['9']}}`), /portable tool round limit/],
     [config(`${fields.replace('max_iterations: 1, ', '')}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
     [config(`${fields}, sub_agents: [root]`), /max_iterations with local teams/],
-    [config(`${fields}, num_history_items: 1`), /history limits/],
     [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],
     [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
   ]) await assert.rejects(api.createSession(opts(yaml)), reason);
