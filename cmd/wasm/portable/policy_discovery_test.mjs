@@ -83,12 +83,12 @@ test('a stale decision cannot resume a later turn with the same model call ID', 
   assert.match(lastOutput(requests[4]), /rejected/);
 });
 
-test('deferred API, allow-list, readonly and deny filters precede search, activation and dispatch', {timeout:5000}, async t => {
+test('deferred API, allow-list and readonly filters precede search and activation; a denied tool is found but never runs', {timeout:5000}, async t => {
   const yaml = config([post('save','wrong',{tools:['excluded'],defer:true}), post('save','right',{defer:true,toon:'^save$'}),
     post('unsafe','readonly',{readonly:true,defer:true}), post('private','hidden',{defer:true})],
   {permissions:{ask:['save'],deny:['private']}});
   const requests = replay(t, [[call('search_tool',{query:''})], [call('add_tool',{name:'unsafe'}),call('add_tool',{name:'private'}),call('add_tool',{name:'save'})],
-    [call('save',{})], [call('save',{})], null], req => {
+    [call('save',{})], [call('private',{}),call('save',{})], null], req => {
     posts.push(req.url);
     assert.equal(req.method, 'POST');
     return Response.json({records:[{id:1},{id:2}]});
@@ -106,13 +106,17 @@ test('deferred API, allow-list, readonly and deny filters precede search, activa
   });
   assert.deepEqual(names(requests[0]), ['search_tool','add_tool']);
   assert.deepEqual(names(requests[1]), names(requests[0]));
-  assert.deepEqual(JSON.parse(lastOutput(requests[1]).split('\n')[1]).map(t => t.name), ['save']);
-  assert.deepEqual(requests[2].messages.slice(-3,-1).map(m => m.content), ["Tool 'unsafe' not found.", "Tool 'private' not found."]);
-  assert.deepEqual(names(requests[2]), ['search_tool','add_tool','save']);
+  // Like Go, a denial does not hide the tool: it is refused at dispatch.
+  assert.deepEqual(JSON.parse(lastOutput(requests[1]).split('\n')[1]).map(t => t.name), ['private','save']);
+  const [unsafe, hidden] = requests[2].messages.slice(-3,-1).map(m => m.content);
+  assert.equal(unsafe, "Tool 'unsafe' not found.");
+  assert.match(hidden, /^Tool 'private' has been activated/);
+  assert.deepEqual(names(requests[2]), ['search_tool','add_tool','private','save']);
   assert.deepEqual(confirmations, ['save','save']);
   assert.deepEqual(calls, ['call-0']);
   assert.deepEqual(posts, ['https://tool.invalid/right']);
   assert.equal(lastOutput(requests[3]), 'records[2]{id}:\n  1\n  2');
+  assert.equal(requests[4].messages.at(-2).content, "Tool 'private' is denied by permissions configuration.");
   assert.match(lastOutput(requests[4]), /rejected/);
 });
 
@@ -221,16 +225,18 @@ test('unsupported policy and filter shapes fail before opening any transport', a
   assert.equal(fetch.mock.callCount(),0);
 });
 
-test('a guessed filtered or unconditionally denied builtin cannot run, even under autoApprove', async t => {
+test('a filtered builtin is not offered and a denied one is refused, even under autoApprove', async t => {
   const requests = replay(t, [[call('create_todo',{description:'no'})], [call('list_todos',{})], null, [call('create_todo',{description:'no'})], null]);
   const events = [];
   for (const yaml of [config([{type:'todo',tools:['list_todos']}]), config([{type:'todo'}],{permissions:{deny:['create_todo']}})]) {
     await api.chat({yaml,messages,autoApprove:true},e => { events.push(e); });
   }
-  assert.ok(requests.every(body => !names(body).includes('create_todo')));
+  assert.ok(requests.slice(0, 3).every(body => !names(body).includes('create_todo')));
+  assert.ok(requests.slice(3).every(body => names(body).includes('create_todo'))); // Go offers a denied tool.
   assert.ok(events.every(e => !['tool_call','tool_confirmation'].includes(e.type) || e.name === 'list_todos'));
   const unavailable = "Tool 'create_todo' is not available. You can only use the tools provided to you.";
-  assert.deepEqual(events.filter(e => e.type === 'tool_result' && e.is_error).map(e => e.output), [unavailable, unavailable]);
+  assert.deepEqual(events.filter(e => e.type === 'tool_result' && e.is_error).map(e => e.output),
+    [unavailable, "Tool 'create_todo' is denied by permissions configuration."]);
   assert.deepEqual(JSON.parse(lastOutput(requests[2])).todos, []);
 });
 

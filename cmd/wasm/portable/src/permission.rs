@@ -58,21 +58,19 @@ impl Policy {
         self
     }
 
-    // Argument-dependent rules are checked again at dispatch, not guessed from a schema.
+    // Go advertises a denied tool and refuses it at dispatch. Only restricted mode, which Go
+    // lacks, hides what can never run; argument-dependent rules are left to dispatch.
     pub fn visible(&self, name: &str, safe: bool) -> Result<bool, &'static str> {
+        if self.safety != Safety::Restricted {
+            return Ok(true);
+        }
         let mut budget = MATCH_BUDGET;
-        let restricted = self.safety == Safety::Restricted;
-        let prohibitions = self
-            .rules
-            .deny
-            .iter()
-            .chain(self.rules.ask.iter().filter(|_| restricted));
-        for rule in prohibitions {
+        for rule in self.rules.deny.iter().chain(&self.rules.ask) {
             if rule.conditions.is_empty() && glob(&rule.name, name, &mut budget)? {
                 return Ok(false);
             }
         }
-        if restricted && !safe {
+        if !safe {
             for rule in &self.rules.allow {
                 if glob(&rule.name, name, &mut budget)? {
                     return Ok(true);
@@ -437,6 +435,36 @@ mod tests {
     // Use the same YAML Value -> typed fields path as config::load.
     fn load<T: serde::de::DeserializeOwned>(yaml: &str) -> Result<T, serde_yaml_ng::Error> {
         serde_yaml_ng::from_value(serde_yaml_ng::from_str(yaml)?)
+    }
+
+    #[test]
+    fn only_restricted_mode_hides_what_dispatch_refuses() {
+        let rules: Permissions = load("{deny: [blocked], ask: [gated], allow: [write]}").unwrap();
+        for (safety, shown) in [
+            (
+                Safety::Legacy,
+                ["blocked", "gated", "write", "other"].as_slice(),
+            ),
+            (Safety::Strict, &["blocked", "gated", "write", "other"]),
+            (Safety::Restricted, &["write"]),
+        ] {
+            let policy = Policy {
+                rules: rules.clone(),
+                safety,
+            };
+            for name in ["blocked", "gated", "write", "other"] {
+                assert_eq!(
+                    policy.visible(name, false).unwrap(),
+                    shown.contains(&name),
+                    "{safety:?} {name}"
+                );
+            }
+            // Offering a denied tool never lets it run.
+            assert!(matches!(
+                rules.verdict(safety, "blocked", "{}", true),
+                Deny(_)
+            ));
+        }
     }
 
     #[test]

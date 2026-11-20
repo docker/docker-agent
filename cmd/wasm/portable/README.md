@@ -317,8 +317,10 @@ Malformed or mistyped tool **arguments** still reject the send, where Go returns
 its JSON error to the model. Go also drops text that shares a non-final stream
 chunk with a tool-call fragment; this port keeps it.
 
-The tool registry applies `tools`, `readonly`, and explicit denials before
-exposing a tool. `defer` provides `search_tool`/`add_tool`; activation takes
+The tool registry applies `tools` and `readonly` before exposing a tool; a
+filtered toolset keeps its instructions. As in Go, a tool denied by
+`permissions.deny` is still offered and discoverable, and is refused when
+called. `defer` provides `search_tool`/`add_tool`; activation takes
 effect on the next model call. Selective `toon` encoding is applied to tool
 results, not to credentials or wire protocol messages. Within an admitted
 batch, every call (including Rust builtins) goes through a permission decision

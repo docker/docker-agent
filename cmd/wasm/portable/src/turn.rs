@@ -405,8 +405,10 @@ impl Catalog {
                 };
                 if spec.readonly && !safe
                     || !spec.tools.is_empty() && !spec.tools.iter().any(|n| n == name)
-                    || !agent.tool_policy.visible(name, safe)?
                 {
+                    continue;
+                }
+                if !agent.tool_policy.visible(name, safe)? {
                     withheld = true;
                     continue;
                 }
@@ -433,7 +435,7 @@ impl Catalog {
                     tool,
                 );
             }
-            // Do not disclose tools hidden by policy. Deferred tools, unlike filtered tools, are discoverable.
+            // Like Go, a filtered toolset keeps its instructions; one restricted mode hides does not.
             let custom = !spec.instruction.is_empty()
                 && !spec.instruction.contains("{ORIGINAL_INSTRUCTIONS}");
             if !text.is_empty() && (!withheld || custom) {

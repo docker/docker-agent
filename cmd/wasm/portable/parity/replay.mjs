@@ -1054,6 +1054,39 @@ agents:`)
     tests[`autonomousYaml_${name}`] = await replay(api, `autonomousYaml_${name}`, yaml,
       [tool('add_memory', {memory: 'not stored'}), answer], answering({decision: 'reject', reason: 'tester declined'}));
   }
+  // Go advertises a denied tool, with its instructions, and refuses the call at dispatch.
+  const stocked = local(['think', 'todo', 'memory']);
+  const denying = list => `permissions: {deny: [${list}]}\n`;
+  const pair = (first, second) => [piece({role: 'assistant', tool_calls: [first, second].map(([name, args], index) =>
+    ({id: `call_${index}`, index, type: 'function', function: {name, arguments: args}}))}, 'tool_calls'), usage];
+  const workers = routed.replace('instruction: Be precise', 'instruction: Be precise, toolsets: [{type: think}]');
+  const narrowed = entry => config.replace('model: local/test', `toolsets: [${entry}, {type: think}], model: local/test`);
+  for (const [name, yaml, replies] of [
+    ['denyName', stocked + denying('think'), [tool('think', {thought: 'x'})]],
+    ['denyNameCase', stocked + denying('THINK'), [tool('think', {thought: 'x'})]],
+    ['denyGlob', stocked + denying('"create_*", "thin?"'), [pair(['create_todo', '{"description":"d"}'], ['think', '{"thought":"x"}'])]],
+    ['denyBeforeDecoding', stocked + denying('think'), [rawTool('think', '{"thought": oops')]],
+    ['denyAllStillNamesUnknown', stocked + denying('"*"'), [pair(['think', '{"thought":"x"}'], ['nope', '{}'])]],
+    ['denyBesideAllowed', stocked + denying('think'), [pair(['think', '{"thought":"x"}'], ['create_todo', '{"description":"d"}'])]],
+    ['denySecretArguments', stocked + denying('think'), [tool('think', {thought: 'ghp_' + 'a'.repeat(36)})]],
+    ['denyHosted', stocked + denying('add_memory'), [tool('add_memory', {memory: 'm'})]],
+    ['denyFetch', local(['fetch']) + denying('fetch'), [tool('fetch', {urls: ['https://tool.invalid/a']})]],
+    ['denyDeferred', deferred + denying('think'), [tool('search_tool', {query: 'think'}), tool('add_tool', {name: 'think'}), tool('think', {thought: 'plan'})]],
+    ['denySearch', deferred + denying('search_tool'), [tool('search_tool', {query: 'think'}), tool('add_tool', {name: 'think'}), tool('think', {thought: 'plan'})]],
+    ['denyActivation', deferred + denying('add_tool'), [tool('search_tool', {query: 'think'}), tool('add_tool', {name: 'think'})]],
+    ['denyTransfer', workers + denying('transfer_task'), [tool('transfer_task', {agent: 'helper', task: 'count'})]],
+    ['denyHandoff', workers + denying('handoff'), [tool('handoff', {agent: 'helper'})]],
+    ['denyInsideTransfer', workers + denying('think'), [tool('transfer_task', {agent: 'helper', task: 'count'}), tool('think', {thought: 'x'}), answer]],
+    ['denyAfterHandoff', workers + denying('think'), [tool('handoff', {agent: 'helper'}), tool('think', {thought: 'x'})]],
+    ['denyQuestion', local(['user_prompt', 'think']) + denying('user_prompt'), [tool('user_prompt', {message: 'Which?'})]],
+    ['denyModelChange', picker + denying('change_model'), [tool('change_model', {model: 'local/careful'})]],
+    ['denyFiltered', narrowed('{type: memory, tools: [get_memories]}') + denying('"*"'), [tool('get_memories', {})]],
+    // A filtered toolset keeps its instructions, even with nothing left to call.
+    ['filteredInstructions', narrowed('{type: memory, tools: [get_memories]}'), [tool('add_memory', {memory: 'm'})]],
+    ['readonlyInstructions', narrowed('{type: memory, readonly: true}'), [tool('add_memory', {memory: 'm'})]],
+    ['emptiedInstructions', narrowed('{type: memory, tools: [nope]}'), [tool('think', {thought: 'x'})]],
+    ['filteredCustomInstructions', narrowed('{type: memory, tools: [get_memories], instruction: "Mine. {ORIGINAL_INSTRUCTIONS} End."}'), [tool('get_memories', {})]],
+  ]) tests[name] = await replay(api, name, yaml, [...replies, answer], approve);
   return tests;
 }
 
