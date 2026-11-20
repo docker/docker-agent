@@ -164,7 +164,7 @@ for (const sdk of [true, false]) test(`abort during ${sdk ? 'SDK' : 'runtime'} b
   assert.equal(requests.length, 1);
   assert.deepEqual(events, []);
   await s.send('fresh');
-  assert.deepEqual(requests[1].body.messages.filter(m => m.role === 'user').map(m => m.content), ['fresh']);
+  assert.deepEqual(requests[1].body.messages.filter(m => m.role === 'user').map(m => m.content), ['cancel\nfresh']);
 });
 
 test('abort from the fallback callback does not dispatch the selected backup', async t => {

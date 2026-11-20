@@ -137,7 +137,11 @@ for (const method of ['abort', 'restart', 'close']) {
     await s.respondToElicitation({ id, action: 'accept' });
     assert.equal((await fresh).message.content, 'done');
     assert.equal(req[2].model, 'parent');
-    assert.doesNotMatch(JSON.stringify(req[2].messages), /abandoned|transfer_task.*arguments/);
+    if (method === 'abort') {
+      assert.equal(req[2].messages.at(-4).content, 'abandoned');
+      assert.equal(req[2].messages.at(-3).tool_calls[0].function.name, 'transfer_task');
+      assert.deepEqual(req[2].messages.at(-2), {role:'tool', tool_call_id:'call-0', content:'The tool call was canceled by the user.'});
+    } else assert.doesNotMatch(JSON.stringify(req[2].messages), /abandoned|transfer_task.*arguments/);
     assert.equal(req[4].messages.at(-1).content, '{"action":"accept"}');
     assert.equal(req[5].messages.at(-1).content, 'chosen');
   });

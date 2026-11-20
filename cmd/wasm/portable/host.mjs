@@ -66,7 +66,7 @@ export function createHost(opts, onEvent, stateless, timezoneOffset) {
     signal.throwIfAborted();
     const id = crypto.randomUUID();
     const { promise, resolve, reject } = Promise.withResolvers();
-    questions.set(id, resolve);
+    questions.set(id, {resolve, signal});
     const abort = () => reject(new Error('chat aborted'));
     signal.addEventListener('abort', abort, { once: true });
     try {
@@ -80,10 +80,10 @@ export function createHost(opts, onEvent, stateless, timezoneOffset) {
     } finally { signal.removeEventListener('abort', abort); questions.delete(id); }
   }
   function respond(reply) {
-    const resolve = questions.get(reply?.id);
-    if (!resolve) return false;
+    const waiter = questions.get(reply?.id);
+    if (!waiter || waiter.signal.aborted) return false;
     if (!['accept','decline','cancel'].includes(reply.action)) throw new Error('unknown elicitation action');
-    questions.delete(reply.id); resolve(reply); return true;
+    questions.delete(reply.id); waiter.resolve(reply); return true;
   }
   function configure(agents) {
     for (const [agent, { toolsets }] of Object.entries(agents)) {

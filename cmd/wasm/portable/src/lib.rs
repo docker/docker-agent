@@ -61,6 +61,8 @@ enum Command {
         now: f64,
         session: u32,
         chunk: Value,
+        #[serde(default)]
+        buffered: bool,
     },
     Failure {
         now: f64,
@@ -70,6 +72,8 @@ enum Command {
         endpoint: Option<String>,
     },
     End {
+        #[serde(default)]
+        buffered: bool,
         session: u32,
         now: f64,
     },
@@ -108,7 +112,15 @@ enum Command {
         action: String,
         content: Option<String>,
     },
-    Cancel {
+    RunTools {
+        session: u32,
+        now: f64,
+    },
+    Interrupt {
+        session: u32,
+        visible_agent: Option<String>,
+    },
+    Rollback {
         session: u32,
     },
     Restart {
@@ -177,7 +189,8 @@ impl Core {
                 session,
                 chunk,
                 now,
-            } => self.session(session)?.chunk(chunk, now),
+                buffered,
+            } => self.session(session)?.chunk(chunk, now, buffered),
             Command::Failure {
                 session,
                 reason,
@@ -187,7 +200,11 @@ impl Core {
             } => self
                 .session(session)?
                 .transport_failure(status, endpoint, reason, now),
-            Command::End { session, now } => self.session(session)?.end(now),
+            Command::End {
+                session,
+                now,
+                buffered,
+            } => self.session(session)?.end(now, buffered),
             Command::RegisterTools {
                 session,
                 agent,
@@ -244,8 +261,20 @@ impl Core {
                 turn::Conversation::answer_output(&action, content.as_deref())?;
                 Ok(Value::Null)
             }
-            Command::Cancel { session } => {
-                self.session(session)?.cancel();
+            Command::RunTools { session, now } => {
+                let s = self.session(session)?;
+                let next = s.conversation.run_tools()?;
+                s.advance(next, now)
+            }
+            Command::Interrupt {
+                session,
+                visible_agent,
+            } => {
+                self.session(session)?.interrupt(visible_agent)?;
+                Ok(Value::Null)
+            }
+            Command::Rollback { session } => {
+                self.session(session)?.rollback();
                 Ok(Value::Null)
             }
             Command::Restart { session, stamp } => {

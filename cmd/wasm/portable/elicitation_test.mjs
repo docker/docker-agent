@@ -121,7 +121,9 @@ for (const method of ['abort', 'restart', 'close']) {
     const fresh = session.send('fresh');
     const current = await question.promise;
     assert.notEqual(current, id);
-    assert.deepEqual(requests[1].messages.filter(m => m.role === 'user').map(m => m.content), ['fresh']);
+    assert.deepEqual(requests[1].messages.filter(m => m.role === 'user').map(m => m.content), method === 'abort' ? ['old', 'fresh'] : ['fresh']);
+    if (method === 'abort') assert.deepEqual(requests[1].messages.at(-2),
+      { role: 'tool', tool_call_id: 'call_0', content: 'The tool call was canceled by the user.' });
     await assert.rejects(session.respondToElicitation({ id, action: 'accept' }), /pending/);
     await session.respondToElicitation({ id: current, action: 'decline' });
     await fresh;

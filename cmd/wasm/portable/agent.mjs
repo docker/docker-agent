@@ -49,9 +49,10 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       }
       host.configure(handle.profiles);
     } catch (e) { call('close', { session: handle.session }); throw e; }
-    let active, batch, restarting = false, closing;
+    let active, batch, restarting = false, closing, visibleAgent;
 
     function emit(event) {
+      if (event.type === 'handoff') visibleAgent = event.to;
       if (typeof onEvent !== 'function') return;
       try { Promise.resolve(onEvent(event)).catch(report); } catch (e) { report(e); }
     }
@@ -68,7 +69,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       signal = AbortSignal.any([signal, owner.signal]);
       const settle = step => {
         if (step.result) { finished.resolve(step); return; }
-        for (const event of step.events) emit(event);
+        for (const event of step.events) { signal.throwIfAborted(); emit(event); }
         if (!step.waiting) finished.resolve({...step, events:[]});
       };
       function answer(reply) {
@@ -84,6 +85,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           signal.throwIfAborted();
           if (e.type === 'host_call') {
             emit({type:'tool_call', id:e.id, name:e.name, args:e.args});
+            signal.throwIfAborted();
             const result = await host.execute(e, signal);
             signal.throwIfAborted();
             settle(call('hostResult', {session, agent:e.agent, token:e.token, ...result}));
@@ -107,9 +109,10 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         if (!step.waiting) finished.resolve({...step, events:[]});
       }
       batch = {answer, wake:() => finished.reject(new Error('chat aborted'))};
-      finished.promise.catch(() => {}); // abort can reject during host I/O
-      try { await deliver(next); return await finished.promise; }
-      finally { owner.abort(); batch = null; }
+      try {
+        void deliver(next).catch(finished.reject);
+        return await finished.promise;
+      } finally { owner.abort(); batch = null; }
     }
 
     // Drive runnable calls before consuming a callback answer. Only a plain chat answer
@@ -183,6 +186,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             if (event.type === 'host_call') {
               visible.push({type:'tool_call', id:event.id, name:event.name, args:event.args});
               publish();
+              signal.throwIfAborted();
               const result = host.execute(event, signal);
               const done = reply => call('hostResult', {session, agent:event.agent, token:event.token, ...reply});
               if (event.network) resume(result, done, false);
@@ -237,13 +241,21 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             }
             request = call('prepare', { session, ...roundContext });
           }
+          visibleAgent ??= request.agent;
           let outcome;
           try {
             const { transport } = handle.profiles[request.agent].targets[request.target];
             const response = await modelFetch(transport, request, signal, sessionID);
             let calls = false;
-            for await (const chunk of sse(response, request.responses)) {
-              signal.throwIfAborted();
+            for await (const chunk of sse(response, request.responses, signal)) {
+              if (signal.aborted) {
+                // A complete Chat Completions frame already in this read can outpace its callback.
+                if (!request.summary && !request.responses && !runError) {
+                  if (chunk === bufferedEnd) call('end', { session, now: performance.now(), buffered: true });
+                  else if (typeof chunk === 'string') call('chunk', { session, chunk, now: performance.now(), buffered: true });
+                }
+                continue;
+              }
               if (chunk === chatEOF) {
                 if (calls) throw new Error('tool stream ended before [DONE]');
                 break;
@@ -251,11 +263,11 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
               const step = call('chunk', { session, chunk, now: performance.now() });
               if (step.request || step.retry) { outcome = step; break; }
               for (const event of step.events) {
-                signal.throwIfAborted();
+                if (signal.aborted) break;
                 if (!runError) emit(event);
               }
               calls = step.calls;
-              if (step.terminal && !calls) break;
+              if (step.terminal && !calls && !signal.aborted) break;
             }
           } catch (e) {
             signal.throwIfAborted();
@@ -275,9 +287,14 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           let next = call('end', { session, now: performance.now() });
           if (runError) {
             // Drain the continuation without projecting it; Rust rejects silent tool actions.
-            if (next.result || next.waiting || next.error) throw runError;
+            if (next.result || next.waiting || next.runTools || next.error) throw runError;
             request = next.request;
             continue;
+          }
+          if (next.runTools) {
+            for (const event of next.events) { signal.throwIfAborted(); emit(event); }
+            signal.throwIfAborted();
+            next = call('runTools', { session, now: performance.now() });
           }
           if (next.waiting) {
             next = await (next.serial ? serialBatch : driveBatch)(next, signal);
@@ -287,16 +304,20 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             signal.throwIfAborted();
             emit(event);
           }
+          signal.throwIfAborted();
           if (next.error) throw new Error(next.error);
           if (next.result) return next.result;
-          signal.throwIfAborted();
           request = next.request;
         }
       } catch (e) {
-        call('cancel', { session });
-        if (signal.aborted) throw new Error('chat aborted');
+        if (signal.aborted) {
+          call('interrupt', { session, visible_agent: visibleAgent });
+          throw new Error('chat aborted');
+        }
+        call('rollback', { session });
         if (runError) throw runError;
         emit({ type: 'error', message: e.message });
+        if (signal.aborted) throw new Error('chat aborted');
         throw e;
       }
     }
@@ -318,9 +339,13 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         if (restarting) throw new Error('session is restarting');
         restarting = true;
         try {
-          await stop();
+          if (active) {
+            abort();
+            try { await active.done; } catch { /* The interrupted send rejects. */ }
+          }
           if (closing) throw new Error('session is closed');
           call('restart', { session: handle.session, stamp: sessionStamp() });
+          visibleAgent = undefined;
         } finally { restarting = false; }
       },
       close() {
@@ -518,18 +543,23 @@ function wait(delay, signal) {
 }
 
 const chatEOF = Symbol('Chat Completions EOF');
+const bufferedEnd = Symbol('buffered [DONE]');
 
-async function* sse(response, responses) {
+async function* sse(response, responses, signal) {
   if (!response.body || !/^text\/event-stream(?:;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
     await response.body?.cancel();
     throw new Error('expected a text/event-stream model response');
   }
   const reader = response.body.getReader();
   const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: !responses });
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal.addEventListener('abort', cancel, { once: true });
   let pending = '', data = [], total = 0, toolCompletion, thread = false, hasData = false;
   try {
     for (;;) {
+      signal.throwIfAborted();
       const { done, value } = await reader.read().catch(e => { throw new TransportError(e.message); });
+      signal.throwIfAborted();
       total += value?.byteLength ?? 0;
       if (total > maxResponse) throw new Error('model response too large');
       pending += utf8.decode(value, { stream: !done });
@@ -550,7 +580,11 @@ async function* sse(response, responses) {
           thread = hasData = false;
           data = [];
           if (record === undefined) continue;
-          if (record === '[DONE]') return;
+          if (responses) signal.throwIfAborted();
+          if (record === '[DONE]') {
+            if (signal.aborted && !responses) yield bufferedEnd;
+            return;
+          }
           if (!responses) {
             if (wrapped) {
               // The SDK wraps thread.* data before decoding, except for top-level errors.
@@ -583,6 +617,7 @@ async function* sse(response, responses) {
       }
     }
   } finally {
+    signal.removeEventListener('abort', cancel);
     try { await reader.cancel(); } finally { reader.releaseLock(); }
   }
 }
