@@ -872,6 +872,55 @@ agents:`)
     options.env = { OPENAI_API_KEY: 'fixture' };
     trace.results.push(await api.chat({ ...options, messages: [{ role: 'user', content: 'hi' }] }, record));
   }, 'https://api.openai.com/v1/responses');
+  // A turn without a visible reply: Go warns, keeps no history for it and answers with the last kept reply.
+  const says = (delta, reason = 'stop') => [piece({role: 'assistant', ...delta}, reason), usage];
+  const silent = says({content: ''});
+  const thinks = local(['think']);
+  const partialCall = [piece({role: 'assistant', tool_calls: [{id: 'cut', index: 0, type: 'function', function: {name: 'think', arguments: '{"thou'}}]}, 'length'), usage];
+  const filteredCall = [piece({role: 'assistant', tool_calls: [{id: 'cut', index: 0, type: 'function', function: {name: 'think', arguments: '{"thought":"a"}'}}]}, 'content_filter'), usage];
+  const narratedCall = [piece({role: 'assistant', content: 'Let me think. '}), ...tool('think', {thought: 'a'})];
+  const mixedChunk = [piece({role: 'assistant', content: 'Let me think. ', reasoning_content: 'hmm',
+    tool_calls: [{id: 'mixed', index: 0, type: 'function', function: {name: 'think', arguments: '{"thought":"a"}'}}]}, 'tool_calls'), usage];
+  for (const [name, yaml, replies] of [
+    ['emptyReply', config, [silent, answer]],
+    ['emptyReplyKeepsEarlier', config, [answer, silent]],
+    ['emptyReplyNoUsage', config, [[piece({role: 'assistant', content: ''}, 'stop')], answer]],
+    ['whitespaceReply', config, [says({content: ' \n '}), answer]],
+    ['reasoningOnlyReply', config, [says({reasoning_content: 'pondering', content: '  '}), answer]],
+    ['paddedReply', config, [says({content: '  padded reply \n'}), says({content: '\n second  '})]],
+    ['emptyReplyAfterTools', thinks, [tool('think', {thought: 'a'}), silent, answer]],
+    ['emptyReplyAfterNarratedTools', thinks, [narratedCall, silent, answer]],
+    ['emptyReplyNextSend', thinks, [tool('think', {thought: 'a'}), answer, silent]],
+    ['truncatedEmptyReply', config, [says({content: ''}, 'length'), answer]],
+    ['truncatedCallReply', thinks, [partialCall, answer]],
+    ['refusedReply', config, [says({content: 'partial'}, 'content_filter'), says({content: ''}, 'refusal')]],
+    ['refusedCallReply', thinks, [filteredCall, answer]],
+    ['mixedTerminalChunk', thinks, [mixedChunk, answer, answer]],
+    ['emptyReplyPicker', picker, [tool('change_model', {model: 'careful'}), silent, answer]],
+    ['emptyReplyToolModel', override, [tool('think', {thought: 'plan'}), silent, answer]],
+    ['emptyReplyFallback', config.replace('model: local/test', 'model: local/test, fallback: {models: [local/backup]}'),
+      [[{error: {message: 'invalid model'}}], silent, answer]],
+    ['delegateBlankReply', limitedTeam('', ''), [delegate(), says({content: '  '}), answer, answer]],
+    ['delegateBlankAfterTools', limitedTeam('', ''), [delegate(), ponder('a'), silent, silent, answer]],
+    ['callerBlankAfterDelegate', limitedTeam('', ''), [delegate(), says({content: 'child says'}), silent, answer]],
+    ['handoffBlankReply', limitedTeam('', ''), [pass(), silent, answer]],
+    ['forcedBlankReply', pipeline, [silent, answer, answer]],
+    ['outputBlankReply', withSchema(config, {mode: 'tool'}), [silent, tool(output, JSON.parse(jsonAnswer)), answer, tool(output, JSON.parse(jsonAnswer))]],
+  ]) tests[name] = await replay(api, name, yaml, replies, turns);
+  tests.emptyReplySeed = await replay(api, 'emptyReplySeed', config, [silent], async ({api, options, record, trace}) => {
+    const messages = [{role: 'user', content: 'a'}, {role: 'assistant', content: ' earlier answer '}, {role: 'user', content: 'go'}];
+    trace.results.push(await api.chat({...options, messages}, record));
+  });
+  const incomplete = reason => [{type: 'response.incomplete', response: {id: 'resp', status: 'incomplete', incomplete_details: {reason},
+    output: [], usage: {input_tokens: 3, output_tokens: 2, total_tokens: 5}}}];
+  const plainResponses = config.replace('provider: openai,', 'provider: openai, api_type: openai_responses,');
+  for (const [name, replies] of [
+    ['responsesEmptyReply', [[fin([])], text]],
+    ['responsesWhitespaceReply', [[{...text[0], delta: '  '}, fin([])], text]],
+    ['responsesTruncatedReply', [incomplete('max_output_tokens'), text]],
+    ['responsesRefusedReply', [incomplete('content_filter'), text]],
+    ['responsesPaddedReply', [[{...text[0], delta: ' hi there \n'}, fin([])], text]],
+  ]) tests[name] = await replay(api, name, plainResponses, replies, turns, '/v1/responses');
   return tests;
 }
 

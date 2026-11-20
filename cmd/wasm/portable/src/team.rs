@@ -509,7 +509,7 @@ impl Session {
                 if changed {
                     self.conversation.attempt = profile.spec.policy.begin(now);
                 }
-                self.conversation.profile = profile;
+                self.conversation.hand_off(profile);
                 if changed {
                     self.announce(switched, &mut events);
                 }
@@ -551,12 +551,8 @@ impl Session {
     pub fn next(&mut self, mut next: Value) -> Result<Value, String> {
         // A child stopped by its cap returns that notice like any other final answer.
         while next.get("result").is_some() && !self.parents.is_empty() {
-            let output = next["result"]["message"]["content"]
-                .as_str()
-                .expect("assistant text")
-                .trim()
-                .to_owned();
             let child = std::mem::replace(&mut self.conversation, self.parents.pop().unwrap());
+            let reply = child.last_reply();
             self.conversation.include_usage(&next["result"]["usage"]);
             let mut events = std::mem::take(next["events"].as_array_mut().unwrap());
             events.retain(|e| e["type"] != "finish");
@@ -565,10 +561,12 @@ impl Session {
                 child.opener(),
                 &self.conversation.profile.spec.name,
             ));
-            events.push(
-                self.conversation
-                    .complete_switch("transfer_task", output, false)?,
-            );
+            events.push(self.conversation.complete_switch(
+                "transfer_task",
+                reply.clone().unwrap_or_default(),
+                false,
+            )?);
+            self.conversation.delegated(reply);
             next = self.conversation.resume(events);
         }
         if next

@@ -201,6 +201,26 @@ test('the acting agent\'s call limit counts the whole send and keeps the handoff
   assert.deepEqual(req[1].messages.filter(m => m.role === 'user').map(m => m.content), ['one', 'two']);
 });
 
+test("a blank reply warns, joins no history and answers with the last reply kept, even a delegate's", async t => {
+  const opts = options(`  root: {model: local/parent, sub_agents: [helper]}
+  helper: {model: local/worker}`);
+  const req = model(t, text(' first \n'), text(''), transfer('helper'), text('from the delegate'),
+    piece({ reasoning_content: 'thinking' }, 'stop'), text('  '), text('  '));
+  const events = [];
+  const s = await api.createSession(opts, e => events.push(e));
+  t.after(() => s.close());
+  const replies = [];
+  for (const prompt of ['one', 'two', 'three', 'four']) replies.push((await s.send(prompt)).message.content);
+  assert.deepEqual(replies, ['first', 'first', 'from the delegate', 'from the delegate']);
+  await s.restart();
+  assert.equal((await s.send('five')).message.content, '');
+  assert.deepEqual(events.filter(e => e.type === 'warning').map(e => e.message.replace(/^Model \S+\/parent | \(stop reason: stop\)\..*$/g, '')),
+    ['returned an empty response', 'produced only reasoning and no reply', 'returned an empty response', 'returned an empty response']);
+  assert.ok(req.every(r => r.messages.every(m => m.role !== 'assistant' || m.tool_calls || m.content.trim())));
+  assert.doesNotMatch(JSON.stringify(req), /thinking/);
+  assert.equal(req[1].messages.find(m => m.role === 'assistant').content, ' first \n');
+});
+
 test('tool budgets and the loop guard stay with the opening agent; the trim count follows the acting agent', async t => {
   const opts = options(`  root: {model: local/parent, max_tool_result_tokens: 4, max_consecutive_tool_calls: 2, handoffs: [helper], toolsets: [{type: think}]}
   helper: {model: local/worker, max_tool_result_tokens: 100, num_history_items: 3, toolsets: [{type: think}]}`);

@@ -98,6 +98,14 @@ impl RoutedSeed {
         }
     }
 
+    pub fn last_reply(&self) -> Option<String> {
+        self.source
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "assistant")
+            .map(|m| m["content"].as_str().unwrap_or_default().trim().into())
+    }
+
     pub fn for_target(&mut self, projection: Projection) -> Result<&[Value], String> {
         if projection != self.projection {
             self.messages = history(self.source.clone(), projection, true)?;

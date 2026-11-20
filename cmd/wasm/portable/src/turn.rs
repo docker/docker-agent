@@ -73,6 +73,8 @@ pub struct Conversation {
     // Limits of the agent that opened this session or delegated task; a handoff keeps them.
     frame: crate::limits::Limits,
     opener: String,
+    // Go finds a delegate's last reply through the sub-session recorded beside its tool result.
+    delegated: Vec<(usize, Option<String>)>,
     messages: Vec<Value>,
     routed_seed: Option<crate::media::RoutedSeed>,
     scratchpads: BTreeMap<String, String>,
@@ -100,6 +102,8 @@ struct Turn {
     tool_rounds: usize,
     reminders: usize,
     forced: usize,
+    // Whether this agent's previous model call in the run used tools.
+    after_tools: bool,
     input: u64,
     output: u64,
     step: Step,
@@ -384,6 +388,7 @@ impl Conversation {
             run_number: 0,
             frame: profile.spec.limits,
             opener: profile.spec.name.clone(),
+            delegated: Vec::new(),
             profile,
             attempt: Default::default(),
             archive: None,
@@ -434,6 +439,7 @@ impl Conversation {
         );
         t.tool_model_source = None;
         t.forced += 1;
+        t.after_tools = false;
     }
     pub fn restart(&mut self, stamp: crate::session_context::Stamp) -> Result<(), String> {
         self.cancel();
@@ -449,6 +455,7 @@ impl Conversation {
             }
         }
         self.messages.clear();
+        self.delegated.clear();
         self.routed_seed = None;
         self.scratchpads.clear();
         self.compaction.truncate(0);
@@ -494,6 +501,7 @@ impl Conversation {
             tool_rounds: 0,
             reminders: 0,
             forced: 0,
+            after_tools: false,
             input: 0,
             output: 0,
             step: Step::default(),
@@ -737,6 +745,7 @@ impl Conversation {
             self.compaction.truncate(turn.messages_before);
             self.compaction.context_tokens = turn.context_before;
             self.messages.truncate(turn.messages_before);
+            self.delegated.retain(|(at, _)| *at < turn.messages_before);
             self.profile = turn.profile_before;
             self.attempt = Default::default();
             self.scratchpads
@@ -786,6 +795,7 @@ impl Conversation {
             return Ok(json!({"events":[], "request":self.request()?}));
         }
         let mut events = Vec::new();
+        let reason = step.finish.clone();
         if matches!(
             step.finish.as_deref(),
             Some("length" | "content_filter" | "refusal")
@@ -797,6 +807,34 @@ impl Conversation {
                 step.calls.clear();
             }
             step.finish = Some("stop".into());
+        }
+        let blank = step.text.trim().is_empty();
+        if step.finish.as_deref() == Some("stop") && step.calls.is_empty() {
+            let refused = matches!(reason.as_deref(), Some("content_filter" | "refusal"));
+            if refused || blank {
+                let target = &self.profile.spec.models[self.attempt.current];
+                let model = match self.profile.override_params(turn.tool_model_source) {
+                    // An override stays on the primary's provider.
+                    Some(params) => format!(
+                        "{}/{}",
+                        target.id.split('/').next().unwrap_or_default(),
+                        params["model"].as_str().expect("configured model")
+                    ),
+                    None => target.id.clone(),
+                };
+                let reason = reason.as_deref().unwrap_or("stop");
+                let message = if refused {
+                    format!("Model {model} refused to respond (stop reason: refusal).")
+                } else if !step.reasoning.trim().is_empty() {
+                    format!("Model {model} produced only reasoning and no reply (stop reason: {reason}). Thinking-mode models can emit reasoning tokens without a final answer; the reasoning is not used as the response. Send a follow-up to continue if the task is unfinished.")
+                } else if reason == "stop" && turn.after_tools {
+                    format!("Model {model} stopped without a final reply after using tools (stop reason: {reason}). Send a follow-up to continue if the task is unfinished.")
+                } else {
+                    format!("Model {model} returned an empty response (stop reason: {reason}). Send a follow-up to continue if the task is unfinished.")
+                };
+                // Go explains a turn without a visible reply before it reports usage.
+                events.push(json!({"type":"warning", "message":message}));
+            }
         }
         if let Some(usage) = step.usage {
             let target = &self.profile.spec.models[self.attempt.current];
@@ -830,15 +868,12 @@ impl Conversation {
         match step.finish.as_deref() {
             None => Err("incomplete stream: missing finish_reason".into()),
             Some("stop") if step.calls.is_empty() => {
-                let content = message["content"].clone();
-                if message["content"]
-                    .as_str()
-                    .is_some_and(|s| !s.trim().is_empty())
-                    || message.get("reasoning_content").is_some()
-                {
-                    self.messages.push(message);
-                } else {
+                turn.after_tools = false;
+                // Go keeps a blank reply only as a usage record, never as history.
+                if blank {
                     self.compaction.truncate(self.messages.len());
+                } else {
+                    self.messages.push(message);
                 }
                 if self.profile.spec.output_tool.is_some() {
                     let reminders = turn.reminders;
@@ -861,13 +896,14 @@ impl Conversation {
                     turn.message_id = format!("{}:reminder:{}", turn.id, turn.reminders);
                     return Ok(self.continue_turn(events));
                 }
-                Ok(self.finish(content, events))
+                Ok(self.finish(events))
             }
             Some("stop" | "tool_calls") if !step.calls.is_empty() => {
                 if turn.tool_rounds >= MAX_TOOL_ROUNDS {
                     return Err("tool iteration limit reached".into());
                 }
                 turn.tool_rounds += 1;
+                turn.after_tools = true;
                 turn.message_id = format!("{}:{}", turn.id, turn.tool_rounds);
                 self.execute_calls(step.calls, message, events)
             }
@@ -877,11 +913,42 @@ impl Conversation {
         }
     }
 
-    fn finish(&mut self, content: Value, mut events: Vec<Value>) -> Value {
+    // Go answers with the last assistant message it kept, trimmed: after a blank reply that
+    // is an earlier one, possibly a delegate's.
+    pub fn last_reply(&self) -> Option<String> {
+        for (i, m) in self.messages.iter().enumerate().rev() {
+            if let Some((_, Some(reply))) = self.delegated.iter().rev().find(|(at, _)| *at == i) {
+                return Some(reply.clone());
+            }
+            if m["role"] == "assistant" {
+                return Some(m["content"].as_str().unwrap_or_default().trim().into());
+            }
+        }
+        self.routed_seed.as_ref().and_then(|seed| seed.last_reply())
+    }
+
+    pub fn hand_off(&mut self, profile: Rc<Profile>) {
+        // Go forgets the previous agent's tool activity.
+        if let Some(turn) = self
+            .active
+            .as_mut()
+            .filter(|_| !Rc::ptr_eq(&self.profile, &profile))
+        {
+            turn.after_tools = false;
+        }
+        self.profile = profile;
+    }
+
+    pub fn delegated(&mut self, reply: Option<String>) {
+        self.delegated.push((self.messages.len() - 1, reply));
+    }
+
+    fn finish(&mut self, mut events: Vec<Value>) -> Value {
         if !self.profile.spec.force_handoff.is_empty() {
             self.switch = Some(Switch::Forced(self.profile.spec.force_handoff.clone()));
             return json!({"events":events});
         }
+        let content = self.last_reply().unwrap_or_default();
         let turn = self.active.take().expect("active turn");
         let mut result = json!({"message":{"role":"assistant", "content":content}});
         if turn.input != 0 || turn.output != 0 {
@@ -976,7 +1043,7 @@ impl Conversation {
                 if let Some(error) = self.repetition_error() {
                     return Ok(json!({"events":events,"error":error}));
                 }
-                return Ok(self.finish(content.into(), events));
+                return Ok(self.finish(events));
             }
         }
         for call in calls.into_values() {
