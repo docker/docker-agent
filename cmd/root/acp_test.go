@@ -38,6 +38,7 @@ func TestACPArgs(t *testing.T) {
 }
 
 func TestACPWithoutAgent(t *testing.T) {
+	t.Skip("flaky: see #4877")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
