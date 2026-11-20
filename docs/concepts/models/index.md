@@ -98,7 +98,7 @@ Control how much the model "thinks" before responding:
 | OpenAI     | string     | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`                  | `medium` (always-reasoning models only) |
 | Anthropic  | int or str | Fixed budgets: ≥1024 and less than `max_tokens`; or `adaptive`, `adaptive/<effort>`, effort level | Model-dependent; Claude 5.x defaults to adaptive |
 | Gemini 2.5 | int        | 0 (off), -1 (dynamic), or token count                               | -1 (dynamic)                     |
-| Gemini 3   | string     | `minimal`, `low`, `medium`, `high`                                  | varies                           |
+| Gemini 3+  | string     | `minimal` (Gemini 3), `low`, `medium`, `high`, `xhigh` (Hydrogen/Neon) | varies                        |
 | All        | string/int | `none` or `0` clears Docker Agent's local config                    | —                                |
 
 **Turning thinking off:** Set `thinking_budget` to `none` or `0`. Models that

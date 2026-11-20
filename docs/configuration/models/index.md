@@ -597,7 +597,7 @@ Use an integer token budget or an adaptive effort setting, depending on the mode
 
 Use an integer token budget. See [Gemini thinking budgets](../../providers/google/index.md#thinking-budget) for defaults, limits, and dynamic thinking.
 
-### Google Gemini 3
+### Google Gemini 3+
 
 Use a string effort level. See [Gemini thinking budgets](../../providers/google/index.md#thinking-budget) for supported values and examples.
 

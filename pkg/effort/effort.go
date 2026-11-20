@@ -213,6 +213,19 @@ func BedrockTokens(l Level) (int, bool) {
 	}
 }
 
+// ForGemini returns the Gemini thinkingLevel string for l.
+// Gemini accepts: minimal, low, medium, high, xhigh — minimal is Gemini 3
+// only and xhigh is Gemini 4 Hydrogen/Neon only. Per-model gating lives in
+// pkg/modelinfo; this is the provider-wide vocabulary layer.
+func ForGemini(l Level) (string, bool) {
+	switch l {
+	case Minimal, Low, Medium, High, XHigh:
+		return string(l), true
+	default:
+		return "", false
+	}
+}
+
 // ForGemini3 returns the Gemini 3 thinking-level string for l.
 // Gemini 3 accepts: minimal, low, medium, high.
 func ForGemini3(l Level) (string, bool) {
