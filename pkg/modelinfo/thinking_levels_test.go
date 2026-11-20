@@ -210,6 +210,36 @@ func TestSupportedThinkingLevels(t *testing.T) {
 			want:     []effort.Level{effort.None, effort.Minimal, effort.Low, effort.Medium, effort.High},
 		},
 		{
+			name:     "gemini 4 hydrogen gets xhigh and drops minimal",
+			provider: "google",
+			modelID:  "gemini-4-hydrogen",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh},
+		},
+		{
+			name:     "gemini 4 neon gets xhigh and drops minimal",
+			provider: "google",
+			modelID:  "gemini-4-neon",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh},
+		},
+		{
+			name:     "vertex gemini 4 neon gets xhigh and drops minimal",
+			provider: "vertexai",
+			modelID:  "gemini-4-neon@us",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh},
+		},
+		{
+			name:     "gemini 4 carbon drops minimal and tops out at high",
+			provider: "google",
+			modelID:  "gemini-4-carbon",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High},
+		},
+		{
+			name:     "gemini 4 argon drops minimal and tops out at high",
+			provider: "google",
+			modelID:  "gemini-4-argon",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High},
+		},
+		{
 			name:     "unknown provider gets conservative scale",
 			provider: "dmr",
 			modelID:  "deepseek-r1",
@@ -566,6 +596,65 @@ func TestAnthropicTopEfforts(t *testing.T) {
 		t.Run(tt.modelID, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, anthropicTopEfforts(tt.modelID))
+		})
+	}
+}
+
+func TestGeminiTopEfforts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		modelID string
+		want    []effort.Level
+	}{
+		{"gemini-4-hydrogen", []effort.Level{effort.XHigh}},
+		{"gemini-4-neon", []effort.Level{effort.XHigh}},
+		{"gemini-4-hydrogen@eu", []effort.Level{effort.XHigh}},
+		{"gemini-4-neon:free", []effort.Level{effort.XHigh}},
+		{"gemini-4-hydrogen-preview", []effort.Level{effort.XHigh}},
+		{"google/gemini-4-neon", []effort.Level{effort.XHigh}},
+		{"GEMINI-4-HYDROGEN", []effort.Level{effort.XHigh}},
+		{"gemini-4-carbon", nil},
+		{"gemini-4-argon", nil},
+		{"gemini-4-argon-contributor", nil},
+		{"gemini-4-hydrogenic", nil},
+		{"gemini-3.8-flash", nil},
+		{"gemini-3-pro-preview", nil},
+		{"gemini-2.5-pro", nil},
+		{"openai/gemini-4-hydrogen", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.modelID, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, geminiTopEfforts(tt.modelID))
+		})
+	}
+}
+
+func TestGeminiDropsMinimalEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		modelID string
+		want    bool
+	}{
+		{"gemini-4-hydrogen", true},
+		{"gemini-4-neon", true},
+		{"gemini-4-carbon", true},
+		{"gemini-4-argon", true},
+		{"gemini-4.1-hydrogen", true},
+		{"gemini-5-foo", true},
+		{"gemini-3.8-flash", false},
+		{"gemini-3-pro-preview", false},
+		{"gemini-2.5-flash", false},
+		{"openai/gemini-4-hydrogen", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.modelID, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, geminiDropsMinimalEffort(tt.modelID))
 		})
 	}
 }

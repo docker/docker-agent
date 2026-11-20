@@ -140,6 +140,31 @@ func TestBedrockTokens(t *testing.T) {
 	}
 }
 
+func TestForGemini(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		level Level
+		want  string
+		ok    bool
+	}{
+		{Minimal, "minimal", true},
+		{Low, "low", true},
+		{Medium, "medium", true},
+		{High, "high", true},
+		{XHigh, "xhigh", true},
+		{Max, "", false},
+		{None, "", false},
+	} {
+		t.Run(string(tt.level), func(t *testing.T) {
+			t.Parallel()
+			got, ok := ForGemini(tt.level)
+			require.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestForGemini3(t *testing.T) {
 	t.Parallel()
 
