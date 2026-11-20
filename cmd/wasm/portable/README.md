@@ -5,8 +5,8 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The measured release is **1,897,048 bytes (1.81 MiB) uncompressed**, including
-all nine runtime JS modules, versus 35.8 MiB for the packed Go small module
+The measured release is **1,943,465 bytes (1.85 MiB) uncompressed**, including
+all ten runtime JS modules, versus 35.8 MiB for the packed Go small module
 alone. CI enforces a 2 MiB budget for the Wasm and JS together.
 
 ```sh
@@ -77,6 +77,12 @@ the calculator and the session's shared plan; plan writes prompt for approval.
   decision: 'approve'})` (or `'reject'`). The ID prevents a delayed UI response
   from approving a different call. A `chat` callback returns the decision.
   Declining must not perform the call. Only enable `autoApprove` on trusted configs.
+- As in Go, `api_config.args` and `required` describe an `api` tool to the
+  model; they do not validate its arguments. A GET decodes a string map and
+  substitutes exact key names into the endpoint, a POST re-encodes the decoded
+  object the way Go marshals it, and other methods ignore arguments. The
+  expanded endpoint must keep the configured origin and still goes through the
+  egress policy. See [API tool arguments](parity/api-arguments.md).
 - MCP tool catalogs are obtained over guarded HTTP. Treat server instructions
   and tool output as untrusted. The streamable HTTP client supports JSON and
   SSE replies, pagination and session teardown; it does not replay a failed tool
@@ -205,6 +211,16 @@ and threshold warrant it. Summary requests honor the same outbound secret
 redaction as ordinary model requests, including an explicit `before_llm_call`
 redaction hook. Provider-native compaction is not supported.
 
+As with the Go SDK, a model request answered with 408, 409, 429 or a 5xx
+status, or whose `fetch` is rejected, is resent up to twice to the same model
+before the runtime's own retry or fallback sees the failure. `x-should-retry`
+overrides that choice; `Retry-After-Ms` or `Retry-After` set the wait, capped
+at eight seconds. A resend carries the same body and credentials and never
+reruns a tool. An HTTP failure reads `error receiving from stream: HTTP
+<status>: <message>`, with Go's rendering of a body that carries no message. A
+diagnostic that echoes the request credential is withheld, and an ambiguous
+error envelope rejects the send.
+
 A **single, tool-free agent** can use a named `compaction_model` for text-only
 history. An agent setting overrides the primary model's setting, which overrides
 its provider's default. Declare `context_window` on both models: the smaller
@@ -234,11 +250,26 @@ continuation never runs a tool: with tools enabled, an ordinary summary failure
 rejects the send at once, and a tool call in a drained reply is an error. A
 malformed or partial summary still fails closed.
 
-Picker/toolset model overrides must be transport-compatible. `session_context`
-reads only the originating handle's previous conversations and is unavailable
-inside a routed team. Teams reject readonly-to-writable routing and disabling
-secret redaction. Routed teams do not support active compaction. Per-tool model
-overrides cannot be combined with team/fallback routing.
+Picker/toolset model overrides must be transport-compatible. A single agent
+with `session_compaction: false` can combine them with `fallback.models`: the
+selected model is tried first and a failure falls through the chain, as in
+Go. Inside a team they stay unsupported. `session_context` reads only the
+originating handle's previous conversations and is unavailable inside a routed
+team. Teams reject readonly-to-writable routing. Routed teams do not support
+active compaction.
+
+Agents of a team can differ in `redact_secrets`. The caller's hooks govern the
+transfer arguments and the returned result; the acting agent's hooks govern its
+own provider requests. A reusable session rejects a foreground handoff between
+two agents when either disables redaction, because an interrupted send could
+resume on the wrong agent; one-shot `chat` supports it.
+
+Tool-mode structured output works in a team when each output agent has one
+serving model. A caller can delegate and then finalize its own answer. An
+output agent reachable through `transfer_task` must be capped at
+`max_iterations: 1` or `2` in every frame it can run in and use a model that
+accepts reminders; its JSON becomes the `transfer_task` result. Both features
+require unnamed, text-only seed history.
 Teams share plan and memory within one handle, but each acting agent gets its
 own authorized tool catalog, MCP connection, credentials and grants. Teams are
 limited to ten nested transfers and 32 switches per user turn.
@@ -267,9 +298,9 @@ that switch between Chat Completions and Responses. History is trimmed before
 encoding the request for the selected API: a retained tool result keeps its
 call ID, and trimming a call removes its paired result. Failover does not run
 the tool again. If any target uses Responses, named or reasoning-bearing seed
-messages are rejected before I/O. Multipart history, `session_context`, per-tool
-model overrides and tool-mode structured output remain unsupported with these
-limits on a fallback chain.
+messages are rejected before I/O. Multipart history, `session_context` and
+tool-mode structured output remain unsupported with these limits on a fallback
+chain.
 
 Agent `max_iterations` finishes normally at its limit, while the `before_llm_call`
 builtin `max_iterations` rejects the send before the next model call. With a
@@ -282,8 +313,8 @@ all tools and approvals finish. A transient primary failure doesn't pin the
 backup; a non-retryable one can. Model retries do not spend another iteration
 or repeat a completed tool. If the continuation fails, the next send starts
 with a fresh limit and retains the completed tool results. On a fallback chain
-these limits still cannot be combined with teams, per-tool model overrides or
-tool-mode structured output.
+these limits still cannot be combined with teams or tool-mode structured
+output.
 
 Identical tool batches are checked against `max_consecutive_tool_calls` after execution;
 successful random and datetime reads are exempt, as in Go.
@@ -309,13 +340,26 @@ The runtime recovers the way Go does instead of failing the send:
   gives no `finish_reason`, or one that cannot apply.
 - **Blank tool result.** It is stored as `(no output)`; the `tool_result` event
   keeps the raw text.
+- **Arguments a tool cannot decode.** Malformed JSON, a wrong type or a
+  non-object comes back as Go's own `encoding/json` complaint (`Error calling
+  tool: …`). The call is announced and still needs its approval first. Tools
+  decode like Go, leniency included: unknown and case-folded fields, repeated
+  keys, and the repairs for a list sent as a string or a one-key object. The
+  few syntax errors whose Go message depends on Unicode tables still reject the
+  send.
 
 Usage events and results count prompt tokens read from or written to a provider
 cache toward `context_length`, not `input_tokens`.
 
-Malformed or mistyped tool **arguments** still reject the send, where Go returns
-its JSON error to the model. Go also drops text that shares a non-final stream
-chunk with a tool-call fragment; this port keeps it.
+Go drops text that shares a non-final stream chunk with a tool-call fragment;
+this port keeps it.
+
+On Responses, a tool runs only if the stream announced its name and delivered
+arguments for that item. A completion snapshot cannot add a call or complete
+arguments Go would not use, and a `response.failed` that follows a tool-call
+completion cancels it. Text that Go loses because it appears only in a snapshot
+is kept. A refusal event, a top-level `error` event or an unknown lifecycle
+event beside a tool call rejects the send rather than dispatching.
 
 The tool registry applies `tools` and `readonly` before exposing a tool; a
 filtered toolset keeps its instructions. As in Go, a tool denied by
@@ -326,8 +370,25 @@ results, not to credentials or wire protocol messages. Within an admitted
 batch, every call (including Rust builtins) goes through a permission decision
 before a side effect. The portable policy accepts bounded ASCII name globs and
 string-argument conditions; explicit asks remain mandatory even with
-`autoApprove`, and unsupported checks deny rather than allow. An untrusted MCP
-server cannot self-authorize a write by declaring its tool read-only.
+`autoApprove` or an overlapping `allow` (Go lets both win over `ask`), and
+unsupported checks deny rather than allow. An untrusted MCP server cannot
+self-authorize a write by declaring its tool read-only.
+
+A parallel batch runs the way Go small runs it in a browser. Calls start in
+order. A call waiting for approval does not hold back calls that need none,
+and approvals are asked one at a time. The error for an unavailable tool, or
+for arguments a tool cannot decode, is reported after the other calls finish.
+Tool messages reach the next request in completion order, and simple `api` and
+`fetch` calls can be in flight together. A batch with a model picker call, an
+MCP call, or network calls with more than one possible prompt still runs one
+call after another: Go's order there depends on timing. See
+[tool batches](parity/batch-order.md).
+
+Go small validates `runtime.safety` and an agent's `safety` but does not
+enforce them: only the host's `autoApprove` waives approval there. Here a
+config can never waive approval, so `autonomous` behaves like the default.
+`strict` asks for every call no `allow` rule covers, and `restricted` denies
+and hides what would need a prompt; both are stricter than Go.
 
 Supported builtin hooks are `add_date`, `add_environment_info`, `max_iterations`,
 `limit_large_tool_results` and `redact_secrets`. `add_date` samples the date once
