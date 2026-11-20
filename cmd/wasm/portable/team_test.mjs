@@ -259,6 +259,27 @@ test('iteration limits that Go would enforce inside a delegated task or on a tea
   assert.equal(fetch.mock.callCount(), 0);
 });
 
+test('only one-shot chat may cross a foreground handoff with redaction disabled', async t => {
+  const secret = 'dckr_pat_' + 'S'.repeat(27);
+  const opts = options(`  root: {model: local/parent, force_handoff: helper, redact_secrets: false}
+  helper: {model: local/worker}`);
+  const requests = model(t, text(secret), text('done'));
+  await assert.rejects(api.createSession(opts), /foreground handoffs.*one-shot chat/);
+  const messages = [{role: 'user', content: secret}];
+  for (const seed of [{role: 'user', name: secret, content: 'seed'},
+    {role: 'user', multi_content: [{type: 'text', text: secret}]}]) {
+    await assert.rejects(api.chat({...opts, messages: [seed, ...messages]}), /unnamed text-only history/);
+  }
+  await assert.rejects(api.chat({...opts, yaml: opts.yaml.replace('force_handoff:', 'max_tool_result_tokens: 4, force_handoff:'), messages}), /split a secret/);
+  const explicit = opts.yaml.replace('redact_secrets: false', 'redact_secrets: false, hooks: {before_llm_call: {type: builtin, command: redact_secrets}}');
+  await assert.rejects(api.chat({...opts, yaml: explicit, messages: [{role: 'user', name: secret, content: 'seed'}, ...messages]}), /unnamed text-only history/);
+  assert.equal(requests.length, 0);
+  assert.equal((await api.chat({...opts, messages})).message.content, 'done');
+  assert.ok(JSON.stringify(requests[0].messages).includes(secret));
+  assert.ok(!JSON.stringify(requests[1].messages).includes(secret));
+  assert.deepEqual(requests[1].messages.filter(m => m.content === '[REDACTED]').map(m => m.role), ['user', 'assistant']);
+});
+
 test('shared todos follow the team, scratchpads follow the conversation and agent', async t => {
   const opts = options(`  root: {model: local/parent, sub_agents: [helper], toolsets: [{type: think}, {type: todo, shared: true}]}
   helper: {model: local/worker, toolsets: [{type: think}, {type: todo, shared: true}]}`);

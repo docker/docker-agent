@@ -307,7 +307,7 @@ test('rejects unsupported policy and media combinations before tool discovery or
   const yaml = `providers: {p: {}}\nmodels: {small: {provider: p, model: small, context_window: 4096}}\nagents:\n  root: {model: p/main, handoffs: [helper]}\n  helper: {model: p/child}`;
   for (const [cfg, reason] of [
     [yaml.replace('p/main,', 'p/main, readonly: true,'), /readonly/],
-    [yaml.replace('p/child}', 'p/child, redact_secrets: false}'), /redaction/],
+    [yaml.replace('p/child}', 'p/child, redact_secrets: false}'), /foreground handoffs with redaction disabled require one-shot chat/],
     [yaml.replace('handoffs:', 'sub_agents:').replace('p/child}', 'p/child, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ["1"]}}}'), /inside transfer_task/],
     [yaml.replace('p/child}', 'small}'), /compaction/],
     [yaml.replace('p/child}', 'p/child, toolsets: [{type: model_picker, models: [image]}]}').replace('small: {', 'image: {provider: p, model: other, capabilities: {image: true}}, small: {'), /media capabilities/],

@@ -38,7 +38,7 @@ enum Command {
         env: BTreeMap<String, String>,
         #[serde(default)]
         auto_approve: bool,
-        history: Vec<Value>,
+        history: Option<Vec<Value>>,
         stamp: session_context::Stamp,
     },
     Begin {

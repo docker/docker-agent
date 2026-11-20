@@ -809,7 +809,8 @@ pub fn team(
     yaml: &str,
     entry: &str,
     env: &BTreeMap<String, String>,
-) -> Result<(String, Vec<Selected>), String> {
+    stateless: bool,
+) -> Result<(String, Vec<Selected>, bool), String> {
     let cfg = load(yaml)?;
     let mut output_tools = BTreeMap::new();
     for (name, a) in &cfg.agents {
@@ -889,10 +890,9 @@ pub fn team(
     let team =
         !root.sub_agents.is_empty() || !root.handoffs.is_empty() || !root.force_handoff.is_empty();
     let mut pending = vec![entry];
-    let mut seen = std::collections::BTreeSet::new();
-    let mut agents = Vec::new();
+    let mut agents = IndexMap::new();
     while let Some(name) = pending.pop() {
-        if !seen.insert(name) {
+        if agents.contains_key(name) {
             continue;
         }
         let a = &cfg.agents[name];
@@ -900,39 +900,16 @@ pub fn team(
             pending.push(&a.force_handoff);
         }
         pending.extend(a.sub_agents.iter().chain(&a.handoffs).map(String::as_str));
-        agents.push(resolve(
-            &cfg,
+        agents.insert(
             name,
-            a,
-            env,
-            team,
-            output_tools.remove(name),
-        )?);
+            resolve(&cfg, name, a, env, team, output_tools.remove(name))?,
+        );
     }
-    // A blocked delegate fails the send in Go while its caller keeps running unobserved.
-    let mut delegates: Vec<&str> = seen
-        .iter()
-        .flat_map(|name| &cfg.agents[*name].sub_agents)
-        .map(String::as_str)
-        .collect();
-    let mut visited = std::collections::BTreeSet::new();
-    while let Some(name) = delegates.pop() {
-        if !visited.insert(name) {
-            continue;
-        }
-        let a = &cfg.agents[name];
-        if a.hooks.max_calls.is_some() {
-            return Err(format!(
-                "the max_iterations hook on {name:?}, which can run inside transfer_task, is not supported"
-            ));
-        }
-        delegates.extend(a.handoffs.iter().map(String::as_str));
-        if !a.force_handoff.is_empty() {
-            delegates.push(&a.force_handoff);
-        }
+    if team {
+        check_team_frames(&cfg, entry, stateless, &agents)?;
     }
     // Standard YAML tags and raw NEL can be lost before serde exposes the schema.
-    if agents.iter().any(Selected::has_schema_instruction)
+    if agents.values().any(Selected::has_schema_instruction)
         && (yaml.contains('\u{85}') || ["!!", "!<", "%TAG"].iter().any(|tag| yaml.contains(tag)))
     {
         return Err(
@@ -940,12 +917,82 @@ pub fn team(
                 .into(),
         );
     }
-    Ok((entry.into(), agents))
+    let plain_history = team
+        && agents.iter().any(|(&name, a)| {
+            a.output_tool.is_some() || cfg.agents[name].redact_secrets == Some(false)
+        });
+    Ok((entry.into(), agents.into_values().collect(), plain_history))
+}
+
+// Handoffs keep session limits; each transfer opens a fresh frame, including nested transfers.
+fn check_team_frames(
+    cfg: &Config,
+    entry: &str,
+    stateless: bool,
+    agents: &IndexMap<&str, Selected>,
+) -> Result<(), String> {
+    let redacting = agents.values().any(|a| a.hooks.redact_messages);
+    let mut pending = vec![(entry, None)];
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some((name, delegate)) = pending.pop() {
+        let opener = delegate.unwrap_or(entry);
+        let frame = cfg.agents[opener].limits;
+        let cap = frame.max_iterations;
+        let safe_delegate = cap > 0
+            && cap as usize <= crate::structured_output::MAX_REMINDERS
+            && cap < frame.repetition_limit();
+        let truncated = frame.max_tool_result_tokens > 0;
+        let bounded = frame.limits_history() || cap > 0;
+        // Visit each effective policy once even when many openers hand off to the same agent.
+        if !visited.insert((name, delegate.is_some(), safe_delegate, truncated, bounded)) {
+            continue;
+        }
+        let a = &agents[name];
+        if delegate.is_some() && a.hooks.max_calls.is_some() {
+            return Err(format!("the max_iterations hook on {name:?}, which can run inside transfer_task, is not supported"));
+        }
+        if truncated && !a.hooks.redact_messages && redacting {
+            return Err("mixed team redaction with max_tool_result_tokens can split a secret before redaction".into());
+        }
+        if a.output_tool.is_some() {
+            if bounded && cfg.agents[name].session_compaction != Some(false) {
+                return Err("tool-mode structured output with team frame limits requires session_compaction: false".into());
+            }
+            if truncated && a.hooks.redact_messages {
+                return Err("tool-mode structured output with max_tool_result_tokens cannot safely truncate results before secret redaction".into());
+            }
+            // A child's ErrorEvent rejects send while its parent continues unobserved.
+            if delegate.is_some()
+                && (!safe_delegate
+                    || crate::structured_output::stop_error(a.models[0].model(), 0).is_some())
+            {
+                return Err(format!("tool-mode structured output inside transfer_task requires a remindable model and a frame capped before reminder exhaustion or repetition ({name:?} in {opener:?})"));
+            }
+        }
+        pending.extend(a.sub_agents.iter().map(|n| (n.as_str(), Some(n.as_str()))));
+        for next in a
+            .handoffs
+            .iter()
+            .chain((!a.force_handoff.is_empty()).then_some(&a.force_handoff))
+        {
+            // An abort may roll back a foreground handoff that Go has already committed.
+            if !stateless
+                && delegate.is_none()
+                && next != name
+                && (cfg.agents[name].redact_secrets == Some(false)
+                    || cfg.agents[next].redact_secrets == Some(false))
+            {
+                return Err("foreground handoffs with redaction disabled require one-shot chat; an interrupted send cannot safely resume on the previous agent".into());
+            }
+            pending.push((next, delegate));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
-    Ok(team(yaml, agent, env)?.1.remove(0))
+    Ok(team(yaml, agent, env, false)?.1.remove(0))
 }
 
 fn resolve(
@@ -956,12 +1003,6 @@ fn resolve(
     team: bool,
     output_tool: Option<OutputTool>,
 ) -> Result<Selected, String> {
-    if team && output_tool.is_some() {
-        return Err("tool-mode structured output with local teams is not supported".into());
-    }
-    if team && a.redact_secrets == Some(false) {
-        return Err("disabling secret redaction within local teams is not supported".into());
-    }
     if team
         && a.readonly
         && a.sub_agents
@@ -1144,6 +1185,14 @@ fn resolve(
             &inline
         };
         models.push(resolve_target(m, output)?);
+    }
+    if team
+        && output_tool.is_some()
+        && (chain || !picker.choices.is_empty() || models[0].model().contains(','))
+    {
+        return Err(
+            "tool-mode structured output within local teams requires a single serving model".into(),
+        );
     }
     if (team || chain) && models.iter().any(|m| m.compaction.enabled()) {
         let primary = &models[0];
@@ -1510,7 +1559,7 @@ agents: {root: {model: main, compaction_model: a}}";
             let yaml = format!(
                 "providers: {{p: {{}}}}\nagents:\n  root: {{model: p/a, {root}}}\n  helper: {{model: p/b, {helper}}}\n  other: {{model: p/c, {hook}}}"
             );
-            team(&yaml, "", &BTreeMap::new()).map(|(_, agents)| agents.len())
+            team(&yaml, "", &BTreeMap::new(), false).map(|(_, agents, _)| agents.len())
         };
         let capped = format!("max_iterations: 2, {hook}, sub_agents: [helper], handoffs: [other]");
         assert_eq!(open(&capped, "max_iterations: 1"), Ok(3));
@@ -1533,6 +1582,54 @@ agents: {root: {model: main, compaction_model: a}}";
             error.contains("fallback chain within local teams"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn delegated_output_is_bounded_by_every_possible_opener() {
+        let output = "session_compaction: false, structured_output: {name: result, mode: tool, schema: {type: object, properties: {}}}";
+        let cfg = format!("providers: {{p: {{}}}}\nagents:\n  root: {{model: p/main, sub_agents: [child, other]}}\n  child: {{model: p/child, max_iterations: 2, force_handoff: target}}\n  other: {{model: p/other, max_iterations: 1, handoffs: [target]}}\n  target: {{model: p/test, {output}, handoffs: [child]}}");
+        let open = |yaml: &str| select(yaml, "", &BTreeMap::new()).map(|_| ());
+        assert_eq!(open(&cfg), Ok(()));
+        for (from, to) in [
+            ("max_iterations: 2, force", "force"),
+            ("max_iterations: 1, handoffs", "max_iterations: 3, handoffs"),
+            (
+                "max_iterations: 2, force",
+                "max_iterations: 2, max_consecutive_tool_calls: 2, force",
+            ),
+            ("p/test", "p/us.anthropic.claude-sonnet-5-v1:0"),
+            ("[child, other]", "[child, other, target]"),
+        ] {
+            assert!(
+                open(&cfg.replace(from, to))
+                    .unwrap_err()
+                    .contains("inside transfer_task"),
+                "{to}"
+            );
+        }
+        for (from, to, reason) in [
+            ("session_compaction: false, ", "", "team frame limits"),
+            (
+                "max_iterations: 2, force",
+                "max_iterations: 2, max_tool_result_tokens: 5, force",
+                "truncate results",
+            ),
+            (
+                "p/test,",
+                "p/test, fallback: {models: [p/backup]},",
+                "single serving model",
+            ),
+            (
+                "p/test,",
+                "p/test, toolsets: [{type: model_picker, models: [p/other]}],",
+                "single serving model",
+            ),
+        ] {
+            assert!(
+                open(&cfg.replace(from, to)).unwrap_err().contains(reason),
+                "{to}"
+            );
+        }
     }
 
     #[test]
