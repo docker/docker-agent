@@ -94,6 +94,13 @@ impl Session {
         auto_approve: bool,
     ) -> Result<Self, String> {
         let (entry, specs) = crate::config::team(yaml, agent, env)?;
+        // Stripped multipart system content can look like plain text after projection.
+        if history.iter().any(|m| {
+            m["multi_content"].as_array().is_some_and(|p| !p.is_empty()) || !m["name"].is_null()
+        }) && specs.iter().any(|s| s.has_schema_instruction())
+        {
+            return Err("Claude schema instructions require unnamed text-only history".into());
+        }
         let shared = Rc::new(RefCell::new(crate::todo::Todos::default()));
         let mut agents = BTreeMap::new();
         for mut spec in specs {

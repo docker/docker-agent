@@ -605,7 +605,7 @@ impl Conversation {
             .spec
             .limits
             .project(&mut messages, &self.profile.spec.hooks)?;
-        let params = turn
+        let override_params = turn
             .tool_model_source
             .and_then(|i| {
                 self.profile
@@ -613,8 +613,36 @@ impl Conversation {
                     .tool_models
                     .get(&self.profile.spec.toolsets[i].model)
             })
-            .unwrap_or_else(|| self.params());
-        let mut body = Value::Object(params.clone());
+            .or_else(|| self.profile.spec.picker.params());
+        let target = self.target();
+        if let Some(instruction) = target
+            .schema_instruction
+            .as_ref()
+            .filter(|_| override_params.is_none())
+        {
+            // Go normalizes blank messages before selecting the leading role.
+            messages.retain(|m| {
+                m["role"] == "tool"
+                    || !m["tool_calls"].is_null()
+                    || m["content"].as_str().is_none_or(|s| !s.trim().is_empty())
+            });
+            if messages.is_empty() {
+                return Err("Claude schema instruction needs a nonempty request".into());
+            }
+            // Only the outgoing view is amended, after hooks and before either wire protocol.
+            if let Some(first) = messages.first_mut().filter(|m| m["role"] == "system") {
+                let Value::String(text) = &mut first["content"] else {
+                    return Err(
+                        "Claude schema instructions require a plain leading system message".into(),
+                    );
+                };
+                text.push_str("\n\n");
+                text.push_str(instruction);
+            } else {
+                messages.insert(0, json!({"role":"system", "content":instruction}));
+            }
+        }
+        let mut body = Value::Object(override_params.unwrap_or(&target.model_params).clone());
         body["messages"] = messages.into();
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});

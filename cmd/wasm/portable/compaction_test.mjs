@@ -309,12 +309,14 @@ agents:
   await s.send(secret);
   await s.send('next');
   assert.deepEqual(requests.map(r => r.model), ['start', 'picked', 'picked', 'picked']);
-  const [, , summary, resume] = requests;
+  const [primary, picked, summary, resume] = requests;
+  assert.equal(primary.response_format.json_schema.name, 'answer');
+  assert.equal(picked.response_format, undefined);
   assert.equal(summary.temperature, 0.25);
   assert.equal(summary.response_format, undefined);
   assert.equal(summary.tools, undefined);
   assert.match(summary.messages[0].content, /summarize conversations/);
-  assert.equal(resume.response_format.json_schema.name, 'answer');
+  assert.equal(resume.response_format, undefined);
   assert.match(JSON.stringify(resume.messages), /Session Summary: \[REDACTED\]/);
   assert.equal(JSON.stringify(requests).includes(secret), false);
 });
