@@ -175,7 +175,7 @@ test('reject unsupported settings and ambiguous policies when registering tools'
     assert.throws(() => api(options));
   }
   assert.throws(() => api({}, { command: 'ignored?' }), /unsupported/);
-  for (const extra of [{ escape_html: 'true' }, { allow_private_ips: 1 }, { timeout: 0 }, { headers: { Cookie: 'page' } },
+  for (const extra of [{ escape_html: 'true' }, { allow_private_ips: 1 }, { timeout: 0.1 }, { headers: { Cookie: 'page' } },
     { allowed_domains: ['example.org'], blocked_domains: ['internal'] }, { blocked_domains: ['10.0.0.0/8'] }, { defer: true }]) {
     assert.throws(() => httpTools({ type: 'fetch', ...extra }));
   }
@@ -242,8 +242,10 @@ test('invalid args, absent proxy, and pre-aborted signal never issue a request',
   const calls = network(t);
   const ts = httpTools({ type: 'fetch' });
   assert.match((await ts.call('fetch', { urls: [start] })).output, /SSRF-guarded HTTP/);
-  for (const args of [{ urls: [] }, { urls: [start], method: 'POST' }, { urls: [start], format: 'pdf' }, { urls: [start], timeout: 301 }]) {
-    assert.equal((await ts.call('fetch', args)).is_error, true);
+  const direct = httpTools({ type: 'fetch', allow_private_ips: true });
+  for (const args of [{ urls: [] }, { urls: [start], method: 'POST' }, { urls: [start], format: 1 },
+    { urls: Array(9).fill(start) }, { urls: [start], timeout: 301 }]) {
+    assert.equal((await direct.call('fetch', args)).is_error, true);
   }
   assert.equal((await api().call('lookup', '{}', AbortSignal.abort())).is_error, true);
   assert.equal(calls.length, 0);
@@ -394,4 +396,63 @@ test('GET skips the second expansion only for empty input and never discloses ex
     assert.doesNotMatch(result.output, /hidden/);
   }
   assert.equal(calls.length, 3);
+});
+
+test('fetch keeps robots restrictions on both sides of Go path re-escaping', async t => {
+  let rule;
+  const calls = network(t, () => new Response('User-agent: *\nDisallow: ' + rule));
+  const ts = httpTools({ type: 'fetch', allow_private_ips: true });
+  // Escaping decodes %2F and exposes a dot segment to browser normalization.
+  const raw = 'https://api.example/disallowed%2F../private file';
+  for (rule of ['/disallowed', '/private']) {
+    assert.match((await ts.call('fetch', { urls: [raw] })).output, /URL blocked by robots.txt/);
+  }
+  assert.deepEqual(calls.map(c => c.target), Array(2).fill('https://api.example/robots.txt'));
+});
+
+test('guard and transport errors never disclose an expanded API endpoint', async t => {
+  const calls = network(t, () => { throw new TypeError('Failed to fetch'); });
+  for (const direct of [false, true]) {
+    const ts = httpTools({ type: 'api', allow_private_ips: direct,
+      api_config: { ...apiConfig, endpoint: start + '/?key=${ env.SECRET }#local' } }, { SECRET: 'private-value' });
+    const { output, is_error } = await ts.call('lookup', '{}');
+    assert.equal(is_error, true);
+    assert.match(output, /^Error calling tool: request failed: Get: /);
+    assert.doesNotMatch(output, /private-value/);
+  }
+  assert.deepEqual(calls.map(c => c.target), [start + '/?key=private-value']);
+});
+
+test('fetch timeouts inherit the tool deadline without disabling it', async t => {
+  const timeouts = t.mock.method(AbortSignal, 'timeout', () => new AbortController().signal);
+  network(t, () => new Response(''));
+  for (const [configured, timeout, expected] of [[2, -1, 2], [0, 0, 30], [-2, null, 30], [2, 1, 1]]) {
+    const ts = httpTools({ type: 'fetch', timeout: configured, allow_private_ips: true });
+    const n = timeouts.mock.callCount();
+    assert.equal((await ts.call('fetch', { urls: [start], timeout })).is_error, false);
+    assert.deepEqual(timeouts.mock.calls.slice(n).map(call => call.arguments), [[expected * 1000], [expected * 1000]]);
+  }
+});
+
+test('malformed Content-Length is rejected without consuming the body', async t => {
+  let value, cancelled;
+  network(t, () => new Response(new ReadableStream({ cancel() { cancelled = true; } }), { headers: { 'Content-Length': value } }));
+  const ts = api();
+  for (const [header, error] of [['123z', /invalid syntax/], ['-1', /invalid Content-Length/], ['9223372036854775808', /value out of range/]]) {
+    value = header;
+    cancelled = false;
+    assert.match((await ts.call('lookup', '{}')).output, error);
+    assert.ok(cancelled);
+  }
+});
+
+test('fetch multi-URL JSON preserves real U+FFFD and replaces each malformed byte', async t => {
+  const body = Uint8Array.of(0xef, 0xbf, 0xbd, 0x61, 0xf0, 0x90, 0x80, 0x62, 0xee, 0x80, 0x63, 0xe0, 0x80, 0x64, 0xf4, 0x90);
+  network(t, ({ target }) => new Response(target.endsWith('/robots.txt') ? '' : body));
+  const ts = httpTools({ type: 'fetch', allow_private_ips: true });
+  const { output } = await ts.call('fetch', { urls: [start, start] });
+  for (const r of JSON.parse(output)) {
+    assert.equal(r.body, '�a���b��c��d��');
+    assert.equal(r.contentLength, body.length);
+  }
 });

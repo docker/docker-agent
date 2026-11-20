@@ -394,7 +394,7 @@ async function run() {
   tests.fallbackHost = await replay(api, 'fallbackHost', apiFallback, [[{ error: { message: 'primary unavailable' } }], tool('greet', {}), answer], single,
     '/v1/chat/completions', greet);
   const fixture = 'https://tool.invalid';
-  const httpConfig = ts => config.replace('model: local/test', `toolsets: [${JSON.stringify({ ...ts, allow_private_ips: true })}], model: local/test`);
+  const httpConfig = ts => config.replace('model: local/test', `toolsets: [${JSON.stringify({ allow_private_ips: true, ...ts })}], model: local/test`);
   async function approved({ api, options, trace, record }) {
     trace.results.push(await api.chat({ ...options, messages: [{ role: 'user', content: 'go' }], autoApprove: true }, record));
   }
@@ -413,6 +413,73 @@ async function run() {
       return new Response(pages.get(path), { statusText: 'OK', headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     });
   }
+  // Include the service's view in the trace, even when the tool only returns an error.
+  async function httpReplay(name, yaml, call, respond, drive = approved) {
+    const calls = [];
+    tests[name] = await replay(api, name, yaml, [call, answer], drive, '/v1/chat/completions', async req => {
+      calls.push({ method: req.method, url: req.url, headers: Object.fromEntries(req.headers), body: await req.text() });
+      return respond(req);
+    });
+    tests[name].http = calls;
+  }
+  const page = fixture + '/page', directFetch = httpConfig({ type: 'fetch' });
+  const robotsPage = (pageResponse, robots = () => new Response(null, { status: 404 })) =>
+    req => new URL(req.url).pathname === '/robots.txt' ? robots() : pageResponse(req);
+  const htmlPage = robotsPage(() => new Response('<ol><li> </li><li><a href="/x"></a></li><li><img src="/i" alt="a  b"></li></ol>',
+    { headers: { 'Content-Type': 'text/html;charset=latin1' } }));
+  for (const [name, args, yaml = directFetch, service = htmlPage] of [
+    ['fetch_defaultFormat', { urls: [page] }],
+    ['fetch_caseFormat', { urls: [page], format: 'MARKDOWN' }],
+    ['fetch_unknownFormat', { urls: [page], format: 'constructor', timeout: -1 }],
+    ['fetch_zeroToolTimeout', { urls: [page], timeout: 0 }, httpConfig({ type: 'fetch', timeout: 0 })],
+    ['fetch_negativeToolTimeout', { urls: [page] }, httpConfig({ type: 'fetch', timeout: -1 })],
+    ['fetch_html', { urls: [page, page], format: 'html' }],
+    ['fetch_emptyListItems', { urls: [page], format: 'markdown' }],
+    ['fetch_nullURL', { urls: [null] }],
+    ['fetch_invalidURLs', { urls: ['', 'path', '//bad.invalid', 'urn:test', 'ftp://bad.invalid/', 'https:///x', ' https://bad.invalid', page + '#bad%'] }],
+    ['fetch_invalidAuthority', { urls: ['https://tool.invalid:bad/p', 'https://bad host.invalid/', '/bad%'] }],
+    ['fetch_noProxy', { urls: [page + '?q=abc', fixture, 'HTTPS://TOOL.INVALID/a b#x y'] }, httpConfig({ type: 'fetch', allow_private_ips: false })],
+    ['fetch_escapedPaths', { urls: [page + '%2Fb (*) 🌍', page + ' ', fixture + ':444/%2f?q=é'] }],
+    ['fetch_allowDomains', { urls: [page, 'https://OTHER.invalid./no'] }, httpConfig({ type: 'fetch', allowed_domains: ['tool.invalid'] })],
+    ['fetch_blockDomains', { urls: [page, 'https://OTHER.invalid./no'] }, httpConfig({ type: 'fetch', blocked_domains: ['other.invalid'] })],
+    ['fetch_configHeaders', { urls: [page] }, httpConfig({ type: 'fetch', headers: { 'X-Name': '${env.WHO}', Accept: 'example/test' } })],
+    ['fetch_binaryMulti', { urls: [page, page] }, directFetch, robotsPage(() => new Response(Uint8Array.of(0xef, 0xbf, 0xbd, 0xff, 0xe2, 0x82)))],
+  ]) await httpReplay(name, yaml, tool('fetch', args), service);
+  for (const [name, respond] of [
+    ['empty204', () => new Response(null, { status: 204 })],
+    ['movedNoLocation', () => new Response('moved', { status: 301 })],
+    ['custom400', () => new Response('<bad>&\u2028\u2029', { status: 400, statusText: 'custom' })],
+    ['empty404', () => new Response(null, { status: 404 })],
+    ['busy429', () => new Response('busy', { status: 429 })],
+    ['error500', () => new Response('error', { status: 500 })],
+    ['unknown599', () => new Response(null, { status: 599, statusText: 'custom' })],
+    ['badLength', () => new Response('body', { headers: { 'Content-Length': '-1' } })],
+    ['closedEarly', () => new Response(new ReadableStream({ start(c) { c.error(new TypeError('connection closed')); } }))],
+    ['offline', () => { throw new TypeError('Failed to fetch'); }],
+  ]) {
+    await httpReplay(`fetch_${name}`, directFetch, tool('fetch', { urls: [page, page] }), robotsPage(respond));
+    await httpReplay(`api_${name}`, apiTool, tool('greet', {}), respond);
+  }
+  for (const [name, robots] of [
+    ['robots403', () => new Response(null, { status: 403 })], ['robots500', () => new Response(null, { status: 500 })],
+    ['robotsDisallow', () => new Response('User-agent: *\nDisallow: /')],
+    ['robotsReadError', () => new Response(new ReadableStream({ start(c) { c.error(new Error('disconnected')); } }))],
+  ]) await httpReplay(`fetch_${name}`, directFetch, tool('fetch', { urls: [page, page] }), robotsPage(() => new Response('ok'), robots));
+  await httpReplay('api_responseByteLimit', apiTool, tool('greet', {}), () => new Response('é'.repeat(15001)));
+  await httpReplay('api_noProxy', apiTool.replace('allow_private_ips: true', 'allow_private_ips: false'), tool('greet', {}), greet);
+  const proxied = args => approved({ ...args, options: { ...args.options, toolProxy: 'https://egress.invalid/relay' } });
+  const sameOriginRedirect = req => {
+    const path = new URL(new URL(req.url).searchParams.get('url')).pathname;
+    if (path === '/robots.txt') return new Response(null, { status: 302, headers: { 'X-Docker-Agent-Location': '/rules' } });
+    if (path === '/rules') return new Response('User-agent: *\nDisallow: /private');
+    if (path === '/page') return new Response(null, { status: 307, headers: { 'X-Docker-Agent-Location': '/done#omitted' } });
+    return new Response('ok');
+  };
+  await httpReplay('fetch_relayRedirect', httpConfig({ type: 'fetch', allow_private_ips: false }),
+    tool('fetch', { urls: [page, fixture + '/private'] }), sameOriginRedirect, proxied);
+  await httpReplay('api_relayRedirect', httpConfig({ type: 'api', allow_private_ips: false,
+    api_config: { name: 'greet', method: 'POST', endpoint: page, headers: { 'X-Name': '${env.WHO}' } } }),
+    tool('greet', { message: 'hello' }), sameOriginRedirect, proxied);
   const row = { type: 'object', properties: { label: { type: 'string' }, text: { type: 'string' } }, required: ['text'] };
   const postArgs = { rows: { type: 'array', items: row } };
   for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']) {

@@ -8,6 +8,7 @@ const redirects = new Set([301, 302, 303, 307, 308]);
 const maxBody = 1 << 20;
 const encoder = new TextEncoder();
 const requestMethods = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+const guardedHTTP = 'SSRF-guarded HTTP is not supported in the browser: configure a trusted HTTPS egress proxy (toolProxy) or opt in with allow_private_ips: true';
 const userAgent = 'Cagent/dev (js; wasm)';
 
 function fields(value, allowed, where) {
@@ -29,6 +30,67 @@ function webURL(raw) {
     throw new Error('URL must not contain userinfo');
   }
   return url;
+}
+
+// Go keeps a valid RawPath, but otherwise re-escapes the whole decoded path.
+function escapedPart(value, fragment = false) {
+  const unsafe = fragment ? /[^\w.~/!$&'()*+,;=:@%?\[\]-]/ : /[^\w.~/!$&'()*+,;=:@%\[\]-]/;
+  if (!unsafe.test(value)) return value;
+  const safe = fragment ? /[\w.~/$&+,;=:@!?()*-]/ : /[\w.~/$&+,;=:@-]/;
+  return value.replace(/%([\da-fA-F]{2})|[^\w.~/$&+,;=:@-]/gu, (ch, hex) => {
+    const bytes = hex ? [parseInt(hex, 16)] : encoder.encode(ch);
+    return Array.from(bytes, b => {
+      const c = String.fromCharCode(b);
+      return safe.test(c) ? c : '%' + b.toString(16).toUpperCase().padStart(2, '0');
+    }).join('');
+  });
+}
+
+function checkEscapes(part, source, invalid) {
+  const bad = /%(?![\da-f]{2})/i.exec(part);
+  if (!bad) return;
+  const bytes = encoder.encode(part.slice(bad.index, bad.index + 3)).subarray(0, 3);
+  let escape;
+  try { escape = goQuote(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  catch { escape = '"' + Array.from(bytes, b => b < 128 ? goQuote(String.fromCharCode(b)).slice(1, -1) : `\\x${b.toString(16)}`).join('') + '"'; }
+  throw invalid(source, `invalid URL escape ${escape}`);
+}
+
+function handlerURL(raw, apiTemplate) {
+  const api = apiTemplate !== undefined;
+  const privateURL = api && (/\$\{\s*env\./.test(apiTemplate) || /^[^:]+:\/\/[^/?#]*@/.test(raw));
+  const invalid = (source, reason) => new Error(privateURL ? 'invalid expanded endpoint' :
+    `${api ? 'Error calling tool: failed to create request' : 'invalid URL'}: parse ${goQuote(source)}: ${reason}`);
+  const beforeHash = raw.split('#', 1)[0];
+  if (/[\x00-\x1f\x7f]/.test(beforeHash)) throw invalid(beforeHash, 'net/url: invalid control character in URL');
+  const parts = /^([a-z][a-z\d+.-]*):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/is.exec(raw);
+  if (!parts) {
+    if (raw.startsWith(':')) throw invalid(beforeHash, 'missing protocol scheme');
+    if (!/^[a-z][a-z\d+.-]*:/i.test(raw) && raw.split(/[/?#]/, 1)[0].includes(':')) {
+      throw invalid(beforeHash, 'first path segment in URL cannot contain colon');
+    }
+    checkEscapes(beforeHash.split('?', 1)[0], beforeHash, invalid);
+    throw new Error('invalid URL: missing scheme or host');
+  }
+  const [, scheme, host, path, query = '', fragment = ''] = parts;
+  if (!/^https?$/i.test(scheme)) throw new Error('only HTTP and HTTPS URLs are supported');
+  if (host.includes('@')) throw new Error('URL must not contain userinfo');
+  const colon = host.lastIndexOf(':');
+  const port = colon > host.lastIndexOf(']') ? host.slice(colon) : '';
+  if (port && !/^:\d*$/.test(port)) throw invalid(beforeHash, `invalid port ${goQuote(port)} after host`);
+  if (host.includes(' ')) throw invalid(beforeHash, 'invalid character " " in host name');
+  checkEscapes(host, beforeHash, invalid);
+  const asciiEscape = /%(?!25)[0-7][\da-f]/i.exec(host);
+  if (asciiEscape) throw invalid(beforeHash, `invalid URL escape ${goQuote(asciiEscape[0])}`);
+  checkEscapes(path, beforeHash, invalid);
+  checkEscapes(fragment, raw, invalid);
+  const original = webURL(raw);
+  const escaped = escapedPart(path), authority = `${scheme.toLowerCase()}://${host}`;
+  const href = authority + escaped + query;
+  const url = escaped === path ? original : webURL(href + fragment);
+  if (url.origin !== original.origin) throw new Error('URL escaping must not change origin');
+  const display = privateURL ? undefined : href + (fragment.length > 1 ? '#' + escapedPart(fragment.slice(1), true) : '');
+  return { url, display, path, original, host };
 }
 
 export function proxyURL(raw) {
@@ -73,7 +135,7 @@ export async function toolFetch(url, init = {}, policy = {}, signal) {
 
 async function request(raw, init, { proxy, allowPrivateIPs, checkDomain }, signal) {
   if (!proxy && !allowPrivateIPs) {
-    throw new Error('SSRF-guarded HTTP is not supported in the browser: configure a trusted HTTPS egress proxy (toolProxy) or opt in with allow_private_ips: true');
+    throw new Error(guardedHTTP);
   }
   fields(init, ['method', 'body', 'headers', 'signal', 'credentials', 'redirect'], 'request');
   if (init.credentials !== undefined && init.credentials !== 'omit') throw new Error('requests must omit credentials');
@@ -171,12 +233,68 @@ function toolHeaders(config = {}) {
   };
 }
 
+// net/http on js/wasm synthesizes Status from the code, not Response.statusText.
+const statusText = {
+  200: 'OK', 201: 'Created', 202: 'Accepted', 203: 'Non-Authoritative Information', 204: 'No Content',
+  205: 'Reset Content', 206: 'Partial Content', 207: 'Multi-Status', 208: 'Already Reported', 226: 'IM Used',
+  300: 'Multiple Choices', 301: 'Moved Permanently', 302: 'Found', 303: 'See Other', 304: 'Not Modified',
+  305: 'Use Proxy', 307: 'Temporary Redirect', 308: 'Permanent Redirect', 400: 'Bad Request', 401: 'Unauthorized',
+  402: 'Payment Required', 403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed', 406: 'Not Acceptable',
+  407: 'Proxy Authentication Required', 408: 'Request Timeout', 409: 'Conflict', 410: 'Gone', 411: 'Length Required',
+  412: 'Precondition Failed', 413: 'Request Entity Too Large', 414: 'Request URI Too Long',
+  415: 'Unsupported Media Type', 416: 'Requested Range Not Satisfiable', 417: 'Expectation Failed',
+  418: "I'm a teapot", 421: 'Misdirected Request', 422: 'Unprocessable Entity', 423: 'Locked',
+  424: 'Failed Dependency', 425: 'Too Early', 426: 'Upgrade Required', 428: 'Precondition Required',
+  429: 'Too Many Requests', 431: 'Request Header Fields Too Large', 451: 'Unavailable For Legal Reasons',
+  500: 'Internal Server Error', 501: 'Not Implemented', 502: 'Bad Gateway', 503: 'Service Unavailable',
+  504: 'Gateway Timeout', 505: 'HTTP Version Not Supported', 506: 'Variant Also Negotiates',
+  507: 'Insufficient Storage', 508: 'Loop Detected', 510: 'Not Extended', 511: 'Network Authentication Required',
+};
+const statusLine = code => `${code} ${statusText[code] ?? ''}`;
+
 function deadline(seconds, parent) {
   const timeout = AbortSignal.timeout(seconds * 1000);
   return parent ? AbortSignal.any([timeout, parent]) : timeout;
 }
 
-async function readBytes(response, limit) {
+function contentLengthError(value) {
+  if (!value) return;
+  const digits = value.replace(/^[+-]?0*/, '') || '0';
+  const max = value.startsWith('-') ? '9223372036854775808' : '9223372036854775807';
+  let reason;
+  const overflow = digits.length > max.length || (digits.length === max.length && digits > max);
+  if (!/^[+-]?\d+$/.test(value)) reason = 'invalid syntax';
+  else if (overflow) reason = 'value out of range';
+  if (reason) return `net/http: ill-formed Content-Length header: strconv.ParseInt: parsing ${goQuote(value)}: ${reason}`;
+  if (value.startsWith('-') && digits !== '0') return `net/http: invalid Content-Length header: ${goQuote(value)}`;
+}
+
+async function handlerRequest(target, init, policy, signal, display, prefix = '') {
+  try {
+    const response = await request(target, init, policy, signal);
+    const error = contentLengthError(response.headers.get('Content-Length'));
+    if (error) {
+      await response.body?.cancel();
+      throw new Error(error);
+    }
+    return response;
+  } catch (err) {
+    const op = (init.method ?? 'GET').toLowerCase();
+    const url = display === undefined ? '' : ` ${goQuote(display)}`;
+    let reason = err.message;
+    if (reason === guardedHTTP) reason = 'httpclient: ' + reason;
+    else if (signal.reason?.name === 'TimeoutError') reason = 'context deadline exceeded (Client.Timeout exceeded while awaiting headers)';
+    else if (err instanceof TypeError) reason = 'net/http: fetch() failed: ' + (display === undefined ? err.name : err);
+    throw new Error(`${prefix}request failed: ${op[0].toUpperCase() + op.slice(1)}${url}: ${reason}`);
+  }
+}
+
+async function readBytes(response, limit, errorPrefix) {
+  try { return await readLimited(response, limit); }
+  catch (err) { throw new Error(errorPrefix + err.message); }
+}
+
+async function readLimited(response, limit) {
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader(), chunks = [];
   let size = 0, reads = 0;
@@ -197,6 +315,21 @@ async function readBytes(response, limit) {
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
   return bytes;
+}
+
+const utf8 = new TextDecoder('utf-8', { ignoreBOM: true });
+const continuation = b => (b & 0xc0) === 0x80;
+
+function decodeFetchBody(bytes, perByte) {
+  if (perByte) {
+    // TextDecoder groups incomplete prefixes; Go range and JSON replace each bad byte.
+    for (let i = 0; i < bytes.length - 1; i++) {
+      const lead = bytes[i];
+      if (lead >= 0xe0 && lead <= 0xf4 && continuation(bytes[i + 1]) &&
+          (!continuation(bytes[i + 2]) || (lead >= 0xf0 && !continuation(bytes[i + 3])))) bytes[i] = 0xff;
+    }
+  }
+  return utf8.decode(bytes);
 }
 
 function normalizedHost(host) {
@@ -296,19 +429,22 @@ function robotsRules(text) {
   };
 }
 
-async function loadRobots(url, headers, policy, signal) {
-  const res = await request(new URL('/robots.txt', url), { headers }, policy, signal);
+async function loadRobots(url, headers, policy, signal, display) {
+  const robots = new URL('/robots.txt', url);
+  // Go reports the page request when the guard prevents both requests.
+  const res = await handlerRequest(robots, { headers }, policy, signal, policy.proxy || policy.allowPrivateIPs ? robots.href : display);
   if (res.status !== 200) {
     await res.body?.cancel();
     if (res.status === 404) return () => true;
     throw new Error(`robots.txt check failed: unexpected status ${res.status}`);
   }
-  const limit = 64 * 1024, bytes = await readBytes(res, limit + 1);
+  const limit = 64 * 1024, bytes = await readBytes(res, limit + 1, 'robots.txt check failed: failed to read robots.txt: ');
   if (bytes.length > limit) throw new Error('robots.txt too large');
   return robotsRules(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
 }
 
 const accepts = {
+  __proto__: null,
   text: 'text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1',
   markdown: 'text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.7, */*;q=0.1',
   html: 'text/html;q=1.0, text/plain;q=0.8, */*;q=0.1',
@@ -328,10 +464,10 @@ function fetchTool(ts, env, policy, seconds) {
   if ('escape_html' in ts && typeof ts.escape_html !== 'boolean') throw new Error('escape_html must be a boolean');
   const escape = ts.escape_html;
   const makeHeaders = toolHeaders(ts.headers);
-  policy.checkDomain = url => {
+  policy.checkDomain = (url, displayHost) => {
     const host = normalizedHost(url.hostname);
-    if (block.some(matches => matches(host))) throw new Error(`URL host "${host}" is blocked by blocked_domains`);
-    if (allow.length && !allow.some(matches => matches(host))) throw new Error(`URL host "${host}" is not in allowed_domains`);
+    if (block.some(matches => matches(host))) throw new Error(`URL host "${displayHost ?? host}" is blocked by blocked_domains`);
+    if (allow.length && !allow.some(matches => matches(host))) throw new Error(`URL host "${displayHost ?? host}" is not in allowed_domains`);
   };
   let instructions = '## Fetch Tool\n\nFetch HTTP/HTTPS URLs; respects robots.txt.';
   if (allow.length) instructions += `\n\nThis tool is restricted to these domains (and any subdomain): ${ts.allowed_domains.join(', ')}. Other hosts are rejected without a network call.`;
@@ -345,9 +481,9 @@ function fetchTool(ts, env, policy, seconds) {
       const { urls, format, timeout } = args;
       if (!Array.isArray(urls) || urls.length === 0 || urls.some(url => typeof url !== 'string')) throw new Error('Error calling tool: at least one URL is required');
       if (urls.length > 8) throw new Error('portable fetch supports at most 8 URLs per call');
-      if (format != null && (typeof format !== 'string' || !Object.hasOwn(accepts, format))) throw new Error('unsupported fetch format');
-      if (timeout != null && (!Number.isInteger(timeout) || timeout < 1 || timeout > 300)) throw new Error('fetch timeout must be 1–300 seconds');
-      const timeoutSeconds = timeout ?? seconds;
+      if (format != null && typeof format !== 'string') throw new Error('unsupported fetch format');
+      if (timeout != null && (!Number.isInteger(timeout) || timeout > 300)) throw new Error('fetch timeout must be 1–300 seconds');
+      const timeoutSeconds = timeout > 0 ? timeout : seconds;
       const robots = new Map(), results = [];
       const robotsHeaders = makeHeaders(env);
       const headers = makeHeaders(env, accepts[format] ?? 'text/plain;q=1.0, */*;q=0.1');
@@ -356,21 +492,23 @@ function fetchTool(ts, env, policy, seconds) {
         const r = { url: raw, statusCode: 0, status: '', contentType: undefined, contentLength: 0 };
         try {
           if (raw.length > 16384) throw new Error('portable fetch URL too long');
-          const url = webURL(raw);
-          if (!robots.has(url.origin)) robots.set(url.origin, await loadRobots(url, robotsHeaders, policy, deadline(timeoutSeconds, signal)));
-          // WHATWG URL removes dot segments. Check Go's original path as well
-          // as the path the browser will actually send. Neither includes query.
-          const original = decodeURIComponent(/^https?:\/\/[^/?#]+([^?#]*)/i.exec(raw)[1]);
-          const path = decodeURIComponent(url.pathname), allows = robots.get(url.origin);
-          if (!allows(original) || (path !== original && !allows(path))) throw new Error('URL blocked by robots.txt');
-          const res = await request(url, { headers }, policy, deadline(timeoutSeconds, signal));
+          const { url, display, path, original, host } = handlerURL(raw);
+          policy.checkDomain(url, host.replace(/:\d*$/, '').replace(/^\[|\]$/g, ''));
+          if (!robots.has(url.origin)) robots.set(url.origin, await loadRobots(url, robotsHeaders, policy, deadline(timeoutSeconds, signal), display));
+          // Check the supplied path and both browser normalizations before sending.
+          const allows = robots.get(url.origin);
+          for (const p of new Set([path, original.pathname, url.pathname])) {
+            if (!allows(decodeURIComponent(p))) throw new Error('URL blocked by robots.txt');
+          }
+          const res = await handlerRequest(url, { headers }, policy, deadline(timeoutSeconds, signal), display);
           r.statusCode = res.status;
-          r.status = `${res.status} ${res.statusText}`.trimEnd();
+          r.status = statusLine(res.status);
           const type = res.headers.get('Content-Type');
           if (type) r.contentType = type;
-          const bytes = await readBytes(res, maxBody);
-          let body = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
-          if (type?.includes('text/html') && (format === 'text' || format === 'markdown')) {
+          const bytes = await readBytes(res, maxBody, 'failed to read response body: ');
+          const convert = type?.includes('text/html') && (format === 'text' || format === 'markdown');
+          let body = decodeFetchBody(bytes, convert ? format === 'text' : urls.length > 1);
+          if (convert) {
             body = convertHTML(body, format);
             const length = encoder.encode(body).length;
             if (length > maxBody) throw new Error('converted HTML exceeds portable size limit');
@@ -389,7 +527,7 @@ function fetchTool(ts, env, policy, seconds) {
         return `Successfully fetched ${r.url} (Status: ${r.statusCode}, Length: ${r.contentLength} bytes):\n\n${r.body ?? ''}`;
       }
       const json = JSON.stringify(results);
-      return escape ? json.replace(/[<>&]/g, escaped) : json;
+      return json.replace(escape ? /[<>&\u2028\u2029]/g : /[\u2028\u2029]/g, escaped);
     },
   };
 }
@@ -485,38 +623,6 @@ function postBody(raw) {
   return json;
 }
 
-// Go's URL.EscapedPath keeps valid raw escapes, but re-escapes the whole decoded path otherwise.
-function apiURL(raw, template, origin) {
-  // Never echo env-expanded values, or input rejected by the browser's authority checks.
-  const publicURL = !/\$\{\s*env\./.test(template) && !/^[^:]+:\/\/[^/?#]*@/.test(raw);
-  const beforeHash = raw.split('#', 1)[0];
-  if (publicURL && /[\x00-\x1f\x7f]/.test(beforeHash)) {
-    throw new Error(`Error calling tool: failed to create request: parse ${goQuote(beforeHash)}: net/url: invalid control character in URL`);
-  }
-  const url = webURL(raw);
-  if (url.origin !== origin) throw new Error('endpoint expansion must not change origin');
-  const [, authority, path, query = '', fragment = ''] = /^(https?:\/\/[^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/is.exec(raw);
-  for (const [part, source] of [[path, authority + path + query], [fragment, raw]]) {
-    const bad = /%(?![\da-f]{2})/i.exec(part);
-    if (!bad) continue;
-    if (!publicURL) throw new Error('invalid URL escape in expanded endpoint');
-    const bytes = encoder.encode(part.slice(bad.index, bad.index + 3)).subarray(0, 3);
-    let escape;
-    try { escape = goQuote(new TextDecoder('utf-8', {fatal: true}).decode(bytes)); }
-    catch { escape = '"' + Array.from(bytes, b => b < 128 ? goQuote(String.fromCharCode(b)).slice(1, -1) : `\\x${b.toString(16)}`).join('') + '"'; }
-    throw new Error(`Error calling tool: failed to create request: parse ${goQuote(source)}: invalid URL escape ${escape}`);
-  }
-  if (!/[^\w.~/!$&'()*+,;=:@%\[\]-]/.test(path)) return url;
-  const escaped = path.replace(/%([\da-fA-F]{2})|[^\w.~/$&+,;=:@-]/gu, (ch, hex) => {
-    const bytes = hex ? [parseInt(hex, 16)] : encoder.encode(ch);
-    return Array.from(bytes, b => {
-      const c = String.fromCharCode(b);
-      return /[\w.~/$&+,;=:@-]/.test(c) ? c : '%' + b.toString(16).toUpperCase().padStart(2, '0');
-    }).join('');
-  });
-  return webURL(authority + escaped + query + fragment);
-}
-
 function apiTool(config, env, policy, seconds) {
   fields(config, ['name', 'method', 'endpoint', 'instruction', 'headers', 'args', 'required'], 'api_config');
   const { name, method, endpoint, instruction = '', args = {}, required = [] } = config;
@@ -545,13 +651,13 @@ function apiTool(config, env, policy, seconds) {
         body = postBody(typeof raw === 'string' ? raw : JSON.stringify(raw));
         headers.set('Content-Type', 'application/json');
       }
-      const target = method === 'GET' ? apiURL(url, endpoint, origin) : webURL(url);
+      const { url: target, display } = handlerURL(url, endpoint);
       if (target.origin !== origin) throw new Error('endpoint expansion must not change origin');
-      const res = await request(target, { method, headers, body }, policy, deadline(seconds, signal));
-      const limit = 30000, bytes = await readBytes(res, limit + 1);
-      const text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes.subarray(0, limit))
+      const res = await handlerRequest(target, { method, headers, body }, policy, deadline(seconds, signal), display, 'Error calling tool: ');
+      const limit = 30000, bytes = await readBytes(res, limit + 1, 'Error calling tool: failed to read response body: ');
+      const text = utf8.decode(bytes.subarray(0, limit))
         + (bytes.length > limit ? '\n\n[Output truncated: exceeded 30,000 character limit]' : '');
-      if (res.status >= 400) throw new Error(`API request failed with status ${res.status} ${res.statusText}: ${text}`);
+      if (res.status >= 400) throw new Error(`API request failed with status ${statusLine(res.status)}: ${text}`);
       return text;
     },
   };
@@ -568,11 +674,12 @@ export function httpTools(toolset, env = {}, toolProxy) {
     default: throw new Error('expected a fetch or api toolset');
   }
   fields(toolset, [...common, ...options], 'toolset');
-  const ts = structuredClone(toolset), seconds = ts.timeout ?? 30;
-  if (!Number.isInteger(seconds) || seconds < 1 || seconds * 1000 > 0x7fffffff) throw new Error('invalid toolset.timeout');
+  const ts = structuredClone(toolset), timeout = ts.timeout ?? 0;
+  if (!Number.isInteger(timeout) || timeout * 1000 > 0x7fffffff) throw new Error('invalid toolset.timeout');
   const policy = policyOf({ toolProxy, allowPrivateIPs: Object.hasOwn(ts, 'allow_private_ips') && ts.allow_private_ips });
   const sessionEnv = { ...env };
   if (Object.values(sessionEnv).some(v => typeof v !== 'string')) throw new Error('session env values must be strings');
+  const seconds = timeout > 0 ? timeout : 30;
   const tool = ts.type === 'api' ? apiTool(ts.api_config, sessionEnv, policy, seconds) : fetchTool(ts, sessionEnv, policy, seconds);
   const { name, description, parameters } = tool;
   return {

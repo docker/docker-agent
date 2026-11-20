@@ -324,7 +324,7 @@ impl Toolset {
                 "headers" => val
                     .as_object()
                     .is_some_and(|obj| obj.values().all(Value::is_string)),
-                "timeout" => val.as_u64().is_some_and(|n| n <= 300),
+                "timeout" => val.as_i64().is_some_and(|n| n <= 300),
                 "allowed_domains" | "blocked_domains" => val
                     .as_array()
                     .is_some_and(|a| a.iter().all(Value::is_string)),
