@@ -52,6 +52,14 @@ for (const oldBudget of [reference.max_old_tool_call_tokens, reference.max_tool_
   });
 }
 
+test('a blank tool result is stored as "(no output)" while its event keeps the raw text', async t => {
+  const requests = intercept(t, [[call('echo')], null], ' \n');
+  const events = [];
+  await api.chat({...opts(config(`toolsets: [${echo}]`)), messages: [{role: 'user', content: 'go'}]}, e => events.push(e));
+  assert.equal(requests[1].messages.at(-1).content, '(no output)');
+  assert.equal(events.find(e => e.type === 'tool_result').output, ' \n');
+});
+
 test('transient failover spends one iteration and the next send starts fresh on primary', async t => {
   const requests = intercept(t, [503, [call('echo')], [call('echo', {}, 'b')]]);
   const yaml = config(`max_iterations: 1, session_compaction: false, fallback: {models: [local/backup], retries: -1}, toolsets: [${echo}]`);

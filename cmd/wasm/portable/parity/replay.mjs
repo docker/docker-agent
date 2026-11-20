@@ -365,6 +365,9 @@ async function run() {
     return new Response('hi');
   }
   tests.apiTool = await replay(api, 'apiTool', apiTool, [tool('greet', {}), answer], single, '/v1/chat/completions', greet);
+  for (const [name, body] of [['blankToolResult', ''], ['whitespaceToolResult', '  \n ']]) {
+    tests[name] = await replay(api, name, apiTool, [tool('greet', {}), answer], single, '/v1/chat/completions', () => new Response(body));
+  }
   const apiFallback = apiTool.replace('model: local/test', 'model: local/test, fallback: {models: [local/backup]}');
   tests.fallbackHost = await replay(api, 'fallbackHost', apiFallback, [[{ error: { message: 'primary unavailable' } }], tool('greet', {}), answer], single,
     '/v1/chat/completions', greet);

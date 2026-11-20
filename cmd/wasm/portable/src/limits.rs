@@ -76,7 +76,8 @@ impl Limits {
     }
 
     pub fn stored_content(&self, output: String, hooks: &Hooks) -> Result<Value, String> {
-        let mut content = if self.limits_history() && output.trim().is_empty() {
+        // Go never stores a blank tool result.
+        let mut content = if output.trim().is_empty() {
             "(no output)".into()
         } else {
             output.into()
