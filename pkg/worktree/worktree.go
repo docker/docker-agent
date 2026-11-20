@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/worktree/namesgenerator"
@@ -35,6 +37,29 @@ var ErrInvalidPRRef = errors.New("invalid pull request reference")
 
 // ErrGHNotFound means the GitHub CLI (gh) is required but not installed.
 var ErrGHNotFound = errors.New("the GitHub CLI (gh) is required to check out a pull request")
+
+// addLocks serializes `git worktree add` per repository: concurrent adds in
+// one repository race on the .git/worktrees admin entries, where one add can
+// fail reading another's half-written commondir (#4922). Keyed by the common
+// git directory, so a main checkout and its linked worktrees — which update
+// the same .git/worktrees — share one lock. In-process only — separate
+// processes sharing a repository are not covered.
+var addLocks sync.Map // map[string]chan struct{} — cap-1 semaphore per repo
+
+// lockAdds acquires the repository's add lock, returning its release func, or
+// the context error when the caller gives up waiting. Waiting observes ctx so
+// a cancelled creation returns promptly even while another session holds the
+// lock.
+func lockAdds(ctx context.Context, commonDir string) (func(), error) {
+	v, _ := addLocks.LoadOrStore(commonDir, make(chan struct{}, 1))
+	sem := v.(chan struct{})
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
 // Worktree describes a git worktree created for an agent session.
 type Worktree struct {
@@ -164,7 +189,17 @@ func Create(ctx context.Context, dir, name string, opts ...CreateOption) (*Workt
 		addArgs = append(addArgs, cfg.base)
 	}
 
-	if err := git(ctx, root, addArgs...); err != nil {
+	commonDir, err := repoCommonDir(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	unlockAdds, err := lockAdds(ctx, commonDir)
+	if err != nil {
+		return nil, fmt.Errorf("creating git worktree: %w", err)
+	}
+	err = git(ctx, root, addArgs...)
+	unlockAdds()
+	if err != nil {
 		if cfg.base != "" {
 			return nil, fmt.Errorf("%w: %s: %w", ErrInvalidBase, cfg.base, err)
 		}
@@ -219,7 +254,17 @@ func CreatePR(ctx context.Context, dir, ref string, opts ...CreateOption) (*Work
 	// Create the worktree first (detached at HEAD), then let gh check out the
 	// PR head into it. gh resolves the PR's head branch, adds a fork remote
 	// when needed, and sets upstream tracking so pushes return to the PR.
-	if err := git(ctx, root, "worktree", "add", "--detach", dest); err != nil {
+	commonDir, err := repoCommonDir(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	unlockAdds, err := lockAdds(ctx, commonDir)
+	if err != nil {
+		return nil, fmt.Errorf("creating git worktree: %w", err)
+	}
+	err = git(ctx, root, "worktree", "add", "--detach", dest)
+	unlockAdds()
+	if err != nil {
 		return nil, fmt.Errorf("creating git worktree: %w", err)
 	}
 
@@ -342,12 +387,58 @@ func validateName(name string) error {
 func repoRoot(ctx context.Context, dir string) (string, error) {
 	out, err := gitOutput(ctx, dir, "rev-parse", "--show-toplevel")
 	if err != nil {
+		// A cancelled call surfaces as a killed process, not as "not a repo".
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 		if _, ok := errors.AsType[*exec.ExitError](err); ok {
 			return "", ErrNotGitRepository
 		}
 		return "", err
 	}
 	return filepath.Clean(out), nil
+}
+
+// repoCommonDir returns the canonical identity of the repository's common git
+// directory, which holds .git/worktrees and is shared by the main checkout
+// and every linked worktree. The result doubles as the add-lock key, so every
+// spelling of one checkout — relative segments, symlink aliases, or a
+// platform alias such as macOS' /System/Volumes/Data — must resolve to one
+// identity: git reports the absolute form, and symlinks are resolved on top.
+func repoCommonDir(ctx context.Context, dir string) (string, error) {
+	out, err := gitOutput(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		// Git older than 2.31 has no --path-format; resolve the relative
+		// form against dir ourselves.
+		out, err = gitOutput(ctx, dir, "rev-parse", "--git-common-dir")
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			if _, ok := errors.AsType[*exec.ExitError](err); ok {
+				return "", ErrNotGitRepository
+			}
+			return "", err
+		}
+		if !filepath.IsAbs(out) {
+			out = filepath.Join(dir, out)
+		}
+	}
+	return canonicalPath(out), nil
+}
+
+// canonicalPath resolves p to the identity used as the add-lock key: symlinks
+// are followed (git's absolute form already covers platform aliases), and the
+// result is case-folded on Windows where the file system is case-insensitive.
+func canonicalPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	p = filepath.Clean(p)
+	if runtime.GOOS == "windows" {
+		p = strings.ToLower(p)
+	}
+	return p
 }
 
 // fetchBase updates the local copy of a remote-tracking base ref (e.g.
