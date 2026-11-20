@@ -5,8 +5,8 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The measured release is **1,943,465 bytes (1.85 MiB) uncompressed**, including
-all ten runtime JS modules, versus 35.8 MiB for the packed Go small module
+The measured release is **2,021,250 bytes (1.93 MiB) uncompressed**, including
+all twelve runtime JS modules, versus 35.8 MiB for the packed Go small module
 alone. CI enforces a 2 MiB budget for the Wasm and JS together.
 
 ```sh
@@ -56,8 +56,8 @@ are protocol-specific. A `user_prompt` answer has the form
 Unsupported runtime features are rejected at session creation, even if a config
 can be inspected with `parseConfig`. They do not silently weaken settings.
 Tool rounds are bounded (8 per turn, 16 calls per round), and scratchpads,
-answers and todo lists have portable memory limits. Parallel tool results may
-appear in a different order than Go's completion-dependent scheduling.
+answers and todo lists have portable memory limits. A parallel tool batch
+follows Go's browser order; see [tool batches](parity/batch-order.md).
 Model requests use only explicit session credentials, never ambient environment
 or cookies, and refuse redirects. Tool calls are a separate trust boundary.
 
@@ -83,10 +83,19 @@ the calculator and the session's shared plan; plan writes prompt for approval.
   object the way Go marshals it, and other methods ignore arguments. The
   expanded endpoint must keep the configured origin and still goes through the
   egress policy. See [API tool arguments](parity/api-arguments.md).
+- `fetch` takes any `format`, as in Go: an unknown one returns the body
+  unconverted. A non-positive `timeout` falls back to the toolset's. Results
+  and errors carry Go's wording and status phrases. A call is still limited to
+  eight URLs and 300 seconds. A direct request never follows a redirect, and
+  a relayed one drops every header once it leaves the origin. See
+  [HTTP tool behaviour](parity/http-behavior.md).
 - MCP tool catalogs are obtained over guarded HTTP. Treat server instructions
   and tool output as untrusted. The streamable HTTP client supports JSON and
   SSE replies, pagination and session teardown; it does not replay a failed tool
-  invocation on a transport error. `remote.transport_type: sse` selects the
+  invocation on a transport error. It negotiates like Go (`server/discover`,
+  then `initialize`), normalizes tool schemas for the model the same way and
+  joins result parts the same way; see [remote MCP](parity/remote-mcp.md).
+  `remote.transport_type: sse` selects the
   legacy transport; it pins a same-origin POST endpoint, uses configured headers
   and does not perform OAuth or reconnect. HTML conversion in `fetch` is offline:
   no DOM or subresource requests, and unsupported markup is reported explicitly.
@@ -340,6 +349,9 @@ The runtime recovers the way Go does instead of failing the send:
   gives no `finish_reason`, or one that cannot apply.
 - **Blank tool result.** It is stored as `(no output)`; the `tool_result` event
   keeps the raw text.
+- **Blank prompt or instruction.** Text that is only whitespace never reaches a
+  request. If nothing else is left to send, the send fails with `model failed:
+  at least one message is required` before any I/O.
 - **Arguments a tool cannot decode.** Malformed JSON, a wrong type or a
   non-object comes back as Go's own `encoding/json` complaint (`Error calling
   tool: …`). The call is announced and still needs its approval first. Tools
@@ -353,6 +365,13 @@ cache toward `context_length`, not `input_tokens`.
 
 Go drops text that shares a non-final stream chunk with a tool-call fragment;
 this port keeps it.
+
+On Chat Completions, a later tool-name fragment replaces the earlier one rather
+than extending it, calls run in the order they first appear, and a stream error
+after `tool_calls` cancels the pending call. Input that is ambiguous about
+which call runs (a missing or changing call ID, a rename onto an available
+tool, a cut record) rejects the send. See
+[Chat Completions streams](parity/chat-completions.md).
 
 On Responses, a tool runs only if the stream announced its name and delivered
 arguments for that item. A completion snapshot cannot add a call or complete
@@ -395,6 +414,11 @@ enforce them: only the host's `autoApprove` waives approval there. Here a
 config can never waive approval, so `autonomous` behaves like the default.
 `strict` asks for every call no `allow` rule covers, and `restricted` denies
 and hides what would need a prompt; both are stricter than Go.
+
+Builtin tools keep Go's state and wording: each private `todo` declaration has
+its own list, `user_prompt` hands the model the host's action in Go's JSON
+encoding, and named time zones use Go's zone database (transitions since 2020
+and the rules after them). See [builtin results](parity/builtin-results.md).
 
 Supported builtin hooks are `add_date`, `add_environment_info`, `max_iterations`,
 `limit_large_tool_results` and `redact_secrets`. `add_date` samples the date once
