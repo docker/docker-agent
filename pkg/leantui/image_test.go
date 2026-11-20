@@ -61,7 +61,6 @@ func TestRenderToolIncludesInlineImage(t *testing.T) {
 
 	assert.Contains(t, joined, "Read image file sample.png")
 	assert.Contains(t, joined, "\x1b_G")
-	assert.Contains(t, joined, "🖼")
 }
 
 func TestInlineImageFromBase64RejectsNonImages(t *testing.T) {

@@ -253,7 +253,8 @@ type chatPage struct {
 	showStartupBanner           bool
 	// hideBanner mirrors the user's show_banner setting; the zero value
 	// keeps the banner so page literals stay banner-enabled.
-	hideBanner bool
+	hideBanner       bool
+	bannerTransition animation.Transition
 
 	// Message queue for enqueuing messages while agent is working
 	messageQueue    []queuedMessage
@@ -414,6 +415,7 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 		commandParser:     commands.NewParser(),
 		sessionState:      sessionState,
 		showStartupBanner: true,
+		bannerTransition:  ar.Transition(),
 	}
 
 	for _, opt := range opts {
@@ -555,6 +557,7 @@ func WatchGitBranch(page Page) tea.Cmd {
 
 func Cleanup(page Page) {
 	if p, ok := page.(*chatPage); ok {
+		p.bannerTransition.Cancel()
 		if p.inputScope != nil {
 			p.inputScope.close()
 		}
@@ -578,6 +581,9 @@ func (p *chatPage) UpdateEffects(msg tea.Msg) (Page, Effects) {
 	p.effects = &effects
 	defer func() { p.effects = nil }()
 	model, cmd := p.update(msg)
+	if p.bannerTransition.Running() && !p.bannerVisible(p.computeSidebarLayout()) {
+		p.bannerTransition.Cancel()
+	}
 	// State changes (async sidebar updates, streaming indicators) can move
 	// child components without any resize. Child positions are only applied
 	// in SetSize, so reapply the geometry when the live layout drifted from
@@ -610,6 +616,11 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case animation.TickMsg:
+		if p.bannerTransition.Running() {
+			p.bannerTransition.Tick()
+			msg.MarkDirty()
+		}
 	case msgtypes.PlanSidebarDataMsg:
 		updated, cmd := p.sidebar.Update(msg)
 		p.sidebar = updated.(sidebar.Model)
@@ -848,7 +859,11 @@ func (p *chatPage) messagesView(sl sidebarLayout) string {
 		return ""
 	}
 
-	banner := strings.Join(tuibanner.Render(), "\n")
+	lines := tuibanner.Render()
+	if p.bannerTransition.Running() {
+		lines = tuibanner.RenderFrame(p.bannerTransition.Progress(), sl.chatWidth)
+	}
+	banner := strings.Join(lines, "\n")
 	return lipgloss.Place(
 		sl.chatWidth,
 		sl.chatHeight,
@@ -975,6 +990,9 @@ func (p *chatPage) SetSize(width, height int) tea.Cmd {
 	}
 
 	cmds = append(cmds, p.messages.SetSize(sl.chatWidth, sl.chatHeight))
+	if p.bannerTransition.Running() && !p.bannerVisible(sl) {
+		p.bannerTransition.Cancel()
+	}
 
 	return tea.Batch(cmds...)
 }
@@ -1620,6 +1638,28 @@ func (p *chatPage) SetInterruptMode(mode msgtypes.InterruptMode) {
 
 func (p *chatPage) SetShowBanner(show bool) {
 	p.hideBanner = !show
+	if !show {
+		p.bannerTransition.Cancel()
+	}
+}
+
+func (p *chatPage) bannerVisible(sl sidebarLayout) bool {
+	return p.showStartupBanner && !p.hideBanner && sl.chatWidth >= tuibanner.Width && sl.chatHeight >= tuibanner.Height && p.messages.View() == ""
+}
+
+// StartStartupBanner animates only the first visible startup banner.
+func StartStartupBanner(page Page) tea.Cmd {
+	if p, ok := page.(*chatPage); ok && p.bannerVisible(p.computeSidebarLayout()) {
+		return p.bannerTransition.Start(2*time.Second, animation.Linear)
+	}
+	return nil
+}
+
+// CancelStartupBanner stops the animation without affecting the static banner.
+func CancelStartupBanner(page Page) {
+	if p, ok := page.(*chatPage); ok {
+		p.bannerTransition.Cancel()
+	}
 }
 
 // SetRoutingID records the tab identity this page's routed UI timers are
