@@ -1519,6 +1519,11 @@ impl Conversation {
             // The host tool reads `input` when what Go decodes differs from the raw text.
             let input = if op.malformed.is_some() {
                 Some(String::new())
+            } else if kind == Some("mcp") {
+                match crate::go_json::normalize_json(&call.arguments)? {
+                    std::borrow::Cow::Owned(text) => Some(text),
+                    std::borrow::Cow::Borrowed(_) => None,
+                }
             } else if kind == Some("fetch") || api_method.is_some() {
                 let decoded = match api_method {
                     Some(method) => api_arguments(method, &call.arguments)

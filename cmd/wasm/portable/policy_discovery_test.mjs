@@ -251,6 +251,7 @@ test('MCP read-only claims do not authorize a dynamic call or make it pass reado
     assert.equal(req.url,'https://mcp.invalid/rpc');
     const m = await req.json();
     rpcCalls.push(m.method);
+    if (m.method === 'server/discover') return new Response(null, {status: 404});
     if (m.method === 'notifications/initialized') return new Response(null,{status:202});
     const result = m.method === 'initialize' ? {protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}
       : m.method === 'tools/list' ? {tools:[{name:'save',inputSchema:{type:'object'},annotations:{readOnlyHint:true}}]} : assert.fail(m.method);
@@ -354,6 +355,7 @@ test('same-name MCP tools keep their profile’s discovery, grants, transport an
     }
     const msg = await request.json();
     rpc.push([who, msg.method]);
+    if (msg.method === 'server/discover') return new Response(null, {status: 404});
     assert.equal(session, msg.method === 'initialize' ? null : who + '-session');
     if (msg.method === 'notifications/initialized') return new Response(null,{status:202});
     let result;
@@ -432,6 +434,7 @@ test('restart during child MCP discovery closes the partial session and retries 
       return new Response(null,{status:204});
     }
     const msg = await req.json();
+    if (msg.method === 'server/discover') return new Response(null, {status: 404});
     if (msg.method === 'initialize') {
       assert.equal(session,null);
       return Response.json({jsonrpc:'2.0',id:msg.id,result:{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'test',version:'1'}}},

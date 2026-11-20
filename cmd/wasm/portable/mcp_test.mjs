@@ -13,6 +13,7 @@ const ack = () => new Response(null, { status: 202 });
 function server(overrides = {}) {
   const calls = [];
   const handlers = {
+    'server/discover': msg => result(msg, { supportedVersions: [version] }),
     initialize: msg => result(msg, hello),
     'notifications/initialized': ack,
     'tools/list': msg => result(msg, { tools: [tool] }),
@@ -49,7 +50,7 @@ test('guarded stateful handshake, negotiated version, pagination and teardown', 
     url: 'https://${env.HOST}/tools', transport_type: 'streamable-http', headers: { Authorization: 'Bearer ${env.TOKEN}' },
   } }, env, proxy, undefined, { toolFetch: srv.toolFetch });
   assert.equal(s.instructions, hello.instructions);
-  assert.deepEqual(s.tools, ['demo_lookup', 'demo_write'].map(name => ({ type: 'function', function: { name, description: tool.description, parameters: tool.inputSchema } })));
+  assert.deepEqual(s.tools, ['demo_lookup', 'demo_write'].map(name => ({ mcpStrict: true, type: 'function', function: { name, description: tool.description, parameters: { type: 'object', properties: { key: { type: ['string', 'null'] } }, required: ['key'], additionalProperties: false } } })));
   env.HOST = 'other.example.test'; // URL pinned at open; auth headers expanded per request.
   env.TOKEN = 'rotated';
   assert.deepEqual(await s.call('demo_write', '{"key":"a","skip":null,"nested":{"value":null}}'), {
@@ -58,22 +59,22 @@ test('guarded stateful handshake, negotiated version, pagination and teardown', 
   await Promise.all([s.close(), s.close()]);
   await assert.rejects(s.call('demo_write', '{}'), /closed/);
   const calls = srv.calls;
-  assert.deepEqual(calls.map(c => c.method), ['initialize', 'notifications/initialized', 'tools/list', 'tools/list', 'tools/call', 'DELETE']);
-  assert.deepEqual(calls[0].msg.params.capabilities, {});
-  assert.equal(calls[0].msg.params.protocolVersion, '2025-11-25');
-  assert.equal('id' in calls[1].msg, false);
-  assert.deepEqual(calls[2].msg.params, {});
-  assert.deepEqual(calls[3].msg.params, { cursor: 'next' });
-  assert.deepEqual(calls[4].msg.params, { name: 'write', arguments: { key: 'a', nested: { value: null } } });
-  assert.equal(new Set(calls.filter(c => c.msg && 'id' in c.msg).map(c => c.msg.id)).size, 4);
+  assert.deepEqual(calls.map(c => c.method), ['server/discover', 'initialize', 'notifications/initialized', 'tools/list', 'tools/list', 'tools/call', 'DELETE']);
+  assert.deepEqual(calls[1].msg.params.capabilities, {});
+  assert.equal(calls[1].msg.params.protocolVersion, '2025-11-25');
+  assert.equal('id' in calls[2].msg, false);
+  assert.deepEqual(calls[3].msg.params, {});
+  assert.deepEqual(calls[4].msg.params, { cursor: 'next' });
+  assert.deepEqual(calls[5].msg.params, { name: 'write', arguments: { key: 'a', nested: { value: null } } });
+  assert.equal(new Set(calls.filter(c => c.msg && 'id' in c.msg).map(c => c.msg.id)).size, 5);
   for (const [i, { url, policy, init }] of calls.entries()) {
     assert.equal(url, endpoint);
     assert.deepEqual(policy, { toolProxy: proxy, allowPrivateIPs: true });
-    assert.equal(init.headers.get('Authorization'), i < 4 ? 'Bearer explicit' : 'Bearer rotated');
+    assert.equal(init.headers.get('Authorization'), i < 5 ? 'Bearer explicit' : 'Bearer rotated');
     assert.equal(init.headers.get('Accept'), 'application/json, text/event-stream');
     assert.equal(init.headers.get('Content-Type'), 'application/json');
-    assert.equal(init.headers.get('MCP-Session-Id'), i ? 'opaque-session' : null);
-    assert.equal(init.headers.get('MCP-Protocol-Version'), i ? version : null);
+    assert.equal(init.headers.get('MCP-Session-Id'), i > 1 ? 'opaque-session' : null);
+    assert.equal(init.headers.get('MCP-Protocol-Version'), i === 0 ? '2026-07-28' : i === 1 ? null : version);
   }
 });
 
@@ -99,7 +100,7 @@ test('stateless session: reply in fragmented SSE, ping and explicit refusal of s
   await s.close();
   assert.ok(cancelled, 'must release the stream even if the server leaves it open');
   assert.deepEqual(srv.calls.filter(c => c.method === 'reply').map(c => c.msg), [
-    { jsonrpc: '2.0', id: 'p', result: {} }, { jsonrpc: '2.0', id: 4, error: { code: -32601, message: 'Method not supported' } },
+    { jsonrpc: '2.0', id: 'p', result: {} }, { jsonrpc: '2.0', id: 4, error: { code: -32602, message: 'client does not support elicitation' } },
   ]);
   assert.ok(srv.calls.every(c => !c.init.headers.has('MCP-Session-Id') && c.method !== 'DELETE' && c.policy.allowPrivateIPs === false));
 });
@@ -139,13 +140,13 @@ test('tool calls reject unknown names locally and distinguish RPC failures from 
     assert.equal((await s.call(name, args)).is_error, true);
   }
   assert.equal(srv.calls.filter(c => c.method === 'tools/call').length, 0);
-  for (const expected of [/-32602/, /401.*OAuth/, /URL elicitation.*not supported/, '{"ok":2}', 'no output', /non-text/, /invalid MCP tool result/, /mismatched/, /expected an MCP JSON/]) {
+  for (const expected of [/-32602/, /401.*OAuth/, /URL elicitation.*not supported/, 'no output', 'no output', /non-text/, /invalid MCP tool result/, /mismatched/, /expected an MCP JSON/]) {
     const { output, is_error } = await s.call('lookup', '{}');
     assert.equal(is_error, typeof expected !== 'string');
     if (is_error) assert.match(output, expected);
     else assert.equal(output, expected);
   }
-  assert.equal(srv.calls.length, 12, 'no auth URL followed and no tool invocation retried');
+  assert.equal(srv.calls.length, 13, 'no auth URL followed and no tool invocation retried');
   await s.close();
 });
 
@@ -171,7 +172,7 @@ test('an instructions-only server has no callable tools', async () => {
   assert.equal(s.instructions, hello.instructions);
   assert.equal((await s.call('lookup', '{}')).is_error, true);
   await s.close();
-  assert.deepEqual(srv.calls.map(c => c.method), ['initialize', 'notifications/initialized']);
+  assert.deepEqual(srv.calls.map(c => c.method), ['server/discover', 'initialize', 'notifications/initialized']);
 });
 
 test('partial stateful sessions are deleted after invalid or excessive discovery responses', async () => {
@@ -259,7 +260,7 @@ test('deadline covers call and cleanup; no retry after timeout', async t => {
   await deleting.promise;
   t.mock.timers.tick(2500);
   await assert.rejects(close, /timed out/);
-  assert.deepEqual(srv.calls.slice(3).map(c => c.method), ['tools/call', 'DELETE']);
+  assert.deepEqual(srv.calls.slice(4).map(c => c.method), ['tools/call', 'DELETE']);
 });
 
 
@@ -425,7 +426,7 @@ test('failed refresh is not an authorization prompt or permission to replay', as
 test('ambiguous or unauthorized tool failures never replay; a second invalid_token ends recovery', async () => {
   for (const [response, error, count] of [
     [() => { throw new Error('connection lost'); }, /transport/, 1],
-    [() => new Response(null, { status: 502 }), /502/, 1],
+    [() => new Response(null, { status: 502 }), /Bad Gateway/, 1],
     [() => new Response('truncated', { headers: { 'Content-Type': 'application/json' } }), /invalid MCP JSON/, 1],
     [msg => Response.json({ jsonrpc: '2.0', id: msg.id, error: { code: -32001, message: 'invalid_token' } }), /JSON-RPC/, 1],
     [() => new Response(null, { status: 403 }), /403/, 1],
@@ -458,4 +459,59 @@ test('expiry without a refresh grant does not send a tool unauthenticated; reope
   assert.equal(f.metadata.length, 4);
   assert.equal(f.prompts.length, 3);
   await second.close();
+});
+
+test('discovery never adopts a session ID or follows a redirect, and is size-limited', async () => {
+  for (const probe of [msg => result(msg, {supportedVersions: ['2026-07-28'], capabilities: {tools: {}}}, {'MCP-Session-Id': 'not-initialized'}),
+    () => new Response(null, {status: 307, headers: {Location: 'https://other.test'}}),
+    () => new Response('old server without JSON discovery')]) {
+    const srv = server({'server/discover': probe});
+    const s = await srv.open();
+    await s.close();
+    assert.deepEqual(srv.calls.map(c => c.method), ['server/discover', 'initialize', 'notifications/initialized', 'tools/list']);
+    assert.ok(srv.calls.every(c => c.url === endpoint && !c.init.headers.has('MCP-Session-Id')));
+  }
+  const srv = server({'server/discover': msg => result(msg, {padding: 'a'.repeat(1 << 20)})});
+  await assert.rejects(srv.open(), /too large/);
+  assert.deepEqual(srv.calls.map(c => c.method), ['server/discover']);
+});
+
+test('schema normalization visits schema positions, not ref targets or enum and example data', async () => {
+  const node = () => ({type: 'object', properties: {q: {type: 'string', format: 'email'}}});
+  const raw = {type: 'object', $defs: {x: node()}, definitions: {x: node()}, patternProperties: {x: node()},
+    not: node(), if: node(), then: node(), else: node(), contains: node(), propertyNames: node(),
+    additionalProperties: node(), items: node(), anyOf: [node()], oneOf: [node()], allOf: [node()], prefixItems: [node()],
+    properties: JSON.parse('{"__proto__":{"$ref":"#"},"10":{"enum":[{"format":"keep"}]},"2":{"type":"array"}}'),
+    examples: [{format: 'keep'}]};
+  const srv = server({'tools/list': msg => result(msg, {tools: [{...tool, inputSchema: raw}]})});
+  const s = await srv.open();
+  try {
+    const p = s.tools[0].function.parameters;
+    for (const child of [p.$defs.x, p.definitions.x, p.patternProperties.x, p.not, p.if, p.then, p.else,
+      p.contains, p.propertyNames, p.additionalProperties, p.items, ...p.anyOf, ...p.oneOf, ...p.allOf, ...p.prefixItems]) {
+      assert.deepEqual(child, {type: 'object', properties: {q: {type: ['string','null']}}, required: ['q'], additionalProperties: false});
+    }
+    assert.deepEqual(p.required, ['10', '2', '__proto__']);
+    assert.deepEqual(p.properties.__proto__, {anyOf: [{$ref: '#'}, {type: 'null'}]});
+    assert.deepEqual(p.properties['10'].anyOf[0].enum, [{format: 'keep'}]);
+    assert.deepEqual(p.properties['2'].anyOf[0].items, {type: 'object'});
+    assert.deepEqual(p.examples, [{format: 'keep'}]);
+    assert.equal(s.tools[0].mcpStrict, undefined);
+  } finally { await s.close(); }
+});
+
+test('a declined server elicitation never transmits content; accepted content uses the host JSON view', async () => {
+  let action = 'decline';
+  const content = {private: 'do not send', toJSON() { return {answer: 'blue'}; }};
+  const srv = server({'tools/call': msg => {
+    const frames = [{id: 10, method: 'elicitation/create', params: {message: 'Choose'}}, {id: msg.id, result: {content: []}}];
+    return new Response(frames.map(f => `data: ${JSON.stringify({jsonrpc: '2.0', ...f})}\n\n`).join(''), {headers: {'Content-Type': 'text/event-stream'}});
+  }, reply: ack});
+  const s = await openMCP(config, {}, proxy, undefined, {toolFetch: srv.toolFetch, elicit: () => ({action, content})});
+  try {
+    for (action of ['decline', 'cancel', 'accept']) {
+      assert.deepEqual(await s.call('lookup', '{}'), {output: 'no output', is_error: false});
+      assert.deepEqual(srv.calls.at(-1).msg.result, action === 'accept' ? {action, content: {answer: 'blue'}} : {action});
+    }
+  } finally { await s.close(); }
 });

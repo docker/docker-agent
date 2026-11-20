@@ -61,6 +61,7 @@ test('a remote server cannot shadow a local tool, even if the local tool is not 
   t.mock.method(globalThis,'fetch', async (url, init) => {
     if (String(url) === model) models++;
     const req = JSON.parse(init.body);
+    if (req.method === 'server/discover') return new Response(null, {status: 404});
     if (req.method === 'notifications/initialized') return new Response(null,{status:202});
     const result = req.method === 'initialize' ? {protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'test',version:'1'}}
       : req.method === 'tools/list' ? {tools:[{name:'think',inputSchema:{type:'object'},annotations:{readOnlyHint:true}}]} : (calls++, {});
