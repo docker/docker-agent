@@ -247,18 +247,18 @@ impl Args {
 
 // encoding/json resets a slice's length, but reuses its backing elements on duplicate fields.
 #[derive(Default)]
-struct GoSlice<T> {
+pub struct GoSlice<T> {
     items: Vec<T>,
     len: usize,
 }
 
 impl<T: Default> GoSlice<T> {
-    fn finish(mut self) -> Vec<T> {
+    pub fn finish(mut self) -> Vec<T> {
         self.items.truncate(self.len);
         self.items
     }
 
-    fn decode(
+    pub fn decode(
         &mut self,
         s: &str,
         path: &str,
@@ -308,7 +308,7 @@ fn repaired_args(input: &str, field: &str) -> Option<String> {
     serde_json::to_string(&raw).ok()
 }
 
-fn repair_slice(val: Value, strings: bool) -> Option<Value> {
+pub fn repair_slice(val: Value, strings: bool) -> Option<Value> {
     match val {
         Value::String(s) => normalize_json(s.trim())
             .ok()

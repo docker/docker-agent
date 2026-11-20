@@ -1039,7 +1039,9 @@ agents:`)
     ['datetime', local(['datetime']), 'get_datetime', {bad: '{"format": "x', wrongType: '{"format":3}', array: '[1]'}],
     ['random', local(['random']), 'random_int', {bad: '{"min": 1', wrongType: '{"min":"a","max":2}', array: '[1]'}],
     ['api', greeter, 'greet', {bad: '{"who": "x'}, [], approve, greet],
-    ['fetch', local(['fetch']), 'fetch', {bad: '{"urls": ["https://x'}],
+    ['fetch', local(['fetch']), 'fetch', {bad: '{"urls": ["https://x', missing: '{}', null: 'null', array: '[1]', emptyList: '{"urls":[]}',
+      wrongType: '{"urls":3}', elementType: '{"urls":["https://tool.invalid/a",3]}', formatType: '{"urls":["https://tool.invalid/a"],"format":3}',
+      timeoutType: '{"urls":["https://tool.invalid/a"],"timeout":"x"}', timeoutFraction: '{"URLS":["https://tool.invalid/a"],"timeout":1.5}'}],
   ]) {
     for (const [label, args] of Object.entries(cases)) {
       const id = `args_${name}_${label}`;

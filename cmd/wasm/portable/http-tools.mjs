@@ -341,7 +341,7 @@ function fetchTool(ts, env, policy, seconds) {
     async run(args, signal) {
       fields(args, ['urls', 'format', 'timeout'], 'fetch argument');
       const { urls, format, timeout } = args;
-      if (!Array.isArray(urls) || urls.length === 0 || urls.some(url => typeof url !== 'string')) throw new Error('at least one URL is required');
+      if (!Array.isArray(urls) || urls.length === 0 || urls.some(url => typeof url !== 'string')) throw new Error('Error calling tool: at least one URL is required');
       if (urls.length > 8) throw new Error('portable fetch supports at most 8 URLs per call');
       if (format != null && (typeof format !== 'string' || !Object.hasOwn(accepts, format))) throw new Error('unsupported fetch format');
       if (timeout != null && (!Number.isInteger(timeout) || timeout < 1 || timeout > 300)) throw new Error('fetch timeout must be 1–300 seconds');

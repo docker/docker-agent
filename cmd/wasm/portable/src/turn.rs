@@ -196,6 +196,67 @@ impl Prompt {
     }
 }
 
+// fetch.ToolArgs as Go decodes it, including aijson's array repairs, re-encoded for the host
+// tool. `Err` is the decoder's model-facing complaint.
+fn fetch_arguments(input: &str) -> Result<String, String> {
+    use crate::go_json::{field_matches, field_path, fields, object, read_string, type_error};
+    const TYPE: &str = "fetch.ToolArgs";
+    let mut urls = crate::todo::GoSlice::<String>::default();
+    let (mut format, mut timeout) = (String::new(), 0_i64);
+    let input = crate::go_json::normalize_json(input)?;
+    if let Some(obj) = object(&input, TYPE)? {
+        let mut decode = |s: &str| {
+            fields(s, |key, val| {
+                let path = field_path(TYPE, &key);
+                if field_matches(&key, "urls") {
+                    urls.decode(val, &format!("ToolArgs.{key}"), "[]string", read_string)
+                } else if field_matches(&key, "format") {
+                    read_string(val, &mut format, &path)
+                } else if field_matches(&key, "timeout") && val != "null" {
+                    timeout = val.parse().map_err(|_| {
+                        if val.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+                            format!("json: cannot unmarshal number {val} into {path} of type int")
+                        } else {
+                            type_error(val, &path, "int")
+                        }
+                    })?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            })
+        };
+        if let Err(error) = decode(obj) {
+            // aijson retries the repaired object into the same partially decoded struct.
+            let repaired = (|| {
+                let mut raw: Map<String, Value> = serde_json::from_str(obj).ok()?;
+                let list = raw
+                    .remove("urls")
+                    .filter(|v| !v.is_array() && !v.is_null())?;
+                raw.insert("urls".into(), crate::todo::repair_slice(list, true)?);
+                // Go re-encodes the object through float64: 2.0 comes back as 2.
+                if let Some(n) = raw.get("timeout").and_then(Value::as_f64) {
+                    if n.fract() == 0.0 && n.abs() < 9e15 {
+                        raw.insert("timeout".into(), (n as i64).into());
+                    }
+                }
+                serde_json::to_string(&raw).ok()
+            })();
+            if repaired.is_none_or(|s| decode(&s).is_err()) {
+                return Err(error);
+            }
+        }
+    }
+    let mut args = json!({"urls":urls.finish()});
+    if !format.is_empty() {
+        args["format"] = format.into();
+    }
+    if timeout != 0 {
+        args["timeout"] = timeout.into();
+    }
+    Ok(args.to_string())
+}
+
 #[derive(Default)]
 struct Step {
     text: String,
@@ -1253,17 +1314,34 @@ impl Conversation {
             events.push(self.complete(reply, output, true)?);
             return Ok(());
         }
-        let turn = self.active.as_mut().unwrap();
         if let Some(source) = source {
+            // The host tool reads `input` when what Go decodes differs from the raw text.
+            let input = if op.malformed.is_some() {
+                Some(String::new())
+            } else if kind == Some("fetch") {
+                match fetch_arguments(&call.arguments) {
+                    Ok(input) => Some(input),
+                    Err(complaint) => {
+                        events.push(call.event());
+                        let output = format!("Error calling tool: {complaint}");
+                        events.push(self.complete(reply, output, true)?);
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            };
+            let turn = self.active.as_mut().unwrap();
             let token = turn.token("host", op.index);
             let mut event = json!({"type":"host_call", "agent":self.profile.spec.name, "id":call.id, "name":call.name, "args":call.arguments, "source":source, "token":token});
-            if op.malformed.is_some() {
-                event["input"] = "".into();
+            if let Some(input) = input {
+                event["input"] = input.into();
             }
             events.push(event);
             turn.host_pending.insert(token, reply);
             return Ok(());
         }
+        let turn = self.active.as_mut().unwrap();
         events.push(call.event());
         let result = match call.name.as_str() {
             "handoff" | "transfer_task" => {
@@ -2081,6 +2159,36 @@ mod tests {
                 "Error calling tool: unexpected end of JSON input",
             ]
         );
+    }
+
+    #[test]
+    fn fetch_arguments_decode_and_repair_like_go() {
+        for (input, expected) in [
+            ("", r#"{"urls":[]}"#),
+            (
+                r#"{"URLS":["a",null],"format":"text","timeout":5,"more":1}"#,
+                r#"{"format":"text","timeout":5,"urls":["a",""]}"#,
+            ),
+            // aijson wraps a bare string, unwraps a stringified list and a one-key object.
+            (
+                r#"{"urls":"a","timeout":2.0}"#,
+                r#"{"timeout":2,"urls":["a"]}"#,
+            ),
+            (r#"{"urls":"[\"a\",\"b\"]"}"#, r#"{"urls":["a","b"]}"#),
+            (r#"{"urls":{"url":"a"}}"#, r#"{"urls":["a"]}"#),
+        ] {
+            assert_eq!(fetch_arguments(input).unwrap(), expected, "{input}");
+        }
+        for (input, expected) in [
+            ("[1]", "json: cannot unmarshal array into Go value of type fetch.ToolArgs"),
+            (r#"{"urls":3}"#, "json: cannot unmarshal number into Go struct field ToolArgs.urls of type []string"),
+            (r#"{"urls":["a",3]}"#, "json: cannot unmarshal number into ToolArgs.urls.1 of type string"),
+            (r#"{"urls":"a","timeout":1.5}"#, "json: cannot unmarshal string into Go struct field ToolArgs.urls of type []string"),
+            (r#"{"Urls":"a"}"#, "json: cannot unmarshal string into Go struct field ToolArgs.Urls of type []string"),
+            (r#"{"timeout":1e2}"#, "json: cannot unmarshal number 1e2 into Go struct field ToolArgs.timeout of type int"),
+        ] {
+            assert_eq!(fetch_arguments(input).unwrap_err(), expected, "{input}");
+        }
     }
 
     #[test]
