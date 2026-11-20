@@ -6,8 +6,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/legacy"
 )
+
+func TestMCPDefinitionsExperimentalEvents(t *testing.T) {
+	for _, override := range []*latest.ToolsetExperimentalConfig{nil, {}, {MCPEvents: true}} {
+		def := latest.Toolset{Experimental: &latest.ToolsetExperimentalConfig{MCPEvents: true}}
+		ts := latest.Toolset{Experimental: override}
+		applyMCPDefaults(&ts, &def)
+		require.NotNil(t, ts.Experimental)
+		assert.Equal(t, override == nil || override.MCPEvents, ts.Experimental.MCPEvents)
+	}
+}
 
 func TestMCPDefinitions_BasicRef(t *testing.T) {
 	t.Parallel()
