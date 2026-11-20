@@ -87,6 +87,7 @@ struct Turn {
     tool_model_source: Option<usize>,
     context_before: u64,
     summarizing: Option<Prefix>,
+    draining: bool,
     original: Option<Undo>,
     messages_before: usize,
     scratchpads_before: BTreeMap<String, usize>,
@@ -168,6 +169,12 @@ impl Profile {
             spec,
             todos,
         })
+    }
+
+    fn override_params(&self, turn: &Turn) -> Option<&Map<String, Value>> {
+        turn.tool_model_source
+            .and_then(|i| self.spec.tool_models.get(&self.spec.toolsets[i].model))
+            .or_else(|| self.spec.picker.params())
     }
 
     pub fn clear_grants(&self) {
@@ -439,6 +446,7 @@ impl Conversation {
         self.scratchpads.clear();
         self.compaction.truncate(0);
         self.compaction.context_tokens = 0;
+        self.compaction.seed_estimates_lost = false;
         Ok(())
     }
 
@@ -464,6 +472,7 @@ impl Conversation {
             selection: self.profile.spec.picker.active.get(),
             tool_model_source: None,
             summarizing: None,
+            draining: false,
             original: None,
             context_before: self.compaction.context_tokens,
             messages_before: self.messages.len(),
@@ -485,6 +494,10 @@ impl Conversation {
         });
         self.messages.push(json!({"role":"user", "content":prompt}));
         self.prepare_request()
+    }
+
+    pub fn set_seed_estimates_lost(&mut self, lost: bool) {
+        self.compaction.seed_estimates_lost = lost;
     }
 
     pub fn set_routed_seed(&mut self, source: Vec<Value>) {
@@ -523,6 +536,13 @@ impl Conversation {
     }
 
     fn prepare_request(&mut self) -> Result<Value, String> {
+        match self.summary_request()? {
+            Some(request) => Ok(request),
+            None => self.request(),
+        }
+    }
+
+    pub fn summary_request(&mut self) -> Result<Option<Value>, String> {
         // The summary never inherits a serving fallback's parameters.
         let (_, summary) = self.profile.spec.summary_target();
         self.compaction.policy = self.profile.spec.models[0].compaction;
@@ -532,19 +552,24 @@ impl Conversation {
             .picker
             .params()
             .unwrap_or(&summary.model_params);
+        let turn = self.active.as_mut().expect("active turn");
         if let Some((prefix, mut request)) = self.compaction.plan(
             &self.messages,
             params,
             summary.compaction,
             summary.merge_messages,
+            turn.summarizing.as_ref(),
         )? {
-            self.active.as_mut().expect("active turn").summarizing = Some(prefix);
-            if let Some(msgs) = request["messages"].as_array_mut() {
-                self.profile.spec.hooks.rewrite_messages(msgs)?;
-            }
-            Ok(request)
+            turn.summarizing = Some(prefix);
+            turn.step = Step::default();
+            self.profile.spec.hooks.rewrite_messages(
+                request["messages"]
+                    .as_array_mut()
+                    .expect("summary messages"),
+            )?;
+            Ok(Some(request))
         } else {
-            self.request()
+            Ok(None)
         }
     }
 
@@ -552,9 +577,19 @@ impl Conversation {
         self.active.as_mut().expect("active summary").step = Step::default();
     }
 
-    pub fn skip_summary(&mut self) {
+    pub fn skip_summary(&mut self, overflow: bool) -> Result<(), String> {
         self.discard_summary_output();
-        self.active.as_mut().expect("active summary").summarizing = None;
+        let turn = self.active.as_mut().expect("active summary");
+        let spec = &self.profile.spec;
+        if !overflow
+            && turn.summarizing.as_ref().is_some_and(|p| p.retries == 0)
+            && (!spec.toolsets.is_empty() || spec.output_tool.is_some())
+        {
+            return Err("cannot silently continue with tools enabled".into());
+        }
+        turn.summarizing = None;
+        turn.draining = true;
+        Ok(())
     }
 
     // session_start belongs to the agent that opened this run, even after a handoff.
@@ -612,15 +647,7 @@ impl Conversation {
             .spec
             .limits
             .project(&mut messages, &self.profile.spec.hooks)?;
-        let override_params = turn
-            .tool_model_source
-            .and_then(|i| {
-                self.profile
-                    .spec
-                    .tool_models
-                    .get(&self.profile.spec.toolsets[i].model)
-            })
-            .or_else(|| self.profile.spec.picker.params());
+        let override_params = self.profile.override_params(turn);
         let target = self.target();
         if let Some(instruction) = target
             .schema_instruction
@@ -739,6 +766,9 @@ impl Conversation {
     fn finish_step(&mut self) -> Result<Value, String> {
         let turn = self.active.as_mut().ok_or("no active turn")?;
         let mut step = std::mem::take(&mut turn.step);
+        if turn.draining && !step.calls.is_empty() {
+            return Err("compaction: cannot execute an unobserved continuation tool".into());
+        }
         if let Some(plan) = turn.summarizing.take() {
             let summary = step.text.trim();
             if summary.is_empty()
@@ -770,11 +800,18 @@ impl Conversation {
             step.finish = Some("stop".into());
         }
         if let Some(usage) = step.usage {
-            self.compaction.record(
-                self.messages.len(),
-                &self.profile.spec.models[self.attempt.current].id,
-                usage,
-            );
+            let target = &self.profile.spec.models[self.attempt.current];
+            // Overrides share the ordinary provider; routed calls retain the full provider/model ID.
+            let model = if self.profile.spec.routed_summary() {
+                &target.id
+            } else {
+                self.profile
+                    .override_params(turn)
+                    .unwrap_or(&target.model_params)["model"]
+                    .as_str()
+                    .expect("configured model")
+            };
+            self.compaction.record(self.messages.len(), model, usage);
             let input = u64::from(usage.prompt_tokens);
             let output = u64::from(usage.completion_tokens);
             turn.input += input;
@@ -806,6 +843,9 @@ impl Conversation {
                 }
                 if self.profile.spec.output_tool.is_some() {
                     let reminders = turn.reminders;
+                    if turn.draining {
+                        return Err("compaction: cannot drain tool-mode structured output".into());
+                    }
                     let model = self.params()["model"].as_str().unwrap();
                     if let Some(error) = structured_output::stop_error(model, reminders) {
                         self.messages

@@ -174,8 +174,110 @@ pub fn status(error: &Value) -> Option<u16> {
     })
 }
 
-pub fn context_limit_error(message: &str) -> bool {
-    [
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overflow {
+    Tokens,
+    Wire,
+    Media,
+}
+
+impl Overflow {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Tokens => "The conversation has exceeded the model's context window. Compact the conversation to reduce its size, or start a new session.",
+            Self::Wire => "Your message is too large for the AI provider. Try a smaller paste, attach the file separately, or split the content.",
+            Self::Media => "An image or file in this conversation is too large for the AI provider. Try a smaller file or remove it from context.",
+        }
+    }
+}
+
+fn truncated(lower: &str) -> bool {
+    lower.contains("unexpected eof") || lower.contains("unexpected end of json input")
+}
+
+pub fn model_error(overflow: Option<Overflow>, reason: &str) -> String {
+    if let Some(kind) = overflow {
+        return kind.message().into();
+    }
+    if truncated(&reason.to_ascii_lowercase()) {
+        return concat!("The connection to the model was closed unexpectedly before it completed its response. ",
+            "With local models (e.g. Docker Model Runner), this can happen when an idle or ",
+            "connection timeout in the model server (or a proxy in front of it) drops a silent ",
+            "prefill before the first token, or cuts a long response mid-stream. ",
+            "Try a shorter prompt, or raise the model server's idle/keep-alive timeout.").into();
+    }
+    format!("model failed: {reason}")
+}
+
+fn error_field<'a>(object: &'a Value, key: &str) -> Result<&'a Value, String> {
+    let mut found = object
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| crate::go_json::field_matches(k, key));
+    let value = found.next().map_or(&Value::Null, |(_, v)| v);
+    if found.next().is_some() {
+        return Err("ambiguous fields in provider error envelope".into());
+    }
+    Ok(value)
+}
+
+pub fn overflow(http_status: Option<u16>, reason: &str) -> Result<Option<Overflow>, String> {
+    // The SDK unwraps the provider envelope. Only JSON still present in the
+    // diagnostic (not fields discarded by the adapter) is visible to Go.
+    for (attempt, (i, _)) in reason.match_indices('{').enumerate() {
+        if attempt >= 16 || reason.len() - i > 1 << 20 {
+            return Err("provider diagnostic exceeds overflow classification limit".into());
+        }
+        let Some(Ok(body)) = serde_json::Deserializer::from_str(&reason[i..])
+            .into_iter::<Value>()
+            .next()
+        else {
+            continue;
+        };
+        let error = error_field(&body, "error")?;
+        if !error.is_object() {
+            break;
+        }
+        let kind = error_field(error, "type")?;
+        if [
+            kind,
+            error_field(error, "message")?,
+            error_field(error, "status")?,
+            error_field(&body, "message")?,
+        ]
+        .into_iter()
+        .any(|v| !v.is_null() && !v.is_string())
+        {
+            break;
+        }
+        if kind == "request_too_large" {
+            return Ok(Some(Overflow::Wire));
+        }
+        if error_field(error, "code")? == "context_length_exceeded"
+            || kind == "exceed_context_size_error"
+        {
+            return Ok(Some(Overflow::Tokens));
+        }
+        break;
+    }
+    if http_status == Some(413) {
+        return Ok(Some(Overflow::Wire));
+    }
+    let lower = reason.to_ascii_lowercase();
+    let matches = |patterns: &[&str]| patterns.iter().any(|p| lower.contains(p));
+    if matches(&["image exceeds", "image dimensions exceed", "pdf pages"]) {
+        return Ok(Some(Overflow::Media));
+    }
+    if matches(&[
+        "request_too_large",
+        "request too large",
+        "payload too large",
+        "request entity too large",
+    ]) {
+        return Ok(Some(Overflow::Wire));
+    }
+    Ok(matches(&[
         "prompt is too long",
         "prompt too long",
         "maximum context length",
@@ -195,24 +297,12 @@ pub fn context_limit_error(message: &str) -> bool {
         "exceeds the model's max token",
         "token limit",
         "reduce your prompt",
-        "request_too_large",
-        "request too large",
-        "payload too large",
-        "request entity too large",
-        "image exceeds",
-        "image dimensions exceed",
-        "pdf pages",
-        "exceed_context_size_error",
-    ]
-    .iter()
-    .any(|s| message.contains(s))
+    ])
+    .then_some(Overflow::Tokens))
 }
 
 pub fn retryable(status: Option<u16>, reason: &str) -> bool {
     let message = reason.to_ascii_lowercase();
-    if context_limit_error(&message) {
-        return false;
-    }
     // Typed status wins over an incidental number in provider diagnostics.
     let status = status.or_else(|| {
         message
@@ -243,11 +333,10 @@ pub fn retryable(status: Option<u16>, reason: &str) -> bool {
         "reset before headers",
         "upstream connect",
         "internal_error",
-        "unexpected eof",
-        "unexpected end of json input",
     ]
     .iter()
     .any(|p| message.contains(p))
+        || truncated(&message)
 }
 
 // Once an output item (even an unannounced tool fragment) has arrived we cannot
@@ -348,6 +437,30 @@ mod tests {
     }
 
     #[test]
+    fn overflow_uses_only_the_error_visible_to_the_adapter() {
+        use Overflow::*;
+        for (status, text, kind) in [
+            (None, "TOKEN LIMIT", Some(Tokens)),
+            (None, "image exceeds token limit", Some(Media)),
+            (None, "payload too large: token limit", Some(Wire)),
+            (Some(413), "token limit", Some(Wire)),
+            (None, r#"{"type":"exceed_context_size_error"}"#, None),
+            (
+                Some(413),
+                r#"inner {"error":{"type":"exceed_context_size_error"}}"#,
+                Some(Tokens),
+            ),
+            (
+                None,
+                r#"{"error":{"type":"request_too_large","code":"context_length_exceeded"}}"#,
+                Some(Wire),
+            ),
+        ] {
+            assert_eq!(overflow(status, text).unwrap(), kind, "{text}");
+        }
+    }
+
+    #[test]
     fn classifies_before_replaying() {
         for (status, reason, retry) in [
             (None, "unexpected EOF", true),
@@ -360,7 +473,11 @@ mod tests {
             (Some(408), "", true),
             (Some(529), "", true),
         ] {
-            assert_eq!(retryable(status, reason), retry, "{status:?}: {reason}");
+            assert_eq!(
+                overflow(status, reason).unwrap().is_none() && retryable(status, reason),
+                retry,
+                "{status:?}: {reason}"
+            );
         }
     }
 }

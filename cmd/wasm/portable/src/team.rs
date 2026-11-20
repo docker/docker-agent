@@ -94,10 +94,12 @@ impl Session {
         auto_approve: bool,
     ) -> Result<Self, String> {
         let (entry, specs) = crate::config::team(yaml, agent, env)?;
+        let multipart = history
+            .iter()
+            .any(|m| m["multi_content"].as_array().is_some_and(|p| !p.is_empty()));
         // Stripped multipart system content can look like plain text after projection.
-        if history.iter().any(|m| {
-            m["multi_content"].as_array().is_some_and(|p| !p.is_empty()) || !m["name"].is_null()
-        }) && specs.iter().any(|s| s.has_schema_instruction())
+        if (multipart || history.iter().any(|m| !m["name"].is_null()))
+            && specs.iter().any(|s| s.has_schema_instruction())
         {
             return Err("Claude schema instructions require unnamed text-only history".into());
         }
@@ -121,10 +123,17 @@ impl Session {
         let primary = &profile.spec.models[0];
         let team = !profile.spec.team_prompts.is_empty() || !profile.spec.force_handoff.is_empty();
         let routing = team || profile.spec.routed_summary();
-        let routed_media = routing
-            && history
-                .iter()
-                .any(|m| m["multi_content"].as_array().is_some_and(|p| !p.is_empty()));
+        let routed_media = routing && multipart;
+        let seed_estimates_lost = multipart
+            || history.iter().any(|m| {
+                !m["usage"].is_null()
+                    || !m["reasoning_content"].is_null()
+                    || !m["tool_definitions"].is_null()
+                    || !m["name"].is_null()
+                    || (m["role"] != "tool"
+                        && m["tool_calls"].is_null()
+                        && m["content"].as_str().is_none_or(|s| s.trim().is_empty()))
+            });
         if routed_media && primary.compaction.enabled() {
             return Err("multipart history with routed compaction is not supported".into());
         }
@@ -152,6 +161,7 @@ impl Session {
         let preserve_names = routing && !profile.spec.limits.limits_history();
         let history = media::history(history, primary.media_projection(), preserve_names)?;
         let mut conversation = Conversation::open(profile, history);
+        conversation.set_seed_estimates_lost(seed_estimates_lost);
         if let Some(source) = source {
             conversation.set_routed_seed(source);
         }
@@ -198,7 +208,6 @@ impl Session {
     pub fn begin(&mut self, prompt: &str, id: &str, now: f64) -> Result<Value, String> {
         self.conversation.attempt = self.conversation.profile.spec.policy.begin(now);
         let body = self.conversation.begin(prompt, id)?;
-        self.summary_attempt = Default::default();
         self.replayable = !self.conversation.summarizing()
             && (self.conversation.profile.spec.hooks.max_calls.is_none()
                 || self.conversation.profile.spec.bounded_fallback());
@@ -216,6 +225,10 @@ impl Session {
             }
             return Ok(next);
         }
+        let summarizing = self.conversation.summarizing();
+        if summarizing {
+            self.summary_attempt = Default::default();
+        }
         let (index, target) = self.conversation.request_target();
         self.responses = target.responses.then(responses::Stream::default);
         if target.responses {
@@ -227,17 +240,58 @@ impl Session {
                 crate::providers::apply_chatgpt_policy(&mut body);
             }
         }
-        Ok(json!({"agent":spec.name, "target": index, "responses":target.responses, "body":body}))
+        Ok(
+            json!({"agent":spec.name, "target": index, "responses":target.responses, "summary":summarizing, "body":body}),
+        )
     }
 
-    pub fn chunk(&mut self, chunk: Value, now: f64) -> Result<Value, String> {
-        let failure = if self.responses.is_some() {
-            responses::failure(&chunk)
+    pub fn chunk(&mut self, mut chunk: Value, now: f64) -> Result<Value, String> {
+        let raw_detail = if let Some(raw) = chunk.as_str() {
+            #[derive(Deserialize)]
+            struct Envelope<'a> {
+                #[serde(borrow)]
+                error: &'a serde_json::value::RawValue,
+            }
+            let envelope: Envelope =
+                serde_json::from_str(raw).map_err(|_| "invalid stream error record")?;
+            let parsed: Value =
+                serde_json::from_str(raw).map_err(|_| "invalid stream error record")?;
+            let error = &parsed["error"];
+            let detail = error.as_str().unwrap_or_else(|| envelope.error.get());
+            let decoded = error
+                .as_str()
+                .map_or_else(|| error.to_string(), str::to_owned);
+            // Escapes in the wire diagnostic must not bypass the credential guard.
+            if decoded != detail
+                && self
+                    .conversation
+                    .request_target()
+                    .1
+                    .transport
+                    .safe_diagnostic(decoded.clone())?
+                    != decoded
+            {
+                return Err("provider diagnostic contained credentials".into());
+            }
+            let reason = format!("received error while streaming: {detail}");
+            chunk = parsed;
+            Some(reason)
         } else {
-            chunk
-                .get("error")
-                .filter(|e| !e.is_null())
-                .map(|e| (e, format!("received error while streaming: {e}")))
+            None
+        };
+        let failure = if let Some(detail) = raw_detail {
+            Some((&chunk["error"], detail))
+        } else if self.responses.is_some() {
+            let failed = responses::failure(&chunk);
+            if self.conversation.summarizing()
+                && failed.is_some()
+                && chunk["type"] != "response.failed"
+            {
+                return Err("compaction: unsupported Responses error event".into());
+            }
+            failed
+        } else {
+            None
         };
         if let Some((error, detail)) = failure {
             let reason = format!("error receiving from stream: {detail}");
@@ -245,8 +299,14 @@ impl Session {
                 .as_array()
                 .is_none_or(Vec::is_empty)
                 && chunk["choices"].as_array().is_none_or(Vec::is_empty);
-            let transient = fallback::retryable(fallback::status(error), &reason);
-            return self.failure(reason, transient, now);
+            // SSE errors have no typed HTTP status in the child runtime.
+            let status = if self.conversation.summarizing() {
+                None
+            } else {
+                fallback::status(error)
+            };
+            let transient = fallback::retryable(status, &reason);
+            return self.failure(reason, None, transient, now);
         }
         self.replayable &= fallback::prelude(&chunk, self.responses.is_some());
         let mut events;
@@ -261,13 +321,22 @@ impl Session {
         Ok(json!({"events":events}))
     }
 
-    pub fn failure(&mut self, reason: String, transient: bool, now: f64) -> Result<Value, String> {
-        let spec = &self.conversation.profile.spec;
+    pub fn failure(
+        &mut self,
+        reason: String,
+        http_status: Option<u16>,
+        transient: bool,
+        now: f64,
+    ) -> Result<Value, String> {
         let (_, target) = self.conversation.request_target();
+        let overflow = fallback::overflow(http_status, &reason)?;
         let reason = target.transport.safe_diagnostic(reason)?;
-        if self.conversation.summarizing() && spec.routed_summary() {
-            if fallback::context_limit_error(&reason.to_ascii_lowercase()) {
-                return Err("compaction: retrying a smaller summary after a context overflow is not supported".into());
+        let transient = overflow.is_none() && transient;
+        if self.conversation.summarizing() {
+            if overflow == Some(fallback::Overflow::Tokens) {
+                if let Some(body) = self.conversation.summary_request()? {
+                    return Ok(json!({"request":self.request(body)?}));
+                }
             }
             // The child summarizer has its own default retries and no fallback chain.
             if let fallback::Decision::Retry(delay) =
@@ -280,12 +349,17 @@ impl Session {
                 self.conversation.discard_summary_output();
                 return Ok(json!({"retry":true,"delay":delay}));
             }
-            self.conversation.skip_summary();
-            let request = self.next_iteration(now)?;
-            return Ok(
-                json!({"request":request, "event":{"type":"error", "message":format!("run compaction agent: model failed: {reason}")}}),
+            let message = format!(
+                "run compaction agent: {}",
+                fallback::model_error(overflow, &reason)
             );
+            self.conversation
+                .skip_summary(overflow.is_some())
+                .map_err(|e| format!("{message} ({e})"))?;
+            let request = self.next_iteration(now)?;
+            return Ok(json!({"request":request, "event":{"type":"error", "message":message}}));
         }
+        let spec = &self.conversation.profile.spec;
         let attempt = &mut self.conversation.attempt;
         let previous = attempt.current;
         let decision = if self.replayable {
@@ -339,7 +413,7 @@ impl Session {
     }
 
     pub fn end(&mut self, now: f64) -> Result<Value, String> {
-        if self.conversation.summarizing() && self.conversation.profile.spec.routed_summary() {
+        if self.conversation.summarizing() {
             self.begin_model_attempt(now);
             let next = self.conversation.end()?;
             return self.next(next);

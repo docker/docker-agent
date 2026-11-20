@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
+const MAX_OVERFLOW_RETRIES: u8 = 3;
 const SYSTEM: &str = include_str!("../../../../pkg/compaction/prompts/compaction-system.txt");
 const USER: &str = include_str!("../../../../pkg/compaction/prompts/compaction-user.txt");
 
@@ -83,13 +84,19 @@ pub struct Compactor {
     pub policy: Policy,
     pub context_tokens: u64,
     marks: Marks,
+    pub seed_estimates_lost: bool,
+    prior_summary: Option<usize>,
 }
 
-pub struct Prefix(usize);
+pub struct Prefix {
+    boundary: usize,
+    tokens: u64,
+    pub retries: u8,
+}
 
 // Keep the pre-compaction arrays only until the enclosing send commits.
 // A cancellation can then use the ordinary turn-start truncation boundary.
-pub struct Undo(Vec<Value>, Marks);
+pub struct Undo(Vec<Value>, Marks, Option<usize>);
 
 fn is_instruction(m: &Value) -> bool {
     matches!(m["role"].as_str(), Some("system" | "developer"))
@@ -173,19 +180,25 @@ fn scale(entries: &[Entry]) -> f64 {
     }
 }
 
-fn split(entries: &[Entry], keep: u64, scale: f64) -> usize {
+fn suffix(entries: &[Entry], budget: u64, scale: f64, compact_all_if_fit: bool) -> (usize, u64) {
+    let mut boundary_tokens = 0;
     let mut boundary = entries.len();
     let mut total = 0;
     for (i, m) in entries.iter().enumerate().rev() {
         total += m.tokens(scale);
-        if total > keep {
-            return boundary;
+        if total > budget {
+            return (boundary, boundary_tokens);
         }
         if m.message["role"] != "tool" {
             boundary = i;
+            boundary_tokens = total;
         }
     }
-    entries.len() // Go compacts the whole conversation if all messages fit the tail.
+    if compact_all_if_fit {
+        (entries.len(), 0)
+    } else {
+        (boundary, boundary_tokens)
+    }
 }
 
 impl Compactor {
@@ -204,6 +217,7 @@ impl Compactor {
     }
 
     pub fn truncate(&mut self, n: usize) {
+        self.prior_summary = self.prior_summary.filter(|&index| index < n);
         while self
             .marks
             .last_key_value()
@@ -219,50 +233,92 @@ impl Compactor {
         params: &Map<String, Value>,
         summary_policy: Policy,
         merge: bool,
+        previous: Option<&Prefix>,
     ) -> Result<Option<(Prefix, Value)>, String> {
+        if previous.is_some_and(|p| p.retries >= MAX_OVERFLOW_RETRIES || p.tokens < 2) {
+            return Ok(None);
+        }
+        if previous.is_some() && self.seed_estimates_lost {
+            return Err(
+                "compaction: cannot size projected seed history for an overflow retry".into(),
+            );
+        }
         let Some(threshold) = self.policy.threshold else {
             return Ok(None);
         };
         let window = u64::from(summary_policy.window);
         let trigger = (f64::from(self.policy.effective_window(summary_policy)) * threshold) as u64;
-        // BeforeTurn checks the last call's usage; AfterMessages also counts completed tool results.
-        if self.context_tokens <= trigger && messages.last().is_none_or(|m| m["role"] != "tool") {
+        if previous.is_none()
+            && self.context_tokens <= trigger
+            && messages.last().is_none_or(|m| m["role"] != "tool")
+        {
             return Ok(None);
         }
-        let entries: Vec<_> = messages
+        // The kept tail does not change when the child retries a smaller prefix.
+        let candidates = previous.map_or(messages, |p| &messages[..p.boundary]);
+        let mut entries: Vec<_> = candidates
             .iter()
             .enumerate()
             .filter(|(_, m)| !is_instruction(m))
             .map(|(i, m)| Entry::new(i, m, self.marks.get(&i)))
             .collect();
-        let calibrated = scale(&entries);
-        let added: u64 = entries
-            .iter()
-            .rev()
-            .take_while(|e| e.message["role"] == "tool")
-            .map(|e| e.tokens(calibrated))
-            .sum();
-        if self.context_tokens + added <= trigger {
-            return Ok(None);
-        }
-        let end = split(&entries, (window / 5).min(20_000), calibrated);
-        let boundary = entries.get(end).map_or(messages.len(), |e| e.index);
-        let prefix = &entries[..end];
+        let boundary = if let Some(p) = previous {
+            p.boundary
+        } else {
+            let calibrated = scale(&entries);
+            let added: u64 = entries
+                .iter()
+                .rev()
+                .take_while(|e| e.message["role"] == "tool")
+                .map(|e| e.tokens(calibrated))
+                .sum();
+            if self.context_tokens + added <= trigger {
+                return Ok(None);
+            }
+            let (end, _) = suffix(&entries, (window / 5).min(20_000), calibrated, true);
+            let boundary = entries.get(end).map_or(messages.len(), |e| e.index);
+            entries.truncate(end);
+            boundary
+        };
         let cap = (window / 4).min(16_000);
-        let calibrated = scale(prefix);
-        let cost: u64 = prefix.iter().map(|m| m.tokens(calibrated)).sum();
-        if prefix.is_empty()
-            || cap + heuristic(SYSTEM.len()) + heuristic(USER.len()) + cost > window
+        let available =
+            window.saturating_sub(cap + heuristic(SYSTEM.len()) + heuristic(USER.len()));
+        let budget = previous.map_or(available, |p| available.min(p.tokens / 2));
+        let mut rest = entries.as_slice();
+        let mut pinned = 0;
+        let mut calibrated = scale(rest);
+        if previous.is_some() && rest.len() > 1 && Some(rest[0].index) == self.prior_summary {
+            let unpinned_scale = scale(&rest[1..]);
+            let tokens = rest[0].tokens(unpinned_scale);
+            if tokens < budget {
+                pinned = tokens;
+                calibrated = unpinned_scale;
+                rest = &rest[1..];
+            }
+        }
+        let (start, tokens) = suffix(rest, budget - pinned, calibrated, false);
+        if previous.is_none()
+            && start > 0
+            && (start < rest.len()
+                || rest.iter().any(|e| e.message["role"] == "tool")
+                || self.seed_estimates_lost)
         {
-            // Go can drop older messages to fit. Never replace history the portable summarizer didn't see.
+            // Initial partial prefixes and oversized tool output remain outside the supported shape.
             return Err(
                 "compaction: complete history prefix does not fit the summarizer context window"
                     .into(),
             );
         }
-        let mut input = Vec::with_capacity(end + 2);
+        let kept = &rest[start..];
+        if pinned == 0 && kept.is_empty() {
+            return Ok(None);
+        }
+        let mut input = Vec::with_capacity(kept.len() + 3);
         input.push(json!({"role":"system", "content":SYSTEM}));
-        input.extend(prefix.iter().map(|e| e.message.clone()));
+        if pinned > 0 {
+            input.push(entries[0].message.clone());
+        }
+        input.extend(kept.iter().map(|e| e.message.clone()));
         input.push(json!({"role":"user", "content":USER}));
         let mut body = params.clone();
         body.remove("response_format");
@@ -277,13 +333,20 @@ impl Compactor {
         if merge {
             crate::wire::merge_messages(&mut request);
         }
-        Ok(Some((Prefix(boundary), request)))
+        Ok(Some((
+            Prefix {
+                boundary,
+                tokens: pinned + tokens,
+                retries: previous.map_or(0, |p| p.retries + 1),
+            },
+            request,
+        )))
     }
 
     pub fn apply(
         &mut self,
         messages: &mut Vec<Value>,
-        Prefix(boundary): Prefix,
+        Prefix { boundary, .. }: Prefix,
         summary: &str,
         output: u32,
     ) -> Undo {
@@ -295,6 +358,7 @@ impl Compactor {
                 .filter(|m| is_instruction(m))
                 .cloned(),
         );
+        let prior = self.prior_summary.replace(messages.len());
         messages.push(json!({"role":"user", "content":format!("Session Summary: {summary}")}));
         let offset = messages.len();
         messages.extend_from_slice(&original[boundary..]);
@@ -304,11 +368,11 @@ impl Compactor {
                 .map(|(i, mark)| (offset + (i - boundary), mark.clone())),
         );
         self.context_tokens = output.into();
-        Undo(original, marks)
+        Undo(original, marks, prior)
     }
 
     pub fn undo(&mut self, messages: &mut Vec<Value>, undo: Undo) {
-        (*messages, self.marks) = (undo.0, undo.1);
+        (*messages, self.marks, self.prior_summary) = (undo.0, undo.1, undo.2);
     }
 }
 
@@ -345,12 +409,12 @@ mod tests {
         ];
         c.record(2, "a", usage(998, 2));
         assert!(c
-            .plan(&messages, &params(), c.policy, false)
+            .plan(&messages, &params(), c.policy, false, None)
             .unwrap()
             .is_none());
         c.record(2, "a", usage(999, 2));
         let (prefix, body) = c
-            .plan(&messages, &params(), c.policy, false)
+            .plan(&messages, &params(), c.policy, false, None)
             .unwrap()
             .unwrap();
         assert_eq!(body["messages"].as_array().unwrap()[1..5], messages[1..5]);
@@ -374,6 +438,78 @@ mod tests {
     }
 
     #[test]
+    fn retry_recalibrates_the_compacted_prefix_without_moving_the_kept_tail() {
+        let mut c = Compactor {
+            policy: Policy::new(Some(4000), None, Some(0.5)).unwrap(),
+            ..Default::default()
+        };
+        let messages = vec![
+            json!({"role":"assistant", "content":"anchor"}),
+            json!({"role":"user", "content":"x".repeat(1800)}),
+            json!({"role":"assistant", "content":"second anchor"}),
+            json!({"role":"user", "content":"y".repeat(1050)}),
+            json!({"role":"assistant", "content":"large output"}),
+            json!({"role":"user", "content":"kept tail"}),
+        ];
+        c.record(0, "a", usage(100, 10));
+        c.record(2, "a", usage(1210, 30));
+        c.record(4, "a", usage(1000, 1100));
+        let plan = |prev| {
+            c.plan(&messages, &params(), c.policy, false, prev)
+                .unwrap()
+                .unwrap()
+        };
+        let (first, _) = plan(None);
+        assert_eq!(first.boundary, 5);
+        // 2x calibration: 15 + 1038 + 35 + 610 + 1105. Half fits only the last assistant.
+        assert_eq!(first.tokens, 2803);
+        let (second, body) = plan(Some(&first));
+        assert_eq!(second.boundary, first.boundary);
+        assert_eq!(second.tokens, 1105);
+        assert_eq!(body["messages"].as_array().unwrap()[1..2], messages[4..5]);
+        assert!(c
+            .plan(&messages, &params(), c.policy, false, Some(&second))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn retry_can_send_only_the_prior_summary_but_never_pins_user_supplied_text() {
+        let mut c = Compactor {
+            policy: Policy::new(Some(2000), None, Some(0.5)).unwrap(),
+            context_tokens: 1100,
+            ..Default::default()
+        };
+        let messages = vec![
+            json!({"role":"user","content":"Session Summary: prior"}),
+            json!({"role":"user","content":"x".repeat(350)}),
+        ];
+        let (first, _) = c
+            .plan(&messages, &params(), c.policy, false, None)
+            .unwrap()
+            .unwrap();
+        assert!(c
+            .plan(&messages, &params(), c.policy, false, Some(&first))
+            .unwrap()
+            .is_none());
+        c.prior_summary = Some(0);
+        let (_, body) = c
+            .plan(&messages, &params(), c.policy, false, Some(&first))
+            .unwrap()
+            .unwrap();
+        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(body["messages"][1], messages[0]);
+        let too_tight = Prefix {
+            tokens: 2 * heuristic("Session Summary: prior".len()),
+            ..first
+        };
+        assert!(c
+            .plan(&messages, &params(), c.policy, false, Some(&too_tight))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn added_tool_tokens_use_calibrated_provider_usage() {
         let mut c = Compactor {
             policy: Policy::new(Some(100_000), None, None).unwrap(),
@@ -387,17 +523,17 @@ mod tests {
         ];
         c.context_tokens = 43_210;
         assert!(c
-            .plan(&messages, &params(), c.policy, false)
+            .plan(&messages, &params(), c.policy, false, None)
             .unwrap()
             .is_none());
         c.record(0, "a", usage(3000, 100));
         c.record(2, "a", usage(43_110, 100));
         // The 2x calibration crosses 90%; the whole prefix would no longer fit.
-        assert!(c.plan(&messages, &params(), c.policy, false).is_err());
+        assert!(c.plan(&messages, &params(), c.policy, false, None).is_err());
         // Different tokenizers cannot calibrate each other's history.
         c.record(2, "b", usage(43_110, 100));
         assert!(c
-            .plan(&messages, &params(), c.policy, false)
+            .plan(&messages, &params(), c.policy, false, None)
             .unwrap()
             .is_none());
     }

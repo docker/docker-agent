@@ -176,7 +176,8 @@ impl Core {
                 now,
             } => {
                 let transient = status.is_none() || fallback::retryable(status, &reason);
-                self.session(session)?.failure(reason, transient, now)
+                self.session(session)?
+                    .failure(reason, status, transient, now)
             }
             Command::End { session, now } => self.session(session)?.end(now),
             Command::RegisterTools {
