@@ -111,12 +111,42 @@ async function run() {
         } finally { await s.close(); }
       });
   }
-  // With compaction explicitly disabled, crossing the threshold must retain history on the pinned fallback.
-  const chain = await (await fetch('/fallback-compaction.yaml')).text();
-  const disabled = chain.replace('$MODEL_URL', `${location.origin}/v1`)
-    .replace('session_compaction: true', 'session_compaction: false');
-  tests.compactionDisabledFallback = await replay(api, 'compactionDisabledFallback', disabled,
-    [[{ error: { message: 'primary unavailable' } }], [piece({ content: 'first answer' }, 'stop'), highUsage], answer], turns);
+  const chain = (await (await fetch('/fallback-compaction.yaml')).text()).replace('$MODEL_URL', `${location.origin}/v1`);
+  const disabled = chain.replace('session_compaction: true', 'session_compaction: false');
+  const failover = [[{ error: { message: 'primary unavailable' } }], [piece({ content: 'first answer' }, 'stop'), highUsage]];
+  tests.compactionDisabledFallback = await replay(api, 'compactionDisabledFallback', disabled, [...failover, answer], turns);
+  for (const failed of [false, true]) {
+    const name = failed ? 'fallbackCompactionError' : 'fallbackCompaction';
+    const summary = failed ? [{ error: { message: 'summary unavailable' } }] : [piece({ content: 'key facts' }, 'stop'), usage];
+    tests[name] = await replay(api, name, chain, [...failover, summary, [piece({ content: 'second answer' }, 'stop'), usage], answer],
+      async ({ api, options, record, trace }) => {
+        const s = await api.createSession(options, record);
+        try {
+          const old = 'old '.repeat(500);
+          trace.results.push(await s.send(old + secret));
+          const before = trace.events.length;
+          const next = s.send('continue');
+          if (failed) {
+            const message = await next.then(() => { throw new Error('expected summary rejection'); }, e => e.message);
+            trace.results.push(message);
+            if (trace.events.length !== before + 1 || trace.events[before].type !== 'error' || trace.events[before].message !== message) {
+              throw new Error('expected only the summary error on the rejected send');
+            }
+          } else {
+            trace.results.push(await next);
+          }
+          // Even after a summary stream error, Go drains a silent spare reply before rejecting.
+          if (trace.requests.length !== 4) throw new Error(`expected 4 requests after the second send; got ${trace.requests.length}`);
+          trace.results.push(await s.send('afterwards'));
+          const history = trace.requests.at(-1).body.messages;
+          const prefix = failed ? old + '[REDACTED]' : 'Session Summary: key facts';
+          if (history[0].content !== prefix || history.at(-2).content !== 'second answer') {
+            throw new Error('continuation lost the prefix or the spare reply');
+          }
+          if (JSON.stringify(trace.requests).includes(secret)) throw new Error('unredacted fallback history');
+        } finally { await s.close(); }
+      });
+  }
   const toolAtBoundary = [...tool('think', { thought: 'plan' }).slice(0, -1),
     { choices: [], usage: { prompt_tokens: 1022, completion_tokens: 2, total_tokens: 1024 } }];
   tests.compactAfterTools = await replay(api, 'compactAfterTools', compact, [toolAtBoundary,
