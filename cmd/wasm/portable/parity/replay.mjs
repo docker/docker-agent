@@ -449,12 +449,18 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
       required: ['value'], additionalProperties: true } } };
   tests.outputRefs = await replay(api, 'outputRefs', withSchema(responses, { mode: 'tool', schema: rowsSchema }),
     [deliver('{"rows":[{}]}'), deliver('{"rows":[{"value":"ok","extra":true}]}')], single, '/v1/responses');
-  const choices = { type: 'object', properties: { values: { type: 'array', items: { $ref: '#/$defs/Choice' } },
-    mode: { anyOf: [{ type: 'boolean' }, { type: 'string', enum: ['auto'] }] } }, required: ['values'],
-    $defs: { Choice: { anyOf: [{ type: 'string', enum: ['skip'] }, { type: 'number' }] } } };
+  const choiceSchema = (mode, choice) => ({ type: 'object', properties: { values: { type: 'array', items: { $ref: '#/$defs/Choice' } },
+    mode }, required: ['values'], $defs: { Choice: choice } });
+  const choices = choiceSchema({ anyOf: [{ type: 'boolean' }, { type: 'string', enum: ['auto'] }] },
+    { anyOf: [{ type: 'string', enum: ['skip'] }, { type: 'number' }] });
   tests.outputAnyOf = await replay(api, 'outputAnyOf', withSchema(responses, { mode: 'tool', schema: choices }),
     [deliver('{"values":["other"]}'), deliver('{"values":[],"mode":{"z":false,"a":[null,1e6]}}'),
       deliver('{ "values": [ "skip", -2.50e+1 ], "mode": false }')], single, '/v1/responses');
+  const exclusiveChoices = choiceSchema({ oneOf: [{ type: 'boolean' }, { type: 'null' }] },
+    { oneOf: [{ type: 'string', enum: ['red', 'both'] }, { type: 'number' }, { type: 'string', enum: ['both', 'blue'] }] });
+  tests.outputOneOf = await replay(api, 'outputOneOf', withSchema(responses, { mode: 'tool', schema: exclusiveChoices }),
+    [deliver('{"values":[true]}'), deliver('{"values":["both"]}'),
+      deliver('{ "values": [ "red", -2.50e+1, "blue" ], "mode": null }')], single, '/v1/responses');
   tests.outputResponses = await replay(api, 'outputResponses', withSchema(responses, { mode: 'tool',
     schema: { ...schema, properties: { ...schema.properties, note: { type: 'string', enum: ['extra'] } }, additionalProperties: true } }),
     [responseTool, deliver(raw), deliver(raw)], turns, '/v1/responses');

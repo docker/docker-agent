@@ -12,7 +12,7 @@ pub const MAX_ARGS: usize = 64 * 1024;
 const MAX_SCHEMA_NODES: usize = 128;
 const MAX_DEPTH: usize = 16;
 const MAX_EXPANDED_NODES: usize = 512;
-const MAX_ANY_OF: usize = 4;
+const MAX_ALTERNATIVES: usize = 4;
 const NON_EXCLUSIVE: &str = "Structured output rejected: __structured_output__ must be the only tool call in the response. Finish any other tool use first, then call __structured_output__ alone with the final answer.";
 
 fn safe_integer(n: i64) -> bool {
@@ -127,6 +127,12 @@ impl OutputTool {
     }
 }
 
+fn scalar_union(s: &Value) -> Option<(&'static str, &Value)> {
+    ["anyOf", "oneOf"]
+        .into_iter()
+        .find_map(|key| s.get(key).map(|branches| (key, branches)))
+}
+
 // Reject unknown keywords at every node before copying anything into the tool definition.
 fn parameters(
     s: &Value,
@@ -159,14 +165,14 @@ fn parameters(
         }
         return Ok(s.clone());
     }
-    if let Some(branches) = s.get("anyOf") {
+    if let Some((keyword, branches)) = scalar_union(s) {
         if s.as_object().unwrap().len() != 1 {
-            return Err("tool schema anyOf siblings are unsupported".into());
+            return Err(format!("tool schema {keyword} siblings are unsupported"));
         }
         let branches = branches
             .as_array()
-            .filter(|a| (2..=MAX_ANY_OF).contains(&a.len()))
-            .ok_or("tool schema anyOf requires 2-4 scalar alternatives")?;
+            .filter(|a| (2..=MAX_ALTERNATIVES).contains(&a.len()))
+            .ok_or_else(|| format!("tool schema {keyword} requires 2-4 scalar alternatives"))?;
         let mut normalized = Vec::with_capacity(branches.len());
         for branch in branches {
             if !matches!(
@@ -178,11 +184,12 @@ fn parameters(
                 .keys()
                 .all(|k| matches!(k.as_str(), "type" | "enum" | "title" | "description"))
             {
-                return Err("unsupported tool schema anyOf alternative".into());
+                return Err(format!("unsupported tool schema {keyword} alternative"));
             }
             normalized.push(parameters(branch, depth + 1, left, strict)?);
         }
-        return Ok(json!({"anyOf": normalized}));
+        *strict &= keyword != "oneOf";
+        return Ok(json!({keyword: normalized}));
     }
     let ty = s["type"]
         .as_str()
@@ -258,7 +265,7 @@ fn parameters(
             check_name(key)?;
             let mut prop = parameters(child, depth + 1, left, strict)?;
             // Go makes optional composition properties required without rewriting their branches.
-            if !required.contains(key.as_str()) && child.get("anyOf").is_none() {
+            if !required.contains(key.as_str()) && scalar_union(child).is_none() {
                 if child["type"] == "null" {
                     return Err("optional null-only tool properties are unsupported".into());
                 }
@@ -340,12 +347,13 @@ impl Schema {
             self.check_graph(target, depth + 1, stack, left)?;
             stack.pop();
         } else {
+            let branches = scalar_union(s).and_then(|(_, b)| b.as_array());
             for child in s["properties"]
                 .as_object()
                 .into_iter()
                 .flat_map(|p| p.values())
                 .chain(s.get("items"))
-                .chain(s["anyOf"].as_array().into_iter().flatten())
+                .chain(branches.into_iter().flatten())
             {
                 self.check_graph(child, depth + 1, stack, left)?;
             }
@@ -360,8 +368,8 @@ impl Schema {
                 .validate(&self.defs[pointer], v, path)
                 .map_err(|e| format!("validating {path}: {e}"));
         }
-        if let Some(branches) = s["anyOf"].as_array() {
-            return validate_any_of(branches, v, path);
+        if let Some((keyword, branches)) = scalar_union(s) {
+            return validate_union(keyword, branches.as_array().unwrap(), v, path);
         }
         let ty = s["type"].as_str().unwrap();
         let bounds = |n: usize, min: &str, max: &str| {
@@ -438,7 +446,12 @@ impl Schema {
     }
 }
 
-fn validate_any_of(branches: &[Value], v: &Instance, path: &str) -> Result<(), String> {
+fn validate_union(
+    keyword: &str,
+    branches: &[Value],
+    v: &Instance,
+    path: &str,
+) -> Result<(), String> {
     let got = match v {
         Instance::String(_) => "string",
         Instance::Number(n) if n.as_f64().unwrap().fract() == 0.0 => "integer",
@@ -450,24 +463,34 @@ fn validate_any_of(branches: &[Value], v: &Instance, path: &str) -> Result<(), S
         Instance::Tagged(_) => unreachable!("JSON instance"),
     };
     let matches_type = |b: &Value| b["type"] == got || (got == "integer" && b["type"] == "number");
-    if branches.iter().any(|b| {
+    let mut matches = branches.iter().filter(|b| {
         matches_type(b)
             && b["enum"]
                 .as_array()
                 .is_none_or(|a| a.iter().any(|x| x.as_str() == v.as_str()))
-    }) {
+    });
+    if matches.next().is_some() {
+        if keyword == "oneOf" && matches.next().is_some() {
+            return Err(
+                "oneOf: validated against both <anonymous schema> and <anonymous schema>".into(),
+            );
+        }
         return Ok(());
     }
+    let names = vec!["<anonymous schema>"; branches.len()].join(" ");
+    let mut error = format!("{keyword}: did not validate against any of [{names}]");
+    if keyword == "oneOf" {
+        return Err(error);
+    }
 
-    // jsonschema-go joins diagnostics for *all* failed branches in declaration order.
+    // Only anyOf includes each branch's failure in jsonschema-go's diagnostic.
+    error.push(':');
     let mut value = String::new();
     if v.is_null() {
         value.push_str("<invalid reflect.Value>");
     } else {
         write_go_value(&mut value, v);
     }
-    let names = vec!["<anonymous schema>"; branches.len()].join(" ");
-    let mut error = format!("anyOf: did not validate against any of [{names}]:");
     for (i, b) in branches.iter().enumerate() {
         write!(error, "\nvalidating {path}/anyOf/{i}: ").unwrap();
         if matches_type(b) {
@@ -715,6 +738,33 @@ mod tests {
     }
 
     #[test]
+    fn scalar_one_of_requires_exactly_one_match() {
+        let choice = json!({"oneOf":[
+            {"type":"string", "enum":["red","both"]}, {"type":"number"},
+            {"type":"string", "title":"Cool", "enum":["blue","both"]}, {"type":"null"}
+        ]});
+        let mut schema = object(choice.clone());
+        schema["required"] = json!([]);
+        let t = tool(&schema).unwrap();
+        assert!(!t.strict);
+        schema["required"] = json!(["x"]);
+        assert_eq!(t.definition["function"]["parameters"], schema);
+        for valid in ["{}", r#"{"x":"blue"}"#, r#"{"x":1}"#, r#"{"x":null}"#] {
+            assert_eq!(t.call(valid, true).unwrap(), valid);
+        }
+        let prefix = r#"arguments do not match the "report" schema: validating root: validating /properties/x: "#;
+        for (input, diagnostic) in [
+            (r#"{"x":"none"}"#, "oneOf: did not validate against any of [<anonymous schema> <anonymous schema> <anonymous schema> <anonymous schema>]"),
+            (r#"{"x":"both"}"#, "oneOf: validated against both <anonymous schema> and <anonymous schema>"),
+        ] {
+            assert_eq!(t.validate(input).unwrap_err(), format!("{prefix}{diagnostic}"));
+        }
+        let mut unused = object(json!({"type":"boolean"}));
+        unused["$defs"] = json!({"unused":choice});
+        assert!(!tool(&unused).unwrap().strict);
+    }
+
+    #[test]
     fn any_of_type_diagnostics_use_go_values() {
         let t = tool(&object(
             json!({"anyOf":[{"type":"boolean"},{"type":"string"}]}),
@@ -744,49 +794,56 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_any_of_even_in_unused_definitions() {
+    fn rejects_unsupported_scalar_unions_even_in_unused_definitions() {
         let string = json!({"type":"string"});
-        for bad in [
-            json!({"anyOf":null}),
-            json!({"anyOf":[]}),
-            json!({"anyOf":[string]}),
-            json!({"anyOf":vec![string.clone(); MAX_ANY_OF + 1]}),
-            json!({"anyOf":[string,string],"description":"sibling"}),
-            json!({"anyOf":[string, true]}),
-            json!({"anyOf":[string, {}]}),
-            json!({"anyOf":[string, {"type":"integer"}]}),
-            json!({"anyOf":[string, {"type":"string","maxLength":1}]}),
-            json!({"anyOf":[string, {"type":"boolean","enum":[true]}]}),
-            json!({"anyOf":[string, {"type":"array","items":string}]}),
-            json!({"anyOf":[string, {"type":"object","properties":{}}]}),
-            json!({"anyOf":[string, {"$ref":"#/$defs/s"}]}),
-            json!({"anyOf":[string, {"anyOf":[string,string]}]}),
-            json!({"anyOf":[string, {"type":"string","not":string}]}),
-        ] {
-            let mut schema = object(string.clone());
-            schema["$defs"] = json!({"s": string, "unused": {"type":"array","items":bad}});
-            assert!(tool(&schema).is_err(), "{bad}");
+        for key in ["anyOf", "oneOf"] {
+            for bad in [
+                json!({key:null}),
+                json!({key:[]}),
+                json!({key:[string]}),
+                json!({key:vec![string.clone(); MAX_ALTERNATIVES + 1]}),
+                json!({key:[string,string],"description":"sibling"}),
+                json!({key:[string, true]}),
+                json!({key:[string, {}]}),
+                json!({key:[string, {"type":"integer"}]}),
+                json!({key:[string, {"type":"string","maxLength":1}]}),
+                json!({key:[string, {"type":"boolean","enum":[true]}]}),
+                json!({key:[string, {"type":"array","items":string}]}),
+                json!({key:[string, {"type":"object","properties":{}}]}),
+                json!({key:[string, {"$ref":"#/$defs/s"}]}),
+                json!({key:[string, {"anyOf":[string,string]}]}),
+                json!({key:[string, {"oneOf":[string,string]}]}),
+                json!({key:[string, {"$ref":"https://invalid.test/schema"}]}),
+                json!({"anyOf":[string,string],"oneOf":[string,string]}),
+                json!({key:[string, {"type":"string","not":string}]}),
+            ] {
+                let mut schema = object(string.clone());
+                schema["$defs"] = json!({"s": string, "unused": {"type":"array","items":bad}});
+                assert!(tool(&schema).is_err(), "{bad}");
+            }
         }
     }
 
     #[test]
-    fn any_of_branches_count_toward_schema_budgets() {
-        let union = json!({"anyOf":vec![json!({"type":"string"}); MAX_ANY_OF]});
-        let mut schema = object(union.clone());
-        for i in 0..MAX_SCHEMA_NODES / (MAX_ANY_OF + 1) {
-            schema["properties"][i.to_string()] = union.clone();
-        }
-        assert!(tool(&schema).err().unwrap().contains("node limit"));
+    fn scalar_union_branches_count_toward_schema_budgets() {
+        for key in ["anyOf", "oneOf"] {
+            let union = json!({key:vec![json!({"type":"string"}); MAX_ALTERNATIVES]});
+            let mut schema = object(union.clone());
+            for i in 0..MAX_SCHEMA_NODES / (MAX_ALTERNATIVES + 1) {
+                schema["properties"][i.to_string()] = union.clone();
+            }
+            assert!(tool(&schema).err().unwrap().contains("node limit"));
 
-        let mut schema = object(json!({"$ref":"#/$defs/0"}));
-        schema["$defs"] = json!({"0":{"type":"object","properties":{}}, "leaf":union});
-        for i in 0..MAX_DEPTH {
-            schema["properties"][i.to_string()] = json!({"$ref":"#/$defs/0"});
+            let mut schema = object(json!({"$ref":"#/$defs/0"}));
+            schema["$defs"] = json!({"0":{"type":"object","properties":{}}, "leaf":union});
+            for i in 0..MAX_DEPTH {
+                schema["properties"][i.to_string()] = json!({"$ref":"#/$defs/0"});
+            }
+            for i in 0..5 {
+                schema["$defs"]["0"]["properties"][i.to_string()] = json!({"$ref":"#/$defs/leaf"});
+            }
+            assert!(tool(&schema).err().unwrap().contains("expansion budget"));
         }
-        for i in 0..5 {
-            schema["$defs"]["0"]["properties"][i.to_string()] = json!({"$ref":"#/$defs/leaf"});
-        }
-        assert!(tool(&schema).err().unwrap().contains("expansion budget"));
     }
 
     #[test]
