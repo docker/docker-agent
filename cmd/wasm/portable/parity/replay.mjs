@@ -1176,6 +1176,66 @@ agents:`)
     tests[`autonomousYaml_${name}`] = await replay(api, `autonomousYaml_${name}`, yaml,
       [tool('add_memory', {memory: 'not stored'}), answer], answering({decision: 'reject', reason: 'tester declined'}));
   }
+  const terminalText = piece({content: 'last'}, 'stop');
+  const chatRecord = chunk => `data: ${JSON.stringify(chunk)}\n\n`;
+  const chatRaw = raw => ({raw, headers: {'Content-Type': 'text/event-stream'}});
+  const chatFailure = {error: {message: 'invalid model'}};
+  for (const [name, stream] of [
+    ['Choices', [{choices: [{index: 1, delta: {content: 'first'}}, {index: 0, delta: {content: 'ignored'}}]}, terminalText]],
+    ['Prelude', [{}, {choices: null}, {choices: [{}]}, piece({role: '', content: null}), piece({content: ''}),
+      piece({content: 'one'}), piece({role: 'assistant'}), terminalText]],
+    ['Parts', chatRaw('data: {"choices":[{"delta":{"content":[{ "type": "text", "text": "part" }]}}]}\n\n')],
+    ['Reasoning', [piece({reasoning_content: {ignored: true}, reasoning: 'plan', content: 'one'}),
+      piece({reasoning_content: 'two', reasoning: {ignored: true}}), terminalText]],
+    ['BlankReasoning', [piece({reasoning: '  ', content: 'visible'}, 'stop')]],
+    ['Legacy', [piece({function_call: {name: 'think', arguments: args}}, 'function_call')]],
+    ['Refusal', [piece({refusal: 'no'}, 'content_filter')]],
+    ['UsageInline', [{...piece({content: 'one'}), usage: {prompt_tokens: 8}}, {...terminalText, usage: {completion_tokens: 2}}, usage]],
+    ['UsageNoChoices', [terminalText, {usage: {prompt_tokens: 4}}, usage]],
+    ['UsageHeldStop', [terminalText, piece({content: 'late'}), usage]],
+    ['NullCounters', [terminalText, {usage: {prompt_tokens: 3, completion_tokens: null, prompt_tokens_details: {cached_tokens: null}}}]],
+    ['UsageNotStop', [{...piece({reasoning: 'plan'}), usage: {}}]],
+    ['UsageToolTrailers', [piece({content: 'text'}, 'tool_calls'), usage, {...usage, usage: {prompt_tokens: 9}}]],
+    ['ErrorAfterUsage', [terminalText, usage, chatFailure]],
+    ['SseLines', chatRaw(': ping\r\n\r\nevent: chat\r\ndata: {"choices":\r\ndata: [{"delta":{"content":"ok"}}]}\r\n\r\n')],
+    ['Bom', chatRaw('\uFEFF' + chatRecord(tool('think', {thought: 'ignored'})[0]) + chatRecord(terminalText))],
+    ['ThreadEvent', chatRaw('event: thread.run\n' + chatRecord(tool('think', {thought: 'ignored'})[0]) + chatRecord(terminalText))],
+    ['EarlyDone', chatRaw(chatRecord(piece({content: 'enough'})) + 'data: [DONE]\n\n' + chatRecord(chatFailure))],
+  ]) tests[`chat${name}`] = await replay(api, `chat${name}`, thinks, [stream, answer], turns);
+  for (const [name, stream] of [
+    ['Null', [{error: null}]], ['Between', [piece({content: 'started'}), chatFailure, terminalText]],
+    ['HeldStop', [terminalText, chatFailure]], ['NonJson', chatRaw(chatRecord(piece({content: 'started'})) + 'data: not JSON\n\n')],
+  ]) tests[`chatError${name}`] = await replay(api, `chatError${name}`, thinks, [stream, answer], rejectsThenRecovers);
+
+  const fragment = (id, index, name, bytes) => ({id, index, type: 'function', function: {name, arguments: bytes}});
+  const fragments = (...calls) => piece({tool_calls: calls});
+  const callEnd = piece({}, 'tool_calls');
+  for (const [name, stream] of [
+    ['Prefix', rawTool('thi', '{}')],
+    ['SplitName', [fragments(fragment('a', 0, 'th', args.slice(0, 3))), fragments(fragment(null, 0, 'ink', args.slice(3))), callEnd]],
+    ['RepeatName', [fragments(fragment('a', 0, 'think', args.slice(0, 3))), fragments(fragment(null, 0, 'think', args.slice(3))), callEnd]],
+    ['ArgsFirst', [fragments(fragment('a', undefined, '', args)), fragments(fragment(null, undefined, 'think', '')), callEnd]],
+    ['NoName', [fragments(fragment('a', 0, '', '{}')), callEnd]],
+    ['Parallel', [fragments(fragment('b', 1, 'think', args.slice(0, 5)), fragment('a', 0, 'think', args.slice(0, 3))),
+      fragments(fragment(null, 0, undefined, args.slice(3)), fragment(null, 1, undefined, args.slice(5))), callEnd]],
+    ['Narration', [piece({content: 'before'}), fragments(fragment('a', 0, 'think', args)), callEnd, piece({content: 'after'}), usage]],
+  ]) tests[`chatCall${name}`] = await replay(api, `chatCall${name}`, thinks, [stream, answer, answer], turns);
+  tests.chatBareDataBeforeDone = await replay(api, 'chatBareDataBeforeDone', thinks,
+    [chatRaw(tool('think', {thought: 'not executed'}).map(chatRecord).join('') + 'data\ndata: [DONE]\n\n'), answer], rejectsThenRecovers);
+  for (const reason of ['stop', 'length', 'tool_calls', 'function_call', 'content_filter', null, '', 'custom']) {
+    const name = `chatFinish_${reason === '' ? 'empty' : reason ?? 'missing'}`;
+    tests[name] = await replay(api, name, config, [[piece({}, reason)], [piece({content: 'visible'}, reason)]], turns);
+  }
+  for (const model of ['gpt-4o', 'gpt-4.1', 'gpt-5', 'o3-mini', 'unknown']) {
+    for (const tools of [false, true]) {
+      const name = `chatRequest_${model}_${tools ? 'tools' : 'plain'}`;
+      const yaml = (tools ? withSchema(thinks, {mode: 'native'}) : config)
+        .replace('provider: openai,', 'provider: openai, api_type: openai_chatcompletions,')
+        .replace('agents:', `models: {m: {provider: local, model: ${model}, max_tokens: 123, temperature: 0, top_p: 0.7, presence_penalty: 0.1, frequency_penalty: -0.2, parallel_tool_calls: false}}\nagents:`)
+        .replace('model: local/test', 'model: m');
+      tests[name] = await replay(api, name, yaml, tools ? [tool('think', {thought: 'plan'}), chatJSON, chatJSON] : [answer, answer], turns);
+    }
+  }
   // Go advertises a denied tool, with its instructions, and refuses the call at dispatch.
   const stocked = local(['think', 'todo', 'memory']);
   const denying = list => `permissions: {deny: [${list}]}\n`;

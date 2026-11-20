@@ -725,12 +725,26 @@ fn expand_model_field(mut text: &str, env: &BTreeMap<String, String>) -> Result<
     Ok(out)
 }
 
+fn model_family(model: &str) -> String {
+    model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_ascii_lowercase()
+}
+
+fn o_series(name: &str) -> bool {
+    ["o1", "o3", "o4"].iter().any(|p| name.starts_with(p))
+}
+
 // Keep in sync with modelinfo.SupportsResponsesAPI (also used for forced Chat Completions).
 fn supports_responses_api(id: &str) -> bool {
-    let name = id.trim().rsplit('/').next().unwrap().to_ascii_lowercase();
-    if ["gpt-4.1", "gpt-5", "o1", "o3", "o4", "codex"]
-        .iter()
-        .any(|p| name.starts_with(p))
+    let name = model_family(id);
+    if o_series(&name)
+        || ["gpt-4.1", "gpt-5", "codex"]
+            .iter()
+            .any(|p| name.starts_with(p))
         || name.contains("-codex")
     {
         return true;
@@ -784,6 +798,10 @@ fn model_params(
         if let Some(n) = model.as_ref().or(provider.as_ref()) {
             params.insert(key.into(), Value::Number(n.clone()));
         }
+    }
+    // Go applies the o-series default before expanding the model field.
+    if o_series(&model_family(&m.model)) && o_series(&model_family(&id)) {
+        params.insert("reasoning_effort".into(), "medium".into());
     }
     if let Some(cap) = m.max_tokens.or(p.max_tokens).filter(|&n| n > 0) {
         // The JS host parses and re-encodes this request before fetch.

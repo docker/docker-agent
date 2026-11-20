@@ -443,26 +443,13 @@ pub fn retryable(status: Option<u16>, reason: &str) -> bool {
 
 // Once an output item (even an unannounced tool fragment) has arrived we cannot
 // replay it. Empty role and stream-lifecycle headers carry no assistant output.
-pub fn prelude(chunk: &Value, responses: bool) -> bool {
-    if responses {
-        matches!(
-            chunk["type"].as_str(),
-            Some("response.created" | "response.queued" | "response.in_progress")
-        ) && chunk["response"]["output"]
-            .as_array()
-            .is_none_or(Vec::is_empty)
-    } else {
-        chunk["usage"].is_null()
-            && chunk["choices"].as_array().is_some_and(|choices| {
-                choices.iter().all(|c| {
-                    c["finish_reason"].is_null()
-                        && c["delta"].as_object().is_some_and(|d| {
-                            d.iter()
-                                .all(|(key, v)| key == "role" || v.is_null() || v == "")
-                        })
-                })
-            })
-    }
+pub fn responses_prelude(chunk: &Value) -> bool {
+    matches!(
+        chunk["type"].as_str(),
+        Some("response.created" | "response.queued" | "response.in_progress")
+    ) && chunk["response"]["output"]
+        .as_array()
+        .is_none_or(Vec::is_empty)
 }
 
 pub fn check_responses_history(body: &Value) -> Result<(), String> {
