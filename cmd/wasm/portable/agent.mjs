@@ -216,7 +216,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     }
     async function run(prompt, signal) {
       const session = handle.session;
-      let runError, roundContext;
+      let runError, roundContext, summaryClient, summarySession;
       try {
         signal.throwIfAborted();
         let request = call('begin', { session, prompt, id: crypto.randomUUID(), now: performance.now() });
@@ -245,12 +245,19 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           let outcome;
           try {
             const { transport } = handle.profiles[request.agent].targets[request.target];
-            const response = await modelFetch(transport, request, signal, sessionID);
+            // A smaller prefix starts a new summary session on the same cloned client.
+            const summary = request.summary != null;
+            if (summary && !request.sent) {
+              if (request.summary === 'new' && transport.headers.session_id) summaryClient = crypto.randomUUID();
+              if (request.summary !== 'continuation' && transport.opencode) summarySession = crypto.randomUUID();
+              request.sent = true;
+            }
+            const response = await modelFetch(transport, request, signal, summary ? summarySession : sessionID, summary && summaryClient);
             let calls = false;
             for await (const chunk of sse(response, request.responses, signal)) {
               if (signal.aborted) {
                 // A complete Chat Completions frame already in this read can outpace its callback.
-                if (!request.summary && !request.responses && !runError) {
+                if (request.summary == null && !request.responses && !runError) {
                   if (chunk === bufferedEnd) call('end', { session, now: performance.now(), buffered: true });
                   else if (typeof chunk === 'string') call('chunk', { session, chunk, now: performance.now(), buffered: true });
                 }
@@ -276,9 +283,12 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           }
           signal.throwIfAborted();
           if (outcome) {
-            if (outcome.event && !runError) {
-              if (outcome.event.type === 'error') runError = new Error(outcome.event.message);
-              emit(outcome.event);
+            for (const event of outcome.events ?? []) {
+              signal.throwIfAborted();
+              if (!runError) {
+                if (event.type === 'error') runError = new Error(event.message);
+                emit(event);
+              }
             }
             if (outcome.delay) await wait(outcome.delay * (0.9 + 0.2 * Math.random()), signal);
             if (!outcome.retry) request = outcome.request;
@@ -466,14 +476,14 @@ async function openCodeID(sessionID) {
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 }
 
-async function modelFetch({ endpoint, headers, opencode }, { body, summary }, signal, sessionID) {
+async function modelFetch({ endpoint, headers, opencode }, { body, summary }, signal, sessionID, summaryClient) {
   const init = {
     method: 'POST', redirect: 'error', credentials: 'omit', signal,
     headers: { ...headers },
     body: JSON.stringify(body),
   };
-  if (summary && headers.session_id) init.headers.session_id = crypto.randomUUID();
-  if (opencode) init.headers['X-OpenCode-Session'] = await openCodeID(summary ? crypto.randomUUID() : sessionID);
+  if (summaryClient && headers.session_id) init.headers.session_id = summaryClient;
+  if (opencode) init.headers['X-OpenCode-Session'] = await openCodeID(sessionID);
   for (let attempt = 0; ; attempt++) {
     init.headers['X-Stainless-Retry-Count'] = String(attempt);
     let response;
@@ -481,7 +491,7 @@ async function modelFetch({ endpoint, headers, opencode }, { body, summary }, si
     catch (e) {
       signal.throwIfAborted();
       if (attempt >= 2) {
-        if (summary) throw new TransportError(`model request failed: ${e.message}`);
+        if (summary != null) throw new TransportError(`model request failed: ${e.message}`);
         const cause = e.cause === undefined ? '' : `: ${e.cause}`;
         throw new TransportError(`error receiving from stream: Post "${endpoint}": net/http: fetch() failed: ${e}${cause}`, endpoint);
       }

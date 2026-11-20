@@ -840,14 +840,6 @@ fn first_nonempty(values: [&str; 3]) -> &str {
     values.into_iter().find(|s| !s.is_empty()).unwrap_or("")
 }
 
-fn compaction_policy(a: &Agent, m: &Model) -> Result<crate::compaction::Policy, String> {
-    crate::compaction::Policy::new(
-        m.context_window,
-        a.session_compaction,
-        m.compaction_threshold.or(a.compaction_threshold),
-    )
-}
-
 pub fn team(
     yaml: &str,
     entry: &str,
@@ -858,7 +850,6 @@ pub fn team(
     let mut output_tools = BTreeMap::new();
     for (name, a) in &cfg.agents {
         let primary = &cfg.models[&a.model];
-        compaction_policy(a, primary)?;
         a.limits.check_round_limit()?;
         let overrides = a.toolsets.iter().any(|ts| !ts.model.is_empty());
         if a.limits.limits_history() || a.limits.max_iterations > 0 || overrides {
@@ -1252,23 +1243,35 @@ fn resolve(
             "tool-mode structured output within local teams requires a single serving model".into(),
         );
     }
-    if (team || chain) && models.iter().any(|m| m.compaction.enabled()) {
+    if (team || chain) && models.iter().any(|m| m.compaction.proactive()) {
         let primary = &models[0];
-        // A failed summary can cause an unobserved continuation. Never run tools on that path.
-        if team
-            || has_tools
+        // A leaf transfer owns fresh history. Handoffs share their caller's frame and limits.
+        let leaf = !chain
+            && a.handoffs.is_empty()
+            && a.force_handoff.is_empty()
+            && a.sub_agents.is_empty()
+            && !cfg
+                .agents
+                .values()
+                .any(|a| a.force_handoff == name || a.handoffs.iter().any(|n| n == name));
+        if (team && !leaf)
+            || (chain && has_tools)
             || models
                 .iter()
                 .any(|m| m.responses != primary.responses || m.compaction != primary.compaction)
         {
-            return Err("routed compaction requires a single tool-free agent and matching APIs, context windows and thresholds; otherwise set session_compaction: false".into());
+            return Err("routed compaction requires a tool-free chain or an isolated delegate and matching APIs, context windows and thresholds; otherwise set session_compaction: false".into());
         }
     }
     let summary_model = if summary_name.is_empty() {
         None
     } else {
-        if team || has_tools || a.hooks.max_calls.is_some() || !models[0].compaction.enabled() {
-            return Err("a dedicated compaction_model requires one tool-free agent with active compaction and no history/iteration limits".into());
+        if team
+            || !picker.choices.is_empty()
+            || a.hooks.max_calls.is_some()
+            || !models[0].compaction.proactive()
+        {
+            return Err("a dedicated compaction_model requires one agent with active compaction, no model picker and no history/iteration limits".into());
         }
         let summary = cfg.models.get(summary_name).ok_or_else(|| format!("compaction_model {summary_name:?} must name a model with a declared context_window"))?;
         if summary.context_window.is_none() {
@@ -1428,7 +1431,11 @@ fn resolve_model(
         return Err("this Responses model requires native deferred tool loads".into());
     }
     let model_id = format!("{provider_id}/{id}");
-    let compaction = compaction_policy(a, m)?;
+    let compaction = crate::compaction::Policy::new(
+        m.context_window,
+        a.session_compaction,
+        m.compaction_threshold.or(a.compaction_threshold),
+    );
     let output = output.filter(|o| matches!(o.mode, OutputMode::Native));
     if let Some(output) = output {
         output.check_session(&id)?;
