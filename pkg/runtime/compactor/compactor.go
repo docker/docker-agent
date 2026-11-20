@@ -36,6 +36,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/compaction"
+	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -224,7 +225,11 @@ func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
 		return nil, fmt.Errorf("compactor: cloning summary model: %w", err)
 	}
 
-	compactionAgent := agent.New(args.Agent.Name(), "", agent.WithModel(summaryModel), agent.WithStreamIdleTimeout(args.Agent.StreamIdleTimeout()))
+	compactionAgent := agent.New(args.Agent.Name(), "",
+		agent.WithModel(summaryModel),
+		agent.WithStreamIdleTimeout(args.Agent.StreamIdleTimeout()),
+		agent.WithHooks(summaryHooks(args.Agent)),
+	)
 
 	// conversationBudget caps the conversation handed to the summarizer;
 	// zero means "whatever fits ContextLimit".
@@ -306,6 +311,25 @@ func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
 			InputTokens:    compactionSession.OutputTokens,
 		}, nil
 	}
+}
+
+// The summary sends parent history, but must not run the parent's tools or lifecycle hooks.
+func summaryHooks(parent *agent.Agent) *hooks.Config {
+	var outbound []hooks.Hook
+	if cfg := parent.Hooks(); cfg != nil {
+		for _, h := range cfg.BeforeLLMCall {
+			if h.Type == hooks.HookTypeBuiltin && h.Command == builtins.RedactSecrets {
+				outbound = append(outbound, h)
+			}
+		}
+	}
+	if parent.RedactSecrets() {
+		outbound = append(outbound, hooks.Hook{Type: hooks.HookTypeBuiltin, Command: builtins.RedactSecrets})
+	}
+	if len(outbound) == 0 {
+		return nil
+	}
+	return &hooks.Config{BeforeLLMCall: outbound}
 }
 
 // runUsage aggregates the model name and token usage of the messages the

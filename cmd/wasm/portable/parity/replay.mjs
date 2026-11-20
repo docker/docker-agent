@@ -87,15 +87,30 @@ async function run() {
   const compact = config.replace('agents:', 'models:\n  small: {provider: local, model: test, context_window: 2048, compaction_threshold: 0.5}\nagents:')
     .replace('model: local/test', 'model: small, session_compaction: true, redact_secrets: false, toolsets: [{type: think}]');
   const highUsage = { choices: [], usage: { prompt_tokens: 1000, completion_tokens: 25, total_tokens: 1025 } };
-  tests.compact = await replay(api, 'compact', compact, [tool('think', { thought: 'remember' }),
-    [piece({ content: 'first answer' }, 'stop'), highUsage], [piece({ content: 'key facts' }, 'stop'), usage], answer],
-    async ({ api, options, record, trace }) => {
-      const s = await api.createSession(options, record);
-      try {
-        trace.results.push(await s.send('old '.repeat(500)));
-        trace.results.push(await s.send('continue'));
-      } finally { await s.close(); }
-    });
+  const secret = 'dckr_pat_' + 'A'.repeat(27);
+  for (const [name, setting, expected] of [
+    ['compact', 'redact_secrets: false, ', secret],
+    ['compactRedaction', '', '[REDACTED]'],
+    ['compactExplicitRedaction', 'redact_secrets: false, hooks: {before_llm_call: {type: builtin, command: redact_secrets}}, ', '[REDACTED]'],
+  ]) {
+    const yaml = compact.replace('redact_secrets: false, ', setting);
+    tests[name] = await replay(api, name, yaml, [tool('think', { thought: 'remember' }),
+      [piece({ content: 'first answer' }, 'stop'), highUsage], [piece({ content: 'key facts' }, 'stop'), usage], answer],
+      async ({ api, options, record, trace }) => {
+        const s = await api.createSession(options, record);
+        try {
+          const prefix = 'old '.repeat(500);
+          trace.results.push(await s.send(prefix + secret));
+          trace.results.push(await s.send('continue'));
+          const summary = trace.requests[2].body;
+          if (!summary.messages[0].content.includes('summarize conversations') ||
+              !summary.messages.some(m => m.role === 'user' && m.content?.startsWith(prefix + expected)) ||
+              (expected !== secret && JSON.stringify(summary).includes(secret))) {
+            throw new Error('summary request did not honor outgoing redaction policy');
+          }
+        } finally { await s.close(); }
+      });
+  }
   // With compaction explicitly disabled, crossing the threshold must retain history on the pinned fallback.
   const chain = await (await fetch('/fallback-compaction.yaml')).text();
   const disabled = chain.replace('$MODEL_URL', `${location.origin}/v1`)

@@ -41,6 +41,20 @@ func (p fakeProvider) CreateChatCompletionStream(
 	return nil, nil
 }
 
+func TestSummaryHooksOnlyInheritOutboundRedaction(t *testing.T) {
+	t.Parallel()
+
+	redact := latest.HookDefinition{Type: "builtin", Command: "redact_secrets", Timeout: 5}
+	other := latest.HookDefinition{Type: "command", Command: "redact_secrets"}
+	cfg := &latest.HooksConfig{
+		TurnStart:     latest.HookDefinitions{redact},
+		BeforeLLMCall: latest.HookDefinitions{other, redact},
+	}
+	want := &latest.HooksConfig{BeforeLLMCall: latest.HookDefinitions{redact}}
+	assert.Equal(t, want, summaryHooks(agent.New("root", "", agent.WithHooks(cfg))))
+	assert.Nil(t, summaryHooks(agent.New("root", "", agent.WithHooks(&latest.HooksConfig{TurnStart: cfg.TurnStart}))))
+}
+
 func TestExtractMessages(t *testing.T) {
 	t.Parallel()
 
