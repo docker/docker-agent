@@ -66,6 +66,48 @@ database has a newer schema (`ErrNewerDatabase`). Restore an older database, or
 use a binary that includes the migration. Revert changes without removing the
 migration catalogue entry.
 
+## Tool approval (opt-in)
+
+By default an A2A session is non-interactive: a tool call that would otherwise
+prompt for confirmation is denied, because no one is present to approve it. Pass
+`--tool-approval` to let the connected client approve or reject such calls
+out-of-band using the A2A `TASK_STATE_INPUT_REQUIRED` flow.
+
+```bash
+$ docker agent serve a2a ./agent.yaml --safety strict --tool-approval
+```
+
+When a call needs confirmation, the task pauses in `TASK_STATE_INPUT_REQUIRED`
+and its status message carries the pending call as a data part:
+
+```json
+{"kind":"data","data":{"id":"call_123","name":"shell","args":{"cmd":"ls"}},
+ "metadata":{"adk_type":"function_call","adk_is_long_running":true}}
+```
+
+The client answers on the same task (`taskId` + `contextId`) with a matching
+function-response data part:
+
+```json
+{"kind":"data","data":{"id":"call_123","name":"shell","response":{"decision":"approve"}},
+ "metadata":{"adk_type":"function_response"}}
+```
+
+`decision` is one of `approve`, `approve-tool` (approve this tool for the rest of
+the session), or `reject` (with an optional `reason`). A free-text reply is
+rejected by the protocol: the response must carry the function-call `id`. An
+unrecognised or missing decision is treated as a rejection, which the model is
+told about so it can adapt.
+
+Notes and limits:
+
+- The switch is narrow: only top-level A2A sessions honour it. Background agents
+  and `transfer_task` sub-sessions keep denying.
+- Pending approvals are held in memory. If the server restarts, they are lost
+  and the task fails when the client replies. Abandoned tasks are reclaimed after
+  a TTL, on A2A `cancel`, and at server shutdown.
+- Without the flag the behaviour is unchanged: non-interactive sessions deny.
+
 ## Resuming conversations
 
 Invocations with the same A2A context ID resume the stored conversation. Before
@@ -92,7 +134,7 @@ policy is preserved or tightened to the server's safety ceiling, never relaxed.
 
 ## Current Limitations
 
-- Tool calls are handled internally, not exposed as separate A2A events
+- Tool calls are handled internally; only calls awaiting approval are exposed, via the opt-in [tool approval](#tool-approval-opt-in) flow
 - A2A artifact support not yet integrated
 - A2A memory features not yet integrated
 - Multi-agent (sub-agent) scenarios need further work
