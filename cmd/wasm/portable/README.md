@@ -5,7 +5,7 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The measured release is **2,021,250 bytes (1.93 MiB) uncompressed**, including
+The measured release is **2,057,287 bytes (1.96 MiB) uncompressed**, including
 all twelve runtime JS modules, versus 35.8 MiB for the packed Go small module
 alone. CI enforces a 2 MiB budget for the Wasm and JS together.
 
@@ -49,7 +49,11 @@ For example, a custom provider can set `api_type: openai_responses` (or
 `openai_chatcompletions`). The supported sampling fields are `temperature`,
 `top_p`, `frequency_penalty`, `presence_penalty`, `max_tokens` and
 `parallel_tool_calls`; model values override provider defaults. The wire fields
-are protocol-specific. A `user_prompt` answer has the form
+are protocol-specific. `thinking_budget` takes an effort name (`minimal` to
+`max`) or `0`/`none`; token counts and `preserve_reasoning: true` are admitted
+only where Go ignores them. Requests match Go for every OpenAI-compatible
+provider of its catalog, headers included; see
+[model requests](parity/model-requests.md). A `user_prompt` answer has the form
 `{id: event.id, action: 'accept', content: {answer: 'blue'}}`; `decline` and
 `cancel` need no content. Use `respondToElicitation` on the originating session.
 
@@ -216,9 +220,15 @@ without advertising a switch tool; missing targets and cycles are errors.
 body to that model's transport and credentials. It retries only before visible
 output; it never retries a completed tool action to recover a model stream.
 `session_compaction` uses a foreground summary when a declared `context_window`
-and threshold warrant it. Summary requests honor the same outbound secret
+and threshold warrant it. Without a declared window the agent still runs and
+never compacts on its own. Summary requests honor the same outbound secret
 redaction as ordinary model requests, including an explicit `before_llm_call`
 redaction hook. Provider-native compaction is not supported.
+
+When the provider rejects a request because the context is too long, the
+runtime warns, summarizes and retries on the summary, as Go does. It does so
+once per consecutive failure, after any fallback models are exhausted, and
+never reruns a completed tool. See [session compaction](parity/session-compaction.md).
 
 As with the Go SDK, a model request answered with 408, 409, 429 or a 5xx
 status, or whose `fetch` is rejected, is resent up to twice to the same model
@@ -230,7 +240,7 @@ reruns a tool. An HTTP failure reads `error receiving from stream: HTTP
 diagnostic that echoes the request credential is withheld, and an ambiguous
 error envelope rejects the send.
 
-A **single, tool-free agent** can use a named `compaction_model` for text-only
+A **single agent** can use a named `compaction_model` for text-only
 history. An agent setting overrides the primary model's setting, which overrides
 its provider's default. Declare `context_window` on both models: the smaller
 window drives the compaction trigger and usage gauge, but the summarizer's own
@@ -255,9 +265,11 @@ retries on its own model, a fallback chain on its primary and a dedicated
 If the summary still fails, the browser reports the error, then drains the
 uncompressed continuation before `send` rejects. That reply is not streamed to
 the caller, but is retained for the next turn, as in Go small. A drained
-continuation never runs a tool: with tools enabled, an ordinary summary failure
-rejects the send at once, and a tool call in a drained reply is an error. A
-malformed or partial summary still fails closed.
+continuation never runs a tool: a tool call in a drained reply is stopped
+before dispatch and rejects the send. A blank summary is skipped and the
+request goes out on the full history. A summarizer that asks for a tool is told
+it is unavailable and asked again, at most four times. A truncated, refused or
+partial summary still fails closed.
 
 Picker/toolset model overrides must be transport-compatible. A single agent
 with `session_compaction: false` can combine them with `fallback.models`: the
@@ -366,6 +378,13 @@ cache toward `context_length`, not `input_tokens`.
 Go drops text that shares a non-final stream chunk with a tool-call fragment;
 this port keeps it.
 
+`abort()` cancels the run, not the conversation. As in Go, the next send still
+sees the prompt, the completed model rounds and tool results, and each
+unanswered call recorded as `The tool call was canceled by the user.` Output
+of a stream that had not finished is dropped. Nothing runs after an abort: a
+late host result or decision is ignored. `restart()` begins a fresh
+conversation. See [interrupted turns](parity/interrupted-turns.md).
+
 On Chat Completions, a later tool-name fragment replaces the earlier one rather
 than extending it, calls run in the order they first appear, and a stream error
 after `tool_calls` cancels the pending call. Input that is ambiguous about
@@ -415,13 +434,21 @@ config can never waive approval, so `autonomous` behaves like the default.
 `strict` asks for every call no `allow` rule covers, and `restricted` denies
 and hides what would need a prompt; both are stricter than Go.
 
+In a team, repeated identical calls are counted across transfers and handoffs
+as in Go, each new model round rechecks the acting agent's fallback cooldown,
+and an approval remembered inside a delegated task ends with that task.
+Structured-output answers that violate the schema get Go's diagnostics, so the
+model's retry sees the same history; see
+[structured output and attachments](parity/structured-media.md).
+
 Builtin tools keep Go's state and wording: each private `todo` declaration has
 its own list, `user_prompt` hands the model the host's action in Go's JSON
 encoding, and named time zones use Go's zone database (transitions since 2020
 and the rules after them). See [builtin results](parity/builtin-results.md).
 
 Supported builtin hooks are `add_date`, `add_environment_info`, `max_iterations`,
-`limit_large_tool_results` and `redact_secrets`. `add_date` samples the date once
+`limit_large_tool_results` and `redact_secrets`; their text, limits and
+redaction output are compared with Go in [builtin hooks](parity/builtin-hooks.md). `add_date` samples the date once
 per model round: retries and fallbacks see the same date, even across midnight.
 The next round or send samples it again. `add_environment_info` follows the
 agent that started the send through a handoff; a delegated task starts its own
