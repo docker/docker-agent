@@ -129,6 +129,45 @@ agents:
   assert.doesNotMatch(JSON.stringify(backup.requests.map(r => r.body)), /service-key/);
 });
 
+test('capped tool rounds recheck cooldown after approval; a failed continuation never repeats a write', async t => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const primary = await endpoint(t, 401, 503, text('recovered'));
+  const backup = await endpoint(t, responseCall('record', {}), 400);
+  const service = await endpoint(t, 'one receipt');
+  const yaml = `providers:
+  p: {base_url: ${primary.url}, token_key: PRIMARY}
+  b: {base_url: ${backup.url}, api_type: openai_responses, token_key: BACKUP}
+agents:
+  root:
+    model: p/main
+    fallback: {models: [b/spare], retries: -1, cooldown: 5s}
+    max_iterations: 3
+    session_compaction: false
+    toolsets: [{type: api, allow_private_ips: true, api_config: {name: record, method: POST, endpoint: '${service.url}/record'}}]`;
+  const events = [];
+  const s = await api.createSession({yaml, env:{PRIMARY:'primary-key', BACKUP:'backup-key'}}, e => {
+    events.push(e);
+    if (e.type === 'tool_confirmation') {
+      now = 5001;
+      return s.confirm({confirmationId:e.confirmationId, decision:'approve'});
+    }
+  });
+  t.after(() => s.close());
+  await assert.rejects(s.send('write'), /all models failed/);
+  assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.output), ['one receipt']);
+  assert.equal(events.filter(e => e.type === 'tool_confirmation').length, 1);
+  assert.equal(events.filter(e => e.type === 'finish').length, 0);
+  assert.equal((await s.send('recover')).message.content, 'recovered');
+  assert.deepEqual(service.requests, [{path:'/record', method:'POST', auth:undefined, body:{}}]);
+  assert.equal(primary.requests[1].body.messages.at(-1).content, 'one receipt');
+  assert.equal(backup.requests[1].body.input.at(-1).output, 'one receipt');
+  assert.equal(primary.requests[2].body.messages.filter(m => m.role === 'tool' && m.content === 'one receipt').length, 1);
+  assert.deepEqual([primary.requests.length, backup.requests.length], [3, 2]);
+  checkRoute(primary, 'main', 'primary-key');
+  checkRoute(backup, 'spare', 'backup-key', true);
+});
+
 test('a picker change belongs to the selected agent, not the delegated or resumed frame', async t => {
   const parent = await endpoint(t, call('change_model', { model: 'p/precise' }), call('transfer_task', { agent: 'helper', task: 'compute' }), text('done'));
   const child = await endpoint(t, 403, text('backup'));

@@ -128,7 +128,7 @@ test('routed iteration cap rejects incompatible settings before any request', as
   const requests = intercept(t, []);
   const fields = 'max_iterations: 1, session_compaction: false, fallback: {models: [local/backup]}';
   for (const [yaml, reason] of [
-    [config(fields.replace('max_iterations: 1', 'max_iterations: 2')), /only supports a limit of 1/],
+    [config(fields.replace('max_iterations: 1', 'max_iterations: 9')), /tool round limit/],
     [config(fields.replace('session_compaction: false, ', '')), /requires session_compaction: false/],
     [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['1']}}`), /max_iterations hook/],
     [config(`${fields}, sub_agents: [root]`), /max_iterations with local teams/],

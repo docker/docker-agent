@@ -47,6 +47,10 @@ enum Command {
         prompt: String,
         id: String,
     },
+    NextIteration {
+        session: u32,
+        now: f64,
+    },
     Prepare {
         session: u32,
         environment: Option<String>,
@@ -150,6 +154,7 @@ impl Core {
                 id,
                 now,
             } => self.session(session)?.begin(&prompt, &id, now),
+            Command::NextIteration { session, now } => self.session(session)?.next_iteration(now),
             Command::Prepare {
                 session,
                 environment,

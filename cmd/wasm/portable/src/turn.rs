@@ -1235,6 +1235,10 @@ impl Conversation {
                 self.active = None;
                 return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
             }
+            if max > 1 && self.profile.spec.models.len() > 1 {
+                // Check the cooldown at dispatch, after tool results and approvals reach the host.
+                return json!({"events":events, "nextIteration":true});
+            }
             match self.prepare_request() {
                 Ok(body) => json!({"events":events, "request":body}),
                 Err(error) => json!({"events":events,"error":error}),

@@ -944,17 +944,9 @@ fn resolve(
     if team && a.limits.max_iterations > 0 {
         return Err("agent max_iterations with local teams is not supported".into());
     }
-    if chain && a.limits.max_iterations > 0 {
-        // Go reselects the model between iterations; portable stays on the serving target.
-        if a.limits.max_iterations != 1 {
-            return Err("fallback with agent max_iterations only supports a limit of 1".into());
-        }
-        // An overflow can start compaction in Go even without a declared context window.
-        if a.session_compaction != Some(false) {
-            return Err(
-                "fallback with agent max_iterations requires session_compaction: false".into(),
-            );
-        }
+    // An overflow can start compaction in Go even without a declared context window.
+    if chain && a.limits.max_iterations > 0 && a.session_compaction != Some(false) {
+        return Err("fallback with agent max_iterations requires session_compaction: false".into());
     }
     if (chain || team) && history_or_override {
         return Err(

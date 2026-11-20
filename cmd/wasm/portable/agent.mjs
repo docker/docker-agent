@@ -122,6 +122,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         let request = call('begin', { session, prompt, id: crypto.randomUUID(), now: performance.now() });
         for (;;) {
           signal.throwIfAborted();
+          if (request.nextIteration) request = call('nextIteration', { session, now: performance.now() });
           if (request.openTools !== undefined) {
             const agent = request.openTools;
             await host.open(agent, signal, sets => call('registerTools', {session, agent, sets}));

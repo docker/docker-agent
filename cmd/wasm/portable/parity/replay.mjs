@@ -16,8 +16,8 @@ const piece = (delta, finish_reason = null) => ({ choices: [{ index: 0, delta, f
 const usage = { choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } };
 const answer = [piece({ role: 'assistant', content: 'hello ' }), piece({ content: '🌍' }, 'stop'), usage];
 function tool(name, args) { return rawTool(name, JSON.stringify(args)); }
-function rawTool(name, text) {
-  return [piece({ role: 'assistant', tool_calls: [{ id: 'call_1', index: 0, type: 'function', function: { name, arguments: text.slice(0, 4) } }] }),
+function rawTool(name, text, id = 'call_1') {
+  return [piece({ role: 'assistant', tool_calls: [{ id, index: 0, type: 'function', function: { name, arguments: text.slice(0, 4) } }] }),
     piece({ tool_calls: [{ index: 0, function: { arguments: text.slice(4) } }] }, 'tool_calls'), usage];
 }
 const config = `providers:
@@ -162,6 +162,24 @@ async function run() {
     .replace('model: local/test', 'model: local/test, max_iterations: 1, session_compaction: false, fallback: {models: [backup]}, toolsets: [{type: think}]');
   tests.fallbackIterationLimit = await replay(api, 'fallbackIterationLimit', cappedFallback,
     [[{ error: { message: 'primary unavailable' } }], tool('think', { thought: 'plan' }), answer], turns);
+  const twoRounds = cappedFallback.replace('max_iterations: 1', 'max_iterations: 2').replace('models: [backup]', 'models: [backup], retries: -1');
+  for (const pinned of [false, true]) {
+    const name = pinned ? 'cappedPinnedToolRounds' : 'cappedTransientToolRounds';
+    const fail = [{error: {message: pinned ? 'invalid model' : 'service unavailable'}}];
+    tests[name] = await replay(api, name, twoRounds, [fail, tool('think', {thought:'first'}),
+      rawTool('think', '{"thought":"second"}', 'second_call'), answer], turns);
+  }
+  tests.cappedContinuationFailover = await replay(api, 'cappedContinuationFailover', twoRounds,
+    [tool('think', {thought:'one'}), [{error:{message:'invalid model'}}], answer, answer], turns);
+  tests.cappedContinuationError = await replay(api, 'cappedContinuationError', twoRounds,
+    [tool('think', {thought:'committed'}), [{error:{message:'invalid model'}}], [{error:{message:'backup unavailable'}}], answer],
+    async ({api, options, record, trace}) => {
+      const s = await api.createSession(options, record);
+      try {
+        await s.send('first').then(() => { throw new Error('expected exhausted fallback'); }, e => trace.results.push(e.message));
+        trace.results.push(await s.send('recover'));
+      } finally { await s.close(); }
+    });
   tests.plain = await replay(api, 'plain', config, [answer, answer], turns);
   const team = config.replace('model: local/test', 'model: local/test, sub_agents: [helper], handoffs: [helper]') + '  helper: {model: local/worker, description: Helps, instruction: Be precise}\n';
   tests.transfer = await replay(api, 'transfer', team, [tool('transfer_task', { agent: 'helper', task: 'count', expected_output: 'numbers' }), answer, answer, answer], turns);
@@ -346,6 +364,13 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
     { type: 'response.function_call_arguments.delta', output_index: 0, item_id: fn.id, delta: args },
     { type: 'response.function_call_arguments.done', output_index: 0, item_id: fn.id, arguments: args },
     fin([{ ...fn, arguments: args, status: 'completed' }])];
+  const responseBackup = twoRounds.replace('providers:', `providers:\n  spare: {provider: openai, api_type: openai_responses, base_url: ${location.origin}/v1, token_key: SPARE_KEY}`)
+    .replace('backup: {provider: local', 'backup: {provider: spare');
+  tests.cappedCrossApi = await replay(api, 'cappedCrossApi', responseBackup,
+    [[{error:{message:'service unavailable'}}], responseTool, answer, answer], async args => {
+      args.options.env.SPARE_KEY = 'spare-only';
+      await turns(args);
+    }, ['/v1/chat/completions', '/v1/responses', '/v1/chat/completions', '/v1/chat/completions']);
   const switchArgs = '{"model":"careful"}';
   const change = { ...fn, name: 'change_model' };
   const switched = [{ type: 'response.output_item.added', output_index: 0, item: change },

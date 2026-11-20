@@ -272,9 +272,7 @@ impl Session {
                 return Ok(json!({"retry":true,"delay":delay}));
             }
             self.conversation.skip_summary();
-            self.resume_after_summary(now);
-            let body = self.conversation.request()?;
-            let request = self.request(body)?;
+            let request = self.next_iteration(now)?;
             return Ok(
                 json!({"request":request, "event":{"type":"error", "message":format!("run compaction agent: model failed: {reason}")}}),
             );
@@ -315,20 +313,26 @@ impl Session {
         Ok(next)
     }
 
-    fn resume_after_summary(&mut self, now: f64) {
-        // The pin may have expired during summarization; the summary never updates it.
+    fn begin_model_attempt(&mut self, now: f64) {
+        // Neither tools nor the primary summarizer extend a fallback pin.
         self.conversation.attempt = self.conversation.profile.spec.policy.begin(now);
         self.replayable = true;
     }
 
+    pub fn next_iteration(&mut self, now: f64) -> Result<Value, String> {
+        self.begin_model_attempt(now);
+        let body = self.conversation.request()?;
+        self.request(body)
+    }
+
     pub fn end(&mut self, now: f64) -> Result<Value, String> {
         if self.conversation.summarizing() && self.conversation.profile.spec.models.len() > 1 {
-            self.resume_after_summary(now);
+            self.begin_model_attempt(now);
             let next = self.conversation.end()?;
             return self.next(next);
         }
         let mut next = self.conversation.end()?;
-        self.replayable = false; // Follow-ups must not replay a completed tool or parent transfer.
+        self.replayable = false; // Only an explicit new model attempt may retry.
         self.conversation
             .attempt
             .success(&self.conversation.profile.spec.policy, now);
@@ -464,7 +468,14 @@ impl Session {
     }
 
     pub fn next(&mut self, mut next: Value) -> Result<Value, String> {
-        if let Some(body) = next.get_mut("request") {
+        if next
+            .as_object_mut()
+            .unwrap()
+            .remove("nextIteration")
+            .is_some()
+        {
+            next["request"] = json!({"nextIteration":true});
+        } else if let Some(body) = next.get_mut("request") {
             *body = self.request(body.take())?;
         }
         Ok(next)
