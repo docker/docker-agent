@@ -82,6 +82,7 @@ pub struct Conversation {
     delegated: Vec<(usize, Option<String>)>,
     messages: Vec<Value>,
     routed_seed: Option<crate::media::RoutedSeed>,
+    pub seed_reply: Option<String>,
     scratchpads: BTreeMap<String, String>,
     grants: BTreeMap<String, BTreeSet<String>>,
     pub switch: Option<Switch>,
@@ -612,6 +613,7 @@ impl Conversation {
             compaction: Compactor::default(),
             messages,
             routed_seed: None,
+            seed_reply: None,
             scratchpads: BTreeMap::new(),
             grants: Default::default(),
             active: None,
@@ -679,6 +681,7 @@ impl Conversation {
         self.messages.clear();
         self.delegated.clear();
         self.routed_seed = None;
+        self.seed_reply = None;
         self.scratchpads.clear();
         self.grants.clear();
         self.compaction.truncate(0);
@@ -1207,6 +1210,7 @@ impl Conversation {
                 if blank {
                     self.compaction.truncate(self.messages.len());
                 } else {
+                    self.seed_reply = None;
                     self.messages.push(message);
                 }
                 if interrupted {
@@ -1219,6 +1223,7 @@ impl Conversation {
                     }
                     turn.tool_model_source = None;
                     if let Some(error) = structured_output::stop_error(model.name(), reminders) {
+                        self.seed_reply = None;
                         self.messages
                             .push(json!({"role":"assistant", "content":error}));
                         self.active = None;
@@ -1265,6 +1270,9 @@ impl Conversation {
     // Go answers with the last assistant message it kept, trimmed: after a blank reply that
     // is an earlier one, possibly a delegate's.
     pub fn last_reply(&self) -> Option<String> {
+        if let Some(reply) = &self.seed_reply {
+            return Some(reply.clone());
+        }
         for (i, m) in self.messages.iter().enumerate().rev() {
             if let Some((_, Some(reply))) = self.delegated.iter().rev().find(|(at, _)| *at == i) {
                 return Some(reply.clone());
@@ -1273,7 +1281,7 @@ impl Conversation {
                 return Some(m["content"].as_str().unwrap_or_default().trim().into());
             }
         }
-        self.routed_seed.as_ref().and_then(|seed| seed.last_reply())
+        None
     }
 
     pub fn hand_off(&mut self, profile: Rc<Profile>) {
@@ -1373,6 +1381,7 @@ impl Conversation {
             }
             wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
         }
+        self.seed_reply = None;
         message["tool_calls"] = wire_calls.into();
         self.messages.push(message);
         let turn = self.active.as_mut().expect("active tool round");
@@ -1997,6 +2006,7 @@ impl Conversation {
             );
             events.push(json!({"type":"delta","content":text,"message_id":t.message_id}));
             let message = json!({"role":"assistant","content":text});
+            self.seed_reply = None;
             self.messages.push(message.clone());
             let mut result = json!({"message":message});
             if t.input + t.output > 0 {

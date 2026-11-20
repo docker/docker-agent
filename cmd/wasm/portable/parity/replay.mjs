@@ -1760,6 +1760,55 @@ agents:`)
   ]) tests[name] = await replay(api, name, yaml, [tool('named_echo', {text: 'fixture'}), answer, answer], async ctx => {
     await turns({...ctx, options: {...ctx.options, autoApprove: true}});
   }, '/v1/chat/completions', echoService(payload));
+  const boundedReport = {type: 'object', properties: {row: {$ref: '#/$defs/row'}}, required: ['row'], $defs: {
+    row: {type: 'object', additionalProperties: false, properties: {
+      tags: {type: 'array', minItems: 1, maxItems: 2, items: {type: 'string', enum: ['ok', 'yes']}},
+      label: {type: 'string', minLength: 2, maxLength: 3}, count: {type: 'integer', minimum: -2, maximum: 3},
+    }},
+  }};
+  for (const [protocol, suffix, path, plain, empty] of [[chat, 'Chat', chatPath, answer, silent], [resp, 'Responses', responsesPath, text, [fin([])]]]) {
+    const onWire = yaml => yaml.replace('provider: openai,', `provider: openai, api_type: ${protocol},`);
+    const outputCall = (args, id) => wireCall(protocol, output, args, id);
+    const valid = ' { "row" : {} } ', finish = outputCall(valid, 'ok'), next = outputCall(valid, 'next');
+    const yaml = onWire(withSchema(thinks, {mode: 'tool', schema: boundedReport, strict: true}));
+    for (const [label, attempts] of [
+      ['Syntax', ['{oops}', '{} true']], ['Types', ['null', '{"row":{"count":0.5}}', '{"row":{"tags":[null]}}']],
+      ['Strings', [{label: '🌍'}, {label: 'a\n\tb'}, {tags: ['other']}, {label: secret}]],
+      ['Bounds', [{count: -3}, {count: 4}, {tags: []}, {tags: ['ok', 'ok', 'yes']}]],
+      ['Order', [{extra: true, tags: [false, 'ok', 'ok']}, {'new\u0007': true}]],
+    ]) {
+      const name = 'outputReject' + label + suffix;
+      const failures = attempts.map((v, i) => outputCall(typeof v === 'string' ? v : JSON.stringify({row: v}), `bad${i}`));
+      tests[name] = await replay(api, name, yaml, [...failures, finish, next], turns, path);
+    }
+    const duplicate = protocol === chat ? batch([output, valid], [output, valid]) :
+      [...['a', 'b'].flatMap((id, output_index) => responseCall({...fn, id, call_id: id, name: output}, valid)
+        .slice(0, -1).map(e => ({...e, output_index}))), fin([])];
+    const name = 'outputExclusive' + suffix;
+    tests[name] = await replay(api, name, yaml, [duplicate, empty, [plain[0], ...finish], next], turns, path);
+    for (const [label, model, strict] of [['Native', 'test', false], ['Claude', 'claude-test', true], ['Reasoner', 'o3-mini', true]]) {
+      const name = 'structuredFeatures' + label + suffix;
+      const schema = {...boundedReport, properties: {...boundedReport.properties, mode: choices.properties.mode,
+        flag: {type: ['boolean', 'null']}, note: {type: 'string', description: 'Status <&>'}}, additionalProperties: false};
+      tests[name] = await replay(api, name, onWire(withSchema(thinks, {schema, strict})).replace('local/test', `local/${model}`),
+        [thought(protocol, 'plan'), plain, plain], turns, path);
+    }
+    const prior = {role: 'assistant', content: ' original caption ', multi_content: [part('on the wire'), image]};
+    const folded = doc('Key.txt', 'TEXT/plain', {inline_text: 'Keep <p>markup</p>. </DOCUMENT-KEY-TXT-TEXT-PLAIN x> End.'});
+    const inline = {...remote, image_url: {url: 'data:image/gif;base64,' + image.document.source.inline_data, detail: 'high'}};
+    const describe = {role: 'user', content: 'describe'};
+    for (const [label, setup, history, replies] of [
+      ['SeedCaption', mediaConfig, [prior, {role: 'assistant', content: '', usage: {input_tokens: 8}}], [empty]],
+      ['SeedStripped', config, [prior, {role: 'assistant', multi_content: [image]}], [empty]],
+      ['RepeatedParts', mediaConfig.replace('model: capable,', 'model: capable, toolsets: [{type: think}],'),
+        [{role: 'user', multi_content: [remote, folded, inline, folded, remote, pdf, part('end')]}, prior], [thought(protocol, 'plan'), plain]],
+    ]) {
+      const name = 'media' + label + suffix;
+      tests[name] = await replay(api, name, onWire(setup), replies, async ({api, options, record, trace}) => {
+        trace.results.push(await api.chat({...options, messages: [...history, describe]}, record));
+      }, path);
+    }
+  }
   // Calls the API refuses carry Go's wording.
   tests.refusedCalls = await replay(api, 'refusedCalls', config, [answer, answer], async ({api, options, record, trace}) => {
     const refused = promise => promise.then(() => 'accepted', e => e.message);
