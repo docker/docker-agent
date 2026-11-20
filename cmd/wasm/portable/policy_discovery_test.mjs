@@ -117,9 +117,27 @@ test('deferred API, allow-list, readonly and deny filters precede search, activa
 });
 
 test('guessing a deferred tool in its activation step cannot run it', async t => {
-  const requests = replay(t, [[call('add_tool',{name:'save'}),call('save',{})]]);
-  await assert.rejects(api.chat({yaml:config([post('save','unused',{defer:true})]), messages, autoApprove:true}), /unsupported tool name/);
+  const requests = replay(t, [[call('add_tool',{name:'save'}),call('save',{})], null]);
+  const events = [];
+  await api.chat({yaml:config([post('save','unused',{defer:true})]), messages, autoApprove:true}, e => { events.push(e); });
   assert.deepEqual(names(requests[0]), ['search_tool','add_tool']);
+  assert.equal(lastOutput(requests[1]), "Tool 'save' is not available. You can only use the tools provided to you.");
+  assert.deepEqual(names(requests[1]), ['search_tool','add_tool','save']);
+  assert.deepEqual(events.filter(e => e.type === 'tool_call').map(e => e.name), ['add_tool']);
+  assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.is_error), [false, true]);
+});
+
+test('a hallucinated tool gets a correctable error without running, prompting or failing the send', async t => {
+  const requests = replay(t, [[call('think',{thought:'kept'}), call('shell',{cmd:'rm -rf /'})], [call('shell',{cmd:'again'})], null]);
+  const events = [];
+  const yaml = config([{type:'think'}], {permissions:{ask:['shell'], deny:['shell']}});
+  const result = await api.chat({yaml, messages}, e => { events.push(e); });
+  assert.equal(result.message.content, 'done');
+  const unavailable = "Tool 'shell' is not available. You can only use the tools provided to you.";
+  assert.deepEqual(requests[1].messages.slice(-2).map(m => m.content), ['Thoughts:\nkept', unavailable]);
+  assert.equal(lastOutput(requests[2]), unavailable);
+  assert.deepEqual(events.filter(e => e.type === 'tool_confirmation' || e.type === 'tool_call').map(e => e.name), ['think']);
+  assert.equal(events.filter(e => e.type === 'tool_call_delta' && e.name === 'shell').length, 2);
 });
 
 test('MCP read-only claims do not authorize a dynamic call or make it pass readonly discovery', {timeout:5000}, async t => {
@@ -188,13 +206,16 @@ test('unsupported policy and filter shapes fail before opening any transport', a
 });
 
 test('a guessed filtered or unconditionally denied builtin cannot run, even under autoApprove', async t => {
-  const requests = replay(t, [[call('create_todo',{description:'no'})], [call('create_todo',{description:'no'})]]);
+  const requests = replay(t, [[call('create_todo',{description:'no'})], [call('list_todos',{})], null, [call('create_todo',{description:'no'})], null]);
   const events = [];
   for (const yaml of [config([{type:'todo',tools:['list_todos']}]), config([{type:'todo'}],{permissions:{deny:['create_todo']}})]) {
-    await assert.rejects(api.chat({yaml,messages,autoApprove:true},e => events.push(e)),/(?:unsupported|invalid) tool name/);
+    await api.chat({yaml,messages,autoApprove:true},e => { events.push(e); });
   }
   assert.ok(requests.every(body => !names(body).includes('create_todo')));
-  assert.ok(events.every(e => !['tool_call','tool_confirmation','tool_result'].includes(e.type)));
+  assert.ok(events.every(e => !['tool_call','tool_confirmation'].includes(e.type) || e.name === 'list_todos'));
+  const unavailable = "Tool 'create_todo' is not available. You can only use the tools provided to you.";
+  assert.deepEqual(events.filter(e => e.type === 'tool_result' && e.is_error).map(e => e.output), [unavailable, unavailable]);
+  assert.deepEqual(JSON.parse(lastOutput(requests[2])).todos, []);
 });
 
 test('same-name MCP tools keep their profile’s discovery, grants, transport and credentials across switches', {timeout:5000}, async t => {

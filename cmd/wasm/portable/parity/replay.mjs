@@ -921,6 +921,38 @@ agents:`)
     ['responsesRefusedReply', [incomplete('content_filter'), text]],
     ['responsesPaddedReply', [[{...text[0], delta: ' hi there \n'}, fin([])], text]],
   ]) tests[name] = await replay(api, name, plainResponses, replies, turns, '/v1/responses');
+  // A hallucinated tool gets an error the model can correct; the send goes on.
+  const twoTools = local(['think', 'calculator']);
+  const shell = args => tool('shell', args);
+  const handoffTeam = config.replace('model: local/test', 'model: local/test, toolsets: [{type: think}], handoffs: [helper]')
+    + '  helper: {model: local/worker, description: Helps, instruction: Be precise}\n';
+  for (const [name, yaml, replies, drive = turns] of [
+    ['unavailableTool', twoTools, [shell({cmd: 'x'}), answer, answer]],
+    ['unavailableToolRepeated', twoTools.replace('model: local/test', 'max_consecutive_tool_calls: 2, model: local/test'),
+      [shell({cmd: 'x'}), shell({cmd: 'x'}), answer], rejectsThenRecovers],
+    ['unavailableToolSecret', twoTools, [shell({token: secret}), answer, answer]],
+    ['unavailableToolCapped', twoTools.replace('model: local/test', 'max_tool_result_tokens: 4, model: local/test'), [shell({}), answer, answer]],
+    ['deferredToolGuess', deferred, [[piece({role: 'assistant', tool_calls: [
+      {id: 'add', index: 0, type: 'function', function: {name: 'add_tool', arguments: '{"name":"think"}'}},
+      {id: 'early', index: 1, type: 'function', function: {name: 'think', arguments: '{"thought":"early"}'}}]}, 'tool_calls'), usage],
+      tool('think', {thought: 'now'}), answer, answer]],
+    ['handoffToolHallucination', handoffTeam, [pass(), tool('think', {thought: 'not mine'}), answer, answer]],
+    ['handoffHallucinatedHandoff', handoffTeam, [pass(), pass('root'), answer, answer]],
+  ]) tests[name] = await replay(api, name, yaml, replies, drive);
+  tests.unavailableToolResponses = await replay(api, 'unavailableToolResponses',
+    plainResponses.replace('model: local/test', 'toolsets: [{type: think}], model: local/test'),
+    [responseCall({...fn, name: 'shell'}, '{"cmd":"x"}'), text, text], turns, '/v1/responses');
+  // Go finishes a turn without tool calls however its stream stopped.
+  const open = content => piece({role: 'assistant', content});
+  for (const [name, replies] of [
+    ['streamWithoutFinish', [[open('cut off'), usage], answer]],
+    ['streamWithoutFinishOrUsage', [[open('cut off')], answer]],
+    ['blankStreamWithoutFinish', [[open(''), usage], answer]],
+    ['blankStreamWithoutFinishOrUsage', [[open('')], answer]],
+    ['whitespaceStreamWithoutFinishOrUsage', [[open('  ')], answer]],
+    ['toolFinishWithoutCalls', [says({content: 'odd'}, 'tool_calls'), says({content: ''}, 'tool_calls')]],
+    ['unknownFinishReason', [says({content: 'odd'}, 'eos'), says({content: ''}, 'eos')]],
+  ]) tests[name] = await replay(api, name, config, replies, turns);
   const cachedUsage = {choices: [], usage: {prompt_tokens: 100, completion_tokens: 7, total_tokens: 107,
     prompt_tokens_details: {cached_tokens: 60}, completion_tokens_details: {reasoning_tokens: 3}}};
   tests.cachedPromptUsage = await replay(api, 'cachedPromptUsage', thinks,

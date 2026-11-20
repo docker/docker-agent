@@ -130,6 +130,8 @@ impl Turn {
 struct Invocation {
     call: Call,
     index: usize,
+    // Whether the tool was advertised for this step, before any activation in the same batch.
+    available: bool,
 }
 
 struct Reply {
@@ -809,7 +811,7 @@ impl Conversation {
             step.finish = Some("stop".into());
         }
         let blank = step.text.trim().is_empty();
-        if step.finish.as_deref() == Some("stop") && step.calls.is_empty() {
+        if step.calls.is_empty() {
             let refused = matches!(reason.as_deref(), Some("content_filter" | "refusal"));
             if refused || blank {
                 let target = &self.profile.spec.models[self.attempt.current];
@@ -822,7 +824,13 @@ impl Conversation {
                     ),
                     None => target.id.clone(),
                 };
-                let reason = reason.as_deref().unwrap_or("stop");
+                let reason = match reason.as_deref() {
+                    // Go infers a reason when the stream gave none it can use.
+                    Some("tool_calls") => "null",
+                    Some(reason) => reason,
+                    None if step.usage.is_some() || !step.text.is_empty() => "stop",
+                    None => "null",
+                };
                 let message = if refused {
                     format!("Model {model} refused to respond (stop reason: refusal).")
                 } else if !step.reasoning.trim().is_empty() {
@@ -867,8 +875,8 @@ impl Conversation {
             message["reasoning_content"] = Value::String(step.reasoning);
         }
         match step.finish.as_deref() {
-            None => Err("incomplete stream: missing finish_reason".into()),
-            Some("stop") if step.calls.is_empty() => {
+            // Go ends a turn without tool calls however its stream stopped.
+            _ if step.calls.is_empty() => {
                 turn.after_tools = false;
                 // Go keeps a blank reply only as a usage record, never as history.
                 if blank {
@@ -899,7 +907,7 @@ impl Conversation {
                 }
                 Ok(self.finish(events))
             }
-            Some("stop" | "tool_calls") if !step.calls.is_empty() => {
+            Some("stop" | "tool_calls") => {
                 if turn.tool_rounds >= MAX_TOOL_ROUNDS {
                     return Err("tool iteration limit reached".into());
                 }
@@ -908,6 +916,7 @@ impl Conversation {
                 turn.message_id = format!("{}:{}", turn.id, turn.tool_rounds);
                 self.execute_calls(step.calls, message, events)
             }
+            None => Err("incomplete stream: missing finish_reason".into()),
             Some(reason) => Err(format!(
                 "incomplete or unsupported model response (finish_reason: {reason})"
             )),
@@ -967,6 +976,7 @@ impl Conversation {
     ) -> Result<Value, String> {
         let mut model_source = None;
         let mut ids = BTreeSet::new();
+        let mut unavailable = BTreeSet::new();
         let mut wire_calls = Vec::with_capacity(calls.len());
         if calls.len() != 1
             && calls
@@ -980,13 +990,13 @@ impl Conversation {
             if *key != index as u64 || call.id.is_empty() || !ids.insert(&call.id) {
                 return Err("missing or duplicate tool call ID or index".into());
             }
-            let catalog = self.profile.catalog.borrow();
-            let tool = catalog
-                .tools
-                .get(&call.name)
-                .ok_or("missing or invalid tool name")?;
-            // Go routes on offered calls in model order, including calls denied during dispatch.
-            model_source = model_source.or(tool.target.model_source);
+            match self.profile.catalog.borrow().tools.get(&call.name) {
+                // Go routes on offered calls in model order, including calls denied during dispatch.
+                Some(tool) => model_source = model_source.or(tool.target.model_source),
+                None => {
+                    unavailable.insert(call.name.clone());
+                }
+            }
             if call.name == structured_output::NAME
                 && self.profile.spec.output_tool.is_some()
                 && call.arguments.len() > structured_output::MAX_ARGS
@@ -1054,7 +1064,12 @@ impl Conversation {
             let index = self.messages.len();
             self.messages
                 .push(json!({"role":"tool", "tool_call_id":call.id}));
-            turn.queue.push_back(Invocation { call, index });
+            let available = !unavailable.contains(&call.name);
+            turn.queue.push_back(Invocation {
+                call,
+                index,
+                available,
+            });
         }
         self.drain_calls(&mut events)?;
         Ok(self.continue_turn(events))
@@ -1062,6 +1077,15 @@ impl Conversation {
 
     fn drain_calls(&mut self, events: &mut Vec<Value>) -> Result<(), String> {
         while let Some(mut op) = self.active.as_mut().unwrap().queue.pop_front() {
+            if !op.available {
+                // Go answers a hallucinated tool with an error the model can correct.
+                let reason = format!(
+                    "Tool '{}' is not available. You can only use the tools provided to you.",
+                    op.call.name
+                );
+                self.reject(op, reason, events)?;
+                continue;
+            }
             if self
                 .profile
                 .spec
@@ -1523,9 +1547,6 @@ impl Step {
                 .as_array()
                 .ok_or("expected tool_calls array")?
             {
-                if tools.is_empty() {
-                    return Err("tool calls are disabled".into());
-                }
                 let index = fragment["index"]
                     .as_u64()
                     .filter(|n| *n < MAX_PARALLEL_CALLS)
@@ -1578,16 +1599,13 @@ impl Call {
         }
         if let Some(name) = string(f, "name")? {
             self.name.push_str(name);
-            if !tools.keys().any(|name| name.starts_with(&self.name)) {
-                return Err("unsupported tool name".into());
-            }
         }
         let args = string(f, "arguments")?.unwrap_or_default();
         self.arguments.push_str(args);
-        if self.id.is_empty()
-            || !tools.contains_key(self.name.as_str())
-            || (self.announced && args.is_empty())
-        {
+        // A name that can no longer grow into a tool is complete: Go announces it too.
+        let complete = tools.contains_key(self.name.as_str())
+            || !tools.keys().any(|name| name.starts_with(&self.name));
+        if self.id.is_empty() || !complete || (self.announced && args.is_empty()) {
             return Ok(None);
         }
         // Arguments can arrive before the name or ID. Flush them once a card can be identified.
@@ -1819,8 +1837,10 @@ mod tests {
     #[test]
     fn rejects_broken_streams_and_rolls_back() {
         for chunks in [
-            vec![chunk(json!({"content":"partial"}), None)],
-            vec![chunk(json!({}), Some("tool_calls"))],
+            vec![chunk(
+                json!({"tool_calls":[call(0, "a", "think", r#"{"thought":"x"}"#)]}),
+                None,
+            )],
             vec![
                 chunk(json!({}), Some("stop")),
                 chunk(json!({"content":"late"}), None),
@@ -1848,8 +1868,6 @@ mod tests {
     fn rejects_malformed_or_unavailable_tools_without_retaining_partial_results() {
         let args = r#"{"thought":"ok"}"#;
         for invalid in [
-            call(1, "b", "shell", args),
-            call(1, "b", "th", args),
             call(1, "a", "think", args),
             call(1, "", "think", args),
             call(1, "b", "think", "{}"),
@@ -1871,14 +1889,51 @@ mod tests {
                 .is_err());
             assert!(c.scratchpads.is_empty());
         }
+        // An agent without tools answers a hallucinated call instead of failing the send.
         let mut c = conversation(&[]);
         c.begin("go", "go").unwrap();
-        assert!(c
-            .chunk(chunk(
-                json!({"tool_calls":[call(0,"a","think",args)]}),
-                Some("tool_calls")
-            ))
-            .is_err());
+        c.chunk(chunk(
+            json!({"tool_calls":[call(0,"a","think",args)]}),
+            Some("tool_calls"),
+        ))
+        .unwrap();
+        let next = c.end().unwrap();
+        assert_eq!(next["events"][0]["is_error"], true);
+        assert!(next["request"]["tools"].is_null());
+        assert!(c.scratchpads.is_empty());
+    }
+
+    #[test]
+    fn unavailable_tools_get_a_correctable_error_and_odd_endings_finish_the_turn() {
+        let mut c = conversation(&["think"]);
+        c.begin("go", "go").unwrap();
+        let batch = json!({"tool_calls":[
+            call(0, "a", "shell", "{}"), call(1, "b", "think", r#"{"thought":"ok"}"#)
+        ]});
+        let events = c.chunk(chunk(batch, Some("tool_calls"))).unwrap();
+        assert_eq!(events[0]["name"], "shell");
+        let next = c.end().unwrap();
+        let results: Vec<_> = next["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "tool_result")
+            .collect();
+        assert_eq!(
+            results[0]["output"],
+            "Tool 'shell' is not available. You can only use the tools provided to you."
+        );
+        assert_eq!(results[0]["is_error"], true);
+        assert_eq!(results[1]["output"], "Thoughts:\nok");
+        // Go accepts a stream that stops without a finish reason, or names one it cannot honor.
+        c.chunk(chunk(json!({"content":"cut off"}), None)).unwrap();
+        assert_eq!(c.end().unwrap()["result"]["message"]["content"], "cut off");
+        c.begin("again", "next").unwrap();
+        c.chunk(chunk(json!({}), Some("tool_calls"))).unwrap();
+        let next = c.end().unwrap();
+        let warning = next["events"][0]["message"].as_str().unwrap();
+        assert!(warning.contains("returned an empty response (stop reason: null)"));
+        assert_eq!(next["result"]["message"]["content"], "cut off");
     }
 
     #[test]
@@ -1919,8 +1974,6 @@ mod tests {
         let mut c = conversation(&["user_prompt"]);
         let saved = c.messages.clone();
         for invalid in [
-            call(1, "b", "think", r#"{"thought":"no"}"#),
-            call(1, "b", "user_", args),
             call(1, "a", "user_prompt", args),
             call(1, "b", "user_prompt", "{}"),
             call(1, "b", "user_prompt", r#"["question"]"#),

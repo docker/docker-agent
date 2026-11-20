@@ -114,7 +114,8 @@ test('rejects missing credentials and unsupported capabilities before fetch', as
 });
 
 test('a broken stream rejects, emits an error, and releases the turn', async t => {
-  const { options } = await mockModel(t, (_, n) => n === 1 ? [chunk({ content: 'partial' })] : [chunk({ content: 'ok' }, 'stop')]);
+  const cut = { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'think', arguments: '{"thought":"x"}' } }] };
+  const { options } = await mockModel(t, (_, n) => n === 1 ? [chunk(cut)] : [chunk({ content: 'ok' }, 'stop')]);
   const events = [];
   const s = await api.createSession(options, e => events.push(e));
   t.after(() => s.close());
