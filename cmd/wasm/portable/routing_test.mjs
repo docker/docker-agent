@@ -210,6 +210,32 @@ agents:
   assert.deepEqual(child.requests.map(r => [r.body.model, r.auth, r.body.tools]), [['start', 'Bearer child-key', undefined], ['alternate', 'Bearer child-key', undefined]]);
 });
 
+test('a tool override expires while pinned; the selected primary returns when cooldown ends', async t => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const primary = await endpoint(t, call('change_model', {model: 'p/picked'}), call('think', {thought: 'route'}), 403, text('restored'));
+  const backup = await endpoint(t, responseText('rescued'), responseText('pinned'));
+  const yaml = `providers:
+  p: {base_url: ${primary.url}, token_key: PRIMARY}
+  b: {base_url: ${backup.url}, api_type: openai_responses, token_key: BACKUP}
+agents: {root: {model: p/main, session_compaction: false, fallback: {models: [b/spare], cooldown: 5s},
+  toolsets: [{type: model_picker, models: [p/picked]}, {type: think, model: p/fast}]}}`;
+  const events = [];
+  const s = await api.createSession({yaml, env: {PRIMARY: 'primary-key', BACKUP: 'backup-key'}}, e => events.push(e));
+  t.after(() => s.close());
+  assert.equal((await s.send('work')).message.content, 'rescued');
+  now = 4999;
+  assert.equal((await s.send('again')).message.content, 'pinned');
+  now = 5000;
+  assert.equal((await s.send('after cooldown')).message.content, 'restored');
+  assert.deepEqual(primary.requests.map(r => [r.body.model, r.auth]),
+    ['main', 'picked', 'fast', 'picked'].map(model => [model, 'Bearer primary-key']));
+  checkRoute(backup, 'spare', 'backup-key', true);
+  assert.deepEqual(events.filter(e => e.type === 'fallback'), [{type: 'fallback', from: 'p/fast', to: 'b/spare',
+    attempt: 1, reason: 'error receiving from stream: HTTP 403: Forbidden'}]);
+  assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.name), ['change_model', 'think']);
+});
+
 test('unsafe combinations on any reachable agent fail at open, before model or MCP discovery', async t => {
   const trap = await endpoint(t);
   const base = `providers: {p: {base_url: '${trap.url}', token_key: KEY}}

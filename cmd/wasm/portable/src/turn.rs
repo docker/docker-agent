@@ -2,7 +2,10 @@ use crate::compaction::{Compactor, Prefix, Undo, Usage};
 use crate::discovery::{self, Discovery, Tool};
 use crate::permission::{self, Verdict};
 use crate::structured_output;
-use crate::{config::Selected, team::Switch};
+use crate::{
+    config::{RequestModel, Selected},
+    team::Switch,
+};
 use indexmap::IndexMap;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Map, Value};
@@ -181,10 +184,15 @@ impl Profile {
         })
     }
 
-    fn override_params(&self, source: Option<usize>) -> Option<&Map<String, Value>> {
+    fn attempt_model(&self, index: usize, source: Option<usize>) -> &RequestModel {
+        let configured = &self.spec.models[index].request;
+        if index != 0 {
+            return configured;
+        }
         source
             .and_then(|i| self.spec.tool_models.get(&self.spec.toolsets[i].model))
-            .or_else(|| self.spec.picker.params())
+            .or_else(|| self.spec.picker.selected())
+            .unwrap_or(configured)
     }
 
     pub fn clear_grants(&self) {
@@ -535,6 +543,11 @@ impl Conversation {
         }
     }
 
+    pub fn attempt_model(&self, index: usize) -> &RequestModel {
+        let turn = self.active.as_ref().expect("active model attempt");
+        self.profile.attempt_model(index, turn.tool_model_source)
+    }
+
     fn target(&self) -> &crate::config::Target {
         &self.profile.spec.models[self.attempt.current]
     }
@@ -556,16 +569,16 @@ impl Conversation {
         // The summary never inherits a serving fallback's parameters.
         let (_, summary) = self.profile.spec.summary_target();
         self.compaction.policy = self.profile.spec.models[0].compaction;
-        let params = self
+        let model = self
             .profile
             .spec
             .picker
-            .params()
-            .unwrap_or(&summary.model_params);
+            .selected()
+            .unwrap_or(&summary.request);
         let turn = self.active.as_mut().expect("active turn");
         if let Some((prefix, mut request)) = self.compaction.plan(
             &self.messages,
-            params,
+            &model.model_params,
             summary.compaction,
             summary.merge_messages,
             turn.summarizing.as_ref(),
@@ -656,13 +669,8 @@ impl Conversation {
         self.frame
             .acting(&self.profile.spec.limits)
             .project(&mut messages, &self.profile.spec.hooks)?;
-        let override_params = self.profile.override_params(turn.tool_model_source);
-        let target = self.target();
-        if let Some(instruction) = target
-            .schema_instruction
-            .as_ref()
-            .filter(|_| override_params.is_none())
-        {
+        let model = self.attempt_model(self.attempt.current);
+        if let Some(instruction) = &model.schema_instruction {
             // Go normalizes blank messages before selecting the leading role.
             messages.retain(|m| {
                 m["role"] == "tool"
@@ -685,7 +693,7 @@ impl Conversation {
                 messages.insert(0, json!({"role":"system", "content":instruction}));
             }
         }
-        let mut body = Value::Object(override_params.unwrap_or(&target.model_params).clone());
+        let mut body = Value::Object(model.model_params.clone());
         body["messages"] = messages.into();
         body["stream"] = true.into();
         body["stream_options"] = json!({"include_usage": true});
@@ -810,20 +818,14 @@ impl Conversation {
             }
             step.finish = Some("stop".into());
         }
+        let model = self
+            .profile
+            .attempt_model(self.attempt.current, turn.tool_model_source);
         let blank = step.text.trim().is_empty();
         if step.calls.is_empty() {
             let refused = matches!(reason.as_deref(), Some("content_filter" | "refusal"));
             if refused || blank {
-                let target = &self.profile.spec.models[self.attempt.current];
-                let model = match self.profile.override_params(turn.tool_model_source) {
-                    // An override stays on the primary's provider.
-                    Some(params) => format!(
-                        "{}/{}",
-                        target.id.split('/').next().unwrap_or_default(),
-                        params["model"].as_str().expect("configured model")
-                    ),
-                    None => target.id.clone(),
-                };
+                let model = &model.id;
                 let reason = match reason.as_deref() {
                     // Go infers a reason when the stream gave none it can use.
                     Some("tool_calls") => "null",
@@ -845,16 +847,10 @@ impl Conversation {
             }
         }
         if let Some(usage) = step.usage {
-            let target = &self.profile.spec.models[self.attempt.current];
-            // Overrides share the ordinary provider; routed calls retain the full provider/model ID.
             let model = if self.profile.spec.routed_summary() {
-                &target.id
+                &model.id
             } else {
-                self.profile
-                    .override_params(turn.tool_model_source)
-                    .unwrap_or(&target.model_params)["model"]
-                    .as_str()
-                    .expect("configured model")
+                model.name()
             };
             self.compaction.record(self.messages.len(), model, usage);
             let input = u64::from(usage.fresh_input());
@@ -889,12 +885,8 @@ impl Conversation {
                     if turn.draining {
                         return Err("compaction: cannot drain tool-mode structured output".into());
                     }
-                    let source = turn.tool_model_source.take();
-                    let model = self
-                        .profile
-                        .override_params(source)
-                        .map_or_else(|| self.target().model(), |p| p["model"].as_str().unwrap());
-                    if let Some(error) = structured_output::stop_error(model, reminders) {
+                    turn.tool_model_source = None;
+                    if let Some(error) = structured_output::stop_error(model.name(), reminders) {
                         self.messages
                             .push(json!({"role":"assistant", "content":error}));
                         self.active = None;

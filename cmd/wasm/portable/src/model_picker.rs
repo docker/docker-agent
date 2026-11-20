@@ -1,12 +1,13 @@
 //! Picker choices change request parameters, not the current agent's transport.
+use crate::config::RequestModel;
 use crate::go_json::{read_string, scalar};
 use indexmap::IndexMap;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::cell::Cell;
 
 #[derive(Default)]
 pub struct Picker {
-    pub choices: IndexMap<String, Map<String, Value>>,
+    pub choices: IndexMap<String, RequestModel>,
     pub active: Cell<Option<usize>>,
 }
 
@@ -34,7 +35,7 @@ impl Picker {
         (instructions, tools)
     }
 
-    pub fn params(&self) -> Option<&Map<String, Value>> {
+    pub fn selected(&self) -> Option<&RequestModel> {
         self.choices.get_index(self.active.get()?).map(|(_, v)| v)
     }
 

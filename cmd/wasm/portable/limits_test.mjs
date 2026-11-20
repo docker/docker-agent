@@ -205,14 +205,27 @@ test('unsafe projections and model routes reject before any request', async t =>
     config('max_iterations: 9'), config('max_iterations: -1'), config('max_tool_result_tokens: -2'), config('num_history_items: -1'),
     config('toolsets: [{type: session_context}], max_old_tool_call_tokens: 1'),
     config('max_iterations: 1, toolsets: [{type: think, model: local/cheap}], sub_agents: [root]'),
-    config('toolsets: [{type: think, model: local/cheap}], fallback: {models: [local/other]}'),
     config('max_tool_result_tokens: 4', 'models: {local/test: {provider: local, model: test, context_window: 2048}}'),
     ...['missing', 'openai/test', 'local/gpt-5', 'local/a,local/b'].map(model => config(`toolsets: [{type: think, model: '${model}'}]`)),
     ...['base_url: https://elsewhere.invalid', 'token_key: OTHER', 'context_window: 2048'].map(extra => config('toolsets: [{type: think, model: cheap}]', `models: {cheap: {provider: local, model: cheap, ${extra}}}`)),
   ]) await assert.rejects(api.createSession(opts(yaml)));
+  const routed = 'toolsets: [{type: think, model: local/cheap}], fallback: {models: [local/other]}';
+  await assert.rejects(api.createSession(opts(config(routed))), /requires session_compaction: false/);
+  await (await api.createSession(opts(config(`session_compaction: false, ${routed}`)))).close();
   const token = 'dckr_pat_' + 'A'.repeat(27);
   await assert.rejects(api.chat({...opts(config('max_tool_result_tokens: 4')), messages: seed(token)}), /cannot safely truncate/);
   assert.equal(requests.length, 0);
+});
+
+test('bounded tool overrides keep the trimmed request when switching to a fallback', async t => {
+  const requests = intercept(t, [[call('think', {thought: 'route'})], 403, null, null]);
+  const yaml = config('num_history_items: 3, max_iterations: 2, session_compaction: false, fallback: {models: [local/backup]}, toolsets: [{type: think, model: local/cheap}]');
+  const s = await api.createSession(opts(yaml));
+  t.after(() => s.close());
+  await s.send('first');
+  await s.send('again');
+  assert.deepEqual(requests.map(r => r.model), ['test', 'cheap', 'backup', 'backup']);
+  assert.deepEqual(requests[1].messages, requests[2].messages);
 });
 
 test('fallback history limits reject incompatible configurations and seeds before I/O', async t => {
@@ -224,7 +237,7 @@ test('fallback history limits reject incompatible configurations and seeds befor
     [config(fields.replace('false', 'true'), 'models: {local/test: {provider: local, model: test, context_window: 4096}}'), /require session_compaction: false/],
     [config(`${fields}, handoffs: [root]`), /fallback chain within local teams/],
     [config(`${fields}, toolsets: [{type: session_context}]`), /session_context/],
-    [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],
+    [config(`${fields}, toolsets: [{type: think, model: local/gpt-5}]`), /toolset cannot change/],
     [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
     [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['9']}}`), /portable tool round limit/],
   ]) await assert.rejects(api.createSession(opts(yaml)), reason);
@@ -290,7 +303,7 @@ test('routed iteration cap rejects incompatible settings before any request', as
     [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['9']}}`), /portable tool round limit/],
     [config(`${fields.replace('max_iterations: 1, ', '')}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
     [config(`${fields}, sub_agents: [root]`), /fallback chain within local teams/],
-    [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],
+    [config(`${fields}, toolsets: [{type: think, model: local/gpt-5}]`), /toolset cannot change/],
     [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
   ]) await assert.rejects(api.createSession(opts(yaml)), reason);
   assert.equal(requests.length, 0);

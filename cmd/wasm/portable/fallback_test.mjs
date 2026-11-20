@@ -172,6 +172,23 @@ test('validates every fallback target before issuing a request', async t => {
   assert.equal(requests.length, 0);
 });
 
+test('model selection with fallback validates the choices and seed before I/O', async t => {
+  const requests = script(t);
+  for (const tools of ['{type: model_picker, models: [p/pick]}', '{type: think, model: p/pick}']) {
+    const yaml = options.yaml.replace('toolsets: [{type: think}]', `session_compaction: false, toolsets: [${tools}]`);
+    for (const [invalid, expected] of [
+      [yaml.replace('session_compaction: false, ', ''), /requires session_compaction: false/],
+      [yaml.replace('p/pick', 'b/pick'), /cannot switch providers/],
+      [yaml.replace('p/pick', 'p/gpt-5'), /cannot change/],
+    ]) await assert.rejects(api.createSession({...options, yaml: invalid}), expected);
+    for (const fields of [{name: 'speaker'}, {reasoning_content: 'old reasoning'}]) {
+      const messages = [{role: 'assistant', content: 'previous', ...fields}, {role: 'user', content: 'go'}];
+      await assert.rejects(api.chat({...options, yaml, messages}), /unnamed seed history without reasoning/);
+    }
+  }
+  assert.deepEqual(requests, []);
+});
+
 test('cross-protocol failover rejects history that Responses cannot replay', async t => {
   const requests = script(t, () => error(404, 'missing'));
   const messages = [{ role: 'user', content: 'first', name: 'Ada' }, { role: 'user', content: 'again' }];

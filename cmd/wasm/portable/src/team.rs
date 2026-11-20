@@ -150,6 +150,12 @@ impl Session {
         let annotated = history
             .iter()
             .any(|m| !m["name"].is_null() || !m["reasoning_content"].is_null());
+        if profile.spec.selected_fallback_chain && annotated {
+            return Err(
+                "model selection with fallback requires unnamed seed history without reasoning"
+                    .into(),
+            );
+        }
         if team && limited && annotated {
             return Err(
                 "history limits in a local team require unnamed history without reasoning".into(),
@@ -252,7 +258,7 @@ impl Session {
             }
         }
         Ok(
-            json!({"agent":spec.name, "target": index, "responses":target.responses, "summary":summarizing, "body":body}),
+            json!({"agent":spec.name, "target": index, "responses":target.responses, "summary":summarizing, "sdkRetries":summarizing || spec.selected_fallback_chain, "body":body}),
         )
     }
 
@@ -310,8 +316,10 @@ impl Session {
                 .as_array()
                 .is_none_or(Vec::is_empty)
                 && chunk["choices"].as_array().is_none_or(Vec::is_empty);
-            // SSE errors have no typed HTTP status in the child runtime.
-            let status = if self.conversation.summarizing() {
+            // The Go SDK exposes SSE errors as text, not typed HTTP status errors.
+            let status = if self.conversation.summarizing()
+                || self.conversation.profile.spec.selected_fallback_chain
+            {
                 None
             } else {
                 fallback::status(error)
@@ -334,11 +342,20 @@ impl Session {
 
     pub fn failure(
         &mut self,
-        reason: String,
+        mut reason: String,
         http_status: Option<u16>,
         transient: bool,
         now: f64,
     ) -> Result<Value, String> {
+        if let Some(status) =
+            http_status.filter(|_| self.conversation.profile.spec.selected_fallback_chain)
+        {
+            if reason.is_empty() {
+                let text =
+                    fallback::status_text(status).ok_or("unsupported empty HTTP error body")?;
+                reason = format!("error receiving from stream: HTTP {status}: {text}");
+            }
+        }
         let (_, target) = self.conversation.request_target();
         let overflow = fallback::overflow(http_status, &reason)?;
         let reason = target.transport.safe_diagnostic(reason)?;
@@ -362,7 +379,7 @@ impl Session {
             }
             let message = format!(
                 "run compaction agent: {}",
-                fallback::model_error(overflow, &reason)
+                fallback::model_error("model failed", overflow, &reason)
             );
             self.conversation
                 .skip_summary(overflow.is_some())
@@ -378,15 +395,21 @@ impl Session {
         } else {
             fallback::Decision::Stop
         };
+        let current = attempt.current;
         let mut next = match decision {
             fallback::Decision::Retry(delay) => json!({"delay":delay}),
             fallback::Decision::Switch => json!({"event":{"type":"fallback", "attempt":1,
-                "from":spec.models[previous].id, "to":spec.models[attempt.current].id, "reason":reason}}),
+                "from":self.conversation.attempt_model(previous).id, "to":self.conversation.attempt_model(current).id, "reason":reason}}),
             fallback::Decision::Stop => {
                 let prefix = if spec.models.len() > 1 && self.replayable {
                     "all models failed"
                 } else {
                     "model failed"
+                };
+                let message = if spec.selected_fallback_chain {
+                    fallback::model_error(prefix, overflow, &reason)
+                } else {
+                    format!("{prefix}: {reason}")
                 };
                 // Close suspended transfer calls without copying a child's provider diagnostics
                 // into its caller's history or rolling back already-completed caller tools.
@@ -399,7 +422,7 @@ impl Session {
                     self.conversation = parent;
                 }
                 self.conversation.fail();
-                return Err(format!("{prefix}: {reason}"));
+                return Err(message);
             }
         };
         let body = self.conversation.request()?;

@@ -441,6 +441,7 @@ struct Provider {
 pub struct Selected {
     pub output_tool: Option<OutputTool>,
     pub separate_model_attempts: bool,
+    pub selected_fallback_chain: bool,
     pub tool_policy: Policy,
     pub name: String,
     pub team_prompts: Vec<String>,
@@ -449,7 +450,7 @@ pub struct Selected {
     pub force_handoff: String,
     pub shared_todo: bool,
     pub limits: crate::limits::Limits,
-    pub tool_models: BTreeMap<String, Map<String, Value>>,
+    pub tool_models: BTreeMap<String, RequestModel>,
     pub hooks: crate::hooks::Hooks,
     pub picker: crate::model_picker::Picker,
     pub models: Vec<Target>,
@@ -459,10 +460,14 @@ pub struct Selected {
     pub toolsets: Vec<Toolset>,
 }
 
-pub struct Target {
+pub struct RequestModel {
     pub id: String,
     pub model_params: Map<String, Value>,
     pub schema_instruction: Option<String>,
+}
+
+pub struct Target {
+    pub request: RequestModel,
     pub transport: Transport,
     pub compaction: crate::compaction::Policy,
     capabilities: Option<crate::media::Capabilities>,
@@ -473,7 +478,9 @@ pub struct Target {
 
 impl Selected {
     pub fn has_schema_instruction(&self) -> bool {
-        self.models.iter().any(|m| m.schema_instruction.is_some())
+        self.models
+            .iter()
+            .any(|m| m.request.schema_instruction.is_some())
     }
 
     pub fn targets(&self) -> impl Iterator<Item = &Target> {
@@ -500,15 +507,17 @@ impl Selected {
     }
 }
 
-impl Target {
-    pub fn model(&self) -> &str {
+impl RequestModel {
+    pub fn name(&self) -> &str {
         self.model_params["model"]
             .as_str()
             .expect("configured model")
     }
+}
 
+impl Target {
     pub(super) fn media_projection(&self) -> crate::media::Projection {
-        crate::media::Projection::new(self.capabilities, self.model(), self.responses)
+        crate::media::Projection::new(self.capabilities, self.request.name(), self.responses)
     }
 }
 
@@ -1053,8 +1062,8 @@ fn resolve(
             "fallback max_iterations hook with tool-mode structured output is not supported".into(),
         );
     }
-    if (chain || team) && overrides {
-        return Err("toolset model overrides with teams or fallback are not supported".into());
+    if team && overrides {
+        return Err("toolset model overrides with local teams are not supported".into());
     }
     let has_tools = output_tool.is_some() || !toolsets.is_empty();
     let summary_name = first_nonempty([
@@ -1113,13 +1122,13 @@ fn resolve(
         if name.contains(',') || cfg.models.get(name).is_some_and(|m| m.model.contains(',')) {
             return Err("toolset model overrides cannot use multi-model references".into());
         }
-        tool_models.insert(name.clone(), compatible(name, "toolset")?.model_params);
+        tool_models.insert(name.clone(), compatible(name, "toolset")?.request);
     }
     let mut picker = crate::model_picker::Picker::default();
     for ts in a.toolsets.iter().filter(|ts| ts.kind == "model_picker") {
-        if chain {
+        if chain && team {
             return Err(
-                "model_picker with fallback models on the same agent is not supported".into(),
+                "model_picker with fallback models within local teams is not supported".into(),
             );
         }
         if !picker.choices.is_empty() {
@@ -1130,7 +1139,17 @@ fn resolve(
                 return Err(format!("duplicate model_picker choice {name:?}"));
             }
             let target = compatible(name, "model_picker")?;
-            picker.choices.insert(name.clone(), target.model_params);
+            picker.choices.insert(name.clone(), target.request);
+        }
+    }
+    let selected_fallback_chain = chain && (overrides || !picker.choices.is_empty());
+    if selected_fallback_chain {
+        // Go may compact on overflow even without a declared context window.
+        if a.session_compaction != Some(false) {
+            return Err("model selection with fallback requires session_compaction: false".into());
+        }
+        if a.model.contains(',') {
+            return Err("model selection with fallback requires a single primary model".into());
         }
     }
     let mut models = vec![request];
@@ -1173,7 +1192,7 @@ fn resolve(
             || models
                 .iter()
                 .chain([&target])
-                .any(|m| m.model().contains(','))
+                .any(|m| m.request.name().contains(','))
         {
             return Err("dedicated compaction cannot use a multi-model reference".into());
         }
@@ -1184,7 +1203,8 @@ fn resolve(
         tool_models,
         summary_model,
         output_tool,
-        separate_model_attempts: bounded_fallback || bounded_output,
+        separate_model_attempts: bounded_fallback || bounded_output || selected_fallback_chain,
+        selected_fallback_chain,
         hooks,
         tool_policy: Policy {
             rules: cfg.permissions.clone(),
@@ -1324,9 +1344,11 @@ fn resolve_model(
         None
     };
     Ok(Target {
-        id: model_id,
-        model_params: params,
-        schema_instruction,
+        request: RequestModel {
+            id: model_id,
+            model_params: params,
+            schema_instruction,
+        },
         transport: providers::transport(builtin, &base, route, key, &m.provider_opts, env)?,
         responses,
         merge_messages,
@@ -1346,6 +1368,7 @@ mod tests {
                 .unwrap()
                 .models
                 .remove(0)
+                .request
                 .model_params,
         )
     }
@@ -1438,7 +1461,7 @@ agents: {root: {model: main, compaction_model: a}}";
             assert_eq!(spec.targets().count(), 2);
             let (i, summary) = spec.summary_target();
             assert_eq!(i, 1);
-            assert_eq!(summary.model(), expected);
+            assert_eq!(summary.request.name(), expected);
             assert_eq!(spec.context_window(), window);
         }
     }
@@ -1448,8 +1471,8 @@ agents: {root: {model: main, compaction_model: a}}";
         let yaml = include_str!("../../examples/small-compaction.yaml");
         let env = BTreeMap::from([("OPENAI_API_KEY".into(), "test".into())]);
         let spec = select(yaml, "root", &env).unwrap();
-        assert_eq!(spec.models[0].model(), "gpt-4o");
-        assert_eq!(spec.summary_target().1.model(), "gpt-4o-mini");
+        assert_eq!(spec.models[0].request.name(), "gpt-4o");
+        assert_eq!(spec.summary_target().1.request.name(), "gpt-4o-mini");
     }
 
     #[test]
@@ -1483,10 +1506,14 @@ agents: {root: {model: main, compaction_model: a}}";
         ] {
             let env = BTreeMap::from([("MODEL".into(), model.into())]);
             let selected = select(cfg, "other", &env).unwrap();
-            assert!(selected.models[0].schema_instruction.is_some(), "{model}");
+            assert!(
+                selected.models[0].request.schema_instruction.is_some(),
+                "{model}"
+            );
         }
         let env = BTreeMap::from([("MODEL".into(), "org/openai/claude-test".into())]);
         assert!(select(cfg, "other", &env).unwrap().models[0]
+            .request
             .schema_instruction
             .is_none());
         assert!(select(&cfg.replace("mode: native", "mode: ''"), "other", &env).is_ok());
@@ -1631,6 +1658,7 @@ agents:
             let m = select(&cfg, "root", &BTreeMap::new()).unwrap();
             assert_eq!(
                 m.models[0]
+                    .request
                     .model_params
                     .get("service_tier")
                     .and_then(Value::as_str),
@@ -1706,7 +1734,7 @@ agents:
             s.models[0].transport.endpoint,
             "http://localhost:8080/v1/chat/completions"
         );
-        assert_eq!(s.models[0].model_params["model"], "org/$LITERAL");
+        assert_eq!(s.models[0].request.model_params["model"], "org/$LITERAL");
         assert_eq!(
             s.models[0].transport.headers["Authorization"],
             "Bearer secret"
@@ -1716,7 +1744,7 @@ agents:
         env.insert(" MODEL ".into(), "other".into());
         env.insert("BASE".into(), "https://example.invalid".into());
         let s = select(cfg, "other", &env).unwrap();
-        assert_eq!(s.models[0].model_params["model"], "other");
+        assert_eq!(s.models[0].request.model_params["model"], "other");
         assert_eq!(
             s.models[0].transport.endpoint,
             "https://example.invalid/v2/chat/completions"
@@ -1786,7 +1814,7 @@ agents:
         ]);
         let cfg = "version: 16\nproviders: {local: {base_url: 'http://localhost:8001/v1'}}\nagents:\n  helper: {model: openai/other}\n  root: {model: local/org/name, instruction: '${env.WHO} ${x} ${wrap(${env.WHO})} ${env.ABSENT}'}";
         let s = select(cfg, "", &env).unwrap();
-        assert_eq!(s.models[0].model_params["model"], "org/name");
+        assert_eq!(s.models[0].request.model_params["model"], "org/name");
         assert_eq!(s.models[0].transport.headers.get("Authorization"), None);
         assert_eq!(s.instruction, "Ada ${x} ${wrap(${env.WHO})} ");
         assert_eq!(
