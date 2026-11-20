@@ -400,7 +400,7 @@ async function* sse(response, responses, summary) {
   }
   const reader = response.body.getReader();
   const utf8 = new TextDecoder('utf-8', { fatal: true });
-  let pending = '', data = [], total = 0;
+  let pending = '', data = [], total = 0, toolCompletion;
   try {
     for (;;) {
       const { done, value } = await reader.read().catch(e => { throw new TransportError(e.message); });
@@ -418,13 +418,23 @@ async function* sse(response, responses, summary) {
           if (record === '[DONE]') return;
           const chunk = JSON.parse(record);
           if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) throw new Error('invalid model stream event');
+          if (toolCompletion && (record === toolCompletion ||
+              (chunk.type === 'response.output_text.annotation.added' && !Object.hasOwn(chunk, 'error')))) continue;
           // Go's SDK retains the original JSON of top-level stream errors.
-          yield chunk.error != null ? record : chunk;
+          yield (responses ? Object.hasOwn(chunk, 'error') : chunk.error != null) ? record : chunk;
           // Go's Chat adapter treats usage-only chunks as terminal, even without an explicit stop.
           if (summary && !responses && chunk.usage && (!chunk.choices?.length || chunk.choices[0].finish_reason)) return;
-          // Responses has a terminal JSON event, not a Chat Completions [DONE] sentinel.
-          if (responses && ['response.completed', 'response.done', 'response.incomplete'].includes(chunk.type)) return;
+          // Go drains tool-call completions: a later stream error must veto dispatch.
+          if (responses && chunk.type === 'response.incomplete') return;
+          if (responses && ['response.completed', 'response.done'].includes(chunk.type)) {
+            if (!chunk.response.output?.some(i => i.type === 'function_call')) return;
+            toolCompletion = record;
+          }
         }
+      }
+      if (done && responses) {
+        if (pending || data.length) throw new Error('incomplete Responses event at EOF');
+        return;
       }
       if (done) throw new TransportError('model stream ended before [DONE]');
     }

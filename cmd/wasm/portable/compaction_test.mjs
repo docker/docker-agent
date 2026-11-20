@@ -164,14 +164,14 @@ test('Responses summary retries discard stale output snapshots before accepting 
   const delta = content => ({ type: 'response.output_text.delta', item_id: 'msg', output_index: 0, delta: content });
   const snapshot = text => ({ type: 'response.output_text.done', item_id: 'msg', output_index: 0, text });
   const finished = input_tokens => ({ type: 'response.completed', response: { status: 'completed', output: [],
-    usage: { input_tokens, output_tokens: 1 } } });
+    usage: { input_tokens, output_tokens: 1, total_tokens: input_tokens + 1 } } });
   const failure = message => ({ type: 'response.failed', response: { status: 'failed', error: { code: 'failed', message } } });
   const requests = intercept(t, (_, n) => {
     switch (n) {
       case 1: return stream(failure('primary unavailable'));
       case 2: return stream(delta('first answer'), finished(1024));
       case 3: return stream(delta('discard'), snapshot('discard'), failure('service unavailable'));
-      case 4: return stream(delta('key'), snapshot('key facts'), finished(10));
+      case 4: return stream(delta('key facts'), snapshot('key facts'), finished(10));
       case 5: return stream(delta('done'), finished(10));
       default: assert.fail('extra model request');
     }

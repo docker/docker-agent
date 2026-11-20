@@ -980,6 +980,50 @@ agents:`)
     ['responsesRefusedReply', [incomplete('content_filter'), text]],
     ['responsesPaddedReply', [[{...text[0], delta: ' hi there \n'}, fin([])], text]],
   ]) tests[name] = await replay(api, name, plainResponses, replies, turns, '/v1/responses');
+  const [callAdded, argsDelta, argsDone, callFinished] = responseTool;
+  const doneItem = item => ({type: 'response.output_item.done', item});
+  const messageItem = value => ({type: 'message', role: 'assistant', id: 'm', content: [{type: 'output_text', text: value}]});
+  const reasonDelta = {type: 'response.reasoning_summary_text.delta', item_id: 'r', delta: 'summary'};
+  const reasoningItem = {type: 'reasoning', id: 'r', summary: [{type: 'summary_text', text: 'snapshot'}]};
+  for (const [name, first] of [
+    ['responsesReasoningDeltas', [reasonDelta, {type: 'response.reasoning_text.delta', item_id: 'r', delta: 'thinking'},
+      {type: 'response.reasoning_text.done', item_id: 'r', text: 'thinking snapshot'}, text[0], fin([reasoningItem])]],
+    ['responsesReasoningSnapshotOnly', [fin([reasoningItem])]],
+    ['responsesTextSnapshots', [text[0], {type: 'response.output_text.done', item_id: 'm', text: 'revised'},
+      doneItem(messageItem('hi suffix')), fin([messageItem('different')])]],
+    ['responsesMetadata', [{type: 'response.future.metadata'}, doneItem({type: 'web_search_call', id: 'ws'}),
+      {type: 'response.output_text.delta', code: 'not text'}, {type: 'response.output_text.delta'},
+      {type: 'response.content_part.delta', part: {type: 'output_text', text: 'part'}}, text[0], fin([])]],
+    ['responsesInProgressMessage', [doneItem({...messageItem('hi'), status: 'in_progress'}), fin([])]],
+    ['responsesTextEOF', [text[0]]], ['responsesReasoningEOF', [reasonDelta]], ['responsesEmptyEOF', []],
+  ]) tests[name] = await replay(api, name, plainResponses, [first, text], turns, '/v1/responses');
+  for (const [name, usage] of [
+    ['responsesMissingTotal', {input_tokens: 9, output_tokens: 2}], ['responsesZeroTotal', {input_tokens: 3, total_tokens: 0}],
+    ['responsesOnlyInput', {input_tokens: 5, total_tokens: 5}], ['responsesOnlyOutput', {output_tokens: 3, total_tokens: 3}],
+    ['responsesOnlyTotal', {total_tokens: 5}], ['responsesNullCounts', {input_tokens: null, total_tokens: 1}],
+    ['responsesNegativeTotal', {total_tokens: -1}],
+  ]) tests[name] = await replay(api, name, plainResponses,
+    [[text[0], {type: 'response.completed', response: {output: [], usage}}], text], turns, '/v1/responses');
+  const parallel = responseCall({...fn, id: 'item_2', call_id: 'call_2'}, '{"thought":"second"}');
+  for (const [name, first] of [
+    ['responsesPendingArgs', [{...argsDelta, delta: 'stale'}, argsDone, callAdded, callFinished]],
+    ['responsesReplacedPendingArgs', [{...argsDone, arguments: '{}'}, argsDone, callAdded, callFinished]],
+    ['responsesItemDoneFallback', [callAdded, doneItem({...fn, arguments: args}), callFinished]],
+    ['responsesDeltaAfterItemDone', [callAdded, argsDelta, doneItem({...fn, arguments: args}), {...argsDelta, delta: ' '}, fin([fn])]],
+    ['responsesParallelText', [text[0], callAdded, {...parallel[0], output_index: 1}, text[0], {...parallel[1], output_index: 1},
+      argsDelta, text[0], fin([fn, parallel[0].item])]],
+    ['responsesToolTrailer', [...responseTool, {type: 'response.output_text.annotation.added'}, callFinished]],
+  ]) tests[name] = await replay(api, name, responses, [first, text, text], turns, '/v1/responses');
+  tests.responsesUnannouncedFinalCall = await replay(api, 'responsesUnannouncedFinalCall', responses, [[callFinished], text], turns, '/v1/responses');
+  for (const [name, first] of [
+    ['responsesLateToolFailure', [...responseTool, ...responseError('late failure')]],
+    ['responsesNullError', [{...callAdded, error: null}, argsDelta, callFinished]],
+  ]) tests[name] = await replay(api, name, responses, [first, text], rejectsThenRecovers, '/v1/responses');
+  const errorFallback = plainResponses.replace('model: local/test', 'model: local/test, fallback: {models: [local/spare], retries: -1}');
+  for (const [name, first] of [
+    ['responsesUntypedFailure', [{type: 'response.failed', response: {id: 'r', error: {code: 'invalid', message: 'busy', status: 503}}}]],
+    ['responsesEnvelopeStatus', [{error: {message: 'invalid 401', status: 503}}]],
+  ]) tests[name] = await replay(api, name, errorFallback, [first, text, text], turns, '/v1/responses');
   // A hallucinated tool gets an error the model can correct; the send goes on.
   const twoTools = local(['think', 'calculator']);
   const shell = args => tool('shell', args);

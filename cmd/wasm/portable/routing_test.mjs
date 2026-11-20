@@ -10,8 +10,13 @@ const chat = delta => ({ choices: [{ index: 0, delta, finish_reason: delta.tool_
 const text = content => chat({ content });
 const call = (name, args, id = name) => chat({ tool_calls: [{ id, index: 0, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
 const completed = (...output) => ({ type: 'response.completed', response: { id: 'r', status: 'completed', output } });
-const responseCall = (name, args) => completed({ id: `item_${name}`, type: 'function_call', call_id: name, name, arguments: JSON.stringify(args) });
+function responseCall(name, args) {
+  const item = { id: `item_${name}`, type: 'function_call', call_id: name, name };
+  return [{ type: 'response.output_item.added', item },
+    { type: 'response.function_call_arguments.done', item_id: item.id, arguments: JSON.stringify(args) }, completed(item)];
+}
 const responseText = content => completed({ id: 'msg', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: content }] });
+const stream = step => [].concat(step).map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + (step.choices ? 'data: [DONE]\n\n' : '');
 
 // Each script listens on a different origin, with no fetch or Wasm ABI mocks.
 async function endpoint(t, ...steps) {
@@ -26,7 +31,7 @@ async function endpoint(t, ...steps) {
     } else if (typeof step === 'string') {
       res.writeHead(200, { 'Content-Type': 'text/plain' }).end(step);
     } else {
-      res.writeHead(200, { 'Content-Type': 'text/event-stream' }).end(`data: ${JSON.stringify(step)}\n\n${step.choices ? 'data: [DONE]\n\n' : ''}`);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' }).end(stream(step));
     }
   });
   await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
@@ -287,7 +292,7 @@ test('child retries bind the child prompt, schema, redaction and transport; retu
     const step = steps[requests.length];
     requests.push({ url, headers: new Headers(init.headers), body: JSON.parse(init.body) });
     if (step === 401) return new Response(null, { status: 401 });
-    return new Response(`data: ${JSON.stringify(step)}\n\n${step.choices ? 'data: [DONE]\n\n' : ''}`, { headers: { 'Content-Type': 'text/event-stream' } });
+    return new Response(stream(step), { headers: { 'Content-Type': 'text/event-stream' } });
   });
   const yaml = `models:
   azure: {provider: azure, model: parent, base_url: https://resource.openai.azure.com, provider_opts: {api_version: preview}}
