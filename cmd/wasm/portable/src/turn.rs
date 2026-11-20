@@ -743,7 +743,7 @@ impl Conversation {
             turn.output += output;
             events.push(json!({
                 "type": "usage", "input_tokens": input, "output_tokens": output,
-                "context_length": input + output, "context_limit": self.profile.spec.models[self.attempt.current].compaction.window, "cost": 0
+                "context_length": input + output, "context_limit": self.profile.spec.models[0].compaction.window, "cost": 0
             }));
         }
         let mut message = json!({"role":"assistant"});
