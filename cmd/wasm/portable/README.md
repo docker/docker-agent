@@ -5,7 +5,7 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The measured release is **1,865,748 bytes (1.78 MiB) uncompressed**, including
+The measured release is **1,869,660 bytes (1.78 MiB) uncompressed**, including
 all nine runtime JS modules, versus 35.8 MiB for the packed Go small module
 alone. CI enforces a 2 MiB budget for the Wasm and JS together.
 
@@ -101,7 +101,16 @@ the calculator and the session's shared plan; plan writes prompt for approval.
 ### Structured output
 
 `structured_output.mode: native` (the default) sends the configured JSON schema
-to the provider. In `mode: tool`, the portable runtime validates the arguments
+to the provider. For a Claude-family model behind an OpenAI-compatible endpoint,
+Go small also puts the schema in a leading system instruction because some
+endpoints ignore the native format field. Portable does the same on both APIs,
+only on requests that use the agent's native schema, never in summary calls.
+This path accepts unnamed, text-only seed history and schemas with safe
+integers, not floats. It rejects YAML tag syntax, control characters and
+ambiguous strings (including numeric-looking strings) rather than send a
+different instruction from Go.
+
+In `mode: tool`, the portable runtime validates the arguments
 of an exclusive `__structured_output__` call against the original schema before
 returning its JSON. A mixed tool batch cannot finalize a turn. The local
 validator supports typed objects, arrays, string enums and length bounds, and
@@ -225,24 +234,27 @@ limited to ten nested transfers and 32 switches per user turn.
 `num_history_items`, `max_old_tool_call_tokens` and `max_tool_result_tokens`
 control the stored or transmitted history; they do not truncate a tool event
 just to hide it from the host. A single agent can use all three limits on a
-**text-only Chat Completions fallback chain** with `session_compaction: false`.
-The backup receives the same capped tool result as the primary, without running
-the tool again. Trimming a call also removes its paired result from the request.
-This combination excludes Responses, multipart history, `session_context`,
-per-tool model overrides, tool-mode structured output, iteration limits, and
-`add_date` (flag or hook).
+**text-only fallback chain** with `session_compaction: false`, including chains
+that switch between Chat Completions and Responses. History is trimmed before
+encoding the request for the selected API: a retained tool result keeps its
+call ID, and trimming a call removes its paired result. Failover does not run
+the tool again. If any target uses Responses, named or reasoning-bearing seed
+messages are rejected before I/O. Multipart history, `session_context`, per-tool
+model overrides and tool-mode structured output remain unsupported with these
+limits on a fallback chain.
 
 Agent `max_iterations` finishes normally at its limit, while the `before_llm_call`
-builtin `max_iterations` rejects the send before the next model call. With a single agent, `fallback.models` and explicit
-`session_compaction: false`, either limit can be 1–8. If both are set to the
-same value, the agent cap stops normally before the hook would reject.
+builtin `max_iterations` rejects the send before the next model call. With a
+single agent, `fallback.models` and explicit `session_compaction: false`, either
+limit can be 1–8 and can be combined with the history limits above. If both
+limits are equal, the agent cap stops normally before the hook would reject.
 
 In these capped fallback runs, each new model round checks the cooldown after
 all tools and approvals finish. A transient primary failure doesn't pin the
 backup; a non-retryable one can. Model retries do not spend another iteration
 or repeat a completed tool. If the continuation fails, the next send starts
 with a fresh limit and retains the completed tool results. These limits still
-cannot be combined with teams, history limits, per-tool model overrides or
+cannot be combined with teams, per-tool model overrides or
 tool-mode structured output on a fallback chain.
 
 Identical tool batches are checked against `max_consecutive_tool_calls` after execution;
@@ -259,7 +271,11 @@ string-argument conditions; explicit asks remain mandatory even with
 server cannot self-authorize a write by declaring its tool read-only.
 
 Supported builtin hooks are `add_date`, `add_environment_info`, `max_iterations`,
-`limit_large_tool_results` and `redact_secrets`. Secret redaction defaults on;
+`limit_large_tool_results` and `redact_secrets`. `add_date` samples the date once
+per model round: retries and fallbacks see the same date, even across midnight.
+The next round or send samples it again. `add_environment_info` follows the
+agent that started the send through a handoff; a delegated task starts its own
+run and does not inherit that environment prompt. Secret redaction defaults on;
 there is no process environment lookup and no hook can run a command. The
 scanner catalog is regenerated from the pinned Go dependency with
 `sh cmd/wasm/portable/gen/redaction/generate.sh`. Resource limits and matcher
