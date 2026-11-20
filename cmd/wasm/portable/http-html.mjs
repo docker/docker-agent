@@ -66,7 +66,7 @@ function textRenderer() {
 
 function markdownRenderer() {
   // Source whitespace is collapsed before rendering. Newlines in the result
-  // are structural; a NUL (rejected in input) marks a <br>.
+  // are structural; NUL marks a <br>, SOH a verbatim space in image alt text.
   const root = { parts: [] }, stack = [root];
   function wrap(s, left, right) {
     const trimmed = s.trim();
@@ -97,14 +97,16 @@ function markdownRenderer() {
       if (name === 'img') {
         const alt = decode(attrs.alt ?? '');
         if (/[\x00-\x1f[\]\\]/.test(alt)) unsupported('image alt syntax');
-        return url ? `![${alt}](${url})` : '';
+        return url ? `![${alt.replaceAll(' ', '\x01')}](${url})` : '';
       }
-      if (!s.trim() || /[\n\0[\]]/.test(s)) unsupported('empty or nested link');
+      if (!s) return `[](${url})`;
+      if (!s.trim() || /[\n\0[\]]/.test(s)) unsupported('complex link');
       return wrap(s, '[', `](${url})`);
     }
     if (name === 'li') {
       if ('value' in attrs) unsupported('explicit list numbering');
       if (!['ul', 'ol'].includes(parent.name) || /[\n\0]/.test(s.trim())) unsupported('complex list item');
+      if (!s.trim()) return '';
       const marker = parent.name === 'ul' ? '-' : `${++parent.count}.`;
       return marker + ' ' + s.trim() + '\n';
     }
@@ -130,7 +132,7 @@ function markdownRenderer() {
     },
     finish() {
       return root.parts.join('').replace(/ +/g, ' ').replace(/ ?([\n\0]) ?/g, '$1')
-        .replace(/[\n\0]+/g, run => run.length > 1 ? '\n\n' : run === '\0' ? '  \n' : '\n').trim();
+        .replace(/[\n\0]+/g, run => run.length > 1 ? '\n\n' : run === '\0' ? '  \n' : '\n').trim().replaceAll('\x01', ' ');
     },
   };
 }

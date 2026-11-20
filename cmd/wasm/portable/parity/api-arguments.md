@@ -20,3 +20,5 @@ Declarations may use string, integer, number and boolean properties, non-null sc
 rejects unsupported schema keywords rather than dropping them. The host also
 retains its byte and complexity limits, never forwards a fragment, and avoids
 quoting an env-expanded endpoint in URL errors.
+
+See [HTTP tool behavior](http-behavior.md) for response handling and browser limits.
