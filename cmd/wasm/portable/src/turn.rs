@@ -849,13 +849,14 @@ impl Conversation {
                     .expect("configured model")
             };
             self.compaction.record(self.messages.len(), model, usage);
-            let input = u64::from(usage.prompt_tokens);
+            let input = u64::from(usage.fresh_input());
             let output = u64::from(usage.completion_tokens);
             turn.input += input;
             turn.output += output;
             events.push(json!({
                 "type": "usage", "input_tokens": input, "output_tokens": output,
-                "context_length": input + output, "context_limit": self.profile.spec.context_window(), "cost": 0
+                "context_length": u64::from(usage.prompt_tokens) + output,
+                "context_limit": self.profile.spec.context_window(), "cost": 0
             }));
         }
         let mut message = json!({"role":"assistant"});
@@ -1746,11 +1747,14 @@ mod tests {
             .unwrap();
         assert_eq!(events[0]["arguments"], r#"{"thought":"B"}"#);
         assert_eq!(events[1]["arguments"], r#""A"}"#);
-        let usage = json!({"choices":[], "usage":{"prompt_tokens":7,"completion_tokens":3}});
+        let usage = json!({"choices":[], "usage":{"prompt_tokens":7,"completion_tokens":3,
+            "prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":1}}});
         c.chunk(usage.clone()).unwrap();
         let next = c.end().unwrap();
         let events = next["events"].as_array().unwrap();
-        assert_eq!(events[0]["type"], "usage");
+        // Go counts cached prompt tokens toward the context, not as fresh input.
+        assert_eq!(events[0]["input_tokens"], 2);
+        assert_eq!(events[0]["context_length"], 10);
         assert_eq!(
             events[1],
             json!({"type":"tool_call", "id":"a", "name":"think", "args":r#"{"thought":"A"}"#})
@@ -1782,7 +1786,7 @@ mod tests {
         c.chunk(usage).unwrap();
         assert_eq!(
             c.end().unwrap()["result"]["usage"],
-            json!({"input_tokens":14, "output_tokens":6})
+            json!({"input_tokens":4, "output_tokens":6})
         );
         assert!(c.end().is_err());
     }

@@ -52,7 +52,15 @@ impl Policy {
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    prompt_tokens_details: Option<PromptDetails>,
     completion_tokens_details: Option<CompletionDetails>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+struct PromptDetails {
+    cached_tokens: u32,
+    cache_write_tokens: u32,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -62,6 +70,14 @@ struct CompletionDetails {
 }
 
 impl Usage {
+    // Go reports as input only what was neither read from nor written to a prompt cache.
+    pub fn fresh_input(self) -> u32 {
+        let details = self.prompt_tokens_details.unwrap_or_default();
+        self.prompt_tokens
+            .saturating_sub(details.cached_tokens)
+            .saturating_sub(details.cache_write_tokens)
+    }
+
     fn visible_output(self) -> u32 {
         self.completion_tokens.saturating_sub(
             self.completion_tokens_details
@@ -384,6 +400,7 @@ mod tests {
         Usage {
             prompt_tokens,
             completion_tokens,
+            prompt_tokens_details: None,
             completion_tokens_details: None,
         }
     }

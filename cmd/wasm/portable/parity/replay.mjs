@@ -921,6 +921,13 @@ agents:`)
     ['responsesRefusedReply', [incomplete('content_filter'), text]],
     ['responsesPaddedReply', [[{...text[0], delta: ' hi there \n'}, fin([])], text]],
   ]) tests[name] = await replay(api, name, plainResponses, replies, turns, '/v1/responses');
+  const cachedUsage = {choices: [], usage: {prompt_tokens: 100, completion_tokens: 7, total_tokens: 107,
+    prompt_tokens_details: {cached_tokens: 60}, completion_tokens_details: {reasoning_tokens: 3}}};
+  tests.cachedPromptUsage = await replay(api, 'cachedPromptUsage', thinks,
+    [[...tool('think', {thought: 'a'}).slice(0, -1), cachedUsage], [piece({role: 'assistant', content: 'done'}, 'stop'), cachedUsage], answer], turns);
+  tests.cachedPromptUsageResponses = await replay(api, 'cachedPromptUsageResponses', plainResponses,
+    [[text[0], {type: 'response.completed', response: {id: 'resp', status: 'completed', output: [],
+      usage: {input_tokens: 100, output_tokens: 7, total_tokens: 107, input_tokens_details: {cached_tokens: 60}}}}], text], turns, '/v1/responses');
   return tests;
 }
 
