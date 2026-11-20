@@ -683,7 +683,8 @@ export function httpTools(toolset, env = {}, toolProxy) {
   const tool = ts.type === 'api' ? apiTool(ts.api_config, sessionEnv, policy, seconds) : fetchTool(ts, sessionEnv, policy, seconds);
   const { name, description, parameters } = tool;
   return {
-    tools: [{ type: 'function', function: { name, description, parameters } }], instructions: tool.instructions,
+    // Every admitted API schema passes Go's strict-mode check, so Responses marks the tool strict.
+    tools: [{ ...(ts.type === 'api' && { mcpStrict: true }), type: 'function', function: { name, description, parameters } }], instructions: tool.instructions,
     async call(called, rawArgs, signal) {
       try {
         signal?.throwIfAborted();

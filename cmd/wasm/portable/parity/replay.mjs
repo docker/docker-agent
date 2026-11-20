@@ -1578,6 +1578,16 @@ agents:`)
         }, path);
     }
   }
+  // An api tool passes Go's strict-mode check, so Responses marks it strict.
+  for (const [name, api_config] of [
+    ['responsesApiStrict', {name: 'greet', method: 'GET', endpoint: fixture + '/greet', instruction: 'Greets', args: {who: {type: 'string'}}, required: ['who']}],
+    ['responsesApiNestedStrict', {name: 'submit', method: 'POST', endpoint: fixture + '/submit', instruction: 'Submit',
+      args: {mode: {type: 'string', enum: ['a', 'b']}, rows: {type: 'array', items: {type: 'object', properties: {x: {type: 'number'}}}}}}],
+    ['responsesApiBare', {name: 'ping', method: 'DELETE', endpoint: fixture + '/ping', instruction: 'Pings'}],
+  ]) {
+    const yaml = plainResponses.replace('model: local/test', `toolsets: [${JSON.stringify({type: 'api', allow_private_ips: true, api_config})}], model: local/test`);
+    tests[name] = await replay(api, name, yaml, [text], approved, '/v1/responses');
+  }
   // Go drops a whitespace-only message from each request and refuses a request left empty.
   const sending = (...prompts) => async ({api, options, record, trace}) => {
     const s = await api.createSession(options, record);
