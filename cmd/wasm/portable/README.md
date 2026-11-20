@@ -5,7 +5,7 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The measured release is **1,855,607 bytes (1.77 MiB) uncompressed**, including
+The measured release is **1,860,993 bytes (1.77 MiB) uncompressed**, including
 all nine runtime JS modules, versus 35.8 MiB for the packed Go small module
 alone. CI enforces a 2 MiB budget for the Wasm and JS together.
 
@@ -111,12 +111,15 @@ and JSON Pointer `~0`/`~1` escapes work. The definitions stay on the provider
 wire and are followed locally when validating the answer; nothing is fetched
 or inlined.
 
-A property, array item or root definition can also be a bare `anyOf` with 2–4
-scalar alternatives. For example, `{"anyOf":[{"type":"boolean"},{"type":"string","enum":["auto"]}]}`
+A property, array item or root definition can also be a bare `anyOf` or `oneOf`
+with 2–4 scalar alternatives. `anyOf` needs at least one match; `oneOf` needs
+exactly one. With `oneOf`, the Responses tool is sent with `strict: false`, as
+in Go; the runtime still rejects both ambiguous and unmatched answers.
+For example, `{"anyOf":[{"type":"boolean"},{"type":"string","enum":["auto"]}]}`
 accepts `true`, `false` or `"auto"`. Branches support `string`, `number`,
 `boolean`, or `null`, with optional title/description and string enums. A local
 `$ref` may point to the union, but branches cannot themselves be references,
-containers or nested compositions. Other compositions (including `oneOf`),
+containers or nested compositions. Other compositions (including `allOf`),
 regex constraints, unknown keywords, unresolved or cyclic references, `$ref`
 siblings and external references are rejected before inference, even in unused
 definitions. The graph is limited to 128 source nodes, depth 16 and 512 visits
@@ -214,11 +217,19 @@ limited to ten nested transfers and 32 switches per user turn.
 `num_history_items`, `max_old_tool_call_tokens` and `max_tool_result_tokens`
 control the stored or transmitted history; they do not truncate a tool event
 just to hide it from the host. Agent `max_iterations` finishes normally at its
-limit, while the `max_iterations` builtin hook rejects the run. With fallback
-models, a single agent can set `max_iterations: 1` and `session_compaction: false`:
-a failed model attempt does not spend the iteration, and the completed tool
-result and stop message remain in history for the next send. Larger caps with
-fallback, capped teams and the `max_iterations` hook with routing are rejected.
+limit, while the `before_llm_call` builtin `max_iterations` rejects the send
+before the next model call. With a single agent, `fallback.models` and explicit
+`session_compaction: false`, either limit can be 1–8. If both are set to the
+same value, the agent cap stops normally before the hook would reject.
+
+In these capped fallback runs, each new model round checks the cooldown after
+all tools and approvals finish. A transient primary failure doesn't pin the
+backup; a non-retryable one can. Model retries do not spend another iteration
+or repeat a completed tool. If the continuation fails, the next send starts
+with a fresh limit and retains the completed tool results. These limits still
+cannot be combined with teams, history limits, per-tool model overrides or
+tool-mode structured output on a fallback chain.
+
 Identical tool batches are checked against `max_consecutive_tool_calls` after execution;
 successful random and datetime reads are exempt, as in Go.
 
