@@ -156,6 +156,10 @@ async function run() {
     [piece({ content: 'finished the plan' }, 'stop'), usage], answer, answer], turns);
   const limits = config.replace('model: local/test','model: local/test, max_iterations: 1, max_tool_result_tokens: 4, toolsets: [{type: think}]');
   tests.sessionLimits = await replay(api,'sessionLimits',limits,[tool('think',{thought:'0123456789abcdefghijklmnopqrstuvwxyz'}),answer],turns);
+  const cappedFallback = config.replace('agents:', 'models: {backup: {provider: local, model: backup, context_window: 4096}}\nagents:')
+    .replace('model: local/test', 'model: local/test, max_iterations: 1, session_compaction: false, fallback: {models: [backup]}, toolsets: [{type: think}]');
+  tests.fallbackIterationLimit = await replay(api, 'fallbackIterationLimit', cappedFallback,
+    [[{ error: { message: 'primary unavailable' } }], tool('think', { thought: 'plan' }), answer], turns);
   tests.plain = await replay(api, 'plain', config, [answer, answer], turns);
   const team = config.replace('model: local/test', 'model: local/test, sub_agents: [helper], handoffs: [helper]') + '  helper: {model: local/worker, description: Helps, instruction: Be precise}\n';
   tests.transfer = await replay(api, 'transfer', team, [tool('transfer_task', { agent: 'helper', task: 'count', expected_output: 'numbers' }), answer, answer, answer], turns);

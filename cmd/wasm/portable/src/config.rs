@@ -896,8 +896,9 @@ fn resolve(
     {
         return Err("readonly agents cannot delegate or hand off to a writable agent".into());
     }
-    if (team || !a.fallback.models.is_empty()) && a.hooks.max_calls.is_some() {
-        return Err("max_iterations with fallback or local teams is not supported".into());
+    let chain = !a.fallback.models.is_empty();
+    if (team || chain) && a.hooks.max_calls.is_some() {
+        return Err("the max_iterations hook with fallback or local teams is not supported".into());
     }
     if team && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
         return Err("session_context with local delegation or handoff is not supported".into());
@@ -935,14 +936,27 @@ fn resolve(
         }
     }
     let primary = &cfg.models[&a.model];
-    let chain = !a.fallback.models.is_empty();
-    let limited_or_overridden = a.limits.limits_history()
-        || a.limits.max_iterations > 0
-        || a.toolsets.iter().any(|ts| !ts.model.is_empty());
-    if output_tool.is_some() && limited_or_overridden {
+    let history_or_override =
+        a.limits.limits_history() || a.toolsets.iter().any(|ts| !ts.model.is_empty());
+    if output_tool.is_some() && (history_or_override || a.limits.max_iterations > 0) {
         return Err("tool-mode structured output with history limits, max_iterations or toolset model overrides is not supported".into());
     }
-    if (chain || team) && limited_or_overridden {
+    if team && a.limits.max_iterations > 0 {
+        return Err("agent max_iterations with local teams is not supported".into());
+    }
+    if chain && a.limits.max_iterations > 0 {
+        // Go reselects the model between iterations; portable stays on the serving target.
+        if a.limits.max_iterations != 1 {
+            return Err("fallback with agent max_iterations only supports a limit of 1".into());
+        }
+        // An overflow can start compaction in Go even without a declared context window.
+        if a.session_compaction != Some(false) {
+            return Err(
+                "fallback with agent max_iterations requires session_compaction: false".into(),
+            );
+        }
+    }
+    if (chain || team) && history_or_override {
         return Err(
             "history limits and toolset model overrides with teams or fallback are not supported"
                 .into(),

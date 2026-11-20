@@ -25,6 +25,7 @@ function intercept(t, rounds, output = reference.source) {
     requests.push(await req.json());
     assert.ok(rounds.length, 'unexpected model request');
     const calls = rounds.shift();
+    if (typeof calls === 'number') return new Response('unavailable', {status: calls});
     const chunk = {choices: [{index: 0, delta: calls ? {tool_calls: calls} : {content: 'done'}, finish_reason: calls ? 'tool_calls' : 'stop'}]};
     const usage = {choices: [], usage: {prompt_tokens: 10, completion_tokens: 5}};
     return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(usage)}\n\ndata: [DONE]\n\n`, {headers: {'Content-Type': 'text/event-stream'}});
@@ -50,6 +51,20 @@ for (const oldBudget of [reference.max_old_tool_call_tokens, reference.max_tool_
     } finally { await s.close(); }
   });
 }
+
+test('transient failover spends one iteration and the next send starts fresh on primary', async t => {
+  const requests = intercept(t, [503, [call('echo')], [call('echo', {}, 'b')]]);
+  const yaml = config(`max_iterations: 1, session_compaction: false, fallback: {models: [local/backup], retries: -1}, toolsets: [${echo}]`);
+  const s = await api.createSession(opts(yaml));
+  try {
+    assert.equal((await s.send('first')).message.content, reference.stop);
+    assert.deepEqual(requests.map(r => r.model), ['test', 'backup']);
+    assert.equal((await s.send('again')).message.content, reference.stop);
+    assert.equal(requests.length, 3);
+    assert.equal(requests[2].model, 'test');
+    assert.deepEqual(requests[2].messages.slice(-3).map(m => m.content), [reference.source, reference.stop, 'again']);
+  } finally { await s.close(); }
+});
 
 test('pending user_prompt is answered and capped before agent stop', async t => {
   const requests = intercept(t, [[call('user_prompt', {message:'ok?'})], null]);
@@ -106,6 +121,21 @@ test('unsafe projections and model routes reject before any request', async t =>
   ]) await assert.rejects(api.createSession(opts(yaml)));
   const token = 'dckr_pat_' + 'A'.repeat(27);
   await assert.rejects(api.chat({...opts(config('max_tool_result_tokens: 4')), messages: seed(token)}), /cannot safely truncate/);
+  assert.equal(requests.length, 0);
+});
+
+test('routed iteration cap rejects incompatible settings before any request', async t => {
+  const requests = intercept(t, []);
+  const fields = 'max_iterations: 1, session_compaction: false, fallback: {models: [local/backup]}';
+  for (const [yaml, reason] of [
+    [config(fields.replace('max_iterations: 1', 'max_iterations: 2')), /only supports a limit of 1/],
+    [config(fields.replace('session_compaction: false, ', '')), /requires session_compaction: false/],
+    [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['1']}}`), /max_iterations hook/],
+    [config(`${fields}, sub_agents: [root]`), /max_iterations with local teams/],
+    [config(`${fields}, num_history_items: 1`), /history limits/],
+    [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],
+    [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
+  ]) await assert.rejects(api.createSession(opts(yaml)), reason);
   assert.equal(requests.length, 0);
 });
 
