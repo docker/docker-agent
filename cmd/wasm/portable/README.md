@@ -5,7 +5,7 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The measured release is **1,839,728 bytes (1.75 MiB) uncompressed**, including
+The measured release is **1,853,768 bytes (1.77 MiB) uncompressed**, including
 all nine runtime JS modules, versus 35.8 MiB for the packed Go small module
 alone. CI enforces a 2 MiB budget for the Wasm and JS together.
 
@@ -42,7 +42,7 @@ Nothing is installed on `globalThis` unless the host chooses to do so.
 |---|---|---|
 | Config | Current schema: named agents/models, reusable `toolsets` / `use_toolsets`, named remote `mcps`, filters and instruction overrides, redaction, date/environment flags and supported builtin hooks. | Historical versions and filesystem-backed config sources are not part of the Go small target. Unknown options are errors. |
 | Providers | Streamed OpenAI Chat Completions and Responses, native and tool-mode structured output, token caps/penalties, service tier, media history, static and selected parameterized endpoints from the Go provider catalog. Azure, Copilot, Cloudflare and session-supplied Codex credentials have separate transport handling. | No ambient login or token storage, realtime/audio generation, encrypted reasoning replay or server-hosted Responses tools. |
-| Sessions | Multi-turn send, local transfers/handoffs, ordered fallbacks, abort/restart/close, stateless chat, same-model foreground compaction using a declared `context_window`, and live selection between compatible models. | No disk persistence, compaction window discovery or provider-native compaction. |
+| Sessions | Multi-turn send, local transfers/handoffs, ordered fallbacks, abort/restart/close, stateless chat, foreground compaction using a declared `context_window` (including compatible tool-free fallback chains), and live selection between compatible models. | No disk persistence, compaction window discovery or provider-native compaction. |
 | Tools | `datetime`, `random`, `think`, `calculator`, `todo`, `plan`, `memory`, `model_picker`, `session_context`, `user_prompt`, `fetch`, `api` and remote MCP, including deferred discovery, TOON and approvals. In-memory stores survive restart but are isolated by handle. | No stdio, process or file tools. `openapi` and opt-in RAG are not part of Go small. |
 
 For example, a custom provider can set `api_type: openai_responses` (or
@@ -109,12 +109,20 @@ bounded integers. A property, array item, or root definition can be a bare
 `{"$ref":"#/$defs/Name"}` pointing to another root definition. Acyclic chains
 and JSON Pointer `~0`/`~1` escapes work. The definitions stay on the provider
 wire and are followed locally when validating the answer; nothing is fetched
-or inlined. Cycles, unresolved references, `$ref` siblings, external references,
-unknown keywords, regex constraints and compositions are rejected before
-inference, even in unused definitions. The graph is limited to 128 source
-nodes, depth 16 and 512 visits following references. Use native mode for more
-complex schemas. Tool mode cannot be combined with team routing, active history
-limits, an agent iteration cap or per-tool model overrides.
+or inlined.
+
+A property, array item or root definition can also be a bare `anyOf` with 2–4
+scalar alternatives. For example, `{"anyOf":[{"type":"boolean"},{"type":"string","enum":["auto"]}]}`
+accepts `true`, `false` or `"auto"`. Branches support `string`, `number`,
+`boolean`, or `null`, with optional title/description and string enums. A local
+`$ref` may point to the union, but branches cannot themselves be references,
+containers or nested compositions. Other compositions (including `oneOf`),
+regex constraints, unknown keywords, unresolved or cyclic references, `$ref`
+siblings and external references are rejected before inference, even in unused
+definitions. The graph is limited to 128 source nodes, depth 16 and 512 visits
+following references and alternatives. Use native mode for more complex schemas.
+Tool mode cannot be combined with team routing, active history limits, an agent
+iteration cap or per-tool model overrides.
 
 ### Attachments in `chat` history
 
@@ -157,8 +165,8 @@ For a single agent with `fallback.models`, multipart history is replayable when
 **every** target uses the same API (Chat Completions or Responses) and the same
 effective media capabilities, including model-name handling of legacy image
 URLs. Each attempt still uses its own endpoint and credentials. Multipart
-history with a routed team or an incompatible fallback chain is rejected before
-the first model request.
+history with a routed team, active fallback compaction, or an incompatible
+fallback chain is rejected before the first model request.
 
 ### Routing and tool policy
 
@@ -172,16 +180,30 @@ output; it never retries a completed tool action to recover a model stream.
 `session_compaction` uses a foreground summary when a declared `context_window`
 and threshold warrant it. Summary requests honor the same outbound secret
 redaction as ordinary model requests, including an explicit `before_llm_call`
-redaction hook. Provider-native and alternate-model compaction are not implemented.
+redaction hook. No provider-native compaction or dedicated `compaction_model`.
+
+A **single, tool-free agent** can compact across a fallback chain when every
+target uses the same API (Chat Completions or Responses), context window, and
+effective threshold. The summary goes to the **primary**, with its own
+credentials and parameters, even while ordinary calls are pinned to a backup.
+The continuation checks the cooldown again. Native structured output is
+restored on the continuation, not sent with the summary.
+
+If the summary provider returns an ordinary error, the browser reports the
+error, then drains the uncompressed continuation before `send` rejects. That
+reply is not streamed to the caller, but is retained for the next turn, as in
+Go small. This is why tool-using agents are excluded: a failed turn must not
+run an unobserved tool. A malformed summary or one that exceeds the supported
+context budget still fails closed; Go's smaller-prefix overflow retry is not
+implemented.
+
 Picker/toolset model overrides must be transport-compatible. `session_context`
 reads only the originating handle's previous conversations and is unavailable
 inside a routed team. Teams reject readonly-to-writable routing and disabling
-secret redaction. Combining team/fallback routing with active compaction or
-per-tool model/history limits is not supported. In particular, Go can use its
-primary model to summarize while its fallback is serving the conversation;
-equal window sizes alone do not make those routes interchangeable. Teams share
-plan and memory within one handle, but each acting agent gets its own
-authorized tool catalog, MCP connection, credentials and grants. Teams are
+secret redaction. Active compaction within a routed team, and history limits or
+per-tool model overrides combined with team/fallback routing, remain unsupported.
+Teams share plan and memory within one handle, but each acting agent gets its
+own authorized tool catalog, MCP connection, credentials and grants. Teams are
 limited to ten nested transfers and 32 switches per user turn.
 
 `num_history_items`, `max_old_tool_call_tokens` and `max_tool_result_tokens`
