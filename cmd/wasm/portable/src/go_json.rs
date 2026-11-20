@@ -122,8 +122,13 @@ pub fn fields(
 }
 
 pub fn field_matches(key: &str, field: &str) -> bool {
+    // The long s and the Kelvin sign are the only non-ASCII runes that fold to ASCII.
     key.eq_ignore_ascii_case(field)
-        || (key.contains('ſ') && key.replace('ſ', "s").eq_ignore_ascii_case(field))
+        || (key.contains(['ſ', '\u{212a}'])
+            && key
+                .replace('ſ', "s")
+                .replace('\u{212a}', "k")
+                .eq_ignore_ascii_case(field))
 }
 
 fn kind(s: &str) -> &str {

@@ -369,7 +369,13 @@ effect on the next model call. Selective `toon` encoding is applied to tool
 results, not to credentials or wire protocol messages. Within an admitted
 batch, every call (including Rust builtins) goes through a permission decision
 before a side effect. The portable policy accepts bounded ASCII name globs and
-string-argument conditions; explicit asks remain mandatory even with
+argument conditions. As in Go, a condition is tested against the argument
+object, with a non-string value in Go's `%v` form, and never matches arguments
+that are not an object. Go checks the exact key only, although its handlers
+also read a field name that differs in case and skip a number that overflows.
+Here a deny covers such a variant, an allow requires every variant to match,
+and arguments with an overflowing number are refused. Explicit asks remain
+mandatory even with
 `autoApprove` or an overlapping `allow` (Go lets both win over `ask`), and
 unsupported checks deny rather than allow. An untrusted MCP server cannot
 self-authorize a write by declaring its tool read-only.

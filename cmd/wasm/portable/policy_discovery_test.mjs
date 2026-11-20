@@ -39,7 +39,7 @@ function replay(t, steps, toolFetch) {
 test('mandatory asks gate pure Rust writes; argument denies survive overlapping allows and autoApprove', {timeout:5000}, async t => {
   const yaml = config([{type:'todo'}], {permissions:{deny:['create_todo:description=blocked*'], ask:['create_todo'], allow:['*']}});
   const requests = replay(t, [[call('create_todo', {description:'blocked'}),
-    ['create_todo', '{"description":"blocked","description":"masked"}'],
+    ['create_todo', '{"description":"masked","description":"blocked"}'], // The handler reads the last one.
     call('create_todo', {description:'refused'}), call('create_todo', {description:'approved'}), call('list_todos', {})], null]);
   const events = [];
   await api.chat({yaml, messages, autoApprove:true}, async e => {
@@ -53,6 +53,20 @@ test('mandatory asks gate pure Rust writes; argument denies survive overlapping 
   assert.equal(JSON.parse(requests[1].messages.at(-3).content).todos.length, 0);
   assert.match(requests[1].messages.at(-2).content, /rejected/);
   assert.deepEqual(JSON.parse(lastOutput(requests[1])).all_todos, [{id:'todo_1',description:'approved',status:'pending'}]);
+});
+
+test('a folded field name or an overflowing number cannot dodge an argument rule', {timeout:5000}, async t => {
+  const yaml = config([{type:'think'}, {type:'memory'}], {permissions:{deny:['think:thought=bad*'], allow:['delete_memory:id=safe*']}});
+  // Go checks the exact key of a map, then lets each of these reach a handler that reads the other value.
+  const requests = replay(t, [[['think', '{"Thought":"bad idea"}'], ['think', '{"thought":"ok","THOUGHT":"bad idea"}'],
+    ['think', '{"thought":"bad idea","pad":1e400}'], ['delete_memory', '{"id":"safe1","ID":"other"}']], null]);
+  const events = [];
+  await api.chat({yaml, messages}, e => { events.push(e); if (e.type === 'tool_confirmation') return false; });
+  assert.deepEqual(events.filter(e => e.type === 'tool_call'), []);
+  assert.deepEqual(events.filter(e => e.type === 'tool_confirmation').map(e => e.id), ['call-3']);
+  const outputs = requests[1].messages.slice(-4).map(m => m.content);
+  for (const output of outputs.slice(0, 3)) assert.match(output, /^Tool 'think' is denied/);
+  assert.match(outputs[3], /rejected/);
 });
 
 for (const mode of ['plain', 'thenable', 'session']) {

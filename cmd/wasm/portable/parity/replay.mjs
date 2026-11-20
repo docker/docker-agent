@@ -1135,7 +1135,8 @@ agents:`)
     ['todos', local(['todo']), 'create_todos', {bad: '{"descriptions": ["a"', repaired: '{"descriptions": "a"}'}],
     ['listTodos', local(['todo']), 'list_todos', {ignored: '{"x": oops'}],
     ['transfer', routed, 'transfer_task', {bad: '{"agent": "helper', missing: '{}', wrongType: '{"agent":3,"task":"x"}', taskType: '{"agent":"helper","task":["a"]}', array: '["helper"]'}],
-    ['transferred', routed, 'transfer_task', {lenient: '{"AGENT":"helper","Task":"count","extra":1}', noTask: '{"agent":"helper"}'}, [answer]],
+    ['transferred', routed, 'transfer_task', {lenient: '{"AGENT":"helper","Task":"count","extra":1}', noTask: '{"agent":"helper"}',
+      folded: '{"agent":"helper","ta\\u017f\\u212a":"count"}'}, [answer]],
     ['handoff', routed, 'handoff', {bad: '{"agent": "helper', missing: '{}', wrongType: '{"agent":3}', array: '["helper"]'}],
     ['handedOff', routed, 'handoff', {lenient: '{"Agent":"helper","extra":1}'}],
     ['changeModel', picker, 'change_model', {bad: '{"model": "careful', wrongType: '{"model":3}', array: '["careful"]'}],
@@ -1209,6 +1210,29 @@ agents:`)
     ['emptiedInstructions', narrowed('{type: memory, tools: [nope]}'), [tool('think', {thought: 'x'})]],
     ['filteredCustomInstructions', narrowed('{type: memory, tools: [get_memories], instruction: "Mine. {ORIGINAL_INSTRUCTIONS} End."}'), [tool('get_memories', {})]],
   ]) tests[name] = await replay(api, name, yaml, [...replies, answer], approve);
+  // Argument conditions see what Go's map[string]any holds: nothing unless the arguments are an object.
+  const declining = answering({decision: 'reject', reason: 'no'});
+  const noBad = {deny: ['think:thought=bad*']}, safeIds = {allow: ['delete_memory:id=safe*']};
+  for (const [name, rules, toolName, args] of [
+    ['conditionMalformed', noBad, 'think', '{"thought": bad'],
+    ['conditionNull', noBad, 'think', 'null'],
+    ['conditionEmpty', noBad, 'think', ''],
+    ['conditionArray', noBad, 'think', '["bad"]'],
+    ['conditionLastDuplicate', noBad, 'think', '{"thought":"ok","thought":"bad idea"}'],
+    ['conditionFirstDuplicate', noBad, 'think', '{"thought":"bad idea","thought":"ok"}'],
+    ['conditionEscapedKey', noBad, 'think', '{"t\\u0068ought":"BAD idea"}'],
+    ['conditionUpperKey', {deny: ['think:Thought=bad*']}, 'think', '{"Thought":"bad"}'],
+    ['conditionNumber', {deny: ['think:thought=1e+06']}, 'think', '{"thought":1000000}'],
+    ['conditionNothing', {deny: ['think:thought=<nil>']}, 'think', '{"thought":null}'],
+    ['conditionObject', {deny: ['think:thought=map*']}, 'think', '{"thought":{"b":1,"a":"x"}}'],
+    ['conditionList', {deny: ['create_todos:descriptions=*b*']}, 'create_todos', '{"descriptions":["a","b"]}'],
+    ['conditionListMiss', {deny: ['create_todos:descriptions=z*']}, 'create_todos', '{"descriptions":["a","b"]}'],
+    ['allowCondition', safeIds, 'delete_memory', '{"id":"safe1"}'],
+    ['allowConditionMiss', safeIds, 'delete_memory', '{"id":"other"}'],
+    ['allowConditionMalformed', safeIds, 'delete_memory', '{"id":"safe1"'],
+    ['allowConditionCase', safeIds, 'delete_memory', '{"ID":"safe1"}'],
+    ['allowConditionDuplicate', safeIds, 'delete_memory', '{"id":"other","id":"safe1"}'],
+  ]) tests[name] = await replay(api, name, stocked + `permissions: ${JSON.stringify(rules)}\n`, [rawTool(toolName, args), answer], declining);
   const thinkCall = ['think', '{"thought":"plan"}'], badThink = ['think', '{"thought": oops'], absent = ['absent', '{}'];
   const forget = ['delete_memory', '{"id":"unused"}'], badForget = ['delete_memory', '[1]'];
   const memories = ['get_memories', '{}'], askUser = ['user_prompt', '{"message":"Choose"}'], greeting = ['greet', '{}'];

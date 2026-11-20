@@ -1,6 +1,7 @@
 //! Portable rule precedence is deny, mandatory ask, allow, then annotation-based safety.
-//! Patterns are ASCII tool globs (`*`, `?`) with optional `:key=glob` string conditions.
-//! Unsupported inputs and exhausted match budgets deny the call, never fall back to approval.
+//! Patterns are ASCII tool globs (`*`, `?`) with optional `:key=glob` conditions, tested like Go
+//! against the argument object. Arguments that cannot be checked and exhausted match budgets
+//! deny the call, never fall back to approval.
 
 use serde::de::{Error, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -138,13 +139,13 @@ impl Permissions {
             parsed: None,
             budget: MATCH_BUDGET,
         };
-        if call.any(&self.deny)? {
+        if call.any(&self.deny, false)? {
             return Ok(Verdict::Deny(format!(
                 "Tool '{name}' is denied by permissions configuration."
             )));
         }
         // Portable asks are mandatory, including under autoApprove and overlapping allows.
-        if call.any(&self.ask)? {
+        if call.any(&self.ask, false)? {
             return Ok(if mode == Safety::Restricted {
                 Verdict::Deny(format!(
                     "Tool '{name}' requires confirmation in restricted mode."
@@ -153,7 +154,7 @@ impl Permissions {
                 Verdict::Ask
             });
         }
-        if call.any(&self.allow)? {
+        if call.any(&self.allow, true)? {
             return Ok(Verdict::Allow);
         }
         Ok(match mode {
@@ -169,12 +170,13 @@ impl Permissions {
 struct Match<'a> {
     name: &'a str,
     arguments: &'a str,
-    parsed: Option<Arguments>,
+    parsed: Option<Option<Arguments>>,
     budget: usize,
 }
 
 impl Match<'_> {
-    fn any(&mut self, rules: &[Rule]) -> Result<bool, &'static str> {
+    // `permit` rules must hold for every value a handler could read; the others for any.
+    fn any(&mut self, rules: &[Rule], permit: bool) -> Result<bool, &'static str> {
         'rules: for rule in rules {
             if !glob(&rule.name, self.name, &mut self.budget)? {
                 continue;
@@ -186,17 +188,12 @@ impl Match<'_> {
                 Some(parsed) => parsed,
                 None => self.parsed.insert(Arguments::parse(self.arguments)?),
             };
+            // Go matches conditions against a nil map unless the arguments are a JSON object.
+            let Some(args) = args else {
+                continue;
+            };
             for (key, pattern) in &rule.conditions {
-                let Some(value) = args.0.get(key) else {
-                    continue 'rules;
-                };
-                if !glob(
-                    pattern,
-                    value
-                        .as_str()
-                        .ok_or("argument rules require string values")?,
-                    &mut self.budget,
-                )? {
+                if !args.holds(key, pattern, permit, &mut self.budget)? {
                     continue 'rules;
                 }
             }
@@ -246,10 +243,8 @@ impl Rule {
         }
         let mut conditions = Vec::new();
         while let Some((i, key)) = boundaries.next() {
-            if key.bytes().any(|b| b.is_ascii_uppercase())
-                || conditions.iter().any(|(k, _)| k == key)
-            {
-                return Err("argument conditions require unique lowercase ASCII keys");
+            if conditions.iter().any(|(k, _)| k == key) {
+                return Err("argument conditions require unique keys");
             }
             let end = boundaries.peek().map_or(pattern.len(), |(i, _)| *i);
             conditions.push((key.to_owned(), pattern[i + key.len() + 2..end].to_owned()));
@@ -295,43 +290,123 @@ fn glob(pattern: &str, value: &str, budget: &mut usize) -> Result<bool, &'static
     Ok(p[i..].iter().all(|&c| c == b'*'))
 }
 
-// The ordinary map decoder loses duplicate fields. Typed Go-compatible handlers also fold
-// field names, so don't let a case variant shadow the value that was checked.
-struct Arguments(BTreeMap<String, Value>);
+// Go checks a map[string]any (nil unless the arguments are an object) by exact key, but its
+// typed handlers fold field names. Keep every occurrence so a case variant cannot dodge a rule.
+struct Arguments(Vec<(String, String)>);
 
 impl Arguments {
-    fn parse(raw: &str) -> Result<Self, &'static str> {
+    fn parse(raw: &str) -> Result<Option<Self>, &'static str> {
+        const UNCHECKED: &str = "argument rules cannot check these arguments";
         if raw.len() > MAX_ARGUMENT_BYTES {
             return Err("tool arguments exceed the permission size limit");
         }
-        serde_json::from_str(raw).map_err(|_| {
-            "argument rules require an unambiguous JSON object with lowercase ASCII keys"
+        if crate::go_json::syntax_error(raw)
+            .map_err(|_| UNCHECKED)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let text = crate::go_json::normalize_json(raw).map_err(|_| UNCHECKED)?;
+        match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(_)) => (),
+            Ok(_) => return Ok(None),
+            // An overflowing number gives Go's rules a nil map, yet a handler can skip it and run.
+            Err(_) => return Err(UNCHECKED),
+        }
+        let mut entries = Vec::new();
+        crate::go_json::fields(text.trim_matches([' ', '\n', '\r', '\t']), |key, value| {
+            entries.push((key, value.to_owned()));
+            Ok(())
         })
+        .map_err(|_| UNCHECKED)?;
+        Ok(Some(Self(entries)))
+    }
+
+    fn holds(
+        &self,
+        key: &str,
+        pattern: &str,
+        permit: bool,
+        budget: &mut usize,
+    ) -> Result<bool, &'static str> {
+        let mut exact: Vec<&str> = Vec::new();
+        let mut variants = Vec::new();
+        for (name, value) in &self.0 {
+            if name == key {
+                exact.push(value);
+            } else if crate::go_json::field_matches(name, key) {
+                variants.push(value.as_str());
+            }
+        }
+        // Go's map and its handlers both keep the last scalar; containers can merge.
+        if exact.iter().all(|v| !v.starts_with(['{', '['])) {
+            exact.drain(..exact.len().saturating_sub(1));
+        }
+        if permit && exact.is_empty() {
+            return Ok(false);
+        }
+        for value in exact.iter().chain(&variants) {
+            let mut text = String::new();
+            go_value(value, &mut text);
+            if glob(pattern, &text, budget)? != permit {
+                return Ok(!permit);
+            }
+        }
+        Ok(permit)
     }
 }
 
-impl<'de> Deserialize<'de> for Arguments {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Object;
-        impl<'de> Visitor<'de> for Object {
-            type Value = Arguments;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("tool arguments object")
-            }
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Arguments, M::Error> {
-                let mut args = BTreeMap::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    if !key.is_ascii() || key.bytes().any(|b| b.is_ascii_uppercase()) {
-                        return Err(Error::custom("unsupported argument key"));
-                    }
-                    if args.insert(key, map.next_value()?).is_some() {
-                        return Err(Error::custom("duplicate argument key"));
-                    }
+// fmt's %v of a value decoded into `any`, as Go's argToString prints a non-string argument.
+fn go_value(raw: &str, out: &mut String) {
+    use crate::go_json::{fields, take};
+    match raw.as_bytes()[0] {
+        b'"' => out.push_str(&serde_json::from_str::<String>(raw).expect("validated string")),
+        b't' | b'f' => out.push_str(raw),
+        b'n' => out.push_str("<nil>"),
+        b'[' => {
+            out.push('[');
+            let mut rest = raw[1..].trim_start();
+            let mut first = true;
+            while !rest.starts_with(']') {
+                if !std::mem::take(&mut first) {
+                    out.push(' ');
                 }
-                Ok(Arguments(args))
+                go_value(take(&mut rest), out);
+                rest = rest.strip_prefix(',').unwrap_or(rest);
+            }
+            out.push(']');
+        }
+        b'{' => {
+            let mut map = BTreeMap::new();
+            let _ = fields(raw, |key, value| {
+                let mut text = String::new();
+                go_value(value, &mut text);
+                map.insert(key, text);
+                Ok(())
+            });
+            out.push_str("map[");
+            for (i, (key, value)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                out.push_str(key);
+                out.push(':');
+                out.push_str(value);
+            }
+            out.push(']');
+        }
+        _ => {
+            let number: f64 = raw.parse().expect("validated number");
+            let scientific = format!("{number:e}");
+            let (mantissa, exponent) = scientific.split_once('e').unwrap();
+            let exponent: i32 = exponent.parse().unwrap();
+            if (-4..6).contains(&exponent) {
+                out.push_str(&number.to_string());
+            } else {
+                let sign = if exponent < 0 { '-' } else { '+' };
+                out.push_str(&format!("{mantissa}e{sign}{:02}", exponent.abs()));
             }
         }
-        d.deserialize_map(Object)
     }
 }
 
@@ -537,7 +612,6 @@ mod tests {
             "tool:k=\\?",
             "tool:k=κ",
             "tool:a=1:a=2",
-            "tool:A=1",
         ] {
             assert!(
                 serde_json::from_value::<Permissions>(json!({"allow": ["*"], "deny": [rule]}))
@@ -617,8 +691,21 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_or_unsupported_input_cannot_skip_a_deny() {
+    fn a_deny_covers_every_value_a_handler_could_read() {
         let p: Permissions = load("{deny: ['*:mode=special'], allow: ['*']}").unwrap();
+        let verdict = |raw| p.verdict(Safety::Autonomous, "x", raw, false);
+        // Go's exact-key map lets a folded name or a skipped overflow reach the handler.
+        for raw in [
+            r#"{"mode":"special"}"#,
+            r#"{"mode":"fine","mode":"special"}"#,
+            r#"{"MODE":"special"}"#,
+            r#"{"mode":"fine","Mode":"special"}"#,
+            r#"{"mode":"special","other":1e400}"#,
+            r#"{"mode":"sp€cial"}"#,
+        ] {
+            assert!(matches!(verdict(raw), Deny(_)), "{raw}");
+        }
+        // Like Go: no object to check, or no value a handler would read as the denied one.
         for raw in [
             "",
             "bogus",
@@ -626,24 +713,94 @@ mod tests {
             "[]",
             "{}{}",
             r#"{"mode":42}"#,
-            r#"{"mode":true}"#,
             r#"{"mode":null}"#,
-            r#"{"mode":{}}"#,
             r#"{"mode":["special"]}"#,
-            r#"{"mode":"sp€cial"}"#,
             r#"{"møde":"special"}"#,
+            r#"{"MODE":"fine"}"#,
             r#"{"mode":"special","m\u006fde":"fine"}"#,
-            r#"{"MODE":"special"}"#,
-            r#"{"mode":"fine","Mode":"special"}"#,
         ] {
-            assert!(
-                matches!(p.verdict(Safety::Autonomous, "x", raw, false), Deny(_)),
-                "{raw}"
-            );
+            assert_eq!(verdict(raw), Allow, "{raw}");
         }
+        let p: Permissions = load("{deny: ['x:task=keep'], allow: ['*']}").unwrap();
+        let folded = r#"{"tas\u212a":"keep"}"#;
+        assert!(matches!(
+            p.verdict(Safety::Autonomous, "x", folded, false),
+            Deny(_)
+        ));
         // No checked condition, no need to interpret (or normalize) handler arguments.
         let p: Permissions = load("{deny: ['other:mode=x'], allow: [x]}").unwrap();
         assert_eq!(p.verdict(Safety::Strict, "x", "ignored", false), Allow);
+    }
+
+    #[test]
+    fn an_allow_needs_every_readable_value_to_match() {
+        let p: Permissions = load("{allow: ['save:Text=safe*']}").unwrap();
+        for (raw, expected) in [
+            (r#"{"Text":"safe one"}"#, Allow),
+            (r#"{"Text":"evil","Text":"safe"}"#, Allow),
+            (r#"{"Text":"safe","text":"safest"}"#, Allow),
+            // Go allows this one although its handler would store the folded field.
+            (r#"{"Text":"safe","text":"evil"}"#, Ask),
+            (r#"{"text":"safe"}"#, Ask),
+            (r#"{"Text":"safe","Text":"evil"}"#, Ask),
+            (r#"{"Text":"safe""#, Ask),
+            ("", Ask),
+        ] {
+            assert_eq!(
+                p.verdict(Safety::Legacy, "save", raw, false),
+                expected,
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_values_print_like_go() {
+        // Generated with fmt.Sprintf("%v") on values decoded into `any`.
+        for (raw, expected) in [
+            ("1.0", "1"),
+            ("-0", "-0"),
+            ("0.1", "0.1"),
+            ("100000", "100000"),
+            ("1000000", "1e+06"),
+            ("1234567", "1.234567e+06"),
+            ("123456789012345678901234567890", "1.2345678901234568e+29"),
+            ("1e21", "1e+21"),
+            ("1e-5", "1e-05"),
+            ("0.0001", "0.0001"),
+            ("1.5e300", "1.5e+300"),
+            ("-2.50", "-2.5"),
+            ("3.0e2", "300"),
+            ("9007199254740993", "9.007199254740992e+15"),
+            ("999999", "999999"),
+            ("12345678.9", "1.23456789e+07"),
+            ("true", "true"),
+            ("null", "<nil>"),
+            (r#"" x ""#, " x "),
+            ("[]", "[]"),
+            (r#"["", "a"]"#, "[ a]"),
+            (r#"[1,"a",null,true,[2]]"#, "[1 a <nil> true [2]]"),
+            ("{}", "map[]"),
+            (r#"{"b":1,"a":"x","b":2}"#, "map[a:x b:2]"),
+            (
+                r#"{"a":{"c":[1,2]},"B":null}"#,
+                "map[B:<nil> a:map[c:[1 2]]]",
+            ),
+            (r#"[{"k":"v"}]"#, "[map[k:v]]"),
+        ] {
+            let mut text = String::new();
+            go_value(raw, &mut text);
+            assert_eq!(text, expected, "{raw}");
+        }
+        let p: Permissions = load("{deny: ['fetch:urls=*internal*', 'pick:n=1e+06']}").unwrap();
+        let denied = |name, raw| matches!(p.verdict(Safety::Autonomous, name, raw, true), Deny(_));
+        assert!(denied(
+            "fetch",
+            r#"{"urls":["https://a","https://internal/x"]}"#
+        ));
+        assert!(!denied("fetch", r#"{"urls":["https://a"]}"#));
+        assert!(denied("pick", r#"{"n":1000000}"#));
+        assert!(!denied("pick", r#"{"n":100000}"#));
     }
 
     #[test]
