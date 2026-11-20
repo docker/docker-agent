@@ -272,6 +272,10 @@ impl Session {
             if let fallback::Decision::Retry(delay) =
                 self.summary_attempt.fail(&Default::default(), transient, 1)
             {
+                self.responses = self
+                    .responses
+                    .as_ref()
+                    .map(|_| responses::Stream::default());
                 self.conversation.discard_summary_output();
                 return Ok(json!({"retry":true,"delay":delay}));
             }

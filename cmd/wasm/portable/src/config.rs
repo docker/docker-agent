@@ -1033,9 +1033,9 @@ fn resolve(
             || has_tools
             || models
                 .iter()
-                .any(|m| m.responses || m.compaction != primary.compaction)
+                .any(|m| m.responses != primary.responses || m.compaction != primary.compaction)
         {
-            return Err("routed compaction requires a single tool-free agent, Chat Completions and matching context windows and thresholds; otherwise set session_compaction: false".into());
+            return Err("routed compaction requires a single tool-free agent and matching APIs, context windows and thresholds; otherwise set session_compaction: false".into());
         }
     }
     Ok(Selected {

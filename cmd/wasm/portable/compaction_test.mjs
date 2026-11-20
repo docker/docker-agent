@@ -47,7 +47,8 @@ test('incompatible or tool-using compaction routes reject before model I/O', asy
   const requests = intercept(t, () => assert.fail('unexpected model request'));
   for (const yaml of [
     chain.replace('model: spare, context_window: 2048', 'model: spare, context_window: 8192'),
-    chain.replace('openai_chatcompletions', 'openai_responses'),
+    chain.replace('models:\n', '  r: {provider: openai, api_type: openai_responses, base_url: $MODEL_URL, token_key: LOCAL_KEY}\nmodels:\n')
+      .replace('spare: {provider: local', 'spare: {provider: r'),
     chain.replace('    fallback:', '    toolsets: [{type: think}]\n    fallback:'),
     chain.replace('name: answer', 'mode: tool, name: answer'),
     chain.replace('    fallback:', '    handoffs: [other]\n    fallback:') + '\n  other: {model: main}',
@@ -96,6 +97,31 @@ test('summary retries stay on the primary with its bearer; continuation selects 
   assert.match(sent[4].messages[0].content, /Session Summary: key facts/);
   assert.equal(events.filter(e => e.type === 'fallback').length, 2);
   assert.doesNotMatch(JSON.stringify([sent, events]), /discard this fragment/);
+});
+
+test('Responses summary retries discard stale output snapshots before accepting a new one', async t => {
+  const delta = content => ({ type: 'response.output_text.delta', item_id: 'msg', output_index: 0, delta: content });
+  const snapshot = text => ({ type: 'response.output_text.done', item_id: 'msg', output_index: 0, text });
+  const finished = input_tokens => ({ type: 'response.completed', response: { status: 'completed', output: [],
+    usage: { input_tokens, output_tokens: 1 } } });
+  const failure = message => ({ type: 'response.failed', response: { status: 'failed', error: { code: 'failed', message } } });
+  const requests = intercept(t, (_, n) => {
+    switch (n) {
+      case 1: return stream(failure('primary unavailable'));
+      case 2: return stream(delta('first answer'), finished(1024));
+      case 3: return stream(delta('discard'), snapshot('discard'), failure('service unavailable'));
+      case 4: return stream(delta('key'), snapshot('key facts'), finished(10));
+      case 5: return stream(delta('done'), finished(10));
+      default: assert.fail('extra model request');
+    }
+  });
+  const s = await api.createSession({ yaml: chain.replace('openai_chatcompletions', 'openai_responses'), env });
+  t.after(() => s.close());
+  await s.send('old '.repeat(500));
+  assert.equal((await s.send('continue')).message.content, 'done');
+  assert.deepEqual(requests.map(r => r.model), ['main', 'spare', 'main', 'main', 'spare']);
+  assert.deepEqual(requests[2], requests[3]);
+  assert.equal(requests[4].input[0].content, 'Session Summary: key facts');
 });
 
 test('summary overflow or malformed output never drains an uncompressed fallback request', async t => {

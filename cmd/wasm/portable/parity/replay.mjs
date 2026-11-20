@@ -115,37 +115,40 @@ async function run() {
   const disabled = chain.replace('session_compaction: true', 'session_compaction: false');
   const failover = [[{ error: { message: 'primary unavailable' } }], [piece({ content: 'first answer' }, 'stop'), highUsage]];
   tests.compactionDisabledFallback = await replay(api, 'compactionDisabledFallback', disabled, [...failover, answer], turns);
+  const compactModels = (name, yaml, endpoint, replies, failed) => replay(api, name, yaml, replies,
+    async ({ api, options, record, trace }) => {
+      const s = await api.createSession(options, record);
+      try {
+        const old = 'old '.repeat(500);
+        trace.results.push(await s.send(old + secret));
+        const before = trace.events.length;
+        const next = s.send('continue');
+        if (failed) {
+          const message = await next.then(() => { throw new Error('expected summary rejection'); }, e => e.message);
+          trace.results.push(message);
+          if (trace.events.length !== before + 1 || trace.events[before].type !== 'error' || trace.events[before].message !== message) {
+            throw new Error('expected only the summary error on the rejected send');
+          }
+        } else {
+          trace.results.push(await next);
+        }
+        // Even after a summary stream error, Go drains a silent spare reply before rejecting.
+        if (trace.requests.length !== 4) throw new Error(`expected 4 requests after the second send; got ${trace.requests.length}`);
+        trace.results.push(await s.send('afterwards'));
+        const body = trace.requests.at(-1).body;
+        const history = body.messages ?? body.input;
+        const prefix = failed ? old + '[REDACTED]' : 'Session Summary: key facts';
+        if (history[0].content !== prefix || history.at(-2).content !== 'second answer') {
+          throw new Error('continuation lost the prefix or the spare reply');
+        }
+        if (JSON.stringify(trace.requests).includes(secret)) throw new Error('unredacted fallback history');
+      } finally { await s.close(); }
+    }, endpoint);
   for (const failed of [false, true]) {
     const name = failed ? 'fallbackCompactionError' : 'fallbackCompaction';
     const summary = failed ? [{ error: { message: 'summary unavailable' } }] : [piece({ content: 'key facts' }, 'stop'), usage];
-    tests[name] = await replay(api, name, chain, [...failover, summary, [piece({ content: 'second answer' }, 'stop'), usage], answer],
-      async ({ api, options, record, trace }) => {
-        const s = await api.createSession(options, record);
-        try {
-          const old = 'old '.repeat(500);
-          trace.results.push(await s.send(old + secret));
-          const before = trace.events.length;
-          const next = s.send('continue');
-          if (failed) {
-            const message = await next.then(() => { throw new Error('expected summary rejection'); }, e => e.message);
-            trace.results.push(message);
-            if (trace.events.length !== before + 1 || trace.events[before].type !== 'error' || trace.events[before].message !== message) {
-              throw new Error('expected only the summary error on the rejected send');
-            }
-          } else {
-            trace.results.push(await next);
-          }
-          // Even after a summary stream error, Go drains a silent spare reply before rejecting.
-          if (trace.requests.length !== 4) throw new Error(`expected 4 requests after the second send; got ${trace.requests.length}`);
-          trace.results.push(await s.send('afterwards'));
-          const history = trace.requests.at(-1).body.messages;
-          const prefix = failed ? old + '[REDACTED]' : 'Session Summary: key facts';
-          if (history[0].content !== prefix || history.at(-2).content !== 'second answer') {
-            throw new Error('continuation lost the prefix or the spare reply');
-          }
-          if (JSON.stringify(trace.requests).includes(secret)) throw new Error('unredacted fallback history');
-        } finally { await s.close(); }
-      });
+    tests[name] = await compactModels(name, chain, '/v1/chat/completions',
+      [...failover, summary, [piece({ content: 'second answer' }, 'stop'), usage], answer], failed);
   }
   const toolAtBoundary = [...tool('think', { thought: 'plan' }).slice(0, -1),
     { choices: [], usage: { prompt_tokens: 1022, completion_tokens: 2, total_tokens: 1024 } }];
@@ -353,6 +356,14 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
   const busy = structuredClone(text);
   busy.at(-1).response.usage = { input_tokens: 1000, output_tokens: 25, total_tokens: 1025 };
   tests.compactResponses = await replay(api, 'compactResponses', compactResponses, [busy, text, text], turns, '/v1/responses');
+  const responseError = message => [{ type: 'response.failed', response: { id: 'id', status: 'failed', error: { code: 'invalid', message } } }];
+  const responseText = delta => [{ ...text[0], delta }, fin([])];
+  for (const failed of [false, true]) {
+    const name = failed ? 'fallbackCompactionErrorResponses' : 'fallbackCompactionResponses';
+    const summary = failed ? responseError('summary unavailable') : responseText('key facts');
+    tests[name] = await compactModels(name, chain.replace('openai_chatcompletions', 'openai_responses'), '/v1/responses',
+      [responseError('primary unavailable'), busy, summary, responseText('second answer'), text], failed);
+  }
   const schema = { type: 'object', properties: { colors: { type: 'array', items: { type: 'string' } } },
     required: ['colors'], additionalProperties: false };
   const jsonAnswer = '{"colors":["blue"]}';
