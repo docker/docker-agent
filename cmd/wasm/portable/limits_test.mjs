@@ -66,6 +66,22 @@ test('transient failover spends one iteration and the next send starts fresh on 
   } finally { await s.close(); }
 });
 
+test('failed continuation retries the capped history, not the tool, and the next send trims the pair', async t => {
+  const requests = intercept(t, [[call('echo')], 400, 400, null]);
+  const yaml = config(`num_history_items: 3, max_tool_result_tokens: 4, session_compaction: false, fallback: {models: [local/backup], retries: -1}, toolsets: [${echo}]`);
+  const events = [];
+  const s = await api.createSession(opts(yaml), e => events.push(e));
+  try {
+    await assert.rejects(s.send('first'), /all models failed/);
+    assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.output), [reference.source]);
+    assert.equal(requests[1].messages.at(-1).content, reference.stored_result);
+    assert.deepEqual(requests[2].messages, requests[1].messages);
+    await s.send('again');
+    assert.deepEqual(requests.map(r => r.model), ['test', 'test', 'backup', 'test']);
+    assert.deepEqual(requests[3].messages.filter(m => m.role !== 'system'), [{role: 'user', content: 'first\nagain'}]);
+  } finally { await s.close(); }
+});
+
 test('the maximum routed cap keeps eight tool results without a ninth model call', async t => {
   const calls = Array.from({length:8}, (_, i) => [call('think', {thought:`step ${i}`}, `id_${i}`)]);
   const requests = intercept(t, [503, ...calls, null]);
@@ -135,6 +151,29 @@ test('unsafe projections and model routes reject before any request', async t =>
   ]) await assert.rejects(api.createSession(opts(yaml)));
   const token = 'dckr_pat_' + 'A'.repeat(27);
   await assert.rejects(api.chat({...opts(config('max_tool_result_tokens: 4')), messages: seed(token)}), /cannot safely truncate/);
+  assert.equal(requests.length, 0);
+});
+
+test('fallback history limits reject incompatible configurations and seeds before I/O', async t => {
+  const requests = intercept(t, []);
+  const route = 'session_compaction: false, fallback: {models: [local/backup]}';
+  const fields = `num_history_items: 3, ${route}`;
+  for (const [yaml, reason] of [
+    [config(fields.replace('session_compaction: false, ', '')), /requires session_compaction: false/],
+    [config(fields.replace('false', 'true'), 'models: {local/test: {provider: local, model: test, context_window: 4096}}'), /require session_compaction: false/],
+    [config(`${fields}, handoffs: [root]`), /history limits with local teams/],
+    [config(`${fields}, toolsets: [{type: session_context}]`), /session_context/],
+    [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],
+    [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
+    [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}`), /history limits with an iteration limit/],
+    [config(`${fields}, add_date: true`), /add_date/],
+    [config(`${fields}, hooks: {turn_start: {type: builtin, command: add_date}}`), /add_date/],
+    [config(fields.replace('[local/backup]', '[local/backup, local/gpt-5]')), /Chat Completions on every target/],
+  ]) await assert.rejects(api.createSession(opts(yaml)), reason);
+  for (const field of ['num_history_items: 1', 'max_tool_result_tokens: 4', 'max_old_tool_call_tokens: 3']) {
+    const options = opts(config(`${field}, ${route}`));
+    await assert.rejects(api.chat({...options, messages: seed('text', [{type:'text', text:'part'}])}), /text-only history/);
+  }
   assert.equal(requests.length, 0);
 });
 
