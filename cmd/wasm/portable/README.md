@@ -5,7 +5,7 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The measured release is **1,869,660 bytes (1.78 MiB) uncompressed**, including
+The measured release is **1,897,048 bytes (1.81 MiB) uncompressed**, including
 all nine runtime JS modules, versus 35.8 MiB for the packed Go small module
 alone. CI enforces a 2 MiB budget for the Wasm and JS together.
 
@@ -133,8 +133,14 @@ regex constraints, unknown keywords, unresolved or cyclic references, `$ref`
 siblings and external references are rejected before inference, even in unused
 definitions. The graph is limited to 128 source nodes, depth 16 and 512 visits
 following references and alternatives. Use native mode for more complex schemas.
-Tool mode cannot be combined with team routing, active history limits, an agent
-iteration cap or per-tool model overrides.
+A single agent without `fallback.models` and with `session_compaction: false`
+can combine tool mode with `num_history_items`, `max_old_tool_call_tokens`, an
+agent iteration cap (1–8) or per-tool model overrides. A reminder counts toward
+the cap, and reaching it ends the send normally with the cap notice.
+`max_tool_result_tokens` also needs outgoing secret redaction to be off:
+Go truncates the stored answer before redacting it, which can split a
+credential into a fragment the scanner no longer recognises. Tool mode still
+cannot be combined with team routing, or with these limits on a fallback chain.
 
 ### Attachments in `chat` history
 
@@ -214,22 +220,44 @@ model if set, otherwise to the **primary**. Neither choice changes the fallback
 cooldown. The continuation goes to the serving model with its own credentials,
 parameters, and native structured-output schema.
 
-If the summary provider returns an ordinary error, the browser reports the
-error, then drains the uncompressed continuation before `send` rejects. That
-reply is not streamed to the caller, but is retained for the next turn, as in
-Go small. This is why tool-using agents are excluded: a failed turn must not
-run an unobserved tool. A malformed summary or one that exceeds the supported
-context budget still fails closed; Go's smaller-prefix overflow retry is not
-implemented.
+If the summary request overflows the summarizer's window, the runtime retries
+with half of the conversation it just sent, up to three times. The messages
+kept after the summary do not change, a prior summary stays in front while it
+fits, and each smaller request gets its own transient retries. Plain compaction
+retries on its own model, a fallback chain on its primary and a dedicated
+`compaction_model` on its own endpoint.
+
+If the summary still fails, the browser reports the error, then drains the
+uncompressed continuation before `send` rejects. That reply is not streamed to
+the caller, but is retained for the next turn, as in Go small. A drained
+continuation never runs a tool: with tools enabled, an ordinary summary failure
+rejects the send at once, and a tool call in a drained reply is an error. A
+malformed or partial summary still fails closed.
 
 Picker/toolset model overrides must be transport-compatible. `session_context`
 reads only the originating handle's previous conversations and is unavailable
 inside a routed team. Teams reject readonly-to-writable routing and disabling
-secret redaction. Routed teams do not support active compaction or history
-limits. Per-tool model overrides cannot be combined with team/fallback routing.
+secret redaction. Routed teams do not support active compaction. Per-tool model
+overrides cannot be combined with team/fallback routing.
 Teams share plan and memory within one handle, but each acting agent gets its
 own authorized tool catalog, MCP connection, credentials and grants. Teams are
 limited to ten nested transfers and 32 switches per user turn.
+
+In a team, limits belong to a session, as in Go. `max_iterations`,
+`max_tool_result_tokens`, `max_old_tool_call_tokens` and
+`max_consecutive_tool_calls` come from the agent that opened the session, or
+from the agent a `transfer_task` was delegated to. A handoff keeps them and
+ignores the target's own values. `num_history_items` and the `max_iterations`
+hook follow the acting agent; the hook counts every model call of the send,
+forced handoffs included. A delegate stopped by its cap returns the notice as
+its result, and its caller carries on. A handoff that stops at the cap is
+announced when the next send starts.
+
+Three team combinations stay rejected at session creation: the `max_iterations`
+hook on an agent that can run inside `transfer_task` (Go fails the send there
+but lets the caller keep running unobserved), iteration or history limits on an
+agent that also has `fallback.models`, and named or reasoning-bearing seed
+messages when any agent limits history.
 
 `num_history_items`, `max_old_tool_call_tokens` and `max_tool_result_tokens`
 control the stored or transmitted history; they do not truncate a tool event
@@ -253,12 +281,41 @@ In these capped fallback runs, each new model round checks the cooldown after
 all tools and approvals finish. A transient primary failure doesn't pin the
 backup; a non-retryable one can. Model retries do not spend another iteration
 or repeat a completed tool. If the continuation fails, the next send starts
-with a fresh limit and retains the completed tool results. These limits still
-cannot be combined with teams, per-tool model overrides or
-tool-mode structured output on a fallback chain.
+with a fresh limit and retains the completed tool results. On a fallback chain
+these limits still cannot be combined with teams, per-tool model overrides or
+tool-mode structured output.
 
 Identical tool batches are checked against `max_consecutive_tool_calls` after execution;
 successful random and datetime reads are exempt, as in Go.
+
+### Replies and calls the model gets wrong
+
+The runtime recovers the way Go does instead of failing the send:
+
+- **No visible reply.** An empty, whitespace-only or reasoning-only reply emits
+  a `warning` that names the serving model and says whether tools ran just
+  before. The blank reply joins no history. `send` then resolves with the last
+  assistant text that was kept: an earlier turn, the text beside a tool call,
+  or the reply of a delegate that just returned.
+- **Refused reply.** A `content_filter` or `refusal` ending warns as well, keeps
+  any text it carried and retracts its tool calls.
+- **Result text is trimmed.** Deltas and history keep the model's whitespace.
+- **Unavailable tool.** A call to a tool that was not advertised for the step
+  gets `Tool '…' is not available. You can only use the tools provided to you.`
+  as an error result. That covers a hallucinated name, a deferred tool
+  activated in the same batch, and a tool seen in another agent's history after
+  a handoff. It never prompts or runs.
+- **Odd stream ending.** A turn without tool calls finishes even if the stream
+  gives no `finish_reason`, or one that cannot apply.
+- **Blank tool result.** It is stored as `(no output)`; the `tool_result` event
+  keeps the raw text.
+
+Usage events and results count prompt tokens read from or written to a provider
+cache toward `context_length`, not `input_tokens`.
+
+Malformed or mistyped tool **arguments** still reject the send, where Go returns
+its JSON error to the model. Go also drops text that shares a non-final stream
+chunk with a tool-call fragment; this port keeps it.
 
 The tool registry applies `tools`, `readonly`, and explicit denials before
 exposing a tool. `defer` provides `search_tool`/`add_tool`; activation takes
