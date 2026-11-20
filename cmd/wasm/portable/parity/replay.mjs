@@ -55,6 +55,7 @@ async function replay(api, name, yaml, replies, drive, endpoint = '/v1/chat/comp
     const chunks = replies[trace.requests.length];
     trace.requests.push({ method: req.method, path: new URL(req.url).pathname,
       authorization: req.headers.get('Authorization'), body: await req.json() });
+    if (typeof chunks === 'function') return chunks(req);
     if (!Array.isArray(chunks)) {
       const init = { status: chunks.status, headers: chunks.headers };
       return 'raw' in chunks ? new Response(chunks.raw, init) : Response.json(chunks.body, init);
@@ -1438,6 +1439,54 @@ agents:`)
     ['emptiedInstructions', narrowed('{type: memory, tools: [nope]}'), [tool('think', {thought: 'x'})]],
     ['filteredCustomInstructions', narrowed('{type: memory, tools: [get_memories], instruction: "Mine. {ORIGINAL_INSTRUCTIONS} End."}'), [tool('get_memories', {})]],
   ]) tests[name] = await replay(api, name, yaml, [...replies, answer], approve);
+  // Never let EOF race the interrupt: the reader stays parked after the scripted frame.
+  const stall = chunk => req => new Response(new ReadableStream({start(c) {
+    c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`));
+    req.signal.addEventListener('abort', () => c.error(req.signal.reason), {once:true});
+  }}), {headers:{'Content-Type':'text/event-stream'}});
+  for (const [protocol, suffix, path, reply, fragment] of [[chat, 'Chat', chatPath, answer, answer[0]],
+    [resp, 'Responses', responsesPath, text, text[0]]]) {
+    const invoke = (name, args) => wireCall(protocol, name, JSON.stringify(args), 'call_1');
+    const thought = invoke('think', {thought:'one'}), ask = invoke('user_prompt', {message:'Which?'});
+    const finish = invoke(output, {colors:['blue']});
+    for (const [label, yaml, replies, event, method = 'abort'] of [
+      ['StalledText', config, [stall(fragment), reply], 'delta'],
+      ['StalledReasoning', thinks, [stall(protocol === chat ? piece({reasoning_content:'why'}) : reasonDelta), reply], 'delta'],
+      ['StalledArguments', thinks, [stall(thought[0]), reply], 'tool_call_delta'],
+      ...(protocol === chat ? [['BufferedText', config, [reply, reply], 'delta'],
+        ['BufferedCall', thinks, [thought, thought, reply], 'tool_call_delta']] : []),
+      ['ToolUsage', thinks, [thought, thought, reply], 'usage'],
+      ['ToolCall', thinks, [thought, thought, reply], 'tool_call'],
+      ['ToolResult', thinks, [thought, thought, reply], 'tool_result'],
+      ['Elicitation', question, [ask, reply], 'elicitation'],
+      ['Child', team, [invoke('transfer_task', {agent:'helper', task:'count'}), stall(fragment), reply], 'delta'],
+      ['Handoff', team, [invoke('handoff', {agent:'helper'}), stall(fragment), reply], 'delta'],
+      ['PinnedReply', config.replace('model: local/test', 'model: local/test, fallback: {models: [local/b], retries: -1, cooldown: 1h}'),
+        [[{error:{message:'invalid model'}}], reply, reply], 'delta'],
+      ['LaterRound', thinks, [thought, stall(fragment), reply], 'delta'],
+      ['OutputUsage', palette, [finish, finish], 'usage'],
+      ['OutputResult', palette, [finish, finish], 'tool_result'],
+      ['Finish', config, [reply, reply], 'finish'],
+      ['Error', config, [[{error:{message:'bad'}}], reply], 'error'],
+      ['Restart', thinks, [thought, reply], 'tool_result', 'restart'],
+      ['Close', thinks, [thought], 'tool_result', 'close'],
+    ]) {
+      const name = `interrupt${label}${suffix}`;
+      tests[name] = await replay(api, name, yaml.replace('provider: openai,', `provider: openai, api_type: ${protocol},`), replies,
+        async ({api, options, record, trace}) => {
+          let fired = false;
+          const s = await api.createSession(options, e => {
+            record(e);
+            if (!fired && e.type === event) { fired = true; s[method](); }
+          });
+          try {
+            const first = await s.send('one').then(() => 'resolved', e => e.message);
+            if (first !== 'chat aborted') throw new Error(`expected interrupted send, got ${first}`);
+            trace.results.push(first, await s.send('again').catch(e => e.message));
+          } finally { await s.close(); }
+        }, path);
+    }
+  }
   // Go drops a whitespace-only message from each request and refuses a request left empty.
   const sending = (...prompts) => async ({api, options, record, trace}) => {
     const s = await api.createSession(options, record);

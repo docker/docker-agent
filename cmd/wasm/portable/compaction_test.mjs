@@ -310,7 +310,7 @@ test('summary failures cannot apply partial output, execute tools, or poison a r
   assert.equal(events.filter(e => e.type === 'tool_call').length, 0);
 });
 
-test('abort during or just after summarization restores history, and other sessions and restart start clean', async t => {
+test('interruption keeps an applied summary but not an unfinished one; restart and other sessions stay clean', async t => {
   const waiting = [Promise.withResolvers(), Promise.withResolvers()];
   const requests = intercept(t, (_r, n, signal) => {
     if (n === 1) return stream(answer('old answer'), usage(1024, 2));
@@ -324,27 +324,28 @@ test('abort during or just after summarization restores history, and other sessi
   const other = await api.createSession({ yaml });
   t.after(() => Promise.all([s.close(), other.close()]));
   await s.send('old question');
-  const aborted = s.send('discard me');
+  const aborted = s.send('during');
   await waiting[0].promise;
   await other.send('isolated');
   s.abort();
   await assert.rejects(aborted, /aborted/);
-  const after = s.send('discard this too');
+  const after = s.send('after');
   await waiting[1].promise;
   s.abort();
   await assert.rejects(after, /aborted/);
   await s.send('commit');
-  for (const i of [1, 3, 5]) {
+  for (const i of [1, 3]) {
     assert.match(requests[i].messages[0].content, /summarize conversations/);
     assert.equal(requests[i].messages[1].content, 'old question');
     assert.equal(requests[i].messages[2].content, 'old answer');
   }
   assert.deepEqual(requests[2].messages.slice(1), [{ role: 'user', content: 'isolated' }]);
   assert.equal(requests[4].messages[1].content, 'Session Summary: reply 4');
-  assert.equal(requests[6].messages[1].content, 'Session Summary: reply 6');
+  assert.ok(requests[3].messages.some(m => m.content.includes('during\nafter')));
+  assert.equal(requests[5].messages.at(-1).content, 'Session Summary: reply 4\ncommit');
   await s.restart();
   await s.send('fresh');
-  assert.deepEqual(requests[7].messages.slice(1), [{ role: 'user', content: 'fresh' }]);
+  assert.deepEqual(requests[6].messages.slice(1), [{ role: 'user', content: 'fresh' }]);
 });
 
 test('never replace a prefix too large for the summary request, including after an elicitation', { timeout: 5000 }, async t => {

@@ -105,7 +105,7 @@ pub struct Session {
     summary_attempt: fallback::Attempt,
     switches: usize,
     turn_id: String,
-    /// A handoff that stopped at the cap is announced when the next run starts.
+    // The next send announces an agent change the interrupted or capped run never projected.
     unannounced: Option<Value>,
 }
 
@@ -308,13 +308,14 @@ impl Session {
         )
     }
 
-    pub fn chunk(&mut self, mut chunk: Value, now: f64) -> Result<Value, String> {
+    pub fn chunk(&mut self, mut chunk: Value, now: f64, buffered: bool) -> Result<Value, String> {
         if self.responses.is_none() {
             let raw = chunk
                 .as_str()
                 .ok_or("expected Chat Completions wire record")?;
             let decoded = match crate::chat_stream::Chunk::decode(raw) {
                 Ok(chunk) => chunk,
+                Err(_) if buffered => return Err("invalid buffered record".into()),
                 Err(_) => {
                     // Do not echo parser snippets: the wire record can contain credentials.
                     let Some(message) = crate::go_json::syntax_error(raw).ok().flatten() else {
@@ -330,6 +331,9 @@ impl Session {
                 let (terminal, calls) = self.conversation.stream_state();
                 return Ok(json!({"events":events, "terminal": terminal, "calls": calls}));
             }
+        }
+        if buffered {
+            return Err("cannot process a buffered stream error or Responses event".into());
         }
         let raw_detail = if let Some(raw) = chunk.as_str() {
             #[derive(Deserialize)]
@@ -539,17 +543,23 @@ impl Session {
         self.request(body)
     }
 
-    pub fn end(&mut self, now: f64) -> Result<Value, String> {
+    pub fn end(&mut self, now: f64, buffered: bool) -> Result<Value, String> {
         if self.conversation.summarizing() {
+            if buffered {
+                return Err("not a buffered completion".into());
+            }
             self.begin_model_attempt(now);
-            let next = self.conversation.end()?;
+            let next = self.conversation.end_stream(false)?;
             return self.next(next);
         }
-        let next = self.conversation.end()?;
+        let next = self.conversation.end_stream(buffered)?;
         self.replayable = false; // Only an explicit new model attempt may retry.
         self.conversation
             .attempt
             .success(&self.conversation.profile.spec.policy, now);
+        if buffered {
+            return Ok(Value::Null);
+        }
         self.advance(next, now)
     }
 
@@ -699,7 +709,7 @@ impl Session {
     }
 
     pub fn restart(&mut self, stamp: session_context::Stamp) -> Result<(), String> {
-        self.cancel();
+        self.rollback();
         self.unannounced = None;
         self.conversation.restart(stamp)?;
         for profile in self.agents.values() {
@@ -708,11 +718,24 @@ impl Session {
         Ok(())
     }
 
-    pub fn cancel(&mut self) {
+    pub fn interrupt(&mut self, visible_agent: Option<String>) -> Result<(), String> {
+        self.unwind();
+        let agent = &self.conversation.profile.spec.name;
+        if let Some(from) = visible_agent.filter(|from| from != agent) {
+            self.unannounced = Some(handoff(&from, agent));
+        }
+        self.conversation.interrupt()
+    }
+
+    pub fn rollback(&mut self) {
+        self.unwind();
+        self.conversation.rollback();
+    }
+
+    fn unwind(&mut self) {
         if let Some(root) = self.parents.drain(..).next() {
             self.conversation = root;
         }
-        self.conversation.cancel();
         self.responses = None;
     }
 }

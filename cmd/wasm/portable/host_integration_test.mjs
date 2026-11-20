@@ -74,3 +74,43 @@ test('a remote server cannot shadow a local tool, even if the local tool is not 
   assert.equal(models,0);
   assert.equal(calls,0);
 });
+
+test('a late host reply cannot overwrite the canceled receipt or resume the batch', {timeout:5000}, async t => {
+  const api = await boot.bootDockerAgent();
+  const started = Promise.withResolvers(), receipt = Promise.withResolvers();
+  const requests = [], events = [];
+  let calls = 0, signal;
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    if (url.toString() !== model) {
+      calls++;
+      signal = init.signal;
+      started.resolve();
+      return receipt.promise;
+    }
+    requests.push(JSON.parse(init.body));
+    const tool_calls = [{name:'think', arguments:'{"thought":"kept"}'}, {name:'save_note', arguments:'{"note":"once"}'}]
+      .map((fn, index) => ({id:`call${index}`, index, type:'function', function:fn}));
+    const first = requests.length === 1;
+    const choices = [{index:0, delta:first ? {tool_calls} : {content:'ok'}, finish_reason:first ? 'tool_calls' : 'stop'}];
+    return new Response(`data: ${JSON.stringify({choices})}\n\ndata: [DONE]\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+  });
+  const yaml = options.yaml.replace('toolsets: [', 'toolsets: [{type: think}, ');
+  const s = await api.createSession({yaml, autoApprove:true}, e => events.push(e));
+  t.after(() => s.close());
+  const interrupted = assert.rejects(s.send('write'), /chat aborted/);
+  await started.promise;
+  s.abort();
+  await interrupted;
+  assert.ok(signal.aborted);
+  const before = events.length;
+  receipt.resolve(new Response('late receipt'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 1);
+  assert.equal(events.length, before);
+  await s.send('again');
+  assert.equal(calls, 1);
+  assert.deepEqual(requests[1].messages.filter(m => m.role === 'tool'), [
+    {role:'tool', tool_call_id:'call0', content:'Thoughts:\nkept'},
+    {role:'tool', tool_call_id:'call1', content:'The tool call was canceled by the user.'},
+  ]);
+});

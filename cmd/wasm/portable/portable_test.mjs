@@ -228,3 +228,35 @@ test('a provider-controlled stop reason cannot echo the endpoint credential in a
   assert.equal(events.find(e => e.type === 'warning').message, 'provider diagnostic contained credentials');
   assert.doesNotMatch(JSON.stringify(events), /session-only/);
 });
+
+test('an idle restart needs no await; an immediate abort still prevents dispatch', async t => {
+  const {options, requests} = await mockModel(t, () => [chunk({content:'ok'}, 'stop')]);
+  const s = await api.createSession(options);
+  t.after(() => s.close());
+  await s.send('old');
+  const restarted = s.restart();
+  const canceled = assert.rejects(s.send('queued'), /chat aborted/);
+  const overlap = assert.rejects(s.send('overlap'), /already active/);
+  s.abort();
+  s.abort();
+  await Promise.all([restarted, canceled, overlap]);
+  assert.equal(requests.length, 1);
+  await s.send('fresh');
+  assert.deepEqual(requests[1].messages.slice(1), [{role:'user', content:'fresh'}]);
+});
+
+
+test('restart from a callback excludes a reentrant send, not the next turn', async t => {
+  const {options, requests} = await mockModel(t, () => [chunk({content:'ok'}, 'stop')]);
+  let restart, overlap;
+  const s = await api.createSession(options, event => {
+    if (restart || event.type !== 'delta') return;
+    restart = s.restart();
+    overlap = assert.rejects(s.send('too early'), /session is restarting/);
+  });
+  t.after(() => s.close());
+  await assert.rejects(s.send('old'), /chat aborted/);
+  await s.send('fresh');
+  await Promise.all([restart, overlap]);
+  assert.deepEqual(requests[1].messages.slice(1), [{role:'user', content:'fresh'}]);
+});
