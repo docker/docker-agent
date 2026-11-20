@@ -251,6 +251,8 @@
       url: /providers/runcrate/
     - title: Together AI
       url: /providers/together/
+    - title: TrustedRouter
+      url: /providers/trustedrouter/
     - title: Vercel AI Gateway
       url: /providers/vercel/
     - title: "xAI (Grok)"
