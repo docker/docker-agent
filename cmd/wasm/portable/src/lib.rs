@@ -203,7 +203,7 @@ impl Core {
                 let next = s
                     .active(&agent)?
                     .confirm(&token, approved, remember, &reason)?;
-                s.confirmed(next, now)
+                s.advance(next, now)
             }
             Command::HostResult {
                 agent,

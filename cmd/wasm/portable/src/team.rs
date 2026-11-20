@@ -82,6 +82,8 @@ pub struct Session {
     summary_attempt: fallback::Attempt,
     switches: usize,
     turn_id: String,
+    /// A handoff that stopped at the cap is announced when the next run starts.
+    unannounced: Option<Value>,
 }
 
 impl Session {
@@ -166,6 +168,7 @@ impl Session {
             summary_attempt: Default::default(),
             switches: 0,
             turn_id: String::new(),
+            unannounced: None,
         })
     }
 
@@ -204,7 +207,11 @@ impl Session {
                 || self.conversation.profile.spec.bounded_fallback());
         self.switches = 0;
         self.turn_id = id.into();
-        self.request(body)
+        let mut request = self.request(body)?;
+        if let Some(event) = self.unannounced.take() {
+            request["event"] = event;
+        }
+        Ok(request)
     }
 
     pub fn request(&mut self, mut body: Value) -> Result<Value, String> {
@@ -344,45 +351,15 @@ impl Session {
             let next = self.conversation.end()?;
             return self.next(next);
         }
-        let mut next = self.conversation.end()?;
+        let next = self.conversation.end()?;
         self.replayable = false; // Only an explicit new model attempt may retry.
         self.conversation
             .attempt
             .success(&self.conversation.profile.spec.policy, now);
-        if let Some(switch) = self.conversation.switch.take() {
-            let events = next["events"].as_array_mut().unwrap();
-            next["request"] = self.route(switch, events, now)?;
-        } else if next.get("result").is_some() && !self.parents.is_empty() {
-            let output = next["result"]["message"]["content"]
-                .as_str()
-                .expect("assistant text")
-                .trim()
-                .to_owned();
-            let usage = &next["result"]["usage"];
-            let child = std::mem::replace(&mut self.conversation, self.parents.pop().unwrap());
-            self.conversation.include_usage(usage);
-            let events = next["events"].as_array_mut().unwrap();
-            events.retain(|e| e["type"] != "finish");
-            events.push(handoff(
-                &child.profile.spec.name,
-                &self.conversation.profile.spec.name,
-            ));
-            events.push(
-                self.conversation
-                    .complete_switch("transfer_task", output, false)?,
-            );
-            next.as_object_mut().unwrap().remove("result");
-            next["request"] = self.conversation.request()?;
-        }
-        self.next(next)
+        self.advance(next, now)
     }
 
-    fn route(
-        &mut self,
-        switch: Switch,
-        events: &mut Vec<Value>,
-        now: f64,
-    ) -> Result<Value, String> {
+    fn route(&mut self, switch: Switch, mut events: Vec<Value>, now: f64) -> Result<Value, String> {
         let caller = &self.conversation.profile.spec;
         let from = &caller.name;
         if let Switch::Forced(target) = switch {
@@ -392,10 +369,11 @@ impl Session {
             self.switches += 1;
             let profile = self.agents[&target].clone();
             let note=format!("The agent {from} finished its response and the conversation was automatically handed off to you. Your available handoff agents and tools are specified in the system messages that follow. Only use those capabilities - do not attempt to use tools or hand off to agents that you see in the conversation history from previous agents, as those were available to different agents with different capabilities. Look at the conversation history for context, continue the work from where the previous agent stopped, and complete your part of the task.");
-            events.push(handoff(from, &target));
+            let switched = handoff(from, &target);
             self.conversation.attempt = profile.spec.policy.begin(now);
             self.conversation.forced(profile, note);
-            return self.conversation.request();
+            self.announce(switched, &mut events);
+            return Ok(self.conversation.resume(events));
         }
         let (target, allowed, name, action, list) = match &switch {
             Switch::Forced(_) => unreachable!(),
@@ -436,7 +414,7 @@ impl Session {
         };
         if let Some(reason) = denial {
             events.push(self.conversation.complete_switch(name, reason, true)?);
-            return self.conversation.request();
+            return Ok(self.conversation.resume(events));
         }
         if self.switches == MAX_SWITCHES {
             return Err("team switch limit reached".into());
@@ -451,11 +429,13 @@ impl Session {
                 let changed = &agent != from;
                 events.push(self.conversation.complete_switch(name, note, false)?);
                 if changed {
-                    events.push(switched);
                     self.conversation.attempt = profile.spec.policy.begin(now);
                 }
                 self.conversation.profile = profile;
-                self.conversation.request()
+                if changed {
+                    self.announce(switched, &mut events);
+                }
+                Ok(self.conversation.resume(events))
             }
             Switch::Transfer(task) => {
                 let mut child = Conversation::open(profile, vec![task.system_message()]);
@@ -468,19 +448,51 @@ impl Session {
                 self.parents
                     .push(std::mem::replace(&mut self.conversation, child));
                 events.push(switched);
-                Ok(body)
+                Ok(json!({"events":events, "request":body}))
             }
         }
     }
 
-    pub fn confirmed(&mut self, mut next: Value, now: f64) -> Result<Value, String> {
+    // Go names the acting agent after its cap check; a stopped root run does so on its next send.
+    fn announce(&mut self, switched: Value, events: &mut Vec<Value>) {
+        if !self.conversation.at_cap() {
+            events.push(switched);
+        } else if self.parents.is_empty() {
+            self.unannounced = Some(switched);
+        }
+    }
+
+    pub fn advance(&mut self, mut next: Value, now: f64) -> Result<Value, String> {
         if let Some(switch) = self.conversation.switch.take() {
-            next["request"] = self.route(switch, next["events"].as_array_mut().unwrap(), now)?;
+            let events = std::mem::take(next["events"].as_array_mut().unwrap());
+            next = self.route(switch, events, now)?;
         }
         self.next(next)
     }
 
     pub fn next(&mut self, mut next: Value) -> Result<Value, String> {
+        // A child stopped by its cap returns that notice like any other final answer.
+        while next.get("result").is_some() && !self.parents.is_empty() {
+            let output = next["result"]["message"]["content"]
+                .as_str()
+                .expect("assistant text")
+                .trim()
+                .to_owned();
+            let child = std::mem::replace(&mut self.conversation, self.parents.pop().unwrap());
+            self.conversation.include_usage(&next["result"]["usage"]);
+            let mut events = std::mem::take(next["events"].as_array_mut().unwrap());
+            events.retain(|e| e["type"] != "finish");
+            // Go reports the delegate that was called, even if it handed off since.
+            events.push(handoff(
+                child.opener(),
+                &self.conversation.profile.spec.name,
+            ));
+            events.push(
+                self.conversation
+                    .complete_switch("transfer_task", output, false)?,
+            );
+            next = self.conversation.resume(events);
+        }
         if next
             .as_object_mut()
             .unwrap()
@@ -496,6 +508,7 @@ impl Session {
 
     pub fn restart(&mut self, stamp: session_context::Stamp) -> Result<(), String> {
         self.cancel();
+        self.unannounced = None;
         self.conversation.restart(stamp)?;
         for profile in self.agents.values() {
             profile.clear_grants();

@@ -216,6 +216,59 @@ async function run() {
   const pipeline = config.replace('model: local/test', 'model: local/test, force_handoff: helper') + '  helper: {model: local/worker, instruction: Summarize}\n';
   tests.forceHandoff = await replay(api, 'forceHandoff', pipeline, [answer, answer, answer], turns);
   tests.handoff = await replay(api, 'handoff', team, [tool('handoff', { agent: 'helper' }), answer, answer], turns);
+  // Go fixes the cap when a session or delegated task opens; hooks follow the acting agent.
+  const ponder = (text, id = 'call_1') => rawTool('think', JSON.stringify({thought: text}), id);
+  const limitedTeam = (root, helper) => config.replace('model: local/test', `model: local/test, ${root} toolsets: [{type: think}], sub_agents: [helper], handoffs: [helper]`)
+    + `  helper: {model: local/worker, ${helper} toolsets: [{type: think}], description: Helps, instruction: Be precise}\n`;
+  const limitedPipeline = (root, helper) => config.replace('model: local/test', `model: local/test, ${root} toolsets: [{type: think}], force_handoff: helper`)
+    + `  helper: {model: local/worker, ${helper} toolsets: [{type: think}], instruction: Summarize}\n`;
+  const limitedTrio = (root, first, second) => config.replace('model: local/test', `model: local/test, ${root} toolsets: [{type: think}]`)
+    + `  first: {model: local/first, ${first} toolsets: [{type: think}], description: First, instruction: Be first}\n`
+    + `  second: {model: local/second, ${second} toolsets: [{type: think}], description: Second, instruction: Be second}\n`;
+  const callLimit = n => `hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ["${n}"]}},`;
+  const delegate = (agent = 'helper') => tool('transfer_task', {agent, task: 'count'});
+  const pass = (agent = 'helper') => tool('handoff', {agent});
+  const handoffOnly = yaml => yaml.replace('sub_agents: [helper], ', '');
+  for (const [name, yaml, replies, drive = turns] of [
+    ['teamCapTransfer', limitedTeam('max_iterations: 2,', ''), [delegate(), answer, ponder('a'), answer]],
+    ['teamCapDelegate', limitedTeam('', 'max_iterations: 1,'), [delegate(), ponder('a'), answer, answer]],
+    ['teamCapHandoff', limitedTeam('max_iterations: 2,', 'max_iterations: 5,'), [pass(), ponder('a'), ponder('b'), ponder('c', 'call_2')]],
+    ['teamCapHandoffTargetIgnored', limitedTeam('', 'max_iterations: 1,'), [pass(), ponder('a'), answer, ponder('b'), answer]],
+    ['teamCapAtHandoff', limitedTeam('max_iterations: 1,', ''), [pass(), ponder('a')]],
+    ['teamCapAtReturn', limitedTeam('max_iterations: 1,', ''), [delegate(), answer, answer]],
+    ['teamCapAtDenial', limitedTeam('max_iterations: 1,', ''), [delegate('ghost'), answer]],
+    ['teamCapBounce', handoffOnly(limitedTeam('max_iterations: 3,', 'handoffs: [root],')), [pass(), pass('root'), ponder('a'), answer]],
+    ['teamCapForced', limitedPipeline('max_iterations: 1,', ''), [answer, answer]],
+    ['teamCapForcedTool', limitedPipeline('max_iterations: 2,', ''), [answer, ponder('a'), answer]],
+    ['teamCapForcedTargetIgnored', limitedPipeline('', 'max_iterations: 1,'), [answer, ponder('a'), answer, answer]],
+    ['teamCapNested', limitedTrio('max_iterations: 3, sub_agents: [first],', 'max_iterations: 2, sub_agents: [second],', 'max_iterations: 1,'),
+      [delegate('first'), delegate('second'), ponder('deep'), ponder('middle'), answer, answer]],
+    ['teamCapDelegateHandoff', limitedTrio('sub_agents: [first],', 'max_iterations: 2, handoffs: [second],', 'max_iterations: 7,'),
+      [delegate('first'), pass('second'), ponder('a'), answer, answer]],
+    ['teamCapDelegateForced', limitedTrio('sub_agents: [first],', 'max_iterations: 1, force_handoff: second,', ''),
+      [delegate('first'), answer, answer, answer]],
+    ['transferHandoffReturn', limitedTrio('sub_agents: [first],', 'handoffs: [second],', ''),
+      [delegate('first'), pass('second'), answer, answer, answer]],
+    ['teamCapChain', limitedTeam('max_iterations: 2,', '').replace('model: local/worker,', 'model: local/worker, fallback: {models: [local/worker-backup]},'),
+      [delegate(), [{error: {message: 'worker unavailable'}}], answer, ponder('a'), answer]],
+    ['teamCapAndHook', limitedTeam(`max_iterations: 2, ${callLimit(2)}`, '').replace('handoffs: [helper]', 'handoffs: []'),
+      [delegate(), answer, ponder('a'), answer]],
+    ['teamHookTransfer', limitedTeam(callLimit(2), ''), [delegate(), answer, ponder('a'), answer], rejectsThenRecovers],
+    ['teamHookAtReturn', limitedTeam(callLimit(1), '').replace('handoffs: [helper]', 'handoffs: []'), [delegate(), answer, answer], rejectsThenRecovers],
+    ['teamHookHandoffSource', limitedTeam(callLimit(2), ''), [pass(), ponder('a'), answer, answer]],
+    ['teamHookHandoffTarget', handoffOnly(limitedTeam('', callLimit(1))), [pass(), answer], rejectsThenRecovers],
+    ['teamHookBounce', handoffOnly(limitedTeam(callLimit(3), 'handoffs: [root],')), [pass(), pass('root'), ponder('a'), answer], rejectsThenRecovers],
+    ['teamHookForced', limitedPipeline('', callLimit(1)), [answer, answer], rejectsThenRecovers],
+  ]) tests[name] = await replay(api, name, yaml, replies, drive);
+  tests.teamCapForcedRestart = await replay(api, 'teamCapForcedRestart', limitedPipeline('max_iterations: 1,', ''), [answer, answer, answer],
+    async ({api, options, record, trace}) => {
+      const s = await api.createSession(options, record);
+      try {
+        trace.results.push(await s.send('first'));
+        await s.restart();
+        for (const prompt of ['fresh', 'again']) trace.results.push(await s.send(prompt));
+      } finally { await s.close(); }
+    });
   tests.think = await replay(api, 'think', config.replace('model: local/test', 'toolsets: [{type: think}], model: local/test'),
     [tool('think', { thought: 'a plan' }), answer, answer], turns);
   tests.loopGuard = await replay(api,'loopGuard', config.replace('model: local/test','max_consecutive_tool_calls: 2, toolsets: [{type: think}], model: local/test'),
@@ -339,6 +392,8 @@ async function run() {
     + 'toolsets: {greeting: {type: api, allow_private_ips: true, api_config: {name: greet, instruction: Return a greeting, method: GET, endpoint: "https://tool.invalid/greet"}}}';
   tests.transferHostFallback = await replay(api, 'transferHostFallback', workerAPI, [tool('transfer_task', {agent:'helper', task:'greet'}),
     [{error:{message:'worker unavailable'}}], tool('greet', {}), answer, answer], single, '/v1/chat/completions', greet);
+  tests.teamCapHostTool = await replay(api, 'teamCapHostTool', workerAPI.replace('fallback: {models: [local/worker-backup]}', 'max_iterations: 1'),
+    [tool('transfer_task', {agent:'helper', task:'greet'}), tool('greet', {}), answer], single, '/v1/chat/completions', greet);
   const mcp = config.replace('agents:', `mcps:
   remote: {name: default, allow_private_ips: true, remote: {transport_type: streamable, url: 'https://tool.invalid/mcp', headers: {X-Agent: '\${env.WHO}'}}}
 toolsets:
@@ -417,6 +472,13 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
     args.options.env.SPARE_KEY = 'spare-only';
     await drive(args);
   };
+  const responsesHelper = (root, helper) => limitedTeam(root, helper).replace('model: local/worker', 'model: spare/worker')
+    .replace('providers:', `providers:\n  spare: {provider: openai, api_type: openai_responses, base_url: ${location.origin}/v1, token_key: SPARE_KEY}`);
+  tests.teamCapResponsesDelegate = await replay(api, 'teamCapResponsesDelegate', responsesHelper('max_iterations: 2,', 'max_iterations: 1,'),
+    [delegate(), responseTool, ponder('a'), answer], withSpareKey(turns),
+    ['/v1/chat/completions', '/v1/responses', '/v1/chat/completions', '/v1/chat/completions']);
+  tests.teamCapResponsesHandoff = await replay(api, 'teamCapResponsesHandoff', responsesHelper('max_iterations: 2,', ''),
+    [pass(), responseTool, text], withSpareKey(turns), ['/v1/chat/completions', '/v1/responses', '/v1/responses']);
   const responseBackup = twoRounds.replace('providers:', `providers:\n  spare: {provider: openai, api_type: openai_responses, base_url: ${location.origin}/v1, token_key: SPARE_KEY}`)
     .replace('backup: {provider: local', 'backup: {provider: spare');
   tests.cappedCrossApi = await replay(api, 'cappedCrossApi', responseBackup,

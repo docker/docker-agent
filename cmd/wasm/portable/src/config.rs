@@ -912,6 +912,28 @@ pub fn team(
             output_tools.remove(name),
         )?);
     }
+    // A blocked delegate fails the send in Go while its caller keeps running unobserved.
+    let mut delegates: Vec<&str> = seen
+        .iter()
+        .flat_map(|name| &cfg.agents[*name].sub_agents)
+        .map(String::as_str)
+        .collect();
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(name) = delegates.pop() {
+        if !visited.insert(name) {
+            continue;
+        }
+        let a = &cfg.agents[name];
+        if a.hooks.max_calls.is_some() {
+            return Err(format!(
+                "the max_iterations hook on {name:?}, which can run inside transfer_task, is not supported"
+            ));
+        }
+        delegates.extend(a.handoffs.iter().map(String::as_str));
+        if !a.force_handoff.is_empty() {
+            delegates.push(&a.force_handoff);
+        }
+    }
     // Standard YAML tags and raw NEL can be lost before serde exposes the schema.
     if agents.iter().any(Selected::has_schema_instruction)
         && (yaml.contains('\u{85}') || ["!!", "!<", "%TAG"].iter().any(|tag| yaml.contains(tag)))
@@ -954,9 +976,6 @@ fn resolve(
         return Err("readonly agents cannot delegate or hand off to a writable agent".into());
     }
     let chain = !a.fallback.models.is_empty();
-    if team && a.hooks.max_calls.is_some() {
-        return Err("the max_iterations hook with local teams is not supported".into());
-    }
     if team && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
         return Err("session_context with local delegation or handoff is not supported".into());
     }
@@ -998,8 +1017,10 @@ fn resolve(
     if output_tool.is_some() && (history || overrides || a.limits.max_iterations > 0) {
         return Err("tool-mode structured output with history limits, max_iterations or toolset model overrides is not supported".into());
     }
-    if team && a.limits.max_iterations > 0 {
-        return Err("agent max_iterations with local teams is not supported".into());
+    if team && chain && (a.limits.max_iterations > 0 || a.hooks.max_calls.is_some()) {
+        return Err(
+            "iteration limits on a fallback chain within local teams are not supported".into(),
+        );
     }
     // An overflow can start compaction in Go even without a declared context window.
     if chain && a.limits.needs_bounded_fallback(&a.hooks) && a.session_compaction != Some(false) {
@@ -1470,6 +1491,39 @@ agents: {root: {model: main, compaction_model: a}}";
             .unwrap()
             .contains("name must be"));
         }
+    }
+
+    #[test]
+    fn team_iteration_limits_exclude_hooked_delegates_and_chains() {
+        let hook =
+            "hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}";
+        let open = |root: &str, helper: &str| {
+            let yaml = format!(
+                "providers: {{p: {{}}}}\nagents:\n  root: {{model: p/a, {root}}}\n  helper: {{model: p/b, {helper}}}\n  other: {{model: p/c, {hook}}}"
+            );
+            team(&yaml, "", &BTreeMap::new()).map(|(_, agents)| agents.len())
+        };
+        let capped = format!("max_iterations: 2, {hook}, sub_agents: [helper], handoffs: [other]");
+        assert_eq!(open(&capped, "max_iterations: 1"), Ok(3));
+        assert_eq!(open("force_handoff: helper", "handoffs: [other]"), Ok(3));
+        for (root, helper) in [
+            ("sub_agents: [other]", "description: unused"),
+            ("sub_agents: [helper]", "handoffs: [other]"),
+            ("sub_agents: [helper]", "force_handoff: other"),
+            ("handoffs: [other, helper]", "sub_agents: [root]"),
+        ] {
+            let error = open(root, helper).unwrap_err();
+            assert!(
+                error.contains("\"other\", which can run inside transfer_task"),
+                "{error}"
+            );
+        }
+        let chain = "max_iterations: 1, session_compaction: false, fallback: {models: [p/d]}";
+        let error = open("handoffs: [helper]", chain).unwrap_err();
+        assert!(
+            error.contains("fallback chain within local teams"),
+            "{error}"
+        );
     }
 
     #[test]

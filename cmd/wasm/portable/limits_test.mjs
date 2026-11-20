@@ -228,7 +228,7 @@ test('routed iteration cap rejects incompatible settings before any request', as
     [config(`fallback: {models: [local/backup]}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}`), /requires session_compaction: false/],
     [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['9']}}`), /portable tool round limit/],
     [config(`${fields.replace('max_iterations: 1, ', '')}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
-    [config(`${fields}, sub_agents: [root]`), /max_iterations with local teams/],
+    [config(`${fields}, sub_agents: [root]`), /fallback chain within local teams/],
     [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],
     [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
   ]) await assert.rejects(api.createSession(opts(yaml)), reason);

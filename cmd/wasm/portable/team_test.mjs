@@ -143,6 +143,78 @@ for (const method of ['abort', 'restart', 'close']) {
   });
 }
 
+const stopped = n => `Execution stopped after reaching the configured max_iterations limit (${n}).`;
+const callLimit = n => `hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['${n}']}}`;
+
+test('the opening agent\'s cap spans handoffs; a handoff stopped by it is announced on the next send', async t => {
+  const opts = options(`  root: {model: local/parent, max_iterations: 1, handoffs: [helper]}
+  helper: {model: local/worker, max_iterations: 5, handoffs: [root]}`);
+  const req = model(t, handoff('helper'), handoff('root'), text('fresh'));
+  const events = [];
+  const s = await api.createSession(opts, e => events.push(e));
+  t.after(() => s.close());
+  assert.equal((await s.send('one')).message.content, stopped(1));
+  assert.deepEqual(events.slice(-2).map(e => e.type), ['delta', 'finish']);
+  assert.equal(events.some(e => e.type === 'handoff'), false);
+  const first = events.length;
+  assert.equal((await s.send('two')).message.content, stopped(1));
+  assert.deepEqual(events[first], { type: 'handoff', from: 'root', to: 'helper' });
+  await s.restart();
+  assert.equal((await s.send('three')).message.content, 'fresh');
+  assert.deepEqual(req.map(r => r.model), ['parent', 'worker', 'parent']);
+  assert.equal(events.filter(e => e.type === 'handoff').length, 1);
+});
+
+test('a delegate stopped by its own cap answers its caller, whichever reply ends the round', { timeout: 5000 }, async t => {
+  const opts = options(`  root: {model: local/parent, max_iterations: 2, sub_agents: [helper]}
+  helper: {model: local/worker, max_iterations: 1, toolsets: [{type: user_prompt}, {type: plan}]}
+permissions: {ask: [write_plan], allow: ['*']}`);
+  const req = model(t, transfer('helper'), calls(tool('user_prompt', { message: 'Which?' })),
+    transfer('helper'), calls(tool('write_plan', { name: 'scope', content: 'plan' })));
+  const events = [];
+  const s = await api.createSession(opts, e => {
+    events.push(e);
+    if (e.type === 'elicitation') s.respondToElicitation({ id: e.id, action: 'accept' });
+    if (e.type === 'tool_confirmation') s.confirm({ confirmationId: e.confirmationId, decision: 'approve' });
+  });
+  t.after(() => s.close());
+  assert.equal((await s.send('go')).message.content, stopped(2));
+  assert.deepEqual(req.map(r => r.model), ['parent', 'worker', 'parent', 'worker']);
+  assert.equal(req[2].messages.at(-1).content, stopped(1));
+  assert.deepEqual(events.filter(e => e.type === 'handoff').map(e => e.to), ['helper', 'root', 'helper', 'root']);
+  assert.deepEqual(events.filter(e => e.type === 'tool_result' && e.name === 'transfer_task').map(e => e.output), [stopped(1), stopped(1)]);
+  assert.equal(events.filter(e => e.type === 'finish').length, 1);
+});
+
+test('the acting agent\'s call limit counts the whole send and keeps the handoff it interrupted', async t => {
+  const opts = options(`  root: {model: local/parent, ${callLimit(2)}, handoffs: [helper]}
+  helper: {model: local/worker, ${callLimit(1)}, handoffs: [root]}`);
+  const req = model(t, handoff('helper'), handoff('root'), text('done'));
+  const events = [];
+  const s = await api.createSession(opts, e => events.push(e));
+  t.after(() => s.close());
+  await assert.rejects(s.send('one'), /limit of 1 model call/);
+  assert.deepEqual(events.slice(-2).map(e => e.type), ['handoff', 'error']);
+  assert.equal(req.length, 1);
+  assert.equal((await s.send('two')).message.content, 'done');
+  assert.deepEqual(req.map(r => r.model), ['parent', 'worker', 'parent']);
+  assert.deepEqual(req[1].messages.filter(m => m.role === 'user').map(m => m.content), ['one', 'two']);
+});
+
+test('iteration limits that Go would enforce inside a delegated task or on a team fallback chain are refused', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', () => assert.fail('unexpected model request'));
+  for (const [agents, reason] of [
+    [`  root: {model: local/parent, sub_agents: [helper]}\n  helper: {model: local/worker, ${callLimit(1)}}`, /"helper", which can run inside transfer_task/],
+    [`  root: {model: local/parent, sub_agents: [helper]}\n  helper: {model: local/worker, handoffs: [other]}\n  other: {model: local/other, ${callLimit(1)}}`, /"other", which can run inside transfer_task/],
+    [`  root: {model: local/parent, sub_agents: [helper]}\n  helper: {model: local/worker, force_handoff: other}\n  other: {model: local/other, ${callLimit(1)}}`, /"other", which can run inside transfer_task/],
+    [`  root: {model: local/parent, ${callLimit(2)}, handoffs: [helper]}\n  helper: {model: local/worker, sub_agents: [root]}`, /"root", which can run inside transfer_task/],
+    [`  root: {model: local/parent, handoffs: [helper]}\n  helper: {model: local/worker, max_iterations: 2, session_compaction: false, fallback: {models: [local/backup]}}`, /fallback chain within local teams/],
+    [`  root: {model: local/parent, handoffs: [helper]}\n  helper: {model: local/worker, ${callLimit(2)}, session_compaction: false, fallback: {models: [local/backup]}}`, /fallback chain within local teams/],
+    [`  root: {model: local/parent, max_iterations: 9, handoffs: [helper]}\n  helper: {model: local/worker}`, /tool round limit/],
+  ]) await assert.rejects(api.createSession(options(agents)), reason);
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
 test('shared todos follow the team, scratchpads follow the conversation and agent', async t => {
   const opts = options(`  root: {model: local/parent, sub_agents: [helper], toolsets: [{type: think}, {type: todo, shared: true}]}
   helper: {model: local/worker, toolsets: [{type: think}, {type: todo, shared: true}]}`);

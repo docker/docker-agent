@@ -70,6 +70,9 @@ pub struct Conversation {
     pub attempt: crate::fallback::Attempt,
     pub archive: Option<crate::session_context::Archive>,
     compaction: Compactor,
+    // Go fixes the cap when a session opens; a handoff target's own cap never applies.
+    max_iterations: usize,
+    opener: String,
     messages: Vec<Value>,
     routed_seed: Option<crate::media::RoutedSeed>,
     scratchpads: BTreeMap<String, String>,
@@ -95,6 +98,7 @@ struct Turn {
     message_id: String,
     tool_rounds: usize,
     reminders: usize,
+    forced: usize,
     input: u64,
     output: u64,
     step: Step,
@@ -371,6 +375,8 @@ impl Conversation {
     pub fn open(profile: Rc<Profile>, messages: Vec<Value>) -> Self {
         Self {
             run_number: 0,
+            max_iterations: profile.spec.limits.max_iterations as usize,
+            opener: profile.spec.name.clone(),
             profile,
             attempt: Default::default(),
             archive: None,
@@ -420,6 +426,7 @@ impl Conversation {
             t.id, self.profile.spec.name, t.tool_rounds
         );
         t.tool_model_source = None;
+        t.forced += 1;
     }
     pub fn restart(&mut self, stamp: crate::session_context::Stamp) -> Result<(), String> {
         self.cancel();
@@ -477,6 +484,7 @@ impl Conversation {
             message_id: id.into(),
             tool_rounds: 0,
             reminders: 0,
+            forced: 0,
             input: 0,
             output: 0,
             step: Step::default(),
@@ -1238,56 +1246,72 @@ impl Conversation {
         None
     }
 
-    fn continue_turn(&mut self, mut events: Vec<Value>) -> Value {
+    fn continue_turn(&mut self, events: Vec<Value>) -> Value {
         if self.switch.is_some() {
             return json!({"events":events});
         }
         if self.active.as_ref().is_some_and(Turn::waiting) {
-            json!({"events":events, "waiting":true})
-        } else {
-            if let Some(error) = self.repetition_error() {
-                return json!({"events":events,"error":error});
+            return json!({"events":events, "waiting":true});
+        }
+        if let Some(error) = self.repetition_error() {
+            return json!({"events":events,"error":error});
+        }
+        self.resume(events)
+    }
+
+    pub fn opener(&self) -> &str {
+        &self.opener
+    }
+
+    pub fn at_cap(&self) -> bool {
+        let t = self.active.as_ref().expect("active turn");
+        self.max_iterations > 0 && t.tool_rounds + t.forced >= self.max_iterations
+    }
+
+    // Go checks the session cap, then the acting agent's hook, before each model call.
+    pub fn resume(&mut self, mut events: Vec<Value>) -> Value {
+        let t = self.active.as_ref().expect("active turn");
+        if self.at_cap() {
+            let max = self.max_iterations;
+            let text = format!(
+                "Execution stopped after reaching the configured max_iterations limit ({max})."
+            );
+            events.push(json!({"type":"delta","content":text,"message_id":t.message_id}));
+            let message = json!({"role":"assistant","content":text});
+            self.messages.push(message.clone());
+            let mut result = json!({"message":message});
+            if t.input + t.output > 0 {
+                result["usage"] = json!({"input_tokens":t.input,"output_tokens":t.output});
             }
-            let t = self.active.as_ref().expect("active tool round");
-            let max = self.profile.spec.limits.max_iterations;
-            if max > 0 && t.tool_rounds >= max as usize {
-                let text = format!(
-                    "Execution stopped after reaching the configured max_iterations limit ({max})."
-                );
-                events.push(json!({"type":"delta","content":text,"message_id":t.message_id}));
-                let message = json!({"role":"assistant","content":text});
-                self.messages.push(message.clone());
-                let mut result = json!({"message":message});
-                if t.input + t.output > 0 {
-                    result["usage"] = json!({"input_tokens":t.input,"output_tokens":t.output});
-                }
-                events.push(json!({"type":"finish","reason":"stop"}));
-                self.active = None;
-                return json!({"events":events,"result":result});
-            }
-            if let Some(limit) = self.profile.spec.hooks.max_calls.filter(|&n| {
-                self.active
-                    .as_ref()
-                    .is_some_and(|t| t.tool_rounds + t.reminders >= n as usize)
-            }) {
-                self.active = None;
-                return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
-            }
-            if self.profile.spec.bounded_fallback() {
-                // A later cancellation or projection error must not erase completed tool effects.
-                let t = self.active.as_mut().expect("active tool round");
-                t.messages_before = self.messages.len();
-                t.scratchpads_before = self
-                    .scratchpads
-                    .iter()
-                    .map(|(k, s)| (k.clone(), s.len()))
-                    .collect();
-                return json!({"events":events, "nextIteration":true});
-            }
-            match self.prepare_request() {
-                Ok(body) => json!({"events":events, "request":body}),
-                Err(error) => json!({"events":events,"error":error}),
-            }
+            events.push(json!({"type":"finish","reason":"stop"}));
+            self.active = None;
+            return json!({"events":events,"result":result});
+        }
+        let calls = t.tool_rounds + t.reminders + t.forced;
+        if let Some(limit) = self
+            .profile
+            .spec
+            .hooks
+            .max_calls
+            .filter(|&n| calls >= n as usize)
+        {
+            self.active = None;
+            return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
+        }
+        if self.profile.spec.bounded_fallback() {
+            // A later cancellation or projection error must not erase completed tool effects.
+            let t = self.active.as_mut().expect("active tool round");
+            t.messages_before = self.messages.len();
+            t.scratchpads_before = self
+                .scratchpads
+                .iter()
+                .map(|(k, s)| (k.clone(), s.len()))
+                .collect();
+            return json!({"events":events, "nextIteration":true});
+        }
+        match self.prepare_request() {
+            Ok(body) => json!({"events":events, "request":body}),
+            Err(error) => json!({"events":events,"error":error}),
         }
     }
 

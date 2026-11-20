@@ -120,6 +120,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       try {
         signal.throwIfAborted();
         let request = call('begin', { session, prompt, id: crypto.randomUUID(), now: performance.now() });
+        if (request.event) emit(request.event);
         for (;;) {
           signal.throwIfAborted();
           if (request.nextIteration) request = call('nextIteration', { session, now: performance.now() });
