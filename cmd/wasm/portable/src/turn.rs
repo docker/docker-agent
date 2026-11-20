@@ -1,5 +1,5 @@
 use crate::chat_stream::{Chunk, Fragment, Object};
-use crate::compaction::{Compactor, Prefix, Undo, Usage};
+use crate::compaction::{Compactor, Prefix, Trigger, Undo, Usage};
 use crate::discovery::{self, Discovery, Tool};
 use crate::permission::{self, Verdict};
 use crate::structured_output;
@@ -100,6 +100,8 @@ struct Turn {
     context_before: u64,
     summarizing: Option<Prefix>,
     draining: bool,
+    recovered: bool,
+    recheck_threshold: bool,
     original: Option<Undo>,
     messages_before: usize,
     scratchpads_before: BTreeMap<String, usize>,
@@ -684,9 +686,7 @@ impl Conversation {
         self.seed_reply = None;
         self.scratchpads.clear();
         self.grants.clear();
-        self.compaction.truncate(0);
-        self.compaction.context_tokens = 0;
-        self.compaction.seed_estimates_lost = false;
+        self.compaction = Compactor::default();
         Ok(())
     }
 
@@ -716,6 +716,8 @@ impl Conversation {
             tool_model_source: None,
             summarizing: None,
             draining: false,
+            recovered: false,
+            recheck_threshold: false,
             original: None,
             context_before: self.compaction.context_tokens,
             messages_before: self.messages.len(),
@@ -749,7 +751,7 @@ impl Conversation {
         {
             self.messages.push(json!({"role":"user", "content":prompt}));
         }
-        self.prepare_request()
+        self.prepare_request(Trigger::BeforeTurn)
     }
 
     pub fn set_seed_estimates_lost(&mut self, lost: bool) {
@@ -783,67 +785,100 @@ impl Conversation {
         &self.profile.spec.models[self.attempt.current]
     }
 
-    pub fn summarizing(&self) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|t| t.summarizing.is_some())
+    pub fn summary(&self) -> Option<&Prefix> {
+        self.active.as_ref()?.summarizing.as_ref()
     }
 
-    fn prepare_request(&mut self) -> Result<Value, String> {
-        match self.summary_request()? {
+    pub fn summarizing(&self) -> bool {
+        self.summary().is_some()
+    }
+
+    fn prepare_request(&mut self, trigger: Trigger) -> Result<Value, String> {
+        match self.summary_request(trigger)? {
             Some(request) => Ok(request),
             None => self.request(),
         }
     }
 
-    pub fn summary_request(&mut self) -> Result<Option<Value>, String> {
-        // The summary never inherits a serving fallback's parameters.
-        let (_, summary) = self.profile.spec.summary_target();
-        self.compaction.policy = self.profile.spec.models[0].compaction;
-        let model = self
-            .profile
-            .spec
-            .picker
-            .selected()
-            .unwrap_or(&summary.request);
-        let turn = self.active.as_mut().expect("active turn");
-        if let Some((prefix, mut request)) = self.compaction.plan(
-            &self.messages,
-            model,
-            summary.compaction,
-            summary.merge_messages,
-            turn.summarizing.as_ref(),
-        )? {
-            turn.summarizing = Some(prefix);
-            turn.step = Step::default();
-            self.profile.spec.hooks.rewrite_messages(
-                request["messages"]
-                    .as_array_mut()
-                    .expect("summary messages"),
-            )?;
-            Ok(Some(request))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn discard_summary_output(&mut self) {
-        self.active.as_mut().expect("active summary").step = Step::default();
-    }
-
-    pub fn skip_summary(&mut self, overflow: bool) -> Result<(), String> {
-        self.discard_summary_output();
-        let turn = self.active.as_mut().expect("active summary");
+    pub fn summary_request(&mut self, trigger: Trigger) -> Result<Option<Value>, String> {
         let spec = &self.profile.spec;
-        if !overflow
-            && turn.summarizing.as_ref().is_some_and(|p| p.retries == 0)
-            && (!spec.toolsets.is_empty() || spec.output_tool.is_some())
-        {
-            return Err("cannot silently continue with tools enabled".into());
+        self.compaction.policy = spec.models[0].compaction;
+        let turn = self.active.as_mut().expect("active turn");
+        let Some(prefix) = self.compaction.plan(
+            &self.messages,
+            spec.summary_target().1.compaction,
+            trigger,
+            turn.summarizing.as_ref(),
+        )?
+        else {
+            return Ok(None);
+        };
+        if turn.summarizing.is_none() {
+            turn.recheck_threshold = trigger != Trigger::BeforeTurn;
         }
-        turn.summarizing = None;
-        turn.draining = true;
-        Ok(())
+        turn.summarizing = Some(prefix);
+        turn.step = Step::default();
+        self.summary_body().map(Some)
+    }
+
+    fn summary_body(&self) -> Result<Value, String> {
+        let spec = &self.profile.spec;
+        let (_, summary) = spec.summary_target();
+        let model = spec.picker.selected().unwrap_or(&summary.request);
+        let prefix = self.summary().expect("active summary");
+        let mut body = self
+            .compaction
+            .request(&self.messages, prefix, model, summary.compaction);
+        if summary.merge_messages {
+            crate::wire::merge_messages(&mut body);
+        }
+        spec.hooks
+            .rewrite_messages(body["messages"].as_array_mut().unwrap())?;
+        Ok(body)
+    }
+
+    pub fn reset_step(&mut self) {
+        let t = self.active.as_mut().expect("active attempt");
+        t.step = Step::default();
+        t.message_id.push_str(":retry");
+    }
+
+    pub fn supports_recovery(&self) -> bool {
+        let spec = &self.profile.spec;
+        spec.models[0].compaction.auto_recover()
+            && !self.frame.needs_bounded_fallback(&spec.hooks)
+            && spec.tool_models.is_empty()
+            && (spec.context_window() == 0
+                || (!self.compaction.seed_estimates_lost
+                    && self.archive.is_none()
+                    && self.messages.iter().any(|m| m["role"] != "system")))
+    }
+
+    pub fn recovered(&self) -> bool {
+        self.active.as_ref().expect("active attempt").recovered
+    }
+
+    pub fn recover(&mut self) -> Result<Value, String> {
+        self.reset_step();
+        self.active.as_mut().unwrap().recovered = true;
+        self.prepare_request(Trigger::Overflow)
+    }
+
+    pub fn drain_summary(&mut self) -> Result<Value, String> {
+        let t = self.active.as_mut().unwrap();
+        t.summarizing = None;
+        t.draining = true;
+        t.step = Step::default();
+        self.after_summary()
+    }
+
+    fn after_summary(&mut self) -> Result<Value, String> {
+        // Overflow and post-tool compaction precede the next iteration's threshold check.
+        if std::mem::take(&mut self.active.as_mut().unwrap().recheck_threshold) {
+            self.prepare_request(Trigger::BeforeTurn)
+        } else {
+            self.request()
+        }
     }
 
     // session_start belongs to the agent that opened this run, even after a handoff.
@@ -1002,13 +1037,16 @@ impl Conversation {
         if turn.summarizing.is_none() && self.profile.needs_host() {
             return Err("host catalog not registered".into());
         }
-        let result = turn.step.chunk(chunk, &turn.message_id).map(|events| {
-            if turn.summarizing.is_some() {
-                Vec::new()
-            } else {
-                events
-            }
-        });
+        let result = turn
+            .step
+            .chunk(chunk, &turn.message_id, turn.summarizing.is_some())
+            .map(|events| {
+                if turn.summarizing.is_some() {
+                    Vec::new()
+                } else {
+                    events
+                }
+            });
         if result.is_err() {
             self.rollback();
         }
@@ -1112,26 +1150,36 @@ impl Conversation {
     fn finish_step(&mut self, interrupted: bool) -> Result<Value, String> {
         let turn = self.active.as_mut().ok_or("no active turn")?;
         let mut step = std::mem::take(&mut turn.step);
+        if let Some(plan) = &mut turn.summarizing {
+            if let Some(usage) = step.usage {
+                plan.output = usage.completion_tokens;
+            }
+            if !step.calls.is_empty() {
+                step.deny_summary_calls(&mut plan.replies)?;
+                return Ok(json!({"events":[], "request":self.summary_body()?}));
+            }
+            let summary = step.text.trim();
+            if summary.contains("<tool_call>")
+                || step.ambiguous
+                || (!summary.is_empty() && step.implicit_stop)
+                || !(step.finish.as_deref() == Some("stop")
+                    || (summary.is_empty() && step.finish.is_none()))
+            {
+                return Err("compaction: expected a complete text summary".into());
+            }
+            let plan = turn.summarizing.take().unwrap();
+            if !summary.is_empty() {
+                let undo = self.compaction.apply(&mut self.messages, plan, summary);
+                turn.original.get_or_insert(undo);
+            }
+            return Ok(json!({"events":[], "request":self.after_summary()?}));
+        }
         if turn.draining && !step.calls.is_empty() {
+            // Keep already observable history, never the hidden call or its effects.
+            self.active = None;
             return Err("compaction: cannot execute an unobserved continuation tool".into());
         }
-        if let Some(plan) = turn.summarizing.take() {
-            let summary = step.text.trim();
-            if summary.is_empty()
-                || step.finish.as_deref() != Some("stop")
-                || !step.calls.is_empty()
-            {
-                return Err("compaction: expected a complete, non-empty text summary".into());
-            }
-            let undo = self.compaction.apply(
-                &mut self.messages,
-                plan,
-                summary,
-                step.usage.map_or(0, |u| u.completion_tokens),
-            );
-            turn.original.get_or_insert(undo);
-            return Ok(json!({"events":[], "request":self.request()?}));
-        }
+        turn.recovered = false;
         let mut events = Vec::new();
         let reason = step.finish.clone();
         if matches!(
@@ -1251,12 +1299,7 @@ impl Conversation {
                     {
                         return Err("ambiguous streamed tool name".into());
                     }
-                    if call.name.len() > 64
-                        || !call
-                            .name
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
-                    {
+                    if !call.valid_name() {
                         return Err("invalid streamed tool name".into());
                     }
                 }
@@ -1281,7 +1324,7 @@ impl Conversation {
                 return Some(m["content"].as_str().unwrap_or_default().trim().into());
             }
         }
-        None
+        self.compaction.summarized_reply.clone()
     }
 
     pub fn hand_off(&mut self, profile: Rc<Profile>) {
@@ -1379,7 +1422,7 @@ impl Conversation {
             {
                 return Err("structured output arguments exceed 64 KiB".into());
             }
-            wire_calls.push(json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments}}));
+            wire_calls.push(call.wire());
         }
         self.seed_reply = None;
         message["tool_calls"] = wire_calls.into();
@@ -1511,10 +1554,7 @@ impl Conversation {
 
     fn start_call(&mut self, mut op: Invocation, events: &mut Vec<Value>) -> Result<(), String> {
         if !op.available {
-            let reason = format!(
-                "Tool '{}' is not available. You can only use the tools provided to you.",
-                op.call.name
-            );
+            let reason = op.call.unavailable();
             return self.logged_error(op.rejected(), reason, events);
         }
         // Like Go, input redaction only understands JSON; the message redaction still applies.
@@ -2039,7 +2079,7 @@ impl Conversation {
         if self.profile.spec.separate_model_attempts {
             return json!({"events":events, "nextIteration":true});
         }
-        match self.prepare_request() {
+        match self.prepare_request(Trigger::AfterTools) {
             Ok(body) => json!({"events":events, "request":body}),
             Err(error) => json!({"events":events,"error":error}),
         }
@@ -2119,7 +2159,44 @@ fn tool_result(id: &str, name: &str, output: &str, is_error: bool) -> Value {
 }
 
 impl Step {
-    fn chunk(&mut self, chunk: Chunk, id: &str) -> Result<Vec<Value>, String> {
+    fn deny_summary_calls(&self, replies: &mut Vec<Value>) -> Result<(), String> {
+        if !matches!(self.finish.as_deref(), Some("tool_calls" | "stop"))
+            || self.ambiguous
+            || replies.iter().filter(|m| m["role"] == "assistant").count() + 1
+                >= crate::limits::Limits::default().repetition_limit() as usize
+        {
+            return Err("compaction: incomplete or excessive summary tool calls".into());
+        }
+        let mut ids = BTreeSet::new();
+        let mut calls = Vec::with_capacity(self.calls.len());
+        for (index, c) in &self.calls {
+            if *index >= self.calls.len() as u64
+                || c.id.is_empty()
+                || !ids.insert(&c.id)
+                || c.renamed
+                || !c.valid_name()
+            {
+                return Err("compaction: invalid summary tool call".into());
+            }
+            calls.push(c.wire());
+        }
+        let mut message = json!({"role":"assistant","tool_calls":calls});
+        if !self.text.trim().is_empty() {
+            message["content"] = self.text.clone().into();
+        }
+        if !self.reasoning.trim().is_empty() {
+            message["reasoning_content"] = self.reasoning.clone().into();
+        }
+        replies.push(message);
+        replies.extend(
+            self.calls
+                .values()
+                .map(|c| json!({"role":"tool","tool_call_id":c.id,"content":c.unavailable()})),
+        );
+        Ok(())
+    }
+
+    fn chunk(&mut self, chunk: Chunk, id: &str, summary: bool) -> Result<Vec<Value>, String> {
         let choices = chunk.choices.unwrap_or_default();
         if self.terminal && !self.implicit_stop && !choices.is_empty() {
             return Err("model sent a choice after terminal usage".into());
@@ -2181,6 +2258,22 @@ impl Step {
                 events.push(event);
             }
         }
+        if summary
+            && delta
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+            && choice
+                .finish_reason
+                .as_deref()
+                .is_none_or(|r| r.is_empty() || (!usage && terminal_reason(r)))
+        {
+            // The Go summarizer ignores narration in a nonterminal tool fragment.
+            if let Some(reason) = choice.finish_reason.filter(|s| !s.is_empty()) {
+                self.finish = Some(reason);
+            }
+            return Ok(events);
+        }
         if let Some(s) = delta.reasoning() {
             self.reasoning.push_str(s);
             events.push(json!({"type":"delta", "message_id":id, "reasoning":s}));
@@ -2215,6 +2308,26 @@ fn terminal_reason(reason: &str) -> bool {
 }
 
 impl Call {
+    fn unavailable(&self) -> String {
+        format!(
+            "Tool '{}' is not available. You can only use the tools provided to you.",
+            self.name
+        )
+    }
+
+    fn wire(&self) -> Value {
+        json!({"id":self.id, "type":"function", "function":{"name":self.name, "arguments":self.arguments}})
+    }
+
+    fn valid_name(&self) -> bool {
+        !self.name.is_empty()
+            && self.name.len() <= 64
+            && self
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+    }
+
     fn event(&self) -> Value {
         json!({"type":"tool_call", "id":self.id, "name":self.name, "args":self.arguments})
     }

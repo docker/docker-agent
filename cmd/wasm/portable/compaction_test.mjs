@@ -23,16 +23,15 @@ function intercept(t, handler) {
 let api;
 before(async () => { api = await boot.bootDockerAgent(); });
 
-test('explicit unsupported strategies, thresholds and unknown windows reject before fetch', async t => {
+test('unsupported strategies, thresholds and out-of-range windows reject before fetch', async t => {
   const requests = intercept(t, () => { throw new Error('unexpected fetch'); });
   for (const config of [
-    yaml.replace('context_window: 2048, ', ''),
     yaml.replace('window: 2048', 'window: 4294967296'),
     yaml.replace('threshold: 0.5', 'threshold: 0'),
     yaml.replace('threshold: 0.5', 'threshold: 1.01'),
     yaml.replace('threshold: 0.5', 'threshold: .nan'),
     yaml.replace('session_compaction: true', 'session_compaction: {strategy: truncate}'),
-    yaml.replace('model: chosen,', 'model: chosen, compaction_model: chosen,'),
+    yaml.replace('model: chosen,', 'model: chosen, compaction_model: missing,'),
     yaml.replace('provider: local,', 'provider: local, provider_opts: {native_compaction: true},'),
     yaml.replace('model: chosen,', 'model: chosen, hooks: {before_compaction: []},'),
     yaml + '\n---\nagents: {root: {model: local/test}}',
@@ -59,8 +58,7 @@ test('dedicated summary routes validate both models and credentials before model
     [dedicated.replace(', context_window: 2048', ''), /context_window/],
     [dedicated.replace('model: summarizer', 'model: "a,b"'), /multi-model/],
     [dedicated.replace('compaction_threshold: 0.5', 'session_compaction: false'), /active compaction/],
-    [dedicated.replace('model: main,', 'toolsets: [{type: think}], model: main,'), /tool-free/],
-    [dedicated.replace('model: main,', 'structured_output: {mode: tool, name: answer, schema: {type: object, properties: {}}}, model: main,'), /tool-free/],
+    [dedicated.replace('model: main,', 'toolsets: [{type: model_picker, models: [main]}], model: main,'), /no model picker/],
     [dedicated.replace('model: main,', 'max_iterations: 2, model: main,'), /iteration limits/],
     [dedicated.replace('model: main,', 'handoffs: [root], model: main,'), /routed compaction/],
     [dedicated.replace('model: summarizer,', 'model: summarizer, base_url: https://other.invalid/v1,'), /explicit model token_key/],
@@ -202,7 +200,7 @@ test('summary overflow retries a smaller request on the primary; malformed retri
   const s = await api.createSession({ yaml: chain, env }, e => events.push(e));
   t.after(() => s.close());
   await s.send('first');
-  await assert.rejects(s.send('malformed'), /complete, non-empty text summary/);
+  await assert.rejects(s.send('malformed'), /complete text summary/);
   assert.equal(requests.length, 4);
   assert.equal((await s.send('retry')).message.content, 'done');
   assert.deepEqual(requests.map(r => r.model), ['main', 'spare', 'main', 'main', 'main', 'main', 'spare']);
@@ -265,6 +263,46 @@ test('plain compaction drains a text reply after overflow, never a silent tool a
   assert.doesNotMatch(JSON.stringify(events), /silent|hidden|secret/);
 });
 
+test('a failed summary with tools can drain text, but never dispatch a hidden host call', async t => {
+  let modelCalls = 0;
+  const hosts = [];
+  const events = [];
+  const hidden = {choices:[{delta:{tool_calls:[{index:0, id:'hidden', type:'function',
+    function:{name:'notify', arguments:'{}'}}]}, finish_reason:'tool_calls'}]};
+  t.mock.method(globalThis, 'fetch', url => {
+    hosts.push(new URL(url).hostname);
+    switch (++modelCalls) {
+      case 1: return stream(answer('old'), usage(1024, 1));
+      case 2: return new Response('bad summary', {status:400});
+      case 3: return stream(hidden);
+      default: assert.fail('unexpected follow-up');
+    }
+  });
+  const config = yaml.replace('{type: think}',
+    '{type: api, api_config: {name: notify, method: POST, endpoint: "https://tool.invalid/notify", instruction: Notify}}');
+  const s = await api.createSession({yaml:config, autoApprove:true}, e => events.push(e));
+  t.after(() => s.close());
+  await s.send('old');
+  const before = events.length;
+  await assert.rejects(s.send('trigger'), /run compaction agent: model failed: .*bad summary/);
+  assert.deepEqual(hosts, Array(3).fill('fixture.invalid'));
+  assert.deepEqual(events.slice(before).map(e => e.type), ['error']);
+});
+
+test('summary redaction also covers material spanning merged user messages', async t => {
+  const requests = intercept(t, (_, n) => n === 1
+    ? new Response('prompt too long', {status:400}) : stream(answer(n === 2 ? 'facts' : 'ok')));
+  const payload = 'ZmFrZQ=='.repeat(10);
+  const config = yaml.replace('redact_secrets: false', 'redact_secrets: true');
+  await api.chat({yaml:config, messages:[
+    {role:'user', content:'-----BEGIN PRIVATE KEY-----'},
+    {role:'user', content:payload + '\n-----END PRIVATE KEY-----'},
+  ]});
+  assert.equal(requests.length, 3);
+  assert.match(requests[1].messages[0].content, /summarize conversations/);
+  assert.ok(!JSON.stringify(requests[1]).includes(payload));
+});
+
 test('disabled compaction still reports the window and clamps the ordinary completion cap', async t => {
   const requests = intercept(t, () => stream(answer('answer'), usage(1500, 3)));
   const events = [];
@@ -280,9 +318,9 @@ test('disabled compaction still reports the window and clamps the ordinary compl
 
 test('summary failures cannot apply partial output, execute tools, or poison a retry', async t => {
   const failures = [
-    [answer('  ')], [answer('bad', null)], [answer('cut', 'length')], [answer('filtered', 'content_filter')],
-    [{ error: { message: 'unavailable' } }],
-    [{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'bad', type: 'function', function: { name: 'think', arguments: '{"thought":"bad"}' } }] }, finish_reason: 'tool_calls' }] }],
+    [answer('bad', null)], [answer('no explicit finish', null), usage(1, 1)], [answer('cut', 'length')], [answer('filtered', 'content_filter')],
+    [answer('<tool_call>{"name":"think"}</tool_call>')],
+    [{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'bad', type: 'function', function: { name: 'think', arguments: '{"thought":"bad"}' } }] }, finish_reason: 'length' }] }],
   ];
   const requests = intercept(t, (_r, n) => {
     if (n === 1) return stream(answer('old answer'), usage(1024, 1));

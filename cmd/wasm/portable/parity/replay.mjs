@@ -1641,6 +1641,64 @@ agents:`)
     const yaml = plainResponses.replace('model: local/test', `toolsets: [${JSON.stringify({type: 'api', allow_private_ips: true, api_config})}], model: local/test`);
     tests[name] = await replay(api, name, yaml, [text], approved, '/v1/responses');
   }
+  const overflow = http(400, {error: {code: 'context_length_exceeded'}});
+  const summaryFail = http(400, {error: {code: 'context_length_exceeded', message: 'over budget'}});
+  const overflowModels = compact.replace('context_window: 2048, ', '');
+  const childCompact = compact.replace('session_compaction: true', 'session_compaction: false, sub_agents: [helper]') +
+    '  helper: {model: small, instruction: Be precise, description: Helps, toolsets: [{type: think}]}\n';
+  const longResponses = [{type: 'response.failed', response: {id:'resp', error:{code:'context_length_exceeded', message:'over budget'}}}];
+  const later = sends(['first', 'again', 'afterwards']);
+  for (const [name, yaml, replies, drive = turns, path] of [
+    ['overflowHttpCode', compact, [overflow, answer, answer, answer]],
+    ['overflowHttpMessage', compact, [http(422, {error:{message:'Please reduce your prompt'}}), answer, answer, answer]],
+    ['overflowWire', compact, [http(413), answer, answer, answer]],
+    ['overflowMedia', compact, [http(400, {error:{message:'image exceeds the token limit'}}), answer, answer, answer]],
+    ['overflowHiddenCode', compact, [summaryFail, answer], rejectsThenRecovers],
+    ['overflowAfterText', compact, [[piece({content:'visible fragment'}), ...tooLong], answer, answer, answer]],
+    ['overflowAfterCall', compact, [[...ponder('unfinished'), ...tooLong], answer, answer, answer]],
+    ['overflowTwice', compact, [overflow, answer, tooLong, answer], rejectsThenRecovers],
+    ['overflowResetAfterTool', compact, [overflow, answer, ponder('work'), tooLong, answer, answer, answer]],
+    ['overflowSummaryEmpty', compact, [overflow, silent, answer, answer]],
+    ['overflowNothingFits', compact, [overflow, answer, answer], sends(['x'.repeat(9000), 'next'])],
+    ['overflowSummaryFailure', compact, [overflow, summaryFail, answer, answer], rejectsThenRecovers],
+    ['overflowLargeSummary', compact, [overflow, [piece({content:'facts'}, 'stop'), {...usage, usage:{prompt_tokens:1, completion_tokens:1200}}], answer, answer, answer]],
+    ['overflowUnknownWindow', overflowModels, [tooLong, answer, answer]],
+    ['compactUnknownWindow', overflowModels, [busyChat, answer]],
+    ['overflowDisabled', compact.replace('compaction: true', 'compaction: false'), [tooLong, answer], rejectsThenRecovers],
+    ['overflowFallback', chain, [[piece({content:'visible'}), ...tooLong], tooLong, answer, answer, answer]],
+    ['overflowPinned', chain, [tooLong, answer, tooLong, answer, answer, answer], later],
+    ['overflowDelegate', childCompact, [delegate(), ponder('work'), tooLong, answer, answer, answer, answer]],
+    ['overflowStructured', withSchema(compact, {mode:'tool'}, 'small'), [overflow, answer, final, final]],
+    ['overflowDedicated', dedicatedSummary.replace('token_key: LOCAL_KEY}', 'token_key: SPARE_KEY}')
+      .replace('model: main\n', 'model: main\n    toolsets: [{type: think}]\n'),
+      [overflow, text, ponder('work'), answer, answer], withSpareKey(turns), [mainPath, summaryPath, mainPath, mainPath, mainPath]],
+    ['overflowResponses', compactResponses, [[text[0], ...longResponses], text, text, text], turns, '/v1/responses'],
+    ['overflowAfterResponsesCall', compactResponses, [[responseTool[0], ...longResponses], text, text, text], turns, '/v1/responses'],
+    ['summaryEmpty', compact, [busyChat, [], answer, answer], later],
+    ['summaryWhitespace', compact, [busyChat, says({content:' \t'}), [piece({content:'no usage'}, 'stop')], answer, answer], later],
+    ['summaryEmptyAfterTools', compact, [[...ponder('work').slice(0,-1), highUsage], silent, answer, answer, answer]],
+    ['summaryUnavailableTool', compact.replace('redact_secrets: false, ', ''), [busyChat, ponder(secret), answer, answer, answer], later],
+    ['summaryToolThenOverflow', compact, [busyChat, ponder('work'), tooLong, answer, answer, answer], later],
+    ['summaryToolThenEmpty', compact, [busyChat, ponder('work'), silent, answer, answer], later],
+    ['summaryDrainWithTools', compact, [busyChat, summaryFail, answer, answer], later],
+    ['summaryBlankContinuation', compact, [busyChat, answer, silent, silent], later],
+    ['summaryNoUsage', compact, [[piece({content:'x'.repeat(5000)}, 'stop')], answer]],
+    ['summaryToolUsage', compact, [overflow, [...ponder('work').slice(0,-1), {...usage, usage:{prompt_tokens:3, completion_tokens:1200}}],
+      [piece({content:'facts'}, 'stop')], answer, answer, answer]],
+    ['summaryResponsesEmpty', compactResponses, [busy, [fin([])], text, text], later, '/v1/responses'],
+    ['summaryResponsesTool', compactResponses, [busy, responseTool, text, text, text], later, '/v1/responses'],
+    ['summaryOpenCodeSession', compact.replace(location.origin, 'https://opencode.ai'),
+      [busyChat, tooLong, ponder('work'), [{error:{message:'service unavailable'}}], answer, answer, answer], later, 'https://opencode.ai/v1/chat/completions'],
+    ['summaryChatGPTClient', 'models: {small: {provider: chatgpt, model: gpt-5, context_window: 2048}}\nagents: {root: {model: small, compaction_threshold: 0.5}}',
+      [busy, longResponses, responseTool, text, text, text], async args => {args.options.env.CHATGPT_OAUTH_TOKEN = 'fixture'; await later(args);}, 'https://chatgpt.com/backend-api/codex/responses'],
+  ]) tests[name] = await replay(api, name, yaml, replies, drive, path);
+  for (const [name, yaml, replies, history, path] of [
+    ['summarySeedBoundary', compact, [overflow, answer, answer], [{role:'system', content:'old policy'}, {role:'user', content:'x'.repeat(1800)},
+      {role:'assistant', content:'kept'}, {role:'system', content:'recent policy'}]],
+    ['summaryImageNoFit', compact, [overflow, answer], [{role:'user', multi_content:[remote]}]],
+    ['summaryImageResponses', compactResponses.replace('window: 2048', 'window: 8192'), [overflow, text, text], [{role:'user', multi_content:[remote, part('blue')]}], '/v1/responses'],
+  ]) tests[name] = await replay(api, name, yaml.replace('model: test,', 'model: test, capabilities: {image: true},'), replies,
+    async ({api, options, record, trace}) => {trace.results.push(await api.chat({...options, messages:[...history, {role:'user', content:'next'}]}, record));}, path);
   // Go drops a whitespace-only message from each request and refuses a request left empty.
   const sending = (...prompts) => async ({api, options, record, trace}) => {
     const s = await api.createSession(options, record);

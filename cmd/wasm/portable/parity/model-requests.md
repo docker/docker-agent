@@ -49,3 +49,6 @@ or credential is needed.
   override; set the model's `token_key` explicitly. Encoded (`%`) or backslash
   base URLs are rejected rather than resolving ambiguous path separators;
   provider-owned Azure query values are encoded separately.
+
+See [session compaction](session-compaction.md) for summary requests, overflow
+recovery, and the limits on unobserved continuations.

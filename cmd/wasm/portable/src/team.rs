@@ -1,5 +1,6 @@
 //! Local agent switches. Transfer frames own independent histories; handoffs keep the current frame.
 use crate::{
+    compaction::Trigger,
     fallback, media, responses, session_context,
     turn::{Conversation, Profile},
 };
@@ -154,17 +155,36 @@ impl Session {
         let team = !profile.spec.team_prompts.is_empty() || !profile.spec.force_handoff.is_empty();
         let routing = team || profile.spec.routed_summary();
         let routed_media = routing && multipart;
-        let seed_estimates_lost = multipart
-            || history.iter().any(|m| {
-                !m["usage"].is_null()
-                    || !m["reasoning_content"].is_null()
-                    || !m["tool_definitions"].is_null()
-                    || !m["name"].is_null()
-                    || (m["role"] != "tool"
-                        && m["tool_calls"].is_null()
-                        && m["content"].as_str().is_none_or(|s| s.trim().is_empty()))
-            });
-        if routed_media && primary.compaction.enabled() {
+        let seed_estimates_lost = history.iter().any(|m| {
+            let parts = m["multi_content"].as_array().filter(|ps| !ps.is_empty());
+            !m["usage"].is_null()
+                || !m["reasoning_content"].is_null()
+                || !m["tool_definitions"].is_null()
+                || !m["name"].is_null()
+                || match parts {
+                    Some(ps) => {
+                        m["role"] != "user"
+                            || m["content"].as_str().is_some_and(|s| !s.is_empty())
+                            || ps
+                                .iter()
+                                .any(|p| p["type"] != "text" && p["type"] != "image_url")
+                    }
+                    None => {
+                        m["role"] != "tool"
+                            && m["tool_calls"].is_null()
+                            && m["content"].as_str().is_none_or(|s| s.trim().is_empty())
+                    }
+                }
+        });
+        let part_count = |messages: &[Value], key: &str| -> usize {
+            messages
+                .iter()
+                .filter_map(|m| m[key].as_array())
+                .map(Vec::len)
+                .sum()
+        };
+        let source_parts = part_count(&history, "multi_content");
+        if routed_media && primary.compaction.proactive() {
             return Err("multipart history with routed compaction is not supported".into());
         }
         let targets = || agents.values().flat_map(|p| p.spec.targets());
@@ -206,6 +226,9 @@ impl Session {
             preserve_names,
             profile.spec.hooks.redact_messages,
         )?;
+        // Dropped images or blank parts still count toward Go's original token estimate.
+        let seed_estimates_lost = seed_estimates_lost
+            || (source_parts > 0 && source_parts != part_count(&history, "content"));
         let mut conversation = Conversation::open(profile, history);
         conversation.seed_reply = seed_reply;
         conversation.set_seed_estimates_lost(seed_estimates_lost);
@@ -284,8 +307,8 @@ impl Session {
             }
             return Ok(next);
         }
-        let summarizing = self.conversation.summarizing();
-        if summarizing {
+        let summary = self.conversation.summary().map(|p| p.request_kind());
+        if summary.is_some() {
             self.summary_attempt = Default::default();
         }
         let (index, target) = self.conversation.request_target();
@@ -316,7 +339,7 @@ impl Session {
             }
         }
         Ok(
-            json!({"agent":spec.name, "target": index, "responses":target.responses, "summary":summarizing, "body":body}),
+            json!({"agent":spec.name, "target": index, "responses":target.responses, "summary":summary, "body":body}),
         )
     }
 
@@ -466,7 +489,7 @@ impl Session {
         let transient = overflow.is_none() && transient;
         if self.conversation.summarizing() {
             if overflow == Some(fallback::Overflow::Tokens) {
-                if let Some(body) = self.conversation.summary_request()? {
+                if let Some(body) = self.conversation.summary_request(Trigger::Overflow)? {
                     return Ok(json!({"request":self.request(body)?}));
                 }
             }
@@ -478,23 +501,28 @@ impl Session {
                     .responses
                     .as_ref()
                     .map(|_| responses::Stream::default());
-                self.conversation.discard_summary_output();
+                self.conversation.reset_step();
                 return Ok(json!({"retry":true,"delay":delay}));
             }
             let message = format!(
                 "run compaction agent: {}",
                 fallback::model_error("model failed", overflow, &reason)
             );
-            self.conversation
-                .skip_summary(overflow.is_some())
-                .map_err(|e| format!("{message} ({e})"))?;
-            let request = self.next_iteration(now)?;
-            return Ok(json!({"request":request, "event":{"type":"error", "message":message}}));
+            if !self.parents.is_empty() {
+                // Draining the child could resume a caller whose tools are no longer observed.
+                return self.stop(message);
+            }
+            self.begin_model_attempt(now);
+            let body = self.conversation.drain_summary()?;
+            return Ok(
+                json!({"request":self.request(body)?, "events":[{"type":"error", "message":message}]}),
+            );
         }
+        let recover = overflow.is_some() && self.conversation.supports_recovery();
         let spec = &self.conversation.profile.spec;
         let attempt = &mut self.conversation.attempt;
         let previous = attempt.current;
-        let decision = if self.replayable {
+        let decision = if self.replayable || recover {
             attempt.fail(&spec.policy, transient, spec.models.len())
         } else {
             fallback::Decision::Stop
@@ -502,15 +530,21 @@ impl Session {
         let current = attempt.current;
         let mut next = match decision {
             fallback::Decision::Retry(delay) => json!({"delay":delay}),
-            fallback::Decision::Switch => json!({"event":{"type":"fallback", "attempt":1,
-                "from":self.conversation.attempt_model(previous).id, "to":self.conversation.attempt_model(current).id, "reason":reason}}),
+            fallback::Decision::Switch => json!({"events":[{"type":"fallback", "attempt":1,
+                "from":self.conversation.attempt_model(previous).id, "to":self.conversation.attempt_model(current).id, "reason":reason}]}),
+            fallback::Decision::Stop if recover && !self.conversation.recovered() => {
+                return self.recover(now)
+            }
             fallback::Decision::Stop => {
                 let prefix = if spec.models.len() > 1 && self.replayable {
                     "all models failed"
                 } else {
                     "model failed"
                 };
-                let message = if http_status.is_some() || spec.separate_model_attempts {
+                let message = if overflow.is_some()
+                    || http_status.is_some()
+                    || spec.separate_model_attempts
+                {
                     fallback::model_error(prefix, overflow, &reason)
                 } else {
                     format!("{prefix}: {reason}")
@@ -518,6 +552,10 @@ impl Session {
                 return self.stop(message);
             }
         };
+        if recover {
+            self.conversation.reset_step();
+            self.replayable = true;
+        }
         let body = self.conversation.request()?;
         let mut request = self.request(body)?;
         if let Some(dynamic) = request.get_mut("dynamic") {
@@ -525,6 +563,24 @@ impl Session {
         }
         next["request"] = request;
         Ok(next)
+    }
+
+    fn recover(&mut self, now: f64) -> Result<Value, String> {
+        let spec = &self.conversation.profile.spec;
+        let mut events = vec![
+            json!({"type":"warning", "message":"The conversation has exceeded the model's context window. Automatically compacting the conversation history..."}),
+        ];
+        if spec.context_window() == 0 {
+            let target = &spec.models[0];
+            let model = spec.picker.selected().unwrap_or(&target.request);
+            let message = format!("Session compaction failed: model {} has no known context window, and it also runs the summary because no compaction_model is set. Define that model in the models section with context_window set to its context window (inline provider/model references cannot set context_window), or point compaction_model at a model with a known context window.", crate::go_json::quote(&model.id));
+            events.push(
+                json!({"type":"warning", "message":target.transport.safe_diagnostic(message)?}),
+            );
+        }
+        self.begin_model_attempt(now);
+        let body = self.conversation.recover()?;
+        Ok(json!({"request":self.request(body)?, "events":events}))
     }
 
     fn stop(&mut self, message: String) -> Result<Value, String> {
