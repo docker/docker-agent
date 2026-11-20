@@ -185,19 +185,84 @@ test('Responses summary retries discard stale output snapshots before accepting 
   assert.equal(requests[4].input[0].content, 'Session Summary: key facts');
 });
 
-test('summary overflow or malformed output never drains an uncompressed fallback request', async t => {
-  let response;
-  const requests = intercept(t, (_, n) => n === 1 ? stream({ error: { message: 'primary unavailable' } })
-    : n === 2 ? stream(answer('first'), usage(1024, 1)) : stream(...response));
-  const s = await api.createSession({ yaml: chain, env });
+test('summary overflow retries a smaller request on the primary; malformed retries never drain a fallback', async t => {
+  const overflow = { error: { message: 'context_length_exceeded' } };
+  const requests = intercept(t, (_, n) => {
+    switch (n) {
+      case 1: return stream({ error: { message: 'primary unavailable' } });
+      case 2: return stream(answer('first'), usage(1000, 25));
+      case 3: case 5: return stream(answer('discard', null), overflow);
+      case 4: return stream(answer('partial', 'length'));
+      case 6: return stream(answer('key facts'), usage(40, 2));
+      case 7: return stream(answer('done'));
+      default: assert.fail('unexpected model request');
+    }
+  });
+  const events = [];
+  const s = await api.createSession({ yaml: chain, env }, e => events.push(e));
+  t.after(() => s.close());
+  await s.send('first');
+  await assert.rejects(s.send('malformed'), /complete, non-empty text summary/);
+  assert.equal(requests.length, 4);
+  assert.equal((await s.send('retry')).message.content, 'done');
+  assert.deepEqual(requests.map(r => r.model), ['main', 'spare', 'main', 'main', 'main', 'main', 'spare']);
+  for (const i of [3, 5]) {
+    assert.equal(requests[i].messages.length, 2);
+    assert.match(requests[i].messages[1].content, /^(malformed|retry)\nProvide a summary/);
+  }
+  assert.equal(requests[6].messages[0].content, 'Session Summary: key facts');
+  assert.doesNotMatch(JSON.stringify(requests.slice(4)), /malformed/);
+  assert.doesNotMatch(JSON.stringify([events, requests]), /discard|partial/);
+});
+
+test('after shrinking, preserve the raw stream error and silently keep the ordinary reply', async t => {
+  const diagnostic = '{ "message": "bad input", "code": "invalid" }';
+  const requests = intercept(t, (_, n) => {
+    switch (n) {
+      case 1: return stream(answer('first'), usage(1000, 25));
+      case 2: return stream({error: {message: 'reduce your prompt'}});
+      case 3: return new Response(`data: {"error":${diagnostic}}\n\n`, {headers:{'content-type':'text/event-stream'}});
+      case 4: return stream(answer('silent'), usage(10, 2));
+      case 5: return stream(answer('done'));
+      default: assert.fail('unexpected request');
+    }
+  });
+  const events = [];
+  const s = await api.createSession({yaml: yaml.replace(', toolsets: [{type: think}]', '')}, e => events.push(e));
+  t.after(() => s.close());
+  await s.send('first');
+  const message = `run compaction agent: model failed: error receiving from stream: received error while streaming: ${diagnostic}`;
+  await assert.rejects(s.send('next'), {message});
+  assert.equal(events.at(-1).message, message);
+  await s.send('afterwards');
+  assert.equal(requests.at(-1).messages.at(-2).content, 'silent');
+  assert.doesNotMatch(JSON.stringify(events), /silent/);
+});
+
+test('plain compaction drains a text reply after overflow, never a silent tool action', async t => {
+  const overflow = {error: {message: 'prompt too long'}};
+  const call = {choices: [{delta:{tool_calls:[{id:'hidden', index:0, type:'function',
+    function:{name:'think', arguments:'{"thought":"secret"}'}}]}, finish_reason:'tool_calls'}]};
+  const requests = intercept(t, (_, n) => {
+    switch (n) {
+      case 1: case 4: return stream(answer('first'), usage(1024, 1));
+      case 2: case 5: case 6: return stream(overflow);
+      case 3: return stream(answer('silent'), usage(10, 2));
+      case 7: return stream(call);
+      default: assert.fail('unexpected model request');
+    }
+  });
+  const events = [];
+  const s = await api.createSession({yaml}, e => events.push(e));
   t.after(() => s.close());
   await s.send('old '.repeat(500));
-  response = [{ error: { message: 'context_length_exceeded' } }];
-  await assert.rejects(s.send('overflow'), /context overflow/);
-  response = [answer('partial', 'length')];
-  await assert.rejects(s.send('malformed'), /complete, non-empty text summary/);
-  assert.deepEqual(requests.map(r => r.model), ['main', 'spare', 'main', 'main']);
-  assert.equal(requests.at(-1).messages.some(m => m.content?.includes('overflow')), false);
+  await assert.rejects(s.send('again'), /run compaction agent: The conversation has exceeded/);
+  await s.send('old '.repeat(500));
+  assert.equal(requests[3].messages.at(-2).content, 'silent');
+  await assert.rejects(s.send('again'), /run compaction agent: The conversation has exceeded/);
+  assert.equal(requests.length, 7);
+  assert.ok(requests.at(-1).tools.length);
+  assert.doesNotMatch(JSON.stringify(events), /silent|hidden|secret/);
 });
 
 test('disabled compaction still reports the window and clamps the ordinary completion cap', async t => {

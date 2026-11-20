@@ -144,8 +144,8 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           let outcome;
           try {
             const { transport } = handle.profiles[request.agent].targets[request.target];
-            const response = await modelFetch(transport, request.body, signal);
-            for await (const chunk of sse(response, request.responses)) {
+            const response = await modelFetch(transport, request, signal);
+            for await (const chunk of sse(response, request.responses, request.summary)) {
               signal.throwIfAborted();
               const step = call('chunk', { session, chunk, now: performance.now() });
               if (step.request || step.retry) { outcome = step; break; }
@@ -165,13 +165,13 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
               if (outcome.event.type === 'error') runError = new Error(outcome.event.message);
               emit(outcome.event);
             }
-            if (outcome.delay) await backoff(outcome.delay, signal);
+            if (outcome.delay) await wait(outcome.delay * (0.9 + 0.2 * Math.random()), signal);
             if (!outcome.retry) request = outcome.request;
             continue;
           }
           let next = call('end', { session, now: performance.now() });
           if (runError) {
-            // Like Go's event bridge, drain the tool-free continuation without projecting it.
+            // Drain the continuation without projecting it; Rust rejects silent tool actions.
             if (next.result || next.waiting || next.error) throw runError;
             request = next.request;
             continue;
@@ -320,26 +320,52 @@ class TransportError extends Error {
   constructor(message, status) { super(message); this.status = status; }
 }
 
-async function modelFetch({ endpoint, headers }, body, signal) {
+async function modelFetch({ endpoint, headers }, { body, summary }, signal) {
   const init = {
     method: 'POST', redirect: 'error', credentials: 'omit', signal,
     headers,
     body: JSON.stringify(body),
   };
-  let response;
-  try { response = await fetch(endpoint, init); }
-  catch (e) { throw new TransportError(`model request failed: ${e.message}`); }
-  if (!response.ok) {
-    const detail = await errorDetail(response);
-    throw new TransportError(`model request failed: HTTP ${response.status}${detail ? `: ${detail}` : ''}`, response.status);
+  for (let attempt = 0; ; attempt++) {
+    let response;
+    try { response = await fetch(endpoint, init); }
+    catch (e) {
+      if (!summary || attempt >= 2) throw new TransportError(`model request failed: ${e.message}`);
+    }
+    if (response?.ok) return response;
+    // The Go SDK retries transport failures before the child runtime sees an overflow.
+    const retry = response?.headers.get('x-should-retry');
+    if (summary && attempt < 2 && (!response || retry === 'true' ||
+        (retry !== 'false' && ([408, 409, 429].includes(response.status) || response.status >= 500)))) {
+      await response?.body?.cancel();
+      await wait(summaryRetryDelay(response?.headers, attempt), signal);
+      continue;
+    }
+    const detail = await errorDetail(response, summary);
+    const phase = summary ? 'error receiving from stream' : 'model request failed';
+    throw new TransportError(`${phase}: HTTP ${response.status}${detail ? `: ${detail}` : ''}`, response.status);
   }
-  return response;
+}
+
+function summaryRetryDelay(headers, attempt) {
+  for (const [key, unit] of [['Retry-After-Ms', 1], ['Retry-After', 1000]]) {
+    const raw = headers?.get(key);
+    if (!raw) continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return Math.min(n * unit, 8000);
+    if (unit === 1000 && Number.isNaN(n)) {
+      const date = Date.parse(raw);
+      if (Number.isFinite(date)) return Math.max(0, Math.min(date - Date.now(), 8000));
+    }
+  }
+  return (500 << attempt) * (1 - Math.random() / 4);
 }
 
 // Use the provider diagnostic, not an unbounded proxy error page, in fallback events.
-async function errorDetail(response) {
-  if (!response.body || !response.headers.get('Content-Type')?.includes('application/json')) {
+async function errorDetail(response, summary) {
+  if (!response.body || (!summary && !response.headers.get('Content-Type')?.includes('application/json'))) {
     await response.body?.cancel();
+    if (summary) throw new Error('compaction: missing HTTP error body');
     return '';
   }
   const reader = response.body.getReader();
@@ -349,29 +375,40 @@ async function errorDetail(response) {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      if ((bytes += value.byteLength) > 8192) return '';
+      if ((bytes += value.byteLength) > 8192) break;
       text += utf8.decode(value, { stream: true });
     }
+    if (bytes > 8192) throw new Error();
     const body = JSON.parse(text + utf8.decode());
+    if (summary) {
+      // The SDK unwraps body.error before StatusError extracts its message.
+      if (body?.error && Object.hasOwn(body.error, 'error')) throw new Error();
+      if (response.status === 413 && body?.error && typeof body.error === 'object' && !body.error.message) return '';
+      if (typeof body?.error?.message === 'string' && body.error.message) return body.error.message;
+      if (body?.error?.code === 'context_length_exceeded' && !body.error.message) return JSON.stringify(body.error);
+      throw new Error();
+    }
     const detail = body?.error?.message ?? body?.message;
     return typeof detail === 'string' ? detail : '';
-  } catch { return ''; }
-  finally { try { await reader.cancel(); } finally { reader.releaseLock(); } }
+  } catch {
+    if (summary) throw new Error('compaction: unsupported HTTP error body');
+    return '';
+  } finally { try { await reader.cancel(); } finally { reader.releaseLock(); } }
 }
 
-function backoff(base, signal) {
+function wait(delay, signal) {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', abort);
       resolve();
-    }, base * (0.9 + 0.2 * Math.random()));
+    }, delay);
     function abort() { clearTimeout(timer); reject(signal.reason); }
     signal.addEventListener('abort', abort, { once: true });
   });
 }
 
-async function* sse(response, responses) {
+async function* sse(response, responses, summary) {
   if (!response.body || !/^text\/event-stream(?:;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
     await response.body?.cancel();
     throw new Error('expected a text/event-stream model response');
@@ -395,7 +432,11 @@ async function* sse(response, responses) {
           data = [];
           if (record === '[DONE]') return;
           const chunk = JSON.parse(record);
-          yield chunk;
+          if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) throw new Error('invalid model stream event');
+          // Go's SDK retains the original JSON of top-level stream errors.
+          yield chunk.error != null ? record : chunk;
+          // Go's Chat adapter treats usage-only chunks as terminal, even without an explicit stop.
+          if (summary && !responses && chunk.usage && (!chunk.choices?.length || chunk.choices[0].finish_reason)) return;
           // Responses has a terminal JSON event, not a Chat Completions [DONE] sentinel.
           if (responses && ['response.completed', 'response.done', 'response.incomplete'].includes(chunk.type)) return;
         }

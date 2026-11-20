@@ -55,6 +55,7 @@ async function replay(api, name, yaml, replies, drive, endpoint = '/v1/chat/comp
     const chunks = replies[trace.requests.length];
     trace.requests.push({ method: req.method, path: new URL(req.url).pathname,
       authorization: req.headers.get('Authorization'), body: await req.json() });
+    if (!Array.isArray(chunks)) return Response.json(chunks.body, { status: chunks.status });
     const isChat = expected.endsWith('/chat/completions');
     const stream = chunks.map(c => `data: ${JSON.stringify(isChat ? { id: 'completion', object: 'chat.completion.chunk', model: 'test', ...c } : c)}\r\n\r\n`).join('');
     return new Response(stream + (isChat ? 'data: [DONE]\r\n\r\n' : ''), { headers: { 'Content-Type': 'text/event-stream' } });
@@ -632,6 +633,40 @@ agents: {root: {model: ordinary, ${smallSummary && !failed ? 'compaction_model: 
       [...failover, failed ? responseError('summary unavailable') : responseText('key facts'),
         [piece({content:'second answer'}, 'stop'), usage], answer], failed);
   }
+  const tooLong = [{error: {code: 'context_length_exceeded', message: 'over budget'}}];
+  const busyChat = [piece({content: 'first answer'}, 'stop'), highUsage];
+  const mainPath = '/v1/chat/completions', summaryPath = '/summary/responses';
+  tests.summaryOverflowChat = await replay(api, 'summaryOverflowChat', compact,
+    [busyChat, [{...piece({content:'discard'}), usage:usage.usage}, ...tooLong], answer, answer], turns);
+  const transient = responseError('service unavailable');
+  tests.summaryOverflowResponsesRetries = await replay(api, 'summaryOverflowResponsesRetries', compactResponses,
+    [busy, transient, responseError('Exceeds the context window'), transient, transient, text, text], turns, '/v1/responses');
+
+  const sends = prompts => async ({api, options, record, trace}) => {
+    const s = await api.createSession(options, record);
+    try {
+      for (const prompt of prompts) trace.results.push(await s.send(prompt).catch(e => e.message));
+    } finally { await s.close(); }
+  };
+  tests.summaryOverflowPinned = await replay(api, 'summaryOverflowPinned', chain.replace(chat, resp),
+    [responseError('primary unavailable'), busy, responseText('key facts'), busy, responseError('prompt too long'), text, text],
+    sends(['first', 'again', 'last']), '/v1/responses');
+  tests.summaryOverflowLimit = await replay(api, 'summaryOverflowLimit', chain,
+    [answer, busyChat, tooLong, tooLong, tooLong, tooLong, answer, answer],
+    sends(['a'.repeat(500), 'b'.repeat(160), 'last', 'afterwards']));
+  tests.summaryOverflowNothingFits = await replay(api, 'summaryOverflowNothingFits', chain,
+    [...failover, tooLong, [piece({content:'second answer'}, 'stop'),usage], answer],
+    sends(['old '.repeat(500), 'again', 'afterwards']));
+  const dedicatedSummary = summaryChain.replace(/^    fallback:.*$/m, '');
+  tests.summaryOverflowThenMedia = await replay(api, 'summaryOverflowThenMedia', dedicatedSummary,
+    [busyChat, ...Array(3).fill({status:500, body:{error:{code:'context_length_exceeded'}}}),
+      responseError('image exceeds the token limit'), answer, answer], sends(['first', 'again', 'afterwards']),
+    [mainPath, summaryPath, summaryPath, summaryPath, summaryPath, mainPath, mainPath]);
+  tests.summaryOverflowHiddenCode = await replay(api, 'summaryOverflowHiddenCode', chain.replace(/^    fallback:.*$/m, '    compaction_model: spare'),
+    [busyChat, tooLong, {status:400, body:{error:{code:'context_length_exceeded', message:'over budget'}}}, answer, answer],
+    sends(['first', 'again', 'afterwards']));
+  tests.summaryNothingFitsInitially = await replay(api, 'summaryNothingFitsInitially', chain,
+    [busyChat, answer], sends(['old '.repeat(2000), 'again']));
   const schema = { type: 'object', properties: { colors: { type: 'array', items: { type: 'string' } } },
     required: ['colors'], additionalProperties: false };
   const jsonAnswer = '{"colors":["blue"]}';

@@ -585,9 +585,9 @@ pub fn failure(event: &Value) -> Option<(&Value, String)> {
 fn provider_error(error: &Value, response: &Value) -> String {
     format!(
         "openai response failed ({}): {} [response_id={}]",
-        error["code"].as_str().unwrap_or("unknown"),
-        error["message"].as_str().unwrap_or("unknown error"),
-        response["id"].as_str().unwrap_or("unknown")
+        error["code"].as_str().unwrap_or_default(),
+        error["message"].as_str().unwrap_or_default(),
+        response["id"].as_str().unwrap_or_default()
     )
 }
 
