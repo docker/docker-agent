@@ -296,7 +296,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       async send(prompt) {
         if (closing) throw new Error('session is closed');
         if (restarting) throw new Error('session is restarting');
-        if (active) throw new Error('a run is already active');
+        if (active) throw new Error('embeddedchat: a run is already active');
         if (typeof prompt !== 'string') throw new Error('send: expected a prompt string');
         const controller = new AbortController();
         // Reserve synchronously; send(); abort() must not start a request.
@@ -340,9 +340,9 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     createSession: async (opts, onEvent) => session(opts, onEvent),
     async chat(opts, onEvent) {
       const messages = opts?.messages;
-      if (!Array.isArray(messages)) throw new Error('messages must be an array');
+      if (!Array.isArray(messages)) throw new Error('chat: parsing messages: messages must be an array');
       const last = messages.at(-1);
-      if (last?.role !== 'user') throw new Error('the last message must be from the user');
+      if (last?.role !== 'user') throw new Error('chat: the last message must be from the user');
       const parts = last.multi_content;
       if (parts != null && (!Array.isArray(parts) || parts.length)) {
         throw new Error('the final user prompt is text-only; attachments belong in prior history');
@@ -350,7 +350,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       const s = session(opts, onEvent, messages.slice(0, -1));
       currentChat?.abort();
       currentChat = s;
-      try { return await s.send(last.content); }
+      try { return await s.send(last.content ?? ''); } // Go decodes a null or missing content as empty text.
       finally {
         if (currentChat === s) currentChat = null;
         await s.close();

@@ -1452,8 +1452,22 @@ agents:`)
     ['blankInstruction', config.replace("'Hello ${env.WHO}'", "'  '"), [answer], ['hi']],
     ['emptyRequest', unprompted, [answer], ['', 'two']],
   ]) tests[name] = await replay(api, name, yaml, replies, sending(...prompts), endpoint);
-  tests.blankChatPrompt = await replay(api, 'blankChatPrompt', config, [answer], async ({api, options, record, trace}) => {
-    trace.results.push(await api.chat({...options, messages: [{role: 'user', content: 'a'}, {role: 'assistant', content: 'ok'}, {role: 'user', content: ''}]}, record));
+  for (const [name, prompt] of [['blankChatPrompt', {role: 'user', content: ''}], ['absentChatPrompt', {role: 'user'}], ['nullChatPrompt', {role: 'user', content: null}]]) {
+    tests[name] = await replay(api, name, config, [answer], async ({api, options, record, trace}) => {
+      trace.results.push(await api.chat({...options, messages: [{role: 'user', content: 'a'}, {role: 'assistant', content: 'ok'}, prompt]}, record));
+    });
+  }
+  // Calls the API refuses carry Go's wording.
+  tests.refusedCalls = await replay(api, 'refusedCalls', config, [answer, answer], async ({api, options, record, trace}) => {
+    const refused = promise => promise.then(() => 'accepted', e => e.message);
+    trace.results.push(await refused(api.chat({...options, messages: 'hello'}, record)));
+    trace.results.push(await refused(api.chat({...options, messages: []}, record)));
+    trace.results.push(await refused(api.chat({...options, messages: [{role: 'user', content: 'hi'}, {role: 'assistant', content: 'yes'}]}, record)));
+    const s = await api.createSession(options, record);
+    try {
+      const first = s.send('one');
+      trace.results.push(await refused(s.send('two')), await first, await s.send('three'));
+    } finally { await s.close(); }
   });
   // Argument conditions see what Go's map[string]any holds: nothing unless the arguments are an object.
   const declining = answering({decision: 'reject', reason: 'no'});
