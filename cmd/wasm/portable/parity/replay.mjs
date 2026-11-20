@@ -960,6 +960,68 @@ agents:`)
   tests.cachedPromptUsageResponses = await replay(api, 'cachedPromptUsageResponses', plainResponses,
     [[text[0], {type: 'response.completed', response: {id: 'resp', status: 'completed', output: [],
       usage: {input_tokens: 100, output_tokens: 7, total_tokens: 107, input_tokens_details: {cached_tokens: 60}}}}], text], turns, '/v1/responses');
+  // Arguments decode like encoding/json; what cannot be decoded goes back to the model.
+  const answering = decision => async ({api, options, record, trace}) => {
+    trace.results.push(await api.chat({...options, messages: [{role: 'user', content: 'go'}]}, e => {
+      record(e);
+      return e.type === 'tool_confirmation' ? decision : e.type === 'elicitation' ? {action: 'accept', content: {answer: 'blue'}} : undefined;
+    }));
+  };
+  const approve = answering({decision: 'approve'});
+  const routed = config.replace('model: local/test', 'model: local/test, sub_agents: [helper], handoffs: [helper]')
+    + '  helper: {model: local/worker, description: Helps, instruction: Be precise}\n';
+  const greeter = apiTool.replace('endpoint: "https://tool.invalid/greet"', 'endpoint: "https://tool.invalid/greet", args: {who: {type: string}}');
+  for (const [name, yaml, toolName, cases, extra = [], drive = approve, service] of [
+    ['think', thinks, 'think', {
+      badValue: '{"thought": oops', trailingComma: '{"thought":"x",}', singleQuotes: "{'thought':'x'}", openSecret: `{"thought":"${secret}`,
+      twoObjects: '{"thought":"a"}{"thought":"b"}', blank: '   ', null: 'null', array: '["x"]', string: '"x"', wrongType: '{"thought":3}',
+      wrongSecret: `{"thought":["${secret}"]}`, lenient: '{"THOUGHT":"x","more":true,"thought":"y"}', laterType: '{"thought":"ok","thought":3}',
+      badEscape: '{"thought":"\\x"}', badUnicode: '{"thought":"\\u12G4"}', rawNewline: '{"thought":"a\nb"}', control: '{"thought":"\u0001"}',
+      badLiteral: '{"thought":tru}', badNumber: '{"thought":1.}', leadingZero: '{"thought":01}', missingColon: '{"thought" "x"}',
+      bareKey: '{thought:"x"}', trailingText: '{"thought":"x"} trailing', latin1: '{"thought": é}', surrogate: '{"thought":"\\ud83d"}',
+    }],
+    ['thinkAsked', thinks + 'permissions: {ask: [think]}\n', 'think', {approved: '{"thought": oops'}],
+    ['thinkRefused', thinks + 'permissions: {ask: [think]}\n', 'think', {refused: '{"thought": oops'}, [], answering({decision: 'reject', reason: 'no'})],
+    ['calculate', local(['calculator']), 'calculate', {bad: '{"expression": 1+', wrongType: '{"expression":3}', array: '[1]', lenient: '{"EXPRESSION":"1+1","x":1}'}],
+    ['userPrompt', local(['user_prompt']), 'user_prompt', {
+      bad: '{"message": "x', missing: '{}', null: 'null', array: '["q"]', wrongType: '{"message":3}', titleType: '{"message":"Q?","title":3}',
+      schemaType: '{"message":"Q?","schema":"oops"}', lenient: '{"Message":"Q?","more":1,"title":"T"}',
+      mergedSchema: '{"message":"Q?","schema":{"type":"object"},"schema":{"properties":{"answer":{"type":"string"}}}}',
+      clearedSchema: '{"message":"Q?","schema":{"type":"object"},"schema":null}',
+    }],
+    ['todo', local(['todo']), 'create_todo', {bad: '{"description": "x', wrongType: '{"description":3}', array: '[1]'}],
+    ['todos', local(['todo']), 'create_todos', {bad: '{"descriptions": ["a"', repaired: '{"descriptions": "a"}'}],
+    ['listTodos', local(['todo']), 'list_todos', {ignored: '{"x": oops'}],
+    ['transfer', routed, 'transfer_task', {bad: '{"agent": "helper', missing: '{}', wrongType: '{"agent":3,"task":"x"}', taskType: '{"agent":"helper","task":["a"]}', array: '["helper"]'}],
+    ['transferred', routed, 'transfer_task', {lenient: '{"AGENT":"helper","Task":"count","extra":1}', noTask: '{"agent":"helper"}'}, [answer]],
+    ['handoff', routed, 'handoff', {bad: '{"agent": "helper', missing: '{}', wrongType: '{"agent":3}', array: '["helper"]'}],
+    ['handedOff', routed, 'handoff', {lenient: '{"Agent":"helper","extra":1}'}],
+    ['changeModel', picker, 'change_model', {bad: '{"model": "careful', wrongType: '{"model":3}', array: '["careful"]'}],
+    ['revertModel', picker, 'revert_model', {ignored: '{"x": oops'}],
+    ['searchTool', deferred, 'search_tool', {bad: '{"query": "x', wrongType: '{"query":3}', array: '[1]'}],
+    ['addTool', deferred, 'add_tool', {bad: '{"name": "think', wrongType: '{"name":3}'}],
+    ['listSessions', local(['session_context']), 'list_sessions', {bad: '{"limit": 1', wrongType: '{"limit":"x"}', blank: '  '}],
+    ['readSession', local(['session_context']), 'read_session', {bad: '{"session_id": "x', wrongType: '{"session_id":3}'}],
+    ['addMemory', local(['memory']), 'add_memory', {bad: '{"memory": "x', wrongType: '{"memory":3}', array: '[1]'}],
+    ['getMemories', local(['memory']), 'get_memories', {bad: '{"x": oops'}],
+    ['writePlan', local(['plan']), 'write_plan', {bad: '{"name": "x', wrongType: '{"name":3,"content":"c"}', array: '[1]'}],
+    ['listPlans', local(['plan']), 'list_plans', {ignored: '{"x": oops'}],
+    ['datetime', local(['datetime']), 'get_datetime', {bad: '{"format": "x', wrongType: '{"format":3}', array: '[1]'}],
+    ['random', local(['random']), 'random_int', {bad: '{"min": 1', wrongType: '{"min":"a","max":2}', array: '[1]'}],
+    ['api', greeter, 'greet', {bad: '{"who": "x'}, [], approve, greet],
+    ['fetch', local(['fetch']), 'fetch', {bad: '{"urls": ["https://x'}],
+  ]) {
+    for (const [label, args] of Object.entries(cases)) {
+      const id = `args_${name}_${label}`;
+      tests[id] = await replay(api, id, yaml, [rawTool(toolName, args), ...extra, answer], drive, '/v1/chat/completions', service);
+    }
+  }
+  // Go small leaves approval to the host: a config cannot waive it.
+  for (const [name, yaml] of [['runtime', local(['memory']) + 'runtime: {safety: autonomous}\n'],
+    ['agent', config.replace('model: local/test', 'safety: autonomous, toolsets: [{type: memory}], model: local/test')]]) {
+    tests[`autonomousYaml_${name}`] = await replay(api, `autonomousYaml_${name}`, yaml,
+      [tool('add_memory', {memory: 'not stored'}), answer], answering({decision: 'reject', reason: 'tester declined'}));
+  }
   return tests;
 }
 

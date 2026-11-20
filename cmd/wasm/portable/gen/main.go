@@ -30,7 +30,11 @@ import (
 )
 
 func main() {
-	if err := generate(context.Background(), os.Stdout); err != nil {
+	write := func(w io.Writer) error { return generate(context.Background(), w) }
+	if len(os.Args) > 1 && os.Args[1] == "json-errors" {
+		write = jsonErrors
+	}
+	if err := write(os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

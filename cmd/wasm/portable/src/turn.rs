@@ -4,7 +4,7 @@ use crate::permission::{self, Verdict};
 use crate::structured_output;
 use crate::{config::Selected, team::Switch};
 use indexmap::IndexMap;
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -132,6 +132,8 @@ struct Invocation {
     index: usize,
     // Whether the tool was advertised for this step, before any activation in the same batch.
     available: bool,
+    // Go's complaint about arguments that are not JSON; the tool reports it.
+    malformed: Option<String>,
 }
 
 struct Reply {
@@ -140,18 +142,55 @@ struct Reply {
     toon: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Think {
-    thought: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Default)]
 struct Prompt {
     message: String,
-    title: Option<String>,
+    title: String,
     schema: Option<Map<String, Value>>,
+}
+
+impl Prompt {
+    // userprompt.Args as encoding/json fills it: unknown fields are ignored, a repeated
+    // field decodes again and a repeated map merges. The inner error is model-facing.
+    fn decode(input: &str) -> Result<Result<Self, String>, String> {
+        use crate::go_json::{field_matches, field_path, fields, object, read_string, type_error};
+        const TYPE: &str = "userprompt.Args";
+        let mut prompt = Self::default();
+        let mut unsupported = false;
+        let mut decode = || -> Result<(), String> {
+            let input = crate::go_json::normalize_json(input)?;
+            let Some(obj) = object(&input, TYPE)? else {
+                return Ok(());
+            };
+            fields(obj, |key, val| {
+                let path = field_path(TYPE, &key);
+                if field_matches(&key, "message") {
+                    read_string(val, &mut prompt.message, &path)
+                } else if field_matches(&key, "title") {
+                    read_string(val, &mut prompt.title, &path)
+                } else if !field_matches(&key, "schema") {
+                    Ok(())
+                } else if val == "null" {
+                    prompt.schema = None;
+                    Ok(())
+                } else if val.starts_with('{') {
+                    match serde_json::from_str::<Map<String, Value>>(val) {
+                        Ok(schema) => prompt.schema.get_or_insert_default().extend(schema),
+                        Err(_) => unsupported = true,
+                    }
+                    Ok(())
+                } else {
+                    Err(type_error(val, &path, "map[string]interface {}"))
+                }
+            })
+        };
+        let decoded = decode();
+        if unsupported {
+            // Go would name the offending number's path or accept deeper nesting.
+            return Err("user_prompt schema is too deep or has a number out of range".into());
+        }
+        Ok(decoded.map(|()| prompt))
+    }
 }
 
 #[derive(Default)]
@@ -977,6 +1016,7 @@ impl Conversation {
         let mut model_source = None;
         let mut ids = BTreeSet::new();
         let mut unavailable = BTreeSet::new();
+        let mut malformed = Vec::with_capacity(calls.len());
         let mut wire_calls = Vec::with_capacity(calls.len());
         if calls.len() != 1
             && calls.values().any(|c| {
@@ -998,6 +1038,14 @@ impl Conversation {
                     unavailable.insert(call.name.clone());
                 }
             }
+            // Go reads empty arguments as {}.
+            let complaint = match call.arguments.as_str() {
+                "" => None,
+                arguments => crate::go_json::syntax_error(arguments).map_err(|_| {
+                    "tool arguments have a JSON error this runtime cannot report like Go"
+                })?,
+            };
+            malformed.push(complaint);
             if call.name == structured_output::NAME
                 && self.profile.spec.output_tool.is_some()
                 && call.arguments.len() > structured_output::MAX_ARGS
@@ -1058,7 +1106,7 @@ impl Conversation {
                 return Ok(self.finish(events));
             }
         }
-        for call in calls.into_values() {
+        for (call, malformed) in calls.into_values().zip(malformed) {
             if self.profile.spec.output_tool.is_some() && call.name == structured_output::NAME {
                 continue;
             }
@@ -1070,6 +1118,7 @@ impl Conversation {
                 call,
                 index,
                 available,
+                malformed,
             });
         }
         self.drain_calls(&mut events)?;
@@ -1087,11 +1136,13 @@ impl Conversation {
                 self.reject(op, reason, events)?;
                 continue;
             }
-            if self
-                .profile
-                .spec
-                .hooks
-                .rewrite_input(&op.call.name, &mut op.call.arguments)?
+            // Like Go, input redaction only understands JSON; the message redaction still applies.
+            if op.malformed.is_none()
+                && self
+                    .profile
+                    .spec
+                    .hooks
+                    .rewrite_input(&op.call.name, &mut op.call.arguments)?
             {
                 events.push(json!({"type":"warning", "message":format!("redact_secrets: redacted secret material from arguments of tool {:?}", op.call.name)}));
             }
@@ -1188,58 +1239,108 @@ impl Conversation {
             name: call.name.clone(),
             toon,
         };
+        let kind = source.map(|i| self.profile.spec.toolsets[i].kind.as_str());
+        // These Go handlers never look at their arguments.
+        let ignored = matches!(
+            call.name.as_str(),
+            "revert_model" | "list_todos" | "list_plans"
+        ) || (call.name == "list_sessions" && call.arguments.trim().is_empty());
+        if let Some(complaint) = op.malformed.as_ref().filter(|_| !ignored) {
+            // Every other handler decodes first and answers the model with the decoder's complaint.
+            let context = match (kind, call.name.as_str()) {
+                (Some("mcp"), _) => "failed to parse tool arguments: ",
+                (Some("api"), _)
+                | (
+                    None,
+                    "transfer_task" | "handoff" | "change_model" | "list_sessions" | "read_session",
+                ) => "invalid arguments: ",
+                _ => "",
+            };
+            let output = format!("Error calling tool: {context}{complaint}");
+            events.push(call.event());
+            events.push(self.complete(reply, output, true)?);
+            return Ok(());
+        }
         let turn = self.active.as_mut().unwrap();
         if let Some(source) = source {
             let token = turn.token("host", op.index);
-            events.push(json!({"type":"host_call", "agent":self.profile.spec.name, "id":call.id, "name":call.name, "args":call.arguments, "source":source, "token":token}));
+            let mut event = json!({"type":"host_call", "agent":self.profile.spec.name, "id":call.id, "name":call.name, "args":call.arguments, "source":source, "token":token});
+            if op.malformed.is_some() {
+                event["input"] = "".into();
+            }
+            events.push(event);
             turn.host_pending.insert(token, reply);
             return Ok(());
         }
         events.push(call.event());
         let result = match call.name.as_str() {
             "handoff" | "transfer_task" => {
-                self.switch = Some(Switch::parse(&call.name, &call.arguments)?);
-                return Ok(());
+                if call.arguments.len() > 64 * 1024 {
+                    return Err(format!("{} arguments exceed 64 KiB", call.name));
+                }
+                match Switch::parse(&call.name, &call.arguments) {
+                    Ok(switch) => {
+                        self.switch = Some(switch);
+                        return Ok(());
+                    }
+                    Err(complaint) => Err(complaint),
+                }
             }
             "think" => {
                 let scratchpad = self
                     .scratchpads
                     .entry(self.profile.spec.name.clone())
                     .or_insert_with(|| "Thoughts:".into());
-                let Think { thought } = call.parse()?;
-                if scratchpad.len() + 1 + thought.len() > MAX_SCRATCHPAD_BYTES {
+                if call.arguments.len() > MAX_SCRATCHPAD_BYTES {
                     return Err("think scratchpad size limit reached".into());
                 }
-                scratchpad.push('\n');
-                scratchpad.push_str(&thought);
-                Ok(scratchpad.clone())
+                let decoded = crate::go_json::scalar(
+                    &call.arguments,
+                    "think.Args",
+                    "thought",
+                    crate::go_json::read_string,
+                    "",
+                );
+                match decoded {
+                    Ok(thought) => {
+                        if scratchpad.len() + 1 + thought.len() > MAX_SCRATCHPAD_BYTES {
+                            return Err("think scratchpad size limit reached".into());
+                        }
+                        scratchpad.push('\n');
+                        scratchpad.push_str(&thought);
+                        Ok(scratchpad.clone())
+                    }
+                    Err(complaint) => Err(complaint),
+                }
             }
             "user_prompt" => {
                 if call.arguments.len() > MAX_ELICITATION_BYTES {
                     return Err("elicitation argument size limit reached".into());
                 }
-                let prompt: Prompt = call.parse()?;
-                let id = turn.token("prompt", op.index);
-                turn.pending.insert(id.clone(), reply);
-                let meta = prompt
-                    .title
-                    .filter(|t| !t.is_empty())
-                    .map(|t| json!({"cagent/title":t}));
-                events.push(json!({"type":"elicitation", "id":id, "message":prompt.message, "schema":prompt.schema, "meta":meta, "server_elicitation_id":"", "mode":"", "url":""}));
-                return Ok(());
+                match Prompt::decode(&call.arguments)? {
+                    Ok(prompt) => {
+                        let id = turn.token("prompt", op.index);
+                        turn.pending.insert(id.clone(), reply);
+                        let meta = (!prompt.title.is_empty())
+                            .then(|| json!({"cagent/title":prompt.title}));
+                        events.push(json!({"type":"elicitation", "id":id, "message":prompt.message, "schema":prompt.schema, "meta":meta, "server_elicitation_id":"", "mode":"", "url":""}));
+                        return Ok(());
+                    }
+                    Err(complaint) => Err(format!("Error calling tool: {complaint}")),
+                }
             }
             discovery::SEARCH | discovery::ADD => {
                 let search = call.name == discovery::SEARCH;
                 let arg = crate::go_json::scalar(
                     &call.arguments,
-                    "deferred",
                     if search {
-                        "SearchToolArgs"
+                        "deferred.SearchToolArgs"
                     } else {
-                        "AddToolArgs"
+                        "deferred.AddToolArgs"
                     },
                     if search { "query" } else { "name" },
                     crate::go_json::read_string,
+                    "",
                 );
                 arg.and_then(|arg| {
                     let Catalog {
@@ -1620,15 +1721,6 @@ impl Call {
             json!({"type":"tool_call_delta", "id":self.id, "name":self.name, "arguments":arguments}),
         ))
     }
-
-    fn parse<T: DeserializeOwned>(&self) -> Result<T, String> {
-        // serde structs also deserialize from positional arrays, which our tool schemas forbid.
-        if !self.arguments.trim_start().starts_with('{') {
-            return Err(format!("{} arguments must be a JSON object", self.name));
-        }
-        serde_json::from_str(&self.arguments)
-            .map_err(|e| format!("invalid {} arguments: {e}", self.name))
-    }
 }
 
 fn string<'a>(object: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
@@ -1847,10 +1939,6 @@ mod tests {
                 chunk(json!({"content":"late"}), None),
             ],
             vec![chunk(json!({"content":3}), Some("stop"))],
-            vec![chunk(
-                json!({"tool_calls":[call(0, "a", "think", "{}")]}),
-                Some("stop"),
-            )],
         ] {
             let mut c = conversation(&["think"]);
             let saved = c.messages.clone();
@@ -1871,12 +1959,8 @@ mod tests {
         for invalid in [
             call(1, "a", "think", args),
             call(1, "", "think", args),
-            call(1, "b", "think", "{}"),
-            call(1, "b", "think", r#"["positional"]"#),
-            call(1, "b", "think", "{"),
-            call(1, "b", "think", r#"{"thought":3}"#),
-            call(1, "b", "think", r#"{"thought":"x","extra":1}"#),
-            call(1, "b", "think", r#"{"thought":"x","thought":"y"}"#),
+            // Go would name this character; its printability needs Unicode tables.
+            call(1, "b", "think", "\u{2028}"),
             call(9, "b", "think", args),
             json!({"index":1, "type":"custom", "id":"b"}),
             json!({"index":4294967295_u64}),
@@ -1938,6 +2022,76 @@ mod tests {
     }
 
     #[test]
+    fn arguments_decode_like_go_and_mistakes_go_back_to_the_model() {
+        let results = |tools: &[&str], name: &str, arguments: &[&str]| -> Vec<Value> {
+            let mut c = conversation(tools);
+            c.begin("go", "go").unwrap();
+            let calls: Vec<_> = arguments
+                .iter()
+                .enumerate()
+                .map(|(i, args)| call(i as u64, &format!("c{i}"), name, args))
+                .collect();
+            c.chunk(chunk(json!({"tool_calls":calls}), Some("tool_calls")))
+                .unwrap();
+            let next = c.end().unwrap();
+            let events = next["events"].as_array().unwrap();
+            // Every call is announced, even one whose arguments cannot be decoded.
+            let announced = events.iter().filter(|e| e["type"] == "tool_call").count();
+            assert_eq!(announced, arguments.len());
+            let kept = ["tool_result", "elicitation"];
+            events
+                .iter()
+                .filter(|e| kept.contains(&e["type"].as_str().unwrap()))
+                .map(|e| e.get("output").unwrap_or(&e["message"]).clone())
+                .collect()
+        };
+        assert_eq!(
+            results(
+                &["think"],
+                "think",
+                &[
+                    "",
+                    r#"{"THOUGHT":"a","other":[1]}"#,
+                    r#"{"thought":"b","thought":"c"}"#,
+                    "null",
+                    r#"{"thought": oops"#,
+                    "   ",
+                    r#"["x"]"#,
+                    r#"{"thought":3}"#,
+                ]
+            ),
+            [
+                "Thoughts:\n",
+                "Thoughts:\n\na",
+                "Thoughts:\n\na\nc",
+                "Thoughts:\n\na\nc\n",
+                "Error calling tool: invalid character 'o' looking for beginning of value",
+                "Error calling tool: unexpected end of JSON input",
+                "Error calling tool: json: cannot unmarshal array into Go value of type think.Args",
+                "Error calling tool: json: cannot unmarshal number into Go struct field Args.thought of type string",
+            ]
+        );
+        assert_eq!(
+            results(
+                &["user_prompt"],
+                "user_prompt",
+                &[
+                    "{}",
+                    r#"{"message":"A","Message":"B","url":"ignored"}"#,
+                    r#"{"message":"A?","schema":"oops"}"#,
+                    r#"{"message": "#,
+                ]
+            ),
+            [
+                "",
+                "B",
+                "Error calling tool: json: cannot unmarshal string into Go struct field Args.schema of type map[string]interface {}",
+                "Error calling tool: unexpected end of JSON input",
+            ]
+        );
+    }
+
+    #[test]
     fn official_openai_keeps_system_messages_separate_and_deduplicates_advertised_tools() {
         let mut c = Conversation::new(
             "agent".into(),
@@ -1976,11 +2130,6 @@ mod tests {
         let saved = c.messages.clone();
         for invalid in [
             call(1, "a", "user_prompt", args),
-            call(1, "b", "user_prompt", "{}"),
-            call(1, "b", "user_prompt", r#"["question"]"#),
-            call(1, "b", "user_prompt", r#"{"message":"A","message":"B"}"#),
-            call(1, "b", "user_prompt", r#"{"message":"A?","url":"no"}"#),
-            call(1, "b", "user_prompt", r#"{"message":"A?","schema":"oops"}"#),
             call(
                 1,
                 "b",

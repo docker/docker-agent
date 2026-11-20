@@ -132,7 +132,7 @@ export function createHost(opts, onEvent, stateless) {
     try {
       const fn = profiles.get(internal.agent)?.bindings.get(internal.source);
       if (!fn) throw new Error(`unavailable host tool ${event.name}`);
-      const result = await fn(internal.name, internal.args, signal);
+      const result = await fn(internal.name, internal.input ?? internal.args, signal);
       if (typeof result.output !== 'string' || typeof result.is_error !== 'boolean') throw new Error('invalid host tool result');
       return result;
     } catch (e) {

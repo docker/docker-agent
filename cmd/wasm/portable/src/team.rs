@@ -22,12 +22,10 @@ fn handoff_note(from: &str) -> String {
 const MAX_DEPTH: usize = 10;
 const MAX_SWITCHES: usize = 32;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct Transfer {
     agent: String,
     task: String,
-    #[serde(default)]
     expected_output: String,
 }
 
@@ -45,8 +43,6 @@ impl Transfer {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Handoff {
     agent: String,
 }
@@ -58,16 +54,43 @@ pub enum Switch {
 }
 
 impl Switch {
+    /// Decodes like the Go handlers; `Err` is their model-facing complaint.
     pub fn parse(name: &str, args: &str) -> Result<Self, String> {
-        if args.len() > 64 * 1024 || !args.trim_start().starts_with('{') {
-            return Err(format!("{name} expects a JSON object of at most 64 KiB"));
-        }
-        match name {
-            "handoff" => serde_json::from_str(args).map(Self::Handoff),
-            "transfer_task" => serde_json::from_str(args).map(Self::Transfer),
-            _ => return Err(format!("unknown team tool {name:?}")),
-        }
-        .map_err(|e| format!("invalid {name} arguments: {e}"))
+        use crate::go_json::{
+            field_matches, field_path, fields, normalize_json, object, read_string,
+        };
+        let handoff = name == "handoff";
+        // transfer_task decodes into an anonymous struct, which Go prints in full.
+        let ty = if handoff {
+            "types.Args"
+        } else {
+            r#"struct { Agent string "json:\"agent\""; Task string "json:\"task\""; ExpectedOutput string "json:\"expected_output\"" }"#
+        };
+        let mut to = Transfer::default();
+        let mut decode = || -> Result<(), String> {
+            let args = normalize_json(args)?;
+            let Some(obj) = object(&args, ty)? else {
+                return Ok(());
+            };
+            fields(obj, |key, val| {
+                let field = if field_matches(&key, "agent") {
+                    &mut to.agent
+                } else if !handoff && field_matches(&key, "task") {
+                    &mut to.task
+                } else if !handoff && field_matches(&key, "expected_output") {
+                    &mut to.expected_output
+                } else {
+                    return Ok(());
+                };
+                read_string(val, field, &field_path(ty, &key))
+            })
+        };
+        decode().map_err(|e| format!("Error calling tool: invalid arguments: {e}"))?;
+        Ok(if handoff {
+            Self::Handoff(Handoff { agent: to.agent })
+        } else {
+            Self::Transfer(to)
+        })
     }
 }
 

@@ -127,6 +127,22 @@ test('guessing a deferred tool in its activation step cannot run it', async t =>
   assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.is_error), [false, true]);
 });
 
+test('malformed arguments still need approval, then come back as the decoder\'s error; a config cannot waive approval', {timeout:5000}, async t => {
+  const requests = replay(t, [[['add_memory', '{"memory": "x'], ['list_plans', '{"x": oops'], ['add_memory', '[1]']], [call('add_memory', {memory:'kept'})], null]);
+  const yaml = config([{type:'memory'}, {type:'plan'}], {runtime:{safety:'autonomous'}});
+  const events = [];
+  const result = await api.chat({yaml, messages}, e => { events.push(e); return e.type === 'tool_confirmation' ? true : undefined; });
+  assert.equal(result.message.content, 'done');
+  assert.deepEqual(events.filter(e => e.type === 'tool_confirmation').map(e => e.args), ['{"memory": "x', '[1]', '{"memory":"kept"}']);
+  assert.deepEqual(requests[1].messages.slice(-3).map(m => m.content), [
+    'Error calling tool: unexpected end of JSON input',
+    '{"plans":[]}',
+    'Error calling tool: json: cannot unmarshal array into Go value of type memory.AddMemoryArgs',
+  ]);
+  assert.match(lastOutput(requests[2]), /^Memory added successfully/);
+  assert.equal(events.filter(e => e.type === 'tool_call').length, 4);
+});
+
 test('a hallucinated tool gets a correctable error without running, prompting or failing the send', async t => {
   const requests = replay(t, [[call('think',{thought:'kept'}), call('shell',{cmd:'rm -rf /'})], [call('shell',{cmd:'again'})], null]);
   const events = [];

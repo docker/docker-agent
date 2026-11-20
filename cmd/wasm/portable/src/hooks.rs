@@ -171,8 +171,9 @@ impl Hooks {
         if args.is_empty() {
             return Ok(false);
         }
-        let mut input: Value =
-            serde_json::from_str(args).map_err(|_| "cannot redact invalid tool input")?;
+        // Like encoding/json, read an unpaired surrogate escape as U+FFFD.
+        let mut input: Value = serde_json::from_str(&crate::go_json::normalize_json(args)?)
+            .map_err(|_| "cannot redact invalid tool input")?;
         let changed = redact_values(&mut input)?;
         if changed {
             *args = crate::wire::encode(input);

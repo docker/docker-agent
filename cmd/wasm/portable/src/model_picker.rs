@@ -39,7 +39,13 @@ impl Picker {
     }
 
     pub fn change(&self, args: &str, selection: &mut Option<usize>) -> Result<String, String> {
-        let name = scalar(args, "modelpicker", "ChangeModelArgs", "model", read_string)?;
+        let name = scalar(
+            args,
+            "modelpicker.ChangeModelArgs",
+            "model",
+            read_string,
+            "invalid arguments: ",
+        )?;
         if name.is_empty() {
             return Err("model parameter is required".into());
         }

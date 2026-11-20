@@ -126,7 +126,7 @@ function decode(raw, spec, args = Object.create(null), retry = true) {
         error = `json: cannot unmarshal number ${value} into ${dest}`;
       }
     }
-    if (depth !== 1 || !fields.length) continue;
+    if (depth !== 1 || !fields.length || !frame.object) continue;
     const key = frame.key;
     const field = key.replaceAll('ſ', 's').toLowerCase();
     if (!fields.includes(field)) continue;

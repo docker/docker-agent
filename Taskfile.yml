@@ -207,6 +207,7 @@ tasks:
     desc: Refresh the portable tool instructions and OpenAI schemas from their Go implementations
     cmds:
       - go run ./cmd/wasm/portable/gen > cmd/wasm/portable/src/tool_catalog.json
+      - go run ./cmd/wasm/portable/gen json-errors > cmd/wasm/portable/testdata/go-json-errors.json
 
   test-wasm-parity:
     desc: Replay identical provider streams against Go small and Rust in headless Chrome

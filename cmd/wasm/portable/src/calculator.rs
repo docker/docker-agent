@@ -19,7 +19,9 @@ pub fn calculate(arguments: &str) -> Result<String, String> {
     if arguments.len() > MAX_ARGUMENT_BYTES {
         return Err(TOO_LONG.into());
     }
-    let expression = expression_argument(arguments)?;
+    // The runtime prefixes a typed handler's decoding error.
+    let expression =
+        expression_argument(arguments).map_err(|e| format!("Error calling tool: {e}"))?;
     if expression.len() > MAX_BYTES {
         return Err(TOO_LONG.into());
     }
@@ -539,7 +541,10 @@ mod tests {
                 "json: cannot unmarshal array into Go struct field Args.expression of type string",
             ),
         ] {
-            assert_eq!(calculate(args).unwrap_err(), error);
+            assert_eq!(
+                calculate(args).unwrap_err(),
+                format!("Error calling tool: {error}")
+            );
         }
         assert!(calculate(r#"{"expression":"2"}[]"#).is_err());
     }

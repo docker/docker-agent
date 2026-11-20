@@ -70,8 +70,7 @@ impl Archive {
         let input = if args.trim().is_empty() { "" } else { args };
         let limit: i64 = scalar(
             input,
-            "sessioncontext",
-            "ListSessionsArgs",
+            "sessioncontext.ListSessionsArgs",
             "limit",
             |val, n, path| {
                 if val != "null" {
@@ -85,6 +84,7 @@ impl Archive {
                 }
                 Ok(())
             },
+            "invalid arguments: ",
         )?;
         let limit = if limit <= 0 {
             20
@@ -104,10 +104,10 @@ impl Archive {
     pub fn read(&self, args: &str) -> Result<String, String> {
         let id = scalar(
             args,
-            "sessioncontext",
-            "ReadSessionArgs",
+            "sessioncontext.ReadSessionArgs",
             "session_id",
             read_string,
+            "invalid arguments: ",
         )?;
         let id = id.trim();
         if id.is_empty() {

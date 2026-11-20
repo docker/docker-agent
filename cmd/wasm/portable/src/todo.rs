@@ -70,7 +70,8 @@ impl Todos {
                 reminder: self.reminder(),
             }));
         }
-        match arguments_for(name, arguments)? {
+        // The runtime prefixes a typed handler's decoding error.
+        match arguments_for(name, arguments).map_err(|e| format!("Error calling tool: {e}"))? {
             Args::Create(description) => {
                 let start = self.append(vec![description])?;
                 Ok(self.created(&self.items[start]))
@@ -194,7 +195,7 @@ fn arguments_for(name: &str, input: &str) -> Result<Args, String> {
         _ => return Err("unknown todo tool".into()),
     };
     let input = normalize_json(input)?;
-    let Some(input) = object(&input, "todo", ty)? else {
+    let Some(input) = object(&input, &format!("todo.{ty}"))? else {
         return Ok(args);
     };
     let mut decode = |s: &str| {
@@ -464,7 +465,10 @@ mod tests {
             ("update_todos", r#"{"updates":[{"id":"todo_1","status":"completed"},{"id":"todo_1","status":2}]}"#, "json: cannot unmarshal number into Go struct field UpdateTodosArgs.updates.1.status of type string"),
             ("update_todos", r#"{"updates":[["todo_1","completed"]]}"#, "json: cannot unmarshal array into UpdateTodosArgs.updates.0 of type todo.Update"),
         ] {
-            assert_eq!(t.call(name, args).unwrap_err(), error);
+            assert_eq!(
+                t.call(name, args).unwrap_err(),
+                format!("Error calling tool: {error}")
+            );
         }
         assert_eq!(t.items.len(), 1);
         assert_eq!(t.items[0].status, "pending");
@@ -478,7 +482,7 @@ mod tests {
         assert_eq!(
             t.call("create_todo", &format!(r#"{{"ignored":{depth}}}"#))
                 .unwrap_err(),
-            "exceeded max depth"
+            "Error calling tool: exceeded max depth"
         );
         let batch = json!({"descriptions": vec![""; MAX_TODOS]}).to_string();
         assert!(t
