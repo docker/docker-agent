@@ -55,7 +55,10 @@ async function replay(api, name, yaml, replies, drive, endpoint = '/v1/chat/comp
     const chunks = replies[trace.requests.length];
     trace.requests.push({ method: req.method, path: new URL(req.url).pathname,
       authorization: req.headers.get('Authorization'), body: await req.json() });
-    if (!Array.isArray(chunks)) return Response.json(chunks.body, { status: chunks.status, headers: chunks.headers });
+    if (!Array.isArray(chunks)) {
+      const init = { status: chunks.status, headers: chunks.headers };
+      return 'raw' in chunks ? new Response(chunks.raw, init) : Response.json(chunks.body, init);
+    }
     const isChat = expected.endsWith('/chat/completions');
     const stream = chunks.map(c => `data: ${JSON.stringify(isChat ? { id: 'completion', object: 'chat.completion.chunk', model: 'test', ...c } : c)}\r\n\r\n`).join('');
     return new Response(stream + (isChat ? 'data: [DONE]\r\n\r\n' : ''), { headers: { 'Content-Type': 'text/event-stream' } });
@@ -944,6 +947,32 @@ agents:`)
   const incomplete = reason => [{type: 'response.incomplete', response: {id: 'resp', status: 'incomplete', incomplete_details: {reason},
     output: [], usage: {input_tokens: 3, output_tokens: 2, total_tokens: 5}}}];
   const plainResponses = config.replace('provider: openai,', 'provider: openai, api_type: openai_responses,');
+  const http = (status, body = {error: {message: `boom ${status}`}}, headers = {'Retry-After-Ms': '1'}) => ({status, body, headers});
+  const fixedBase = 'https://provider.invalid/v1'; // Raw SDK errors quote the URL; page origins differ per runtime.
+  const fixed = yaml => yaml.replace(`${location.origin}/v1`, fixedBase);
+  const httpChain = config.replace('model: local/test', 'model: local/test, fallback: {models: [local/backup], retries: -1}');
+  for (const [name, yaml, replies, drive, path] of [
+    ['httpSdkConflict', config, [http(409, undefined, {'Retry-After': '0.001'}), answer], single],
+    ['httpSdkRetryAfterDate', plainResponses, [http(408, undefined, {'Retry-After': 'Sun, 06 Nov 1994 08:49:37 GMT'}), http(429), text], single, '/v1/responses'],
+    ['httpRetryHeaderTrue', config, [http(422, undefined, {'x-should-retry': 'true', 'Retry-After-Ms': '1'}), answer], single],
+    ['httpRetryHeaderFalse', httpChain, [http(503, undefined, {'x-should-retry': 'false'}), answer, answer], turns],
+    ['httpRuntimeRetry', config.replace('model: local/test', 'model: local/test, fallback: {retries: -1}'), [http(503), http(503), http(503), answer], single],
+    ['httpRateLimitPinned', httpChain, [http(429), http(429), http(429), answer, answer], turns],
+    ['httpChainExhausted', httpChain, [http(401), http(403), answer], rejectsThenRecovers],
+    ['httpHandoffError', team, [pass(), http(400), answer], rejectsThenRecovers],
+    ['httpResponseScalar', plainResponses, [...Array(3).fill(http(500, 'invalid')), text], rejectsThenRecovers, '/v1/responses'],
+    ['httpHiddenCode', config, [http(400, {error: {message: 'over budget', code: 'context_length_exceeded'}}), answer], rejectsThenRecovers],
+    ['httpWireOverflow', config.replace('model: local/test', 'model: local/test, session_compaction: false'), [http(413), answer], rejectsThenRecovers],
+    ['httpProxyEnvelope', fixed(config), [http(400, {error: 'string'}), answer], rejectsThenRecovers, `${fixedBase}/chat/completions`],
+    ['httpEmptyObject', fixed(plainResponses), [http(404, {}), text], rejectsThenRecovers, `${fixedBase}/responses`],
+    ['httpEmptyBody', config, [{status: 400, raw: null}, answer], rejectsThenRecovers],
+    ['httpHtmlBody', plainResponses, [{status: 400, raw: '<html>bad gateway</html>'}, text], rejectsThenRecovers, '/v1/responses'],
+    ['httpCappedContinuation', twoRounds, [ponder('once'), http(503), http(503), http(503), answer, answer], turns],
+    ['httpAfterTool', local(['think']), [ponder('once'), http(409), answer], single],
+    ['httpDelegateRetry', responsesHelper('', ''), [delegate(), http(429), text, answer], withSpareKey(single),
+      ['/v1/chat/completions', '/v1/responses', '/v1/responses', '/v1/chat/completions']],
+    ['httpHandoffRetry', team, [pass(), http(529), answer, answer], turns],
+  ]) tests[name] = await replay(api, name, yaml, replies, drive, path);
   for (const [name, replies] of [
     ['responsesEmptyReply', [[fin([])], text]],
     ['responsesWhitespaceReply', [[{...text[0], delta: '  '}, fin([])], text]],

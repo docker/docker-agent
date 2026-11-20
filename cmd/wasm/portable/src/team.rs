@@ -281,7 +281,7 @@ impl Session {
             }
         }
         Ok(
-            json!({"agent":spec.name, "target": index, "responses":target.responses, "summary":summarizing, "sdkRetries":summarizing || spec.selected_fallback_chain, "body":body}),
+            json!({"agent":spec.name, "target": index, "responses":target.responses, "summary":summarizing, "body":body}),
         )
     }
 
@@ -363,22 +363,40 @@ impl Session {
         Ok(json!({"events":events}))
     }
 
-    pub fn failure(
+    pub fn transport_failure(
         &mut self,
-        mut reason: String,
+        status: Option<u16>,
+        endpoint: Option<String>,
+        reason: Option<String>,
+        now: f64,
+    ) -> Result<Value, String> {
+        let Some(reason) = reason else {
+            return self.stop("unsupported HTTP error body".into());
+        };
+        let (status, reason) = if let Some(code) = status {
+            match fallback::http_error(
+                code,
+                endpoint.as_deref().ok_or("missing model endpoint")?,
+                &reason,
+            ) {
+                Ok(failure) => failure,
+                Err(message) => return self.stop(message),
+            }
+        } else {
+            (None, reason)
+        };
+        // Read failures in an established stream retain their own retry policy.
+        let transient = endpoint.is_none() || fallback::retryable(status, &reason);
+        self.failure(reason, status, transient, now)
+    }
+
+    fn failure(
+        &mut self,
+        reason: String,
         http_status: Option<u16>,
         transient: bool,
         now: f64,
     ) -> Result<Value, String> {
-        if let Some(status) =
-            http_status.filter(|_| self.conversation.profile.spec.selected_fallback_chain)
-        {
-            if reason.is_empty() {
-                let text =
-                    fallback::status_text(status).ok_or("unsupported empty HTTP error body")?;
-                reason = format!("error receiving from stream: HTTP {status}: {text}");
-            }
-        }
         let (_, target) = self.conversation.request_target();
         let overflow = fallback::overflow(http_status, &reason)?;
         let reason = target.transport.safe_diagnostic(reason)?;
@@ -414,7 +432,13 @@ impl Session {
         let attempt = &mut self.conversation.attempt;
         let previous = attempt.current;
         let decision = if self.replayable {
-            attempt.fail(&spec.policy, transient, spec.models.len())
+            // Go loads fallback.retries only when it loads fallback.models.
+            let policy = if http_status.is_some() && spec.models.len() == 1 {
+                &Default::default()
+            } else {
+                &spec.policy
+            };
+            attempt.fail(policy, transient, spec.models.len())
         } else {
             fallback::Decision::Stop
         };
@@ -429,23 +453,12 @@ impl Session {
                 } else {
                     "model failed"
                 };
-                let message = if spec.selected_fallback_chain {
+                let message = if http_status.is_some() || spec.selected_fallback_chain {
                     fallback::model_error(prefix, overflow, &reason)
                 } else {
                     format!("{prefix}: {reason}")
                 };
-                // Close suspended transfer calls without copying a child's provider diagnostics
-                // into its caller's history or rolling back already-completed caller tools.
-                while let Some(mut parent) = self.parents.pop() {
-                    parent.complete_switch(
-                        "transfer_task",
-                        "Delegated task failed".into(),
-                        true,
-                    )?;
-                    self.conversation = parent;
-                }
-                self.conversation.fail();
-                return Err(message);
+                return self.stop(message);
             }
         };
         let body = self.conversation.request()?;
@@ -455,6 +468,16 @@ impl Session {
         }
         next["request"] = request;
         Ok(next)
+    }
+
+    fn stop(&mut self, message: String) -> Result<Value, String> {
+        // Keep completed caller tools without copying a child's diagnostics into its history.
+        while let Some(mut parent) = self.parents.pop() {
+            parent.complete_switch("transfer_task", "Delegated task failed".into(), true)?;
+            self.conversation = parent;
+        }
+        self.conversation.fail();
+        Err(message)
     }
 
     fn begin_model_attempt(&mut self, now: f64) {

@@ -167,3 +167,18 @@ test('a fallback cannot carry Copilot credentials into a ChatGPT request', async
   assert.ok(headers.get('session_id'));
   assert.equal(body.store, false);
 });
+
+// Empty SDK envelopes retain the request URL, not its headers.
+test('HTTP diagnostics retain the Azure query but never project hidden envelope fields', async t => {
+  const steps = [{}, {error: {code: 'sensitive-credential', message: 'bad input'}}];
+  t.mock.method(globalThis, 'fetch', async () => Response.json(steps.shift(), {status:400}));
+  const cfg = yaml('azure', 'gpt-4o', `, base_url: ${azure}, token_key: OTHER, provider_opts: {api_version: preview}`);
+  const errors = [];
+  const s = await api.createSession({yaml: cfg, env: {...env, OTHER: 'sensitive-credential'}}, e => errors.push(e));
+  t.after(() => s.close());
+  for (const detail of [`POST "${azure}/chat/completions?api-version=preview": 400 Bad Request {}`, 'bad input']) {
+    const message = `model failed: error receiving from stream: HTTP 400: ${detail}`;
+    await assert.rejects(s.send('go'), {message});
+    assert.deepEqual(errors.splice(0), [{type: 'error', message}]);
+  }
+});

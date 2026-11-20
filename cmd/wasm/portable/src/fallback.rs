@@ -195,7 +195,7 @@ fn truncated(lower: &str) -> bool {
     lower.contains("unexpected eof") || lower.contains("unexpected end of json input")
 }
 
-pub fn status_text(code: u16) -> Option<&'static str> {
+fn status_text(code: u16) -> Option<&'static str> {
     // net/http retains the older names for these statuses.
     match code {
         413 => Some("Request Entity Too Large"),
@@ -203,6 +203,98 @@ pub fn status_text(code: u16) -> Option<&'static str> {
         416 => Some("Requested Range Not Satisfiable"),
         _ => http::StatusCode::from_u16(code).ok()?.canonical_reason(),
     }
+}
+
+// ErrorBodyMiddleware preserves nonstandard bodies; the SDK then unwraps exactly one `error`.
+// Only a decoded apierror.Error carries a status into the runtime retry loop.
+pub fn http_error(code: u16, endpoint: &str, body: &str) -> Result<(Option<u16>, String), String> {
+    use serde_json::value::RawValue;
+    const PHASE: &str = "error receiving from stream";
+    const UNSUPPORTED: &str = "unsupported HTTP error body";
+    let status = status_text(code).unwrap_or_default();
+    let typed = |message: String| (Some(code), format!("{PHASE}: HTTP {code}: {message}"));
+    let body = if body.is_empty() { status } else { body };
+    let raw = body.trim_matches([' ', '\n', '\r', '\t']);
+    if crate::go_json::syntax_error(raw)
+        .map_err(|_| UNSUPPORTED)?
+        .is_some()
+        && !body.is_empty()
+    {
+        let mut detail = body.to_owned();
+        if body.contains("(Request-ID:") {
+            append_request_id(&mut detail, &crate::wire::encode(body))?;
+        }
+        return Ok(typed(detail));
+    }
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        #[serde(borrow)]
+        error: Option<&'a RawValue>,
+    }
+    let raw = if raw.starts_with('{') {
+        serde_json::from_str::<Envelope>(raw)
+            .map_err(|_| UNSUPPORTED)?
+            .error
+            .map(RawValue::get)
+            .filter(|s| s.starts_with('{'))
+            .unwrap_or(raw)
+    } else if body.is_empty() {
+        r#"{"message":""}"#
+    } else if raw == "null" {
+        raw
+    } else {
+        let error = crate::go_json::type_error(raw, "Go value", "apierror.Error");
+        return Ok((None, format!("{PHASE}: {error}")));
+    };
+    if let Some(mut message) = http_message(raw)? {
+        append_request_id(&mut message, raw)?;
+        return Ok(typed(message));
+    }
+    // Do not project a raw diagnostic whose escapes could hide a credential from redaction.
+    if raw.contains('\\') {
+        return Err(UNSUPPORTED.into());
+    }
+    Ok(typed(format!("POST \"{endpoint}\": {code} {status} {raw}")))
+}
+
+fn http_message(raw: &str) -> Result<Option<String>, String> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    let mut message = None;
+    let mut invalid = false;
+    // fields() borrows slices from validated JSON and expects decodable strings.
+    serde_json::from_str::<Value>(raw).map_err(|_| "unsupported HTTP error body")?;
+    crate::go_json::fields(raw, |key, val| {
+        if crate::go_json::field_matches(&key, "message") {
+            if message.is_some() {
+                return Err("ambiguous provider error message".into());
+            }
+            message = Some(serde_json::from_str::<String>(val).unwrap_or_default());
+        } else if crate::go_json::field_matches(&key, "error") && val != "null" {
+            if val.starts_with('{') {
+                return Err("unsupported nested HTTP error".into());
+            }
+            invalid = true;
+        }
+        Ok(())
+    })?;
+    Ok(message.filter(|s| !invalid && !s.is_empty()))
+}
+
+fn append_request_id(message: &mut String, raw: &str) -> Result<(), String> {
+    static ID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = ID
+        .get_or_init(|| regex::Regex::new(r"\(Request-ID:(?-u:\s*)([^)\t\n\x0c\r ]+)\)").unwrap());
+    if let Some(id) = re.captures(raw) {
+        if id[1].contains('\\') {
+            return Err("unsupported escaped request ID".into());
+        }
+        message.push_str(" (Request-ID: ");
+        message.push_str(&id[1]);
+        message.push(')');
+    }
+    Ok(())
 }
 
 pub fn model_error(prefix: &str, overflow: Option<Overflow>, reason: &str) -> String {
@@ -443,6 +535,60 @@ mod tests {
                 serde_yaml_ng::from_str::<Config>(&format!("cooldown: '{bad}'")).is_err(),
                 "{bad}"
             );
+        }
+    }
+
+    #[test]
+    fn http_diagnostic_uses_the_unwrapped_wire_object() {
+        for (code, body, detail) in [
+            (
+                400,
+                r#"{"error":{"type":"invalid","message":"bad"}}"#,
+                "bad",
+            ),
+            (
+                403,
+                r#"{"Message":"no","opaque":"(Request-ID: abc)"}"#,
+                "no (Request-ID: abc)",
+            ),
+            (
+                400,
+                r#"{ "error" : { "extra" : 123 } }"#,
+                r#"POST "url": 400 Bad Request { "extra" : 123 }"#,
+            ),
+            (400, " <html>bad</html>\n", " <html>bad</html>\n"),
+            (413, "", "Request Entity Too Large"),
+            (529, "", r#"POST "url": 529  {"message":""}"#),
+        ] {
+            assert_eq!(
+                http_error(code, "url", body).unwrap(),
+                (
+                    Some(code),
+                    format!("error receiving from stream: HTTP {code}: {detail}")
+                )
+            );
+        }
+        for (body, kind) in [
+            ("42", "number"),
+            ("false", "bool"),
+            ("[]", "array"),
+            (r#""x""#, "string"),
+        ] {
+            let message = format!("error receiving from stream: json: cannot unmarshal {kind} into Go value of type apierror.Error");
+            assert_eq!(http_error(503, "url", body).unwrap(), (None, message));
+        }
+    }
+
+    #[test]
+    fn ambiguous_or_escaped_raw_diagnostics_fail_closed() {
+        for body in [
+            r#"{"error":{"error":{"message":"hidden"}}}"#,
+            r#"{"error":{"message":"a"},"error":{"message":"b"}}"#,
+            r#"{"message":"a","MESSAGE":"b"}"#,
+            r#"{"opaque":"f\u0069xture"}"#,
+            r#"{"message":"\ud800"}"#,
+        ] {
+            assert!(http_error(400, "url", body).is_err(), "{body}");
         }
     }
 
