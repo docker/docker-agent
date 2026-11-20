@@ -240,6 +240,7 @@ async function run() {
     ['teamCapBounce', handoffOnly(limitedTeam('max_iterations: 3,', 'handoffs: [root],')), [pass(), pass('root'), ponder('a'), answer]],
     ['teamCapForced', limitedPipeline('max_iterations: 1,', ''), [answer, answer]],
     ['teamCapForcedTool', limitedPipeline('max_iterations: 2,', ''), [answer, ponder('a'), answer]],
+    ['teamCapBeforeForced', limitedPipeline('max_iterations: 1,', ''), [ponder('a'), answer]],
     ['teamCapForcedTargetIgnored', limitedPipeline('', 'max_iterations: 1,'), [answer, ponder('a'), answer, answer]],
     ['teamCapNested', limitedTrio('max_iterations: 3, sub_agents: [first],', 'max_iterations: 2, sub_agents: [second],', 'max_iterations: 1,'),
       [delegate('first'), delegate('second'), ponder('deep'), ponder('middle'), answer, answer]],
@@ -345,6 +346,18 @@ async function run() {
       record(e); return e.type === 'tool_confirmation' ? {decision:'reject',reason:'tester declined'} : undefined;
     }));
   });
+  // A refusal is a tool result: Go redacts its reason and caps the stored copy.
+  const refuse = async ({api, options, record, trace}) => {
+    trace.results.push(await api.chat({...options,messages:[{role:'user',content:'go'}]}, e => {
+      record(e); return e.type === 'tool_confirmation' ? {decision:'reject',reason:`no ${secret}`} : undefined;
+    }));
+  };
+  tests.rejectSecret = await replay(api, 'rejectSecret', local(['memory']), [tool('add_memory', {memory:'not stored'}), answer], refuse);
+  tests.rejectCapped = await replay(api, 'rejectCapped', local(['memory']).replace('model: local/test', 'max_tool_result_tokens: 4, model: local/test'),
+    [tool('add_memory', {memory:'not stored'}), answer], refuse);
+  tests.deniedCapped = await replay(api, 'deniedCapped',
+    local(['think']).replace('model: local/test', 'max_tool_result_tokens: 4, model: local/test') + 'permissions: {deny: ["think:thought=blocked"]}\n',
+    [tool('think', {thought:'blocked'}), answer], single);
   tests.readonly = await replay(api, 'readonly', config.replace('model: local/test', 'readonly: true, toolsets: [{type: memory, tools: [add_memory,get_memories], instruction: "Scoped"}], model: local/test'), [answer], single);
   const apiTool = config.replace('model: local/test', 'toolsets: [{type: api, allow_private_ips: true, api_config: {name: greet, instruction: Return a greeting, method: GET, endpoint: "https://tool.invalid/greet"}}], model: local/test');
   function greet(req) {
