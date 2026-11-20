@@ -1,3 +1,4 @@
+import { localTimestamp } from './clock.mjs';
 import { createHost } from './host.mjs';
 // The module owns config, conversation history, tool execution and turn decisions.
 // Only browser I/O and the asynchronous lifetime of a session live here.
@@ -11,6 +12,10 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     : source instanceof URL ? await WebAssembly.compileStreaming(fetch(source))
     : await WebAssembly.compile(source);
   const { exports: wasm } = await WebAssembly.instantiate(module, {});
+
+  // time.Local is initialized once by the Go wasm runtime.
+  const timezoneOffset = new Date().getTimezoneOffset();
+  const sessionStamp = () => ({ id: crypto.randomUUID(), created_at: localTimestamp(new Date(), timezoneOffset) });
 
   function call(op, args) {
     const bytes = encoder.encode(JSON.stringify({ ...args, op }));
@@ -28,7 +33,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     if (typeof opts?.yaml !== 'string') throw new Error('options.yaml must be a string');
     if ('safety' in opts || 'permissions' in opts) throw new Error('portable safety and permissions must be configured in YAML');
     validateDocuments(opts.documents);
-    let host = createHost(opts, onEvent, stateless);
+    let host = createHost(opts, onEvent, stateless, timezoneOffset);
     let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, auto_approve: opts.autoApprove === true, history, stamp: sessionStamp() });
     try {
       for (const { targets } of Object.values(handle.profiles)) {
@@ -62,7 +67,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         const { id, action, content } = reply ?? {};
         if (typeof id !== 'string' || !id) throw new Error('respondToElicitation: id is required');
         if (signal.aborted || !pending.has(id)) throw new Error('no pending elicitation with that ID');
-        const step = call('answerElicitation', {session, id, action, content});
+        const step = call('answerElicitation', {session, id, action, content: answerContent(content)});
         pending.delete(id);
         settle(step);
       }
@@ -145,7 +150,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
                 pending.delete(id);
                 try {
                   const action = typeof reply === 'string' ? reply : reply === true ? 'accept' : reply?.action;
-                  return call('answerElicitation', {session, id, action, content:reply?.content});
+                  return call('answerElicitation', {session, id, action, content: answerContent(reply?.content)});
                 } catch { return call('answerElicitation', {session, id, action:'decline'}); }
               }, true);
             } else emit(event);
@@ -157,7 +162,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         if (typeof id !== 'string' || !id) throw new Error('respondToElicitation: id is required');
         if (!pending.has(id) || signal.aborted) throw new Error('no pending elicitation with that ID');
         // Snapshot and validate now; the session reply becomes runnable only when Go is idle.
-        const args = JSON.parse(JSON.stringify({session, id, action, content}));
+        const args = {session, id, action: typeof action === 'string' ? action : '', content: answerContent(content)};
         call('validateElicitation', args);
         pending.delete(id);
         schedule(external, () => call('answerElicitation', args));
@@ -219,7 +224,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
               signal.throwIfAborted();
               roundContext = {
                 environment: addEnvironmentInfo ? dynamicPrompt({ add_environment_info: true })[0] : undefined,
-                date: addDate ? dynamicPrompt({ add_date: true })[0] : undefined,
+                date: addDate ? dynamicPrompt({ add_date: true }, {timezoneOffset})[0] : undefined,
               };
             }
             request = call('prepare', { session, ...roundContext });
@@ -366,14 +371,13 @@ function validateDocuments(documents) {
   }
 }
 
-// Match time.Local.Format(time.RFC3339) in the Go browser runtime.
-function sessionStamp() {
-  const now = new Date();
-  const minutes = -now.getTimezoneOffset();
-  const local = new Date(now.getTime() + minutes * 60_000).toISOString().slice(0, 19);
-  const pad = n => String(n).padStart(2, '0');
-  const zone = minutes === 0 ? 'Z' : `${minutes > 0 ? '+' : '-'}${pad(Math.floor(Math.abs(minutes) / 60))}:${pad(Math.abs(minutes) % 60)}`;
-  return { id: crypto.randomUUID(), created_at: local + zone };
+// Go ignores response content that cannot round-trip to map[string]any.
+function answerContent(content) {
+  if (!content || typeof content !== 'object') return undefined;
+  try {
+    const raw = JSON.stringify(content);
+    return raw?.startsWith('{') ? raw : undefined;
+  } catch { return undefined; }
 }
 
 function modelURL(endpoint) {

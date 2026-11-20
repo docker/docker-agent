@@ -41,6 +41,7 @@ pub fn response_strict(name: &str) -> bool {
 #[derive(Clone, Copy, Debug)]
 struct Target {
     host: Option<usize>,
+    private_todo: Option<usize>,
     safe: bool,
     model_source: Option<usize>,
 }
@@ -58,7 +59,8 @@ pub struct Profile {
     pub spec: Selected,
     catalog: RefCell<Catalog>,
     grants: RefCell<BTreeSet<String>>,
-    todos: Rc<RefCell<crate::todo::Todos>>,
+    shared_todos: Rc<RefCell<crate::todo::Todos>>,
+    private_todos: RefCell<BTreeMap<usize, crate::todo::Todos>>,
 }
 
 struct Catalog {
@@ -372,12 +374,16 @@ fn simple_network_call(spec: &crate::config::Toolset, arguments: &str) -> bool {
 }
 
 impl Profile {
-    pub fn new(spec: Selected, todos: Rc<RefCell<crate::todo::Todos>>) -> Result<Self, String> {
+    pub fn new(
+        spec: Selected,
+        shared_todos: Rc<RefCell<crate::todo::Todos>>,
+    ) -> Result<Self, String> {
         Ok(Self {
             catalog: RefCell::new(Catalog::build(&spec, None)?),
             grants: Default::default(),
             spec,
-            todos,
+            shared_todos,
+            private_todos: Default::default(),
         })
     }
 
@@ -510,7 +516,7 @@ impl Catalog {
                     continue;
                 }
                 let hidden = all || names.iter().any(|n| n == name);
-                let profile = (hosted, hidden, spec.toon.matches(name));
+                let profile = (hosted, hidden, spec.toon.matches(name), spec.shared);
                 if let Some(previous) = seen.insert(name.to_owned(), profile) {
                     if hosted || previous != profile {
                         return Err(format!("duplicate tool name {name:?}"));
@@ -521,6 +527,7 @@ impl Catalog {
                     tool.clone(),
                     Target {
                         host: hosted.then_some(index),
+                        private_todo: (spec.kind == "todo" && !spec.shared).then_some(index),
                         safe,
                         model_source: (!spec.model.is_empty()).then_some(index),
                     },
@@ -551,6 +558,7 @@ impl Catalog {
                             definition: definition.clone(),
                             target: Target {
                                 host: None,
+                                private_todo: None,
                                 safe: helpers.read_only[name],
                                 model_source: None,
                             },
@@ -572,6 +580,7 @@ impl Catalog {
                     definition: output.definition.clone(),
                     target: Target {
                         host: None,
+                        private_todo: None,
                         model_source: None,
                         safe: true,
                     },
@@ -1429,10 +1438,10 @@ impl Conversation {
 
     fn dispatch(&mut self, op: Invocation, events: &mut Vec<Value>) -> Result<(), String> {
         let call = op.call;
-        let (source, toon) = {
+        let (source, toon, private_todo) = {
             let catalog = self.profile.catalog.borrow();
             let tool = &catalog.tools[&call.name];
-            (tool.target.host, tool.toon)
+            (tool.target.host, tool.toon, tool.target.private_todo)
         };
         let reply = Reply {
             slot: op.slot,
@@ -1623,11 +1632,16 @@ impl Conversation {
                 }
             }
             "calculate" => crate::calculator::calculate(&call.arguments),
-            "create_todo" | "create_todos" | "update_todos" | "list_todos" => self
-                .profile
-                .todos
-                .borrow_mut()
-                .call(&call.name, &call.arguments),
+            "create_todo" | "create_todos" | "update_todos" | "list_todos" => {
+                let mut store = if let Some(i) = private_todo {
+                    std::cell::RefMut::map(self.profile.private_todos.borrow_mut(), |m| {
+                        m.entry(i).or_default()
+                    })
+                } else {
+                    self.profile.shared_todos.borrow_mut()
+                };
+                store.call(&call.name, &call.arguments)
+            }
             _ => return Err("missing or invalid tool name".into()),
         };
         self.handler_result(reply, result, events)
@@ -1883,29 +1897,34 @@ impl Conversation {
         Ok(self.continue_turn(events))
     }
 
-    pub fn answer_output(
-        action: &str,
-        content: Option<Map<String, Value>>,
-    ) -> Result<String, String> {
+    pub fn answer_output(action: &str, content: Option<&str>) -> Result<String, String> {
         if !matches!(action, "accept" | "decline" | "cancel") {
-            return Err(format!("unknown elicitation action {action:?}"));
+            return Err(format!(
+                "unknown elicitation action {} (accept, decline, cancel)",
+                crate::go_json::quote(action)
+            ));
         }
         let mut response = json!({"action":action});
-        if let Some(data) = content.filter(|c| !c.is_empty()) {
-            response["content"] = Value::Object(data);
+        if let Some(raw) = content {
+            let normalized = crate::go_json::normalize_json(raw)?;
+            let data: Map<String, Value> =
+                serde_json::from_str(&normalized).map_err(|e| e.to_string())?;
+            if !data.is_empty() {
+                response["content"] = Value::Object(data);
+            }
         }
-        let output = response.to_string();
-        if output.len() > MAX_ELICITATION_BYTES {
+        // Keep the admission limit on the unescaped response, not its expanded Go spelling.
+        if response.to_string().len() > MAX_ELICITATION_BYTES {
             return Err("elicitation answer size limit reached".into());
         }
-        Ok(output)
+        Ok(crate::go_json::encode_decoded(&response))
     }
 
     pub fn answer(
         &mut self,
         id: &str,
         action: &str,
-        content: Option<Map<String, Value>>,
+        content: Option<&str>,
     ) -> Result<Value, String> {
         let output = Self::answer_output(action, content)?;
         let turn = self.active.as_mut().ok_or("no active turn")?;
@@ -2543,6 +2562,17 @@ mod tests {
     }
 
     #[test]
+    fn html_escaping_does_not_reduce_the_accepted_answer_size() {
+        let content = json!({"text": "<&>".repeat(18_000)}).to_string();
+        let output = Conversation::answer_output("accept", Some(&content)).unwrap();
+        assert!(output.len() > MAX_ELICITATION_BYTES);
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["content"].to_string(),
+            content
+        );
+    }
+
+    #[test]
     fn incomplete_batch_rejects_model_chunks_and_waits_for_its_own_replies() {
         let mut c = conversation(&["user_prompt"]);
         c.begin("go", "turn").unwrap();
@@ -2566,7 +2596,7 @@ mod tests {
             .chunk(chunk(json!({"content":"skip"}), Some("stop")))
             .is_err());
         assert!(c.answer("one", "accept", None).is_err());
-        let next = c.answer(id, "accept", Some(Default::default())).unwrap();
+        let next = c.answer(id, "accept", Some("{}")).unwrap();
         assert_eq!(next["events"][0]["output"], r#"{"action":"accept"}"#);
         assert!(c.answer(id, "decline", None).is_err());
         assert_eq!(answer(&mut c, "ok")["result"]["message"]["content"], "ok");

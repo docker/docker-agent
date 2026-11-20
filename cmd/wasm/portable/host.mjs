@@ -4,7 +4,7 @@ import { localTools } from './local-tools.mjs';
 import { clockTool } from './clock.mjs';
 
 // Each live session has its own native resources, tool bindings, and outstanding questions.
-export function createHost(opts, onEvent, stateless) {
+export function createHost(opts, onEvent, stateless, timezoneOffset) {
   const profiles = new Map(), closers = [];
   const questions = new Map();
   let local, confirmation, delivering;
@@ -87,7 +87,7 @@ export function createHost(opts, onEvent, stateless) {
       const bindings = new Map(), sources = [];
       for (const [index, spec] of toolsets.entries()) {
         if (spec.type === 'memory' || spec.type === 'plan') {
-          bindings.set(index, (...args) => (local ??= localTools()).call(...args));
+          bindings.set(index, (...args) => (local ??= localTools(timezoneOffset)).call(...args));
         } else if (spec.type === 'datetime' || spec.type === 'random') {
           bindings.set(index, clockTool);
         } else if (['mcp', 'fetch', 'api'].includes(spec.type)) {

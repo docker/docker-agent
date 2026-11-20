@@ -99,13 +99,13 @@ enum Command {
     },
     ValidateElicitation {
         action: String,
-        content: Option<serde_json::Map<String, Value>>,
+        content: Option<String>,
     },
     AnswerElicitation {
         session: u32,
         id: String,
         action: String,
-        content: Option<serde_json::Map<String, Value>>,
+        content: Option<String>,
     },
     Cancel {
         session: u32,
@@ -236,11 +236,11 @@ impl Core {
                 content,
             } => {
                 let s = self.session(session)?;
-                let next = s.conversation.answer(&id, &action, content)?;
+                let next = s.conversation.answer(&id, &action, content.as_deref())?;
                 s.next(next)
             }
             Command::ValidateElicitation { action, content } => {
-                turn::Conversation::answer_output(&action, content)?;
+                turn::Conversation::answer_output(&action, content.as_deref())?;
                 Ok(Value::Null)
             }
             Command::Cancel { session } => {

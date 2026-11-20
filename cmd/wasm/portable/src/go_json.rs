@@ -425,6 +425,31 @@ impl Scanner<'_> {
     }
 }
 
+// strconv.Quote, including Go's non-JSON control escapes.
+pub fn quote(s: &str) -> String {
+    static PRINT_BOUNDARIES: &[u32] = include!("printable.in");
+    let mut out = String::from('"');
+    for c in s.chars() {
+        match c {
+            '"' | '\\' => out.extend(['\\', c]),
+            '\u{7}' => out.push_str(r"\a"),
+            '\u{8}' => out.push_str(r"\b"),
+            '\t' => out.push_str(r"\t"),
+            '\n' => out.push_str(r"\n"),
+            '\u{b}' => out.push_str(r"\v"),
+            '\u{c}' => out.push_str(r"\f"),
+            '\r' => out.push_str(r"\r"),
+            ' '..='~' => out.push(c),
+            c if c.is_ascii() => write!(out, r"\x{:02x}", u32::from(c)).unwrap(),
+            c if PRINT_BOUNDARIES.partition_point(|&b| b <= u32::from(c)) % 2 == 1 => out.push(c),
+            c if u32::from(c) <= 0xffff => write!(out, r"\u{:04x}", u32::from(c)).unwrap(),
+            c => write!(out, r"\U{:08x}", u32::from(c)).unwrap(),
+        }
+    }
+    out.push('"');
+    out
+}
+
 // strconv.QuoteRune for the runes whose printability needs no table.
 fn quote_rune(c: char) -> Option<String> {
     Some(match c {

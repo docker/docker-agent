@@ -141,12 +141,10 @@ impl Session {
         let mut agents = BTreeMap::new();
         for mut spec in specs {
             spec.tool_policy = spec.tool_policy.with_auto_approve(auto_approve);
-            let todos = if spec.shared_todo {
-                Rc::clone(&shared)
-            } else {
-                Default::default()
-            };
-            agents.insert(spec.name.clone(), Rc::new(Profile::new(spec, todos)?));
+            agents.insert(
+                spec.name.clone(),
+                Rc::new(Profile::new(spec, Rc::clone(&shared))?),
+            );
         }
         let profile = agents[&entry].clone();
         let context = profile

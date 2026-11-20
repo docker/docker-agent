@@ -1,5 +1,5 @@
 //! Previous conversations of this handle, not the module's registry of active handles.
-use crate::go_json::{encode, read_string, scalar, type_error};
+use crate::go_json::{encode, quote, read_string, scalar, type_error};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Write as _;
@@ -118,21 +118,22 @@ impl Archive {
             .parse::<i64>()
             .ok()
             .filter(|n| *n < 0)
-            .map(i64::unsigned_abs);
+            .map(i64::wrapping_neg);
         if id == self.current.id || offset == Some(1) {
             return Err("cannot read the current session; reference a different one".into());
         }
         let session = if let Some(n) = offset {
             let count = 1 + self.past.len();
-            if n > count as u64 {
-                return Err(format!("cannot resolve session {id:?}: session offset {n} out of range (have {count} sessions)"));
+            // Go int negation wraps for MinInt64; its index (offset - 1) wraps too.
+            if n.wrapping_sub(1) >= count as i64 {
+                return Err(format!("cannot resolve session {}: session offset {n} out of range (have {count} sessions)", quote(id)));
             }
             &self.past[count - n as usize]
         } else {
             self.past
                 .iter()
                 .find(|p| p.summary.id == id)
-                .ok_or_else(|| format!("session {id:?} not found"))?
+                .ok_or_else(|| format!("session {} not found", quote(id)))?
         };
         Ok(session.transcript.clone())
     }

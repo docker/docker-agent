@@ -140,3 +140,24 @@ test('add_date reads a fresh clock with the fixed local offset used by Go wasm',
   assert.deepEqual(dynamicPrompt({ add_date: true }), ["Today's date: 2026-11-08"]);
   assert.equal(offset.mock.callCount(), 1);
 });
+
+test('zone transitions from the Go database take precedence over browser ICU', t => {
+  const Clock = Date;
+  let instant;
+  t.mock.method(globalThis, 'Date', class extends Clock {
+    constructor(...args) { super(...(args.length ? args : [instant])); }
+  });
+  t.mock.method(Intl, 'DateTimeFormat', () => { throw new Error('no host zone data'); });
+  const layout = '15:04:05 -07:00:00 MST';
+  for (const [iso, zone, want] of [
+    ['1900-07-01T12:00:00Z', 'Europe/Paris', '12:09:21 +00:09:21 PMT'],
+    ['1900-07-01T12:00:00Z', 'Africa/Accra', '11:59:08 +00:00:-52 LMT'],
+    ['2026-11-01T08:59:59Z', 'Canada/Pacific', '01:59:59 -07:00:00 PDT'],
+    ['2026-11-01T09:00:00Z', 'America/Vancouver', '02:00:00 -07:00:00 MST'],
+    ['2050-01-01T00:00:00Z', 'Australia/Lord_Howe', '11:00:00 +11:00:00 +11'],
+    ['2050-07-01T00:00:00Z', 'Australia/Lord_Howe', '10:30:00 +10:30:00 +1030'],
+  ]) {
+    instant = Clock.parse(iso);
+    assert.deepEqual(time(layout, zone), ok(want));
+  }
+});
