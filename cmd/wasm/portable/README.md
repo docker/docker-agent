@@ -5,7 +5,7 @@ The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
 ES module host handles browser I/O, cancellation, approval prompts and MCP.
 There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
 or Go binary to download. The model still runs at the configured provider.
-The measured release is **1,853,768 bytes (1.77 MiB) uncompressed**, including
+The measured release is **1,855,607 bytes (1.77 MiB) uncompressed**, including
 all nine runtime JS modules, versus 35.8 MiB for the packed Go small module
 alone. CI enforces a 2 MiB budget for the Wasm and JS together.
 
@@ -161,12 +161,17 @@ messages: [
   attachment and 16 MiB total per history (including text-envelope overhead),
   1,024 parts and 4,096 messages. HTTPS image URLs are limited to 8 KiB.
 
-For a single agent with `fallback.models`, multipart history is replayable when
-**every** target uses the same API (Chat Completions or Responses) and the same
-effective media capabilities, including model-name handling of legacy image
-URLs. Each attempt still uses its own endpoint and credentials. Multipart
-history with a routed team, active fallback compaction, or an incompatible
-fallback chain is rejected before the first model request.
+A fallback or handoff can switch between Chat Completions and Responses, or to
+an agent with different media capabilities. Each request uses the destination's
+credentials and attachment format. For example, a text-only primary omits an
+image, but a vision-capable backup receives the original image. A handoff keeps
+the conversation; `transfer_task` starts fresh and does **not** inherit the
+caller's attachments. On return the caller still has its history.
+
+Multipart history with active fallback compaction is not supported. Routed
+multipart history with named messages or `reasoning_content` is rejected before
+model I/O if a reachable target uses Responses. File IDs and opaque provider
+state are not portable attachment formats.
 
 ### Routing and tool policy
 
@@ -209,8 +214,12 @@ limited to ten nested transfers and 32 switches per user turn.
 `num_history_items`, `max_old_tool_call_tokens` and `max_tool_result_tokens`
 control the stored or transmitted history; they do not truncate a tool event
 just to hide it from the host. Agent `max_iterations` finishes normally at its
-limit, while the `max_iterations` builtin hook rejects the run. Identical
-tool batches are checked against `max_consecutive_tool_calls` after execution;
+limit, while the `max_iterations` builtin hook rejects the run. With fallback
+models, a single agent can set `max_iterations: 1` and `session_compaction: false`:
+a failed model attempt does not spend the iteration, and the completed tool
+result and stop message remain in history for the next send. Larger caps with
+fallback, capped teams and the `max_iterations` hook with routing are rejected.
+Identical tool batches are checked against `max_consecutive_tool_calls` after execution;
 successful random and datetime reads are exempt, as in Go.
 
 The tool registry applies `tools`, `readonly`, and explicit denials before
