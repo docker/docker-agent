@@ -320,7 +320,7 @@ class TransportError extends Error {
   constructor(message, status) { super(message); this.status = status; }
 }
 
-async function modelFetch({ endpoint, headers }, { body, summary }, signal) {
+async function modelFetch({ endpoint, headers }, { body, sdkRetries, summary }, signal) {
   const init = {
     method: 'POST', redirect: 'error', credentials: 'omit', signal,
     headers,
@@ -330,24 +330,32 @@ async function modelFetch({ endpoint, headers }, { body, summary }, signal) {
     let response;
     try { response = await fetch(endpoint, init); }
     catch (e) {
-      if (!summary || attempt >= 2) throw new TransportError(`model request failed: ${e.message}`);
+      if (!sdkRetries) throw new TransportError(`model request failed: ${e.message}`);
+      if (attempt >= 2) {
+        if (summary) throw new TransportError(`model request failed: ${e.message}`);
+        const cause = e.cause === undefined ? '' : `: ${e.cause}`;
+        throw new TransportError(`error receiving from stream: Post "${endpoint}": net/http: fetch() failed: ${e}${cause}`);
+      }
     }
     if (response?.ok) return response;
-    // The Go SDK retries transport failures before the child runtime sees an overflow.
+    // SDK retries precede classification by the runtime fallback executor.
     const retry = response?.headers.get('x-should-retry');
-    if (summary && attempt < 2 && (!response || retry === 'true' ||
+    if (sdkRetries && attempt < 2 && (!response || retry === 'true' ||
         (retry !== 'false' && ([408, 409, 429].includes(response.status) || response.status >= 500)))) {
       await response?.body?.cancel();
-      await wait(summaryRetryDelay(response?.headers, attempt), signal);
+      await wait(sdkRetryDelay(response?.headers, attempt), signal);
       continue;
     }
-    const detail = await errorDetail(response, summary);
-    const phase = summary ? 'error receiving from stream' : 'model request failed';
+    const scope = summary ? 'compaction' : sdkRetries ? 'model selection' : '';
+    const detail = await errorDetail(response, scope);
+    // Rust supplies net/http's canonical status text for an empty SDK error.
+    if (!detail && scope === 'model selection') throw new TransportError('', response.status);
+    const phase = sdkRetries ? 'error receiving from stream' : 'model request failed';
     throw new TransportError(`${phase}: HTTP ${response.status}${detail ? `: ${detail}` : ''}`, response.status);
   }
 }
 
-function summaryRetryDelay(headers, attempt) {
+function sdkRetryDelay(headers, attempt) {
   for (const [key, unit] of [['Retry-After-Ms', 1], ['Retry-After', 1000]]) {
     const raw = headers?.get(key);
     if (!raw) continue;
@@ -362,14 +370,14 @@ function summaryRetryDelay(headers, attempt) {
 }
 
 // Use the provider diagnostic, not an unbounded proxy error page, in fallback events.
-async function errorDetail(response, summary) {
-  if (!response.body || (!summary && !response.headers.get('Content-Type')?.includes('application/json'))) {
+async function errorDetail(response, scope) {
+  if (!response.body || (!scope && !response.headers.get('Content-Type')?.includes('application/json'))) {
     await response.body?.cancel();
-    if (summary) throw new Error('compaction: missing HTTP error body');
+    if (scope === 'compaction') throw new Error('compaction: missing HTTP error body');
     return '';
   }
   const reader = response.body.getReader();
-  const utf8 = new TextDecoder();
+  const utf8 = new TextDecoder('utf-8', {fatal: scope === 'model selection'});
   let text = '', bytes = 0;
   try {
     for (;;) {
@@ -379,19 +387,27 @@ async function errorDetail(response, summary) {
       text += utf8.decode(value, { stream: true });
     }
     if (bytes > 8192) throw new Error();
-    const body = JSON.parse(text + utf8.decode());
-    if (summary) {
+    text += utf8.decode();
+    let body;
+    try { body = JSON.parse(text); }
+    catch (e) {
+      // The Go middleware wraps a non-JSON response as an error message.
+      if (scope === 'model selection') return text;
+      throw e;
+    }
+    if (scope) {
       // The SDK unwraps body.error before StatusError extracts its message.
       if (body?.error && Object.hasOwn(body.error, 'error')) throw new Error();
-      if (response.status === 413 && body?.error && typeof body.error === 'object' && !body.error.message) return '';
+      if (scope === 'compaction' && response.status === 413 && body?.error && typeof body.error === 'object' && !body.error.message) return '';
       if (typeof body?.error?.message === 'string' && body.error.message) return body.error.message;
-      if (body?.error?.code === 'context_length_exceeded' && !body.error.message) return JSON.stringify(body.error);
+      if (scope === 'model selection' && !body?.error && typeof body?.message === 'string' && body.message) return body.message;
+      if (scope === 'compaction' && body?.error?.code === 'context_length_exceeded' && !body.error.message) return JSON.stringify(body.error);
       throw new Error();
     }
     const detail = body?.error?.message ?? body?.message;
     return typeof detail === 'string' ? detail : '';
   } catch {
-    if (summary) throw new Error('compaction: unsupported HTTP error body');
+    if (scope) throw new Error(`${scope}: unsupported HTTP error body`);
     return '';
   } finally { try { await reader.cancel(); } finally { reader.releaseLock(); } }
 }

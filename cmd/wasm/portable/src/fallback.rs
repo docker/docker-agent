@@ -195,7 +195,17 @@ fn truncated(lower: &str) -> bool {
     lower.contains("unexpected eof") || lower.contains("unexpected end of json input")
 }
 
-pub fn model_error(overflow: Option<Overflow>, reason: &str) -> String {
+pub fn status_text(code: u16) -> Option<&'static str> {
+    // net/http retains the older names for these statuses.
+    match code {
+        413 => Some("Request Entity Too Large"),
+        414 => Some("Request URI Too Long"),
+        416 => Some("Requested Range Not Satisfiable"),
+        _ => http::StatusCode::from_u16(code).ok()?.canonical_reason(),
+    }
+}
+
+pub fn model_error(prefix: &str, overflow: Option<Overflow>, reason: &str) -> String {
     if let Some(kind) = overflow {
         return kind.message().into();
     }
@@ -206,7 +216,7 @@ pub fn model_error(overflow: Option<Overflow>, reason: &str) -> String {
             "prefill before the first token, or cuts a long response mid-stream. ",
             "Try a shorter prompt, or raise the model server's idle/keep-alive timeout.").into();
     }
-    format!("model failed: {reason}")
+    format!("{prefix}: {reason}")
 }
 
 fn error_field<'a>(object: &'a Value, key: &str) -> Result<&'a Value, String> {

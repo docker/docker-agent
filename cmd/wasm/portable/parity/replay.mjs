@@ -55,7 +55,7 @@ async function replay(api, name, yaml, replies, drive, endpoint = '/v1/chat/comp
     const chunks = replies[trace.requests.length];
     trace.requests.push({ method: req.method, path: new URL(req.url).pathname,
       authorization: req.headers.get('Authorization'), body: await req.json() });
-    if (!Array.isArray(chunks)) return Response.json(chunks.body, { status: chunks.status });
+    if (!Array.isArray(chunks)) return Response.json(chunks.body, { status: chunks.status, headers: chunks.headers });
     const isChat = expected.endsWith('/chat/completions');
     const stream = chunks.map(c => `data: ${JSON.stringify(isChat ? { id: 'completion', object: 'chat.completion.chunk', model: 'test', ...c } : c)}\r\n\r\n`).join('');
     return new Response(stream + (isChat ? 'data: [DONE]\r\n\r\n' : ''), { headers: { 'Content-Type': 'text/event-stream' } });
@@ -737,9 +737,10 @@ agents: {root: {model: ordinary, ${smallSummary && !failed ? 'compaction_model: 
   const deliver = args => [{ type: 'response.output_item.added', output_index: 0, item: outputFn },
     { type: 'response.function_call_arguments.delta', output_index: 0, item_id: fn.id, delta: args },
     fin([{ ...outputFn, arguments: args, status: 'completed' }])];
+  const wireCall = (protocol, name, args, id) => protocol === chat ? rawTool(name, args, id)
+    : responseCall({...fn, name, call_id: id}, args);
   for (const [protocol, suffix, plain] of [[chat, 'Chat', answer], [resp, 'Responses', text]]) {
-    const call = (name, args, id) => protocol === chat ? rawTool(name, args, id)
-      : responseCall({...fn, name, call_id: id}, args);
+    const call = (name, args, id) => wireCall(protocol, name, args, id);
     const finish = call(output, jsonAnswer, 'final');
     const replayOutput = async (name, base, fields, replies, drive = turns) => {
       name += suffix;
@@ -780,6 +781,35 @@ agents: {root: {model: ordinary, ${smallSummary && !failed ? 'compaction_model: 
   tests.outputResponses = await replay(api, 'outputResponses', withSchema(responses, { mode: 'tool',
     schema: { ...schema, properties: { ...schema.properties, note: { type: 'string', enum: ['extra'] } }, additionalProperties: true } }),
     [responseTool, deliver(raw), deliver(raw)], turns, '/v1/responses');
+  for (const [protocol, suffix, plain, spare] of [[chat, 'Chat', answer, resp], [resp, 'Responses', text, chat]]) {
+    const fail = message => protocol === chat ? [{error: {message}}] : responseError(message);
+    const invalid = fail('invalid model'), transient = fail('service unavailable');
+    const empty = protocol === chat ? [piece({content: ''}, 'stop'), usage] : [fin([])];
+    const pick = wireCall(protocol, 'change_model', switchArgs, 'pick');
+    const revert = wireCall(protocol, 'revert_model', '{}', 'revert');
+    const selectedChain = (base, models, retries) => base.replace('provider: openai,', `provider: openai, api_type: ${protocol},`)
+      .replace('model: local/test,', `model: local/test, session_compaction: false, fallback: {models: [${models}], retries: ${retries}, cooldown: 1h},`);
+    const path = `/v1/${pathFor(protocol)}`;
+    const combined = picker.replace('{type: session_context}', '{type: think, model: local/fast}')
+      .replace('model: local/test,', `model: local/test, ${historyLimits}, max_iterations: 3,`);
+    for (const [prefix, base, retries, replies, drive] of [
+      ['pickerRetryRevert', picker, 1, [pick, transient, transient, empty, revert, plain], turns],
+      ['pickerPinnedRevert', withSchema(picker, {}), -1, [pick, invalid, invalid, revert, empty, plain], turns],
+      ['pickOnFallback', withSchema(picker, {mode: 'tool'}), -1, [protocol === chat ? invalid : transient, pick, empty,
+        wireCall(protocol, output, jsonAnswer, 'final'), wireCall(protocol, output, jsonAnswer, 'again')], turns],
+      ['pickerToolModelExhausted', combined, -1, [pick, thought(protocol, 'work'), invalid, invalid,
+        protocol === chat ? invalid : fail('prompt too long'), plain], rejectsThenRecovers],
+    ]) {
+      const name = prefix + suffix;
+      tests[name] = await replay(api, name, selectedChain(base, 'local/backup, local/last', retries), replies, drive, path);
+    }
+    const http503 = {status: 503, headers: {'Retry-After-Ms': '1'}, body: {error: {message: 'service unavailable'}}};
+    const name = 'toolModelCrossApi' + suffix;
+    const mixed = selectedChain(override, 'spare/backup', -1).replace('providers:', `providers:\n  spare: {provider: openai, api_type: ${spare}, base_url: ${location.origin}/backup, token_key: SPARE_KEY}`);
+    tests[name] = await replay(api, name, mixed, [thought(protocol, 'work'), http503, http503, http503,
+      wireCall(spare, 'calculate', '{"expression":"2+2"}', 'calc'), empty, plain], withSpareKey(turns),
+      [path, path, path, path, `/backup/${pathFor(spare)}`, path, path]);
+  }
   const mediaConfig = config.replace('agents:', `models:
   capable: {provider: local, model: test, capabilities: {image: true, pdf: true, audio: true}}
 agents:`)
