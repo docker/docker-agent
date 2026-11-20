@@ -148,3 +148,13 @@ export function goQuote(s) {
     return n <= 0xffff ? escaped(c) : '\\U' + n.toString(16).padStart(8, '0');
   }) + '"';
 }
+
+// Go sorts UTF-8 map keys by code point, JS sorts strings by UTF-16 unit.
+export function compareKeys(a, b) {
+  for (let i = 0; i < a.length && i < b.length;) {
+    const x = a.codePointAt(i), y = b.codePointAt(i);
+    if (x !== y) return x - y;
+    i += x > 0xffff ? 2 : 1;
+  }
+  return a.length - b.length;
+}

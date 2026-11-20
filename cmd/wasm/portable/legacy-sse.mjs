@@ -33,7 +33,7 @@ export async function* sseEvents(source) {
         afterCR = false;
         if (bytes[i] === 10) { start = i + 1; continue; }
       }
-      if (++size > maxBytes) throw new Error('MCP response too large');
+      if (++size > maxBytes) throw new RangeError('MCP response too large');
       if (bytes[i] !== 13 && bytes[i] !== 10) continue;
       // Decode the delimiter too: an incomplete UTF-8 sequence cannot span lines.
       const line = (partial + decoder.decode(bytes.subarray(start, i + 1), { stream: true })).slice(0, -1);
@@ -72,7 +72,7 @@ export function legacySSE({ url, request, lifetime, parseMessage }) {
       if (!reply) continue;
       const waiter = pending.get(reply.id);
       if (!waiter) throw new Error('unexpected MCP SSE response ID');
-      if ((waiter.budget.left -= size) < 0) throw new Error('MCP response too large');
+      if ((waiter.budget.left -= size) < 0) throw new RangeError('MCP response too large');
       pending.delete(reply.id);
       waiter.resolve(reply);
     }

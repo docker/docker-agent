@@ -279,12 +279,28 @@ impl Session {
             self.summary_attempt = Default::default();
         }
         let (index, target) = self.conversation.request_target();
+        // MCP strictness belongs to the admitted definition, not its (possibly shared) name.
+        let mut strict_tools = Vec::new();
+        if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+            for (i, tool) in tools.iter_mut().enumerate() {
+                if tool
+                    .as_object_mut()
+                    .is_some_and(|t| t.remove("mcpStrict") == Some(Value::Bool(true)))
+                    && target.responses
+                {
+                    strict_tools.push(i);
+                }
+            }
+        }
         self.responses = target.responses.then(responses::Stream::default);
         if target.responses {
             if spec.routed_summary() || self.team {
                 fallback::check_responses_history(&body)?;
             }
             body = responses::request(body, spec.output_tool.as_ref())?;
+            for i in strict_tools {
+                body["tools"][i]["strict"] = true.into();
+            }
             if target.transport.chatgpt {
                 crate::providers::apply_chatgpt_policy(&mut body);
             }

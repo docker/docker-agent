@@ -71,7 +71,10 @@ export function createHost(opts, onEvent, stateless) {
     signal.addEventListener('abort', abort, { once: true });
     try {
       const reply = dispatch({ ...event, type: 'elicitation', id });
-      if (stateless) Promise.resolve(reply).then(v => resolve(v && ['accept','decline','cancel'].includes(v.action) ? v : { action: 'decline' }), () => resolve({ action: 'decline' }));
+      if (stateless) Promise.resolve(reply).then(v => {
+        const action = v === true ? 'accept' : typeof v === 'string' ? v : v?.action;
+        resolve(['accept','decline','cancel'].includes(action) ? {action, content:v?.content} : {action:'decline'});
+      }, () => resolve({ action: 'decline' }));
       else Promise.resolve(reply).catch(() => {});
       return await promise;
     } finally { signal.removeEventListener('abort', abort); questions.delete(id); }

@@ -60,7 +60,7 @@ test('one guarded GET; replies and notifications on SSE, including out-of-order 
   const s = await srv.open(discovery.signal, { elicit: () => assert.fail('unexpected prompt') });
   discovery.abort(); // The initial GET must survive the end of the discovery turn.
   srv.env.TOKEN = 'rotated';
-  assert.deepEqual(s.tools, [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } }]);
+  assert.deepEqual(s.tools, [{ mcpStrict: true, type: 'function', function: { name: tool.name, description: tool.description, parameters: {type: 'object', additionalProperties: false, required: [], properties: {}} } }]);
   assert.equal((await s.call('absent', {})).is_error, true);
   const a = s.call('echo', '{"n":1}'), b = s.call('echo', { n: 2 });
   await started.promise;
@@ -87,8 +87,10 @@ test('one guarded GET; replies and notifications on SSE, including out-of-order 
     assert.equal(init.headers.get('MCP-Session-Id'), null);
     assert.equal(init.headers.get('MCP-Protocol-Version'), null);
     assert.equal(init.headers.get('Last-Event-ID'), null);
-    if (i) assert.equal(msg.jsonrpc, '2.0');
-    else assert.equal(init.headers.get('Accept'), 'text/event-stream');
+    if (i) {
+      assert.equal(init.headers.get('Accept'), null);
+      assert.equal(msg.jsonrpc, '2.0');
+    } else assert.equal(init.headers.get('Accept'), 'text/event-stream');
   }
   assert.equal(raw.mock.callCount(), 0);
 });

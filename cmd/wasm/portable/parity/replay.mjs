@@ -445,6 +445,7 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
     if (req.method === 'DELETE') return new Response(null,{status:204});
     if (req.headers.get('X-Agent') !== 'Ada') throw new Error('missing inherited MCP header');
     const m=await req.json();
+    if (m.method==='server/discover') return new Response(null,{status:404});
     if (m.method==='notifications/initialized') return new Response(null,{status:202});
     const val = m.method==='initialize' ? {protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}
       : m.method==='tools/list' ? {tools:[{name:'echo',description:'Echo a word',inputSchema:{type:'object',properties:{text:{type:'string'}},required:['text'],additionalProperties:false}}]}
@@ -1237,6 +1238,72 @@ agents:`)
       [batch(['fetch', '{"urls":["https://tool.invalid/a"]}'], forget), answer], approved,
       req => new Response(req.url.endsWith('/robots.txt') ? 'User-agent: *\nAllow: /' : 'page')],
   ]) tests[name] = await replay(api, name, yaml, replies, drive, '/v1/chat/completions', service);
+  const remoteSpec = {type: 'mcp', name: 'notes', remote: {url: fixture + '/mcp', transport_type: 'streamable'}};
+  const catalogPage = [{name: 'lookup', annotations: {title: 'Lookup', readOnlyHint: true}},
+    {name: 'read', description: 'Find a note', annotations: {destructiveHint: false}, inputSchema: {
+      $defs: {Tag: {enum: ['blue', 3]}}, additionalProperties: false, required: ['unknown', 'rows'],
+      properties: {tag: {$ref: '#/$defs/Tag'}, rows: {type: ['null', 'array'], items: row}, mode: {enum: ['red', false]}}}}];
+  const mcpTool = 'notes_read', echoArgs = '{"pick":null,"rows":[{"tag":null}],"extra":"yes"}';
+  const form = {message: 'Color?', requestedSchema: {type: 'object', properties: {color: {type: 'string'}}}, _meta: {title: 'Choose'}};
+  for (const [name, c] of [
+    ['mcpCatalog', {pages: true}], ['mcpCatalogResponses', {responses: true, pages: true}],
+    ['mcpFilter', {filter: [mcpTool], pages: true}], ['mcpDiscover', {modern: true}], ['mcpNovember2024', {version: '2024-11-05'}],
+    ['mcpTextParts', {result: {content: [part('A\ufeff'), part('B'), part('\u0085C'), {type: 'resource_link', name: 'note]', uri: 'note:a)b'},
+      {type: 'resource', resource: {uri: 'note:one', text: ' footnote\udfff'}}], isError: true}}],
+    ['mcpStructured', {result: {content: [], structuredContent: {color: 'blue'}}}], ['mcpEmptyResult', {result: {}}],
+    ['mcpStructuredArray', {result: {content: [part('Useful text')], structuredContent: [1, 2]}}],
+    ['mcpRpcInvalidParams', {error: {code: -32602, message: 'Invalid params', data: {ignored: 'do not display'}}}],
+    ['mcpRpcEmptyMessage', {error: {code: -32602, message: '', data: {ignored: true}}}], ['mcpUnavailable', {status: 503}],
+    ['mcpProgress', {push: 'notifications/progress', params: {progress: 1, progressToken: 'p'}}],
+    ['mcpPing', {push: 'ping'}], ['mcpSampling', {push: 'sampling/createMessage'}], ['mcpRoots', {push: 'roots/list'}],
+    ['mcpForm', {push: 'elicitation/create', params: form, reply: {action: 'accept', content: {color: 'blue'}}}],
+    ['mcpDecline', {push: 'elicitation/create', params: {...form, mode: 'form'}, reply: 'decline'}],
+    ['mcpCancel', {push: 'elicitation/create', params: form, reply: 'cancel'}],
+    ['mcpUrl', {push: 'elicitation/create', params: {message: 'Visit', mode: 'url', url: fixture + '/verify', elicitationId: 'visit'}, reply: true}],
+    ...Object.entries({numbers: '{"10":1.0,"2":{"z":-0,"a":"<>&\\u2028"},"u":1e21}', null: 'null', array: '[1]', scalar: 'false', bad: '{"x":', overflow: '{"x":[1e400],"x":0}',
+      surrogate: '{"\\udfff": 1,"�":2,"v":"\\udfff"}'}).map(([label, args]) => [`args_mcp_${label}`, {args}]),
+  ]) {
+    let yaml = httpConfig({...remoteSpec, tools: c.filter});
+    if (c.responses) yaml = yaml.replace('provider: openai,', 'provider: openai, api_type: openai_responses,');
+    const args = c.args ?? echoArgs;
+    let trace, acknowledge;
+    const replies = c.responses ? [responseCall({...fn, name: mcpTool}, args), text] : [rawTool(mcpTool, args), answer];
+    tests[name] = await replay(api, name, yaml, replies, async ctx => {
+      trace = ctx.trace;
+      trace.mcp = [];
+      trace.results.push(await api.chat({...ctx.options, messages: [{role: 'user', content: 'go'}]}, event => {
+        ctx.record(event);
+        return event.type === 'tool_confirmation' ? {decision: 'approve'} : event.type === 'elicitation' ? c.reply : undefined;
+      }));
+    }, c.responses ? responsesPath : chatPath, async req => {
+      if (req.url !== remoteSpec.remote.url || req.method !== 'POST') throw new Error('unexpected MCP request');
+      const body = await req.text(), msg = JSON.parse(body);
+      trace.mcp.push({round: trace.requests.length, method: req.method, url: req.url, headers: Object.fromEntries(req.headers), body});
+      const response = result => Response.json({jsonrpc: '2.0', id: msg.id, result});
+      switch (msg.method) {
+        case 'server/discover': return response({supportedVersions: c.modern ? ['2026-07-28'] : [], capabilities: {tools: {}}, instructions: 'Modern notes.'});
+        case 'initialize': return response({protocolVersion: c.version ?? '2025-11-25', serverInfo: {name: 'notes', version: '1'}, capabilities: {tools: {}}, instructions: 'Use the notes.'});
+        case 'notifications/initialized': return new Response(null, {status: 202});
+        case 'tools/list': return response(c.pages && msg.params.cursor ? {tools: [{name: 'last', inputSchema: {type: 'object', additionalProperties: {type: 'string'}}}]}
+          : {tools: catalogPage, ...(c.pages && {nextCursor: 'next'})});
+        case undefined: acknowledge(); return new Response(null, {status: 202});
+        case 'tools/call': break;
+        default: throw new Error(`unexpected MCP method ${msg.method}`);
+      }
+      if (c.status) return new Response('discarded diagnostic', {status: c.status});
+      if (c.error) return Response.json({jsonrpc: '2.0', id: msg.id, error: c.error});
+      const result = c.result ?? {content: [part('ok')]};
+      if (!c.push) return response(result);
+      const notice = c.push.startsWith('notifications/');
+      const frame = fields => new TextEncoder().encode(`data: ${JSON.stringify({jsonrpc: '2.0', ...fields})}\n\n`);
+      return new Response(new ReadableStream({async start(controller) {
+        controller.enqueue(frame({method: c.push, params: c.params ?? {}, ...(!notice && {id: 'question'})}));
+        if (!notice) await new Promise(ok => { acknowledge = ok; });
+        controller.enqueue(frame({id: msg.id, result}));
+        controller.close();
+      }}), {headers: {'Content-Type': 'text/event-stream'}});
+    });
+  }
   return tests;
 }
 
