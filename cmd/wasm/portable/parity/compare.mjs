@@ -11,6 +11,7 @@ const chrome = process.env.CHROME_BIN || (process.platform === 'darwin' ? '/Appl
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 const goroot = execFileSync('go', ['env', 'GOROOT'], { encoding: 'utf8' }).trim();
 const files = new Map([
+  ['/providers.json', [join(root, 'pkg/model/provider/catalog/providers.json'), 'application/json']],
   ['/go.wasm', [join(root, 'cmd/wasm/web/docker-agent.wasm'), 'application/wasm']],
   ['/wasm_exec.js', [join(goroot, 'lib/wasm/wasm_exec.js'), 'text/javascript']],
   ...readdirSync(join(root, 'bin/wasm-portable')).filter(f => f.endsWith('.mjs')).map(f => ['/' + f, [join(root, 'bin/wasm-portable', f), 'text/javascript']]),

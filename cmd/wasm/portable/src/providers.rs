@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::OnceLock};
 
+pub const OPENAI_BASE: &str = "https://api.openai.com/v1";
+
 #[derive(Deserialize)]
 pub struct Builtin {
-    name: String,
+    pub name: String,
     api_type: String,
     #[serde(default)]
     pub base_url: String,
@@ -13,6 +15,8 @@ pub struct Builtin {
     token_env_vars: Vec<String>,
     #[serde(default)]
     pub auto_responses: bool,
+    #[serde(default)]
+    pub openai_vendor: bool,
     #[serde(default)]
     pub merge_consecutive_messages: bool,
     #[serde(default)]
@@ -23,7 +27,18 @@ pub struct Builtin {
     query_params: BTreeMap<String, String>,
 }
 
+pub fn canonical(name: &str) -> &str {
+    match name {
+        "fireworks" => "fireworks-ai",
+        "together" => "togetherai",
+        "moonshot" => "moonshotai",
+        "opencode-zen" => "opencode",
+        _ => name,
+    }
+}
+
 pub fn lookup(name: &str) -> Option<&'static Builtin> {
+    let name = canonical(name);
     static CATALOG: OnceLock<Vec<Builtin>> = OnceLock::new();
     CATALOG
         .get_or_init(|| {
@@ -36,8 +51,8 @@ pub fn lookup(name: &str) -> Option<&'static Builtin> {
         .find(|p| {
             p.name == name
                 && p.api_type == "openai"
-                && !p.token_env_vars.is_empty()
-                && (p.scoped()
+                && (p.name == "ollama"
+                    || p.scoped()
                     || (p.base_url.starts_with("https://")
                         && !p.base_url.contains('$')
                         && !p.requires_configuration
@@ -52,7 +67,16 @@ pub fn lookup(name: &str) -> Option<&'static Builtin> {
 pub struct Options {
     #[serde(deserialize_with = "service_tier")]
     pub service_tier: Option<String>,
+    #[serde(deserialize_with = "present")]
     api_version: Option<String>,
+    #[serde(deserialize_with = "present")]
+    pub preserve_reasoning: Option<bool>,
+    #[serde(deserialize_with = "present")]
+    pub replay_reasoning: Option<bool>,
+    #[serde(deserialize_with = "present")]
+    pub api_type: Option<String>,
+    #[serde(deserialize_with = "present")]
+    pub supports_deferred_tools: Option<bool>,
     #[serde(rename = "http_headers", deserialize_with = "copilot_header")]
     copilot_header: Option<String>,
 }
@@ -60,6 +84,12 @@ pub struct Options {
 // A present map key shadows the provider default even if its value is null or empty.
 fn service_tier<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     Ok(Some(Option::<String>::deserialize(d)?.unwrap_or_default()))
+}
+
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
 }
 
 fn copilot_header<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
@@ -75,11 +105,20 @@ fn copilot_header<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
         check_header_value(value).map_err(serde::de::Error::custom)?;
         header = Some(value.into());
     }
-    Ok(header)
+    header
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("expected Copilot-Integration-Id override"))
 }
 
 impl Options {
     pub fn validate(&self, builtin: Option<&Builtin>) -> Result<(), String> {
+        if self
+            .api_type
+            .as_deref()
+            .is_some_and(|t| !matches!(t, "openai_chatcompletions" | "openai_responses"))
+        {
+            return Err("unsupported provider_opts.api_type".into());
+        }
         let name = builtin.map(|p| p.name.as_str());
         if self.api_version.is_some() && name != Some("azure") {
             return Err("api_version is only supported on the built-in azure provider".into());
@@ -125,6 +164,10 @@ impl Transport {
 }
 
 impl Builtin {
+    pub fn credential_key(&self, name: &str) -> bool {
+        self.token_env_vars.iter().any(|k| k == name)
+    }
+
     pub fn scoped(&self) -> bool {
         matches!(
             self.name.as_str(),
@@ -146,8 +189,7 @@ impl Builtin {
             return Err(format!("{} requires an explicit base_url", self.name));
         }
         if base.trim_end_matches('/') != self.base_url.trim_end_matches('/') {
-            if self.name != "azure"
-                && (self.scoped() || key.is_empty() || self.token_env_vars.iter().any(|k| k == key))
+            if self.name != "azure" && (self.scoped() || key.is_empty() || self.credential_key(key))
             {
                 return Err("cannot use built-in credentials on an overridden endpoint; configure a custom provider and token_key".into());
             }
@@ -181,17 +223,22 @@ pub fn transport(
     route: &str,
     key: &str,
     opts: &Options,
+    inherited: Option<&Options>,
     env: &BTreeMap<String, String>,
 ) -> Result<Transport, String> {
     let name = builtin.map_or("", |p| p.name.as_str());
     let defaults = builtin.map_or(&[][..], |p| p.token_env_vars.as_slice());
     let mut headers = builtin.map(|b| b.headers.clone()).unwrap_or_default();
-    if let Some(value) = &opts.copilot_header {
+    if let Some(value) = opts
+        .copilot_header
+        .as_ref()
+        .or_else(|| inherited?.copilot_header.as_ref())
+    {
         headers.insert("Copilot-Integration-Id".into(), value.clone());
     }
     let chatgpt = name == "chatgpt";
     // Explicit token_key is required by Go's config preflight, even for GITHUB_TOKEN.
-    let key = if !key.is_empty() || defaults.is_empty() {
+    let key = if !key.is_empty() || inherited.is_some() || defaults.is_empty() {
         key
     } else {
         defaults
@@ -199,6 +246,17 @@ pub fn transport(
             .find(|k| env.get(*k).is_some_and(|v| !v.is_empty()))
             .ok_or_else(|| format!("{} environment variable is required", defaults.join(" or ")))?
     };
+    if chatgpt && key.is_empty() {
+        return Err("a custom chatgpt provider requires an explicit token_key".into());
+    }
+    if name == "ollama"
+        && opts.api_type.is_none()
+        && key.is_empty()
+        && env.get("OPENAI_API_KEY").is_some_and(|s| !s.is_empty())
+        && inherited.is_none()
+    {
+        return Err("ollama requires a dedicated token_key when OPENAI_API_KEY is set".into());
+    }
     if !key.is_empty() {
         let token = env
             .get(key)
@@ -215,7 +273,12 @@ pub fn transport(
         headers.insert("Authorization".into(), format!("Bearer {token}"));
     }
     let mut query = BTreeMap::new();
-    if let (Some(b), Some(version)) = (builtin, &opts.api_version) {
+    if let (Some(b), Some(version)) = (
+        builtin,
+        opts.api_version
+            .as_ref()
+            .or_else(|| inherited?.api_version.as_ref()),
+    ) {
         query.insert(
             b.query_params
                 .get("api_version")
@@ -225,13 +288,44 @@ pub fn transport(
         );
     }
     Ok(Transport {
-        endpoint: format!("{}/{route}", base.trim_end_matches('/')),
+        endpoint: endpoint(base, route)?,
         headers,
         chatgpt,
         query,
         token_key: key.into(),
-        azure_default_key: name == "azure" && defaults.iter().any(|k| k == key),
+        azure_default_key: key == "AZURE_API_KEY",
     })
+}
+
+fn endpoint(base: &str, route: &str) -> Result<String, String> {
+    if base.contains(['%', '\\']) || base.chars().any(char::is_control) {
+        return Err("ambiguous model endpoint path".into());
+    }
+    let authority = base.find("://").ok_or("invalid model endpoint")? + 3;
+    let path = base[authority..]
+        .find('/')
+        .map_or(base.len(), |i| authority + i);
+    let (origin, path) = base.split_at(path);
+    if origin[authority..].contains('@') || base.contains(['?', '#']) {
+        return Err("model endpoint must not contain userinfo, query or fragment".into());
+    }
+    // WithBaseURL appends a slash to Path, invalidating Go's optional RawPath spelling.
+    let ordinary = |b: u8| b.is_ascii_alphanumeric() || b"-._~$&+,/:;=@".contains(&b);
+    if path.ends_with('/') && path.bytes().all(|b| ordinary(b) || b"!'()*[]".contains(&b)) {
+        return Ok(format!("{base}{route}"));
+    }
+    use std::fmt::Write;
+    let mut url = origin.to_owned();
+    for b in path.strip_suffix('/').unwrap_or(path).bytes() {
+        if ordinary(b) {
+            url.push(b as char);
+        } else {
+            write!(url, "%{b:02X}").unwrap();
+        }
+    }
+    url.push('/');
+    url.push_str(route);
+    Ok(url)
 }
 
 fn check_header_value(value: &str) -> Result<(), String> {

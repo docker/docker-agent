@@ -1,5 +1,5 @@
 use crate::permission::{Permissions, Policy, Safety};
-use crate::providers::{self, Options, Transport};
+use crate::providers::{self, Options, Transport, OPENAI_BASE};
 use crate::structured_output::OutputTool;
 use indexmap::IndexMap;
 use serde::{de::Error, Deserialize, Deserializer, Serialize};
@@ -7,6 +7,8 @@ use serde_json::{json, Map, Number, Value};
 use std::collections::BTreeMap;
 
 mod definitions;
+mod reasoning;
+use reasoning::{responses as supports_responses_api, Budget, Reasoning};
 
 const VERSION: &str = "16";
 const MAX_SAFE_INTEGER: i64 = (1_i64 << 53) - 1;
@@ -418,6 +420,8 @@ struct Model {
     presence_penalty: Option<Number>,
     max_tokens: Option<i64>,
     parallel_tool_calls: Option<bool>,
+    thinking_budget: Option<Budget>,
+    track_usage: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -435,6 +439,8 @@ struct Provider {
     presence_penalty: Option<Number>,
     max_tokens: Option<i64>,
     parallel_tool_calls: Option<bool>,
+    thinking_budget: Option<Budget>,
+    track_usage: Option<bool>,
 }
 
 #[derive(Default)]
@@ -459,10 +465,15 @@ pub struct Selected {
     pub toolsets: Vec<Toolset>,
 }
 
+#[cfg_attr(test, derive(Default))]
 pub struct RequestModel {
     pub id: String,
     pub model_params: Map<String, Value>,
     pub schema_instruction: Option<String>,
+    pub reasoning: Reasoning,
+    pub cap: Option<i64>,
+    pub cache_breakpoints: bool,
+    pub replay_reasoning: bool,
 }
 
 pub struct Target {
@@ -507,6 +518,23 @@ impl Selected {
 }
 
 impl RequestModel {
+    pub fn apply_reasoning(&self, body: &mut Map<String, Value>, tools: bool, cap: Option<i64>) {
+        self.reasoning.apply(body, tools, cap);
+        if !self.replay_reasoning {
+            body.get_mut("messages")
+                .and_then(Value::as_array_mut)
+                .unwrap()
+                .retain_mut(|m| {
+                    if m["role"] != "assistant" {
+                        return true;
+                    }
+                    m.as_object_mut().unwrap().remove("reasoning_content");
+                    !m["tool_calls"].is_null()
+                        || m["content"].as_str().is_none_or(|s| !s.trim().is_empty())
+                });
+        }
+    }
+
     pub fn name(&self) -> &str {
         self.model_params["model"]
             .as_str()
@@ -702,7 +730,18 @@ fn js_env_name(expr: &str) -> Option<&str> {
 }
 
 // ModelConfig.ExpandEnv uses shell references, unlike instruction expansion.
-fn expand_model_field(mut text: &str, env: &BTreeMap<String, String>) -> Result<String, String> {
+fn expand_model_field(text: &str, env: &BTreeMap<String, String>) -> Result<String, String> {
+    expand_field(text, |key| {
+        env.get(key)
+            .map(String::as_str)
+            .ok_or_else(|| format!("environment variable {key:?} not set"))
+    })
+}
+
+fn expand_field<'a>(
+    mut text: &str,
+    lookup: impl Fn(&str) -> Result<&'a str, String>,
+) -> Result<String, String> {
     let mut out = String::with_capacity(text.len());
     while let Some((before, tail)) = text.split_once('$') {
         out.push_str(before);
@@ -729,49 +768,11 @@ fn expand_model_field(mut text: &str, env: &BTreeMap<String, String>) -> Result<
             }
             tail.split_at(n)
         };
-        out.push_str(
-            env.get(name)
-                .ok_or_else(|| format!("environment variable {name:?} not set"))?,
-        );
+        out.push_str(lookup(name)?);
         text = rest;
     }
     out.push_str(text);
     Ok(out)
-}
-
-fn model_family(model: &str) -> String {
-    model
-        .trim()
-        .rsplit('/')
-        .next()
-        .unwrap()
-        .to_ascii_lowercase()
-}
-
-fn o_series(name: &str) -> bool {
-    ["o1", "o3", "o4"].iter().any(|p| name.starts_with(p))
-}
-
-// Keep in sync with modelinfo.SupportsResponsesAPI (also used for forced Chat Completions).
-fn supports_responses_api(id: &str) -> bool {
-    let name = model_family(id);
-    if o_series(&name)
-        || ["gpt-4.1", "gpt-5", "codex"]
-            .iter()
-            .any(|p| name.starts_with(p))
-        || name.contains("-codex")
-    {
-        return true;
-    }
-    let Some(gpt) = name.strip_prefix("gpt-") else {
-        return false;
-    };
-    let version = gpt.split('-').next().unwrap();
-    let (major, minor) = version.split_once('.').unwrap_or((version, "0"));
-    [major, minor]
-        .iter()
-        .all(|s| (1..=2).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit()))
-        && major.parse::<u8>().is_ok_and(|n| n >= 6)
 }
 
 pub fn cap_key(model: &str) -> &'static str {
@@ -812,10 +813,6 @@ fn model_params(
         if let Some(n) = model.as_ref().or(provider.as_ref()) {
             params.insert(key.into(), Value::Number(n.clone()));
         }
-    }
-    // Go applies the o-series default before expanding the model field.
-    if o_series(&model_family(&m.model)) && o_series(&model_family(&id)) {
-        params.insert("reasoning_effort".into(), "medium".into());
     }
     if let Some(cap) = m.max_tokens.or(p.max_tokens).filter(|&n| n > 0) {
         // The JS host parses and re-encodes this request before fetch.
@@ -902,8 +899,14 @@ pub fn team(
         }
     }
     for p in cfg.providers.values() {
-        p.provider_opts.validate(None)?;
-        if !matches!(p.provider.as_str(), "" | "openai")
+        let underlying = providers::lookup(&p.provider);
+        p.provider_opts.validate(underlying)?;
+        if !(p.provider.is_empty()
+            || underlying.is_some()
+            || matches!(
+                p.provider.as_str(),
+                "openai_chatcompletions" | "openai_responses"
+            ))
             || !matches!(
                 p.api_type.as_str(),
                 "" | "openai_chatcompletions" | "openai_responses"
@@ -1166,6 +1169,11 @@ fn resolve(
         }
         // Runtime picker and tool overrides build fresh providers without agent structured output.
         let target = resolve_target(m, None)?;
+        if target.transport.chatgpt {
+            return Err(format!(
+                "{feature} requires a new ChatGPT client session ID"
+            ));
+        }
         if target.media_projection() != request.media_projection() {
             return Err(format!("{feature} cannot change media capabilities"));
         }
@@ -1311,7 +1319,13 @@ fn check_provider(
     m: &Model,
 ) -> Result<Option<&'static providers::Builtin>, String> {
     let builtin = providers::lookup(&m.provider);
-    if custom.is_none() && builtin.is_none() {
+    if custom.is_none()
+        && builtin.is_none()
+        && !matches!(
+            m.provider.as_str(),
+            "openai_responses" | "openai_chatcompletions"
+        )
+    {
         return Err(format!("unsupported provider {:?}", m.provider));
     }
     if custom.is_some_and(|p| p.provider.is_empty()) && builtin.is_some_and(|p| p.scoped()) {
@@ -1320,7 +1334,9 @@ fn check_provider(
                 .into(),
         );
     }
-    let builtin = builtin.filter(|_| custom.is_none());
+    let builtin = custom
+        .filter(|p| !p.provider.is_empty())
+        .map_or(builtin, |p| providers::lookup(&p.provider));
     m.provider_opts.validate(builtin)?;
     Ok(builtin)
 }
@@ -1336,37 +1352,52 @@ fn resolve_model(
 ) -> Result<Target, String> {
     let p = cfg.providers.get(&m.provider);
     let builtin = check_provider(p, m)?;
-    let default_base = builtin.map_or("https://api.openai.com/v1", |b| b.base_url.as_str());
-    let chatgpt = p.is_none() && m.provider == "chatgpt";
+    let default_base = builtin
+        .filter(|_| p.is_none())
+        .map_or(OPENAI_BASE, |b| b.base_url.as_str());
+    let custom = p.is_some();
+    let chatgpt = builtin.is_some_and(|b| b.name == "chatgpt");
     // Go resolves a custom provider's default protocol before expanding the model.
     let id = expand_model_field(&m.model, env)?;
-    let responses = match p {
-        Some(p) => {
-            p.api_type == "openai_responses"
-                || (p.api_type.is_empty() && supports_responses_api(&m.model))
-        }
-        None => {
-            chatgpt || (builtin.is_some_and(|b| b.auto_responses) && supports_responses_api(&id))
-        }
-    };
-    let custom = p.is_some();
+    let api_type = m
+        .provider_opts
+        .api_type
+        .as_deref()
+        .or_else(|| p?.provider_opts.api_type.as_deref())
+        .or_else(|| p.map(|p| p.api_type.as_str()).filter(|s| !s.is_empty()));
+    let responses = chatgpt
+        || match api_type {
+            Some(t) => t == "openai_responses",
+            None if p.is_some() => supports_responses_api(&m.model),
+            None => builtin.is_some_and(|b| b.auto_responses) && supports_responses_api(&id),
+        };
     let default_provider = Provider::default();
     let p = p.unwrap_or(&default_provider);
-    let key = if m.token_key.is_empty() {
-        &p.token_key
-    } else {
-        &m.token_key
-    };
+    let key = first_nonempty([&m.token_key, &p.token_key, ""]);
+    if !custom && builtin.is_none() && (key.is_empty() || m.base_url.is_empty()) {
+        return Err("a protocol-only provider requires an explicit base_url and token_key".into());
+    }
     let base_field = first_nonempty([&m.base_url, &p.base_url, default_base]);
-    if let Some(b) = builtin {
+    if let Some(b) = builtin.filter(|_| !custom || chatgpt) {
+        if !custom && api_type.is_some() && !m.base_url.is_empty() && key.is_empty() && !chatgpt {
+            return Err("an explicit API and base_url require an explicit token_key".into());
+        }
         b.validate_base(base_field, key, env)?;
     }
-    let base = expand_model_field(base_field, env)?;
+    let base = expand_field(base_field, |name| {
+        if name == key || builtin.is_some_and(|b| b.credential_key(name)) {
+            return Err("model endpoint cannot reference a credential".into());
+        }
+        env.get(name)
+            .map(String::as_str)
+            .ok_or_else(|| format!("environment variable {name:?} not set"))
+    })?;
     if id.trim().is_empty() || base.trim().is_empty() {
         return Err("model and endpoint must not expand to an empty string".into());
     }
     let merge_messages = !responses
         && (custom
+            || api_type == Some("openai_chatcompletions")
             || builtin.is_some_and(|b| b.merge_consecutive_messages)
             || (m.provider == "openai" && base.trim_end_matches('/') != default_base));
     let route = if responses {
@@ -1374,11 +1405,23 @@ fn resolve_model(
     } else {
         "chat/completions"
     };
-    let provider_id = if p.provider.is_empty() {
+    let provider_id = if custom && p.provider.is_empty() {
         &m.provider
     } else {
-        &p.provider
+        providers::canonical(first_nonempty([&p.provider, &m.provider, ""]))
     };
+    if responses
+        && m.provider_opts
+            .supports_deferred_tools
+            .or(p.provider_opts.supports_deferred_tools)
+            .unwrap_or_else(|| reasoning::deferred_tools(provider_id, &id))
+        && a.toolsets.iter().any(|ts| {
+            let (all, names) = ts.defer.parts();
+            all || !names.is_empty()
+        })
+    {
+        return Err("this Responses model requires native deferred tool loads".into());
+    }
     let model_id = format!("{provider_id}/{id}");
     let compaction = compaction_policy(a, m)?;
     let output = output.filter(|o| matches!(o.mode, OutputMode::Native));
@@ -1392,6 +1435,33 @@ fn resolve_model(
             &output.schema,
         )
     });
+    let vendor = builtin.is_none_or(|b| b.openai_vendor)
+        || id.trim().to_ascii_lowercase().starts_with("openai/");
+    let cache_breakpoints = vendor
+        && reasoning::explicit_cache(&id)
+        && !(provider_id == "openai" && base.trim_end_matches('/') != OPENAI_BASE);
+    let reasoning = Reasoning::new(
+        &m.model,
+        &id,
+        vendor,
+        responses,
+        m.thinking_budget.as_ref().or(p.thinking_budget.as_ref()),
+    )?;
+    if !responses && m.track_usage.or(p.track_usage) == Some(false) {
+        return Err(
+            "track_usage: false on Chat Completions requires different stream termination".into(),
+        );
+    }
+    if responses
+        && (provider_id == "chatgpt"
+            || provider_id == "openai" && base.trim_end_matches('/') == OPENAI_BASE)
+        && m.provider_opts
+            .preserve_reasoning
+            .or(p.provider_opts.preserve_reasoning)
+            == Some(true)
+    {
+        return Err("preserve_reasoning requires source-bound encrypted Responses history".into());
+    }
     let mut params = model_params(id, m, p, tools, compaction)?;
     if let Some(output) = output {
         params.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":output.name,"description":output.description,"strict":output.strict,"schema":output.schema}}));
@@ -1408,11 +1478,7 @@ fn resolve_model(
         );
     }
     // An override on one model must not redirect an inherited provider key to another origin.
-    let key_base = if custom
-        && !m.base_url.is_empty()
-        && multi_target
-        && m.token_key.is_empty()
-        && !key.is_empty()
+    let key_base = if custom && !m.base_url.is_empty() && m.token_key.is_empty() && !key.is_empty()
     {
         Some(expand_model_field(
             first_nonempty([&p.base_url, default_base, ""]),
@@ -1426,10 +1492,26 @@ fn resolve_model(
             id: model_id,
             model_params: params,
             schema_instruction,
+            reasoning,
+            cache_breakpoints,
+            replay_reasoning: responses
+                || m.provider_opts
+                    .replay_reasoning
+                    .or(p.provider_opts.replay_reasoning)
+                    .unwrap_or(true),
+            cap: m.max_tokens.or(p.max_tokens),
         },
-        transport: providers::transport(builtin, &base, route, key, &m.provider_opts, env)?,
+        transport: providers::transport(
+            builtin,
+            &base,
+            route,
+            key,
+            &m.provider_opts,
+            custom.then_some(&p.provider_opts),
+            env,
+        )?,
         responses,
-        merge_messages,
+        merge_messages: merge_messages && !cache_breakpoints,
         key_base,
         compaction,
         capabilities: m.capabilities,
@@ -1844,7 +1926,7 @@ agents:
 providers:
   local: {base_url: '${env.HOST}/$VERSION/', token_key: '${TOKEN_KEY}'}
 models:
-  override: {provider: local, model: '${ MODEL }', base_url: '${BASE}/v2'}
+  override: {provider: local, model: '${ MODEL }', base_url: '${BASE}/v2', token_key: '${TOKEN_KEY}'}
 agents:
   root: {model: 'local/org/${ env.MODEL }'}
   other: {model: override}
@@ -1900,7 +1982,7 @@ agents:
             "provider_opts: {extra_body: {model: other}}",
             "provider_opts: {service_tier: 42}",
             "provider_opts: {service_tier: priority, service_tier: flex}",
-            "thinking_budget: low",
+            "thinking_budget: unknown",
             "max_completion_tokens: 42",
         ] {
             let provider =

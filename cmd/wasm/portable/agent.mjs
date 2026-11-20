@@ -15,7 +15,6 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
 
   // time.Local is initialized once by the Go wasm runtime.
   const timezoneOffset = new Date().getTimezoneOffset();
-  const sessionStamp = () => ({ id: crypto.randomUUID(), created_at: localTimestamp(new Date(), timezoneOffset) });
 
   function call(op, args) {
     const bytes = encoder.encode(JSON.stringify({ ...args, op }));
@@ -29,6 +28,11 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
   }
 
   function session(opts, onEvent, history) {
+    let sessionID;
+    function sessionStamp() {
+      sessionID = crypto.randomUUID();
+      return { id: sessionID, created_at: localTimestamp(new Date(), timezoneOffset) };
+    }
     const stateless = history !== undefined;
     if (typeof opts?.yaml !== 'string') throw new Error('options.yaml must be a string');
     if ('safety' in opts || 'permissions' in opts) throw new Error('portable safety and permissions must be configured in YAML');
@@ -36,8 +40,12 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     let host = createHost(opts, onEvent, stateless, timezoneOffset);
     let handle = call('open', { yaml: opts.yaml, agent: opts.agentName ?? '', env: { ...opts.env }, auto_approve: opts.autoApprove === true, history, stamp: sessionStamp() });
     try {
-      for (const { targets } of Object.values(handle.profiles)) {
-        for (const { transport, keyBase } of targets) prepareModelTransport(transport, keyBase);
+      const profiles = Object.values(handle.profiles);
+      for (const { targets } of profiles) {
+        for (const { transport, keyBase } of targets) {
+          prepareModelTransport(transport, keyBase);
+          if (transport.opencode && profiles.length > 1) throw new Error('OpenCode in a team requires per-delegation session IDs');
+        }
       }
       host.configure(handle.profiles);
     } catch (e) { call('close', { session: handle.session }); throw e; }
@@ -232,7 +240,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           let outcome;
           try {
             const { transport } = handle.profiles[request.agent].targets[request.target];
-            const response = await modelFetch(transport, request, signal);
+            const response = await modelFetch(transport, request, signal, sessionID);
             let calls = false;
             for await (const chunk of sse(response, request.responses)) {
               signal.throwIfAborted();
@@ -407,9 +415,14 @@ function prepareModelTransport(target, keyBase) {
       ['.openai.azure.com', '.services.ai.azure.com'].some(suffix => url.hostname.endsWith(suffix)))) {
     throw new Error('AZURE_API_KEY requires an Azure resource endpoint; use a dedicated token_key for other endpoints');
   }
-  for (const [key, value] of Object.entries(target.query)) url.searchParams.append(key, value);
+  const query = new URLSearchParams(target.query).toString();
+  if (query) url.search = query.replaceAll('%7E', '~').replaceAll('*', '%2A');
   target.endpoint = url.href;
-  target.headers['Content-Type'] = 'application/json';
+  target.opencode = url.hostname === 'opencode.ai' || url.hostname.endsWith('.opencode.ai');
+  // Browser-visible headers of the reference wasm SDK (versions pinned in go.mod).
+  Object.assign(target.headers, { Accept: 'application/json', 'Content-Type': 'application/json',
+    'X-Stainless-Arch': 'other:wasm', 'X-Stainless-OS': 'Other:js', 'X-Stainless-Lang': 'go',
+    'X-Stainless-Runtime': 'go', 'X-Stainless-Runtime-Version': 'go1.27.4', 'X-Stainless-Package-Version': '3.61.0' });
   if (target.chatgpt) target.headers.session_id = crypto.randomUUID();
 }
 
@@ -417,13 +430,27 @@ class TransportError extends Error {
   constructor(reason, endpoint, status) { super(reason); this.failure = { reason, endpoint, status }; }
 }
 
-async function modelFetch({ endpoint, headers }, { body, summary }, signal) {
+// OpenCode hashes the conversation ID in its own UUIDv5 namespace.
+async function openCodeID(sessionID) {
+  const bytes = Uint8Array.of(0x6f, 0x0c, 0x2a, 0x1e, 0x8d, 0x4b, 0x4c, 0x7f,
+    0x9a, 0x3e, 0x2b, 0x5d, 0x7e, 0x9f, 0x1c, 0x03, ...encoder.encode(sessionID));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-1', bytes), 0, 16);
+  digest[6] = (digest[6] & 15) | 80;
+  digest[8] = (digest[8] & 63) | 128;
+  const hex = Array.from(digest, b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
+async function modelFetch({ endpoint, headers, opencode }, { body, summary }, signal, sessionID) {
   const init = {
     method: 'POST', redirect: 'error', credentials: 'omit', signal,
-    headers,
+    headers: { ...headers },
     body: JSON.stringify(body),
   };
+  if (summary && headers.session_id) init.headers.session_id = crypto.randomUUID();
+  if (opencode) init.headers['X-OpenCode-Session'] = await openCodeID(summary ? crypto.randomUUID() : sessionID);
   for (let attempt = 0; ; attempt++) {
+    init.headers['X-Stainless-Retry-Count'] = String(attempt);
     let response;
     try { response = await fetch(endpoint, init); }
     catch (e) {

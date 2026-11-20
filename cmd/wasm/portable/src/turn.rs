@@ -802,7 +802,7 @@ impl Conversation {
         let turn = self.active.as_mut().expect("active turn");
         if let Some((prefix, mut request)) = self.compaction.plan(
             &self.messages,
-            &model.model_params,
+            model,
             summary.compaction,
             summary.merge_messages,
             turn.summarizing.as_ref(),
@@ -885,6 +885,7 @@ impl Conversation {
         if turn.reminders > 0 {
             messages.push(json!({"role":"system", "content":structured_output::REMINDER}));
         }
+        let prompt_len = messages.len();
         if let Some(seed) = &mut self.routed_seed {
             let target = &self.profile.spec.models[self.attempt.current];
             messages.extend_from_slice(seed.for_target(target.media_projection())?);
@@ -927,6 +928,20 @@ impl Conversation {
                 messages.insert(0, json!({"role":"system", "content":instruction}));
             }
         }
+        if model.cache_breakpoints {
+            let part = if self.target().responses {
+                "input_text"
+            } else {
+                "text"
+            };
+            for count in [catalog.instructions.len(), prompt_len] {
+                if let Some(m) = count.checked_sub(1).and_then(|i| messages.get_mut(i)) {
+                    if m["role"] == "system" && m["content"].is_string() {
+                        m["content"] = json!([{"type":part, "text":m["content"], "prompt_cache_breakpoint":{"mode":"explicit"}}]);
+                    }
+                }
+            }
+        }
         let mut body = Value::Object(model.model_params.clone());
         body["messages"] = messages.into();
         body["stream"] = true.into();
@@ -944,6 +959,11 @@ impl Conversation {
             body.as_object_mut().unwrap().remove("parallel_tool_calls");
             body.as_object_mut().unwrap().remove("tool_choice");
         }
+        model.apply_reasoning(
+            body.as_object_mut().unwrap(),
+            !catalog.tools.is_empty(),
+            model.cap,
+        );
         if self.target().merge_messages {
             crate::wire::merge_messages(&mut body);
         }
