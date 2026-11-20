@@ -222,7 +222,7 @@ pub fn http_error(code: u16, endpoint: &str, body: &str) -> Result<(Option<u16>,
     {
         let mut detail = body.to_owned();
         if body.contains("(Request-ID:") {
-            append_request_id(&mut detail, &crate::wire::encode(body))?;
+            append_request_id(&mut detail, &crate::go_json::encode(body))?;
         }
         return Ok(typed(detail));
     }

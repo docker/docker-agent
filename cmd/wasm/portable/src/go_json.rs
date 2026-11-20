@@ -5,9 +5,49 @@ use std::{borrow::Cow, fmt::Write as _, io};
 pub const MAX_JSON_DEPTH: usize = 10_000;
 
 // serde_json already matches encoding/json for quotes, backslashes and control characters.
-struct GoFormatter;
+struct GoFormatter<const FLOAT_MAP: bool>;
 
-impl serde_json::ser::Formatter for GoFormatter {
+impl<const FLOAT_MAP: bool> serde_json::ser::Formatter for GoFormatter<FLOAT_MAP> {
+    fn write_u64<W: io::Write + ?Sized>(&mut self, w: &mut W, n: u64) -> io::Result<()> {
+        if FLOAT_MAP {
+            self.write_f64(w, n as f64)
+        } else {
+            serde_json::ser::CompactFormatter.write_u64(w, n)
+        }
+    }
+
+    fn write_i64<W: io::Write + ?Sized>(&mut self, w: &mut W, n: i64) -> io::Result<()> {
+        if FLOAT_MAP {
+            self.write_f64(w, n as f64)
+        } else {
+            serde_json::ser::CompactFormatter.write_i64(w, n)
+        }
+    }
+
+    fn write_f64<W: io::Write + ?Sized>(&mut self, w: &mut W, n: f64) -> io::Result<()> {
+        if !FLOAT_MAP {
+            return serde_json::ser::CompactFormatter.write_f64(w, n);
+        }
+        let text = serde_json::to_string(&n).unwrap();
+        let Some((mantissa, exp)) = text.split_once('e') else {
+            return w.write_all(text.trim_end_matches(".0").as_bytes());
+        };
+        let exp: i32 = exp.parse().unwrap();
+        if !(-6..21).contains(&exp) {
+            return write!(w, "{mantissa}e{exp:+}");
+        }
+        // Reposition the shortest digits when serde uses an exponent within Go's fixed range.
+        let digits = mantissa.trim_start_matches('-').replace('.', "");
+        if n < 0.0 {
+            w.write_all(b"-")?;
+        }
+        if exp < 0 {
+            write!(w, "0.{:0>width$}{digits}", "", width = (-exp - 1) as usize)
+        } else {
+            write!(w, "{digits:0<width$}", width = exp as usize + 1)
+        }
+    }
+
     fn write_string_fragment<W: io::Write + ?Sized>(
         &mut self,
         w: &mut W,
@@ -32,11 +72,19 @@ impl serde_json::ser::Formatter for GoFormatter {
 }
 
 pub fn encode(value: impl Serialize) -> String {
+    serialize(value, GoFormatter::<false>)
+}
+
+// Numbers decoded into Go's map[string]any are float64, even when written as integers.
+pub fn encode_decoded(value: &serde_json::Value) -> String {
+    serialize(value, GoFormatter::<true>)
+}
+
+fn serialize(value: impl Serialize, formatter: impl serde_json::ser::Formatter) -> String {
     let mut bytes = Vec::new();
     value
         .serialize(&mut serde_json::Serializer::with_formatter(
-            &mut bytes,
-            GoFormatter,
+            &mut bytes, formatter,
         ))
         .unwrap();
     String::from_utf8(bytes).unwrap()
@@ -94,6 +142,20 @@ pub fn type_error(val: &str, path: &str, ty: &str) -> String {
         "json: cannot unmarshal {} into {path} of type {ty}",
         kind(val)
     )
+}
+
+// encoding/json converts its JSON pointer to a dotted field name, treating a final number as an index.
+pub fn map_field_path(key: &str) -> String {
+    if key.is_empty() {
+        return "Go value".into();
+    }
+    let key = key.replace('~', "~0").replace('/', "~1");
+    let tail = key.rsplit('.').next().unwrap();
+    if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+        format!(".{key}")
+    } else {
+        format!("Go struct field .{key}")
+    }
 }
 
 pub fn read_string(val: &str, s: &mut String, path: &str) -> Result<(), String> {
@@ -470,6 +532,15 @@ pub fn field_path(ty: &str, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_map_numbers_use_go_float64_spelling() {
+        let v: serde_json::Value = serde_json::from_str(
+            "[1.0,-0,9007199254740993,-1.2345678901234567e17,1e20,1e21,-1.23e-6,1e-7,5e-324]",
+        )
+        .unwrap();
+        assert_eq!(encode_decoded(&v), "[1,-0,9007199254740992,-123456789012345660,100000000000000000000,1e+21,-0.00000123,1e-7,5e-324]");
+    }
 
     #[test]
     fn syntax_errors_match_the_go_corpus() {

@@ -257,6 +257,34 @@ fn fetch_arguments(input: &str) -> Result<String, String> {
     Ok(args.to_string())
 }
 
+fn api_arguments(method: &Value, input: &str) -> Result<String, String> {
+    use crate::go_json::{fields, map_field_path, normalize_json, object, read_string};
+    if method != "GET" && method != "POST" {
+        return Ok(String::new());
+    }
+    if input.len() > 1 << 20 {
+        return Err("API argument size limit reached".into());
+    }
+    let input = normalize_json(input)?;
+    if method == "POST" {
+        // The host decodes map[string]any; preserve the original number and duplicate-key tokens.
+        return Ok(input.into_owned());
+    }
+    if input.is_empty() {
+        return Ok(String::new()); // Go skips the second expansion entirely.
+    }
+    let mut values = BTreeMap::new();
+    if let Some(obj) = object(&input, "map[string]string")? {
+        fields(obj, |key, raw| {
+            let mut value = String::new();
+            read_string(raw, &mut value, &map_field_path(&key))?;
+            values.insert(key, value);
+            Ok(())
+        })?;
+    }
+    Ok(serde_json::to_string(&values).unwrap())
+}
+
 #[derive(Default)]
 struct Step {
     text: String,
@@ -1294,11 +1322,15 @@ impl Conversation {
             toon,
         };
         let kind = source.map(|i| self.profile.spec.toolsets[i].kind.as_str());
+        let api_method = source
+            .filter(|_| kind == Some("api"))
+            .map(|i| &self.profile.spec.toolsets[i].options["api_config"]["method"]);
         // These Go handlers never look at their arguments.
         let ignored = matches!(
             call.name.as_str(),
             "revert_model" | "list_todos" | "list_plans"
-        ) || (call.name == "list_sessions" && call.arguments.trim().is_empty());
+        ) || (call.name == "list_sessions" && call.arguments.trim().is_empty())
+            || api_method.is_some_and(|m| m != "GET" && m != "POST");
         if let Some(complaint) = op.malformed.as_ref().filter(|_| !ignored) {
             // Every other handler decodes first and answers the model with the decoder's complaint.
             let context = match (kind, call.name.as_str()) {
@@ -1319,8 +1351,13 @@ impl Conversation {
             // The host tool reads `input` when what Go decodes differs from the raw text.
             let input = if op.malformed.is_some() {
                 Some(String::new())
-            } else if kind == Some("fetch") {
-                match fetch_arguments(&call.arguments) {
+            } else if kind == Some("fetch") || api_method.is_some() {
+                let decoded = match api_method {
+                    Some(method) => api_arguments(method, &call.arguments)
+                        .map_err(|e| format!("invalid arguments: {e}")),
+                    None => fetch_arguments(&call.arguments),
+                };
+                match decoded {
                     Ok(input) => Some(input),
                     Err(complaint) => {
                         events.push(call.event());
