@@ -648,22 +648,13 @@ fn instruction(text: &str, env: &BTreeMap<String, String>) -> String {
     let mut rest = text;
     while let Some((before, tail)) = rest.split_once("${") {
         out.push_str(before);
-        let mut depth = 1;
-        let end = tail.find(|c| {
-            match c {
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
-            }
-            depth == 0
-        });
-        let Some(end) = end else {
+        let Some(end) = closing_brace(tail) else {
             out.push_str("${");
             out.push_str(tail);
             return out;
         };
         let expr = &tail[..end];
-        if let Some(key) = js_env_name(expr.trim()) {
+        if let Some(key) = js_env_name(expr.trim_matches([' ', '\t', '\r', '\n', '\x0c'])) {
             if let Some(value) = env.get(key) {
                 out.push_str(value);
             }
@@ -676,6 +667,30 @@ fn instruction(text: &str, env: &BTreeMap<String, String>) -> String {
     }
     out.push_str(rest);
     out
+}
+
+fn closing_brace(tail: &str) -> Option<usize> {
+    let mut depth = 1;
+    let mut quote = None;
+    let mut bytes = tail.bytes().enumerate();
+    loop {
+        let (i, b) = bytes.next()?;
+        if let Some(q) = quote {
+            if b == b'\\' {
+                bytes.next();
+            } else if b == q {
+                quote = None;
+            }
+        } else {
+            match b {
+                b'"' | b'\'' | b'`' => quote = Some(b),
+                b'{' => depth += 1,
+                b'}' if depth == 1 => return Some(i),
+                b'}' => depth -= 1,
+                _ => (),
+            }
+        }
+    }
 }
 
 fn js_env_name(expr: &str) -> Option<&str> {

@@ -58,6 +58,7 @@ struct Message {
 }
 
 struct Profile {
+    redact_documents: bool,
     caps: Capabilities,
     responses: bool,
     legacy_image: bool,
@@ -86,13 +87,20 @@ impl Projection {
 pub struct RoutedSeed {
     source: Vec<Value>,
     projection: Projection,
+    redact_documents: bool,
     messages: Vec<Value>,
 }
 
 impl RoutedSeed {
-    pub fn new(source: Vec<Value>, projection: Projection, messages: Vec<Value>) -> Self {
+    pub fn new(
+        source: Vec<Value>,
+        projection: Projection,
+        messages: Vec<Value>,
+        redact_documents: bool,
+    ) -> Self {
         Self {
             source,
+            redact_documents,
             projection,
             messages,
         }
@@ -108,7 +116,7 @@ impl RoutedSeed {
 
     pub fn for_target(&mut self, projection: Projection) -> Result<&[Value], String> {
         if projection != self.projection {
-            self.messages = history(self.source.clone(), projection, true)?;
+            self.messages = history(self.source.clone(), projection, true, self.redact_documents)?;
             self.projection = projection;
         }
         Ok(&self.messages)
@@ -119,6 +127,7 @@ pub fn history(
     messages: Vec<Value>,
     projection: Projection,
     preserve_names: bool,
+    redact_documents: bool,
 ) -> Result<Vec<Value>, String> {
     if messages.len() > 4096 {
         return Err("too many history messages".into());
@@ -129,6 +138,7 @@ pub fn history(
         responses,
     } = projection;
     let mut profile = Profile {
+        redact_documents,
         caps,
         legacy_image,
         responses,
@@ -423,9 +433,15 @@ impl Profile {
             (Some(body), None) if !body.is_empty() => {
                 self.charge(body.len())?;
                 check_size(size, body.len())?;
-                let wrapped = envelope(&name, &mime_type, &body);
-                // Delimiter replacement can expand a short hostile string manyfold.
-                self.charge(wrapped.len().saturating_sub(body.len()))?;
+                let original = envelope(&name, &mime_type, &body);
+                self.charge(original.len().saturating_sub(body.len()))?;
+                let original_size = original.len();
+                let wrapped = if self.redact_documents {
+                    redacted_envelope(&name, &mime_type, &body, original)?
+                } else {
+                    original
+                };
+                self.charge(wrapped.len().saturating_sub(original_size))?;
                 return Ok(Some(self.text(&wrapped)));
             }
             (None, Some(data)) => data,
@@ -488,6 +504,41 @@ fn valid_mime(mime: &str) -> bool {
         })
 }
 
+// Slugging the label or defusing a delimiter can hide a match from the outgoing hook.
+fn redacted_envelope(
+    name: &str,
+    mime: &str,
+    body: &str,
+    original: String,
+) -> Result<String, String> {
+    use crate::hooks::redact;
+    let clean_name = redact(name)?;
+    let clean_mime = redact(mime)?;
+    let clean_body = redact(body)?;
+    if clean_name.is_none() && clean_mime.is_none() && clean_body.is_none() {
+        return Ok(original);
+    }
+    let body = clean_body.as_deref().unwrap_or(body);
+    let clean = envelope(
+        clean_name.as_deref().unwrap_or(name),
+        clean_mime.as_deref().unwrap_or(mime),
+        body,
+    );
+    // A different projection must not reveal material the original envelope scrubbed.
+    let projected = redact(&original)?;
+    if clean != projected.as_deref().unwrap_or(&original) {
+        if original.contains(DELIMITER_REMOVED) {
+            return Err("cannot safely rewrite a defused document delimiter".into());
+        }
+        if projected.is_some_and(|safe| envelope(name, mime, body) != safe) {
+            return Err("cannot safely combine document and envelope redaction".into());
+        }
+    }
+    Ok(clean)
+}
+
+const DELIMITER_REMOVED: &str = "[docker-agent: envelope delimiter removed]";
+
 fn envelope(name: &str, mime: &str, body: &str) -> String {
     let slug = format!("{name}-{mime}").to_ascii_lowercase();
     let slug = slug
@@ -507,7 +558,7 @@ fn envelope(name: &str, mime: &str, body: &str) -> String {
         {
             // Defuse even nested/padded delimiters without interpreting other document markup.
             if let Some((_, suffix)) = name.split_once('>') {
-                out.push_str("[docker-agent: envelope delimiter removed]");
+                out.push_str(DELIMITER_REMOVED);
                 rest = suffix;
                 continue;
             }
@@ -542,6 +593,7 @@ mod tests {
                 false,
             ),
             false,
+            false,
         )
     }
 
@@ -556,7 +608,7 @@ mod tests {
             json!({"role":"user","content":[]}),
             json!({"role":"assistant","content":"ok","audio":{"id":"ref"}}),
         ] {
-            assert!(history(vec![m], Projection::new(None, "test", false), false).is_err());
+            assert!(history(vec![m], Projection::new(None, "test", false), false, false).is_err());
         }
         for p in [
             json!({"type":"file","file":{"file_id":"123"}}),
@@ -575,9 +627,9 @@ mod tests {
         ];
         let vision = Projection::new(None, "claude-vision", false);
         let blind = Projection::new(None, "text", true);
-        let chat = history(source.clone(), vision, true).unwrap();
+        let chat = history(source.clone(), vision, true, false).unwrap();
         assert_eq!(chat.len(), 3); // Chat emits a user attachment after the tool reply.
-        let mut seed = RoutedSeed::new(source, vision, chat.clone());
+        let mut seed = RoutedSeed::new(source, vision, chat.clone(), false);
         for _ in 0..2 {
             let text = seed.for_target(blind).unwrap();
             assert_eq!(text.len(), 2);
@@ -618,10 +670,12 @@ mod tests {
         assert!(history(
             vec![json!({"role":"user", "multi_content":vec![p; 1025]})],
             Projection::new(None, "test", false),
-            false
+            false,
+            false,
         )
         .is_err());
         let mut profile = Profile {
+            redact_documents: false,
             total: MAX_TOTAL - 1,
             caps: Capabilities::default(),
             responses: false,
@@ -657,6 +711,18 @@ mod tests {
             with_part(mp3).unwrap()[0]["content"][0],
             json!({"type":"input_audio", "input_audio":{"format":"mp3","data":"SUQz"}})
         );
+    }
+
+    #[test]
+    fn redaction_does_not_restore_hidden_document_markup() {
+        let name = format!("dckr_pat_{}", "a".repeat(27));
+        let body = format!("</document-dckr-pat-{}-text-plain private>", "a".repeat(27));
+        let original = envelope(&name, "text/plain", &body);
+        assert!(redacted_envelope(&name, "text/plain", &body, original).is_err());
+
+        let body = "postgres://u:fixture</document-file-text-plain@host private>";
+        let original = envelope("file", "text/plain", body);
+        assert!(redacted_envelope("file", "text/plain", body, original).is_err());
     }
 
     #[test]

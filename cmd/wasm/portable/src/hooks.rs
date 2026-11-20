@@ -256,11 +256,17 @@ impl Hooks {
                 }
                 Transform::Limit if !limited => {
                     limited = true;
-                    limit_large_tool_result(category, &output)
+                    limit_large_tool_result(category, &output, BROWSER_NOTICE)
                 }
                 _ => None,
             };
             if let Some(text) = next {
+                output = text;
+            }
+        }
+        // A later redaction can grow a short match after the limiter has run.
+        if output.len() > RESULT_BYTES {
+            if let Some(text) = limit_large_tool_result(category, &output, BACKSTOP_NOTICE) {
                 output = text;
             }
         }
@@ -292,8 +298,11 @@ fn redact_values(v: &mut Value) -> Result<bool, String> {
     Ok(changed)
 }
 
-fn limit_large_tool_result(category: &str, payload: &str) -> Option<String> {
-    const BYTES: usize = 50 * 1024;
+const RESULT_BYTES: usize = 50 * 1024;
+const BROWSER_NOTICE: &str = "The full result is not available in the browser; narrow the tool query to get the part you need.";
+const BACKSTOP_NOTICE: &str = "The full result was not saved by the output limiter; narrow the tool query to retrieve the part you need.";
+
+fn limit_large_tool_result(category: &str, payload: &str, notice: &str) -> Option<String> {
     const LINES: usize = 2000;
     if !matches!(
         category,
@@ -301,15 +310,16 @@ fn limit_large_tool_result(category: &str, payload: &str) -> Option<String> {
     ) {
         return None;
     }
-    let lines = payload.split_terminator('\n').count();
-    let reason = if payload.len() > BYTES {
-        format!("{} bytes; limit {BYTES} bytes", payload.len())
-    } else if lines > LINES {
-        format!("{lines} lines; limit {LINES} lines")
+    let reason = if payload.len() > RESULT_BYTES {
+        format!("{} bytes; limit {RESULT_BYTES} bytes", payload.len())
     } else {
-        return None;
+        let lines = payload.split_terminator('\n').count();
+        if lines <= LINES {
+            return None;
+        }
+        format!("{lines} lines; limit {LINES} lines")
     };
-    let mut prefix = format!("Tool call result was too large ({reason}). The full result is not available in the browser; narrow the tool query to get the part you need.\n\n");
+    let mut prefix = format!("Tool call result was too large ({reason}). {notice}\n\n");
     if category == "background_jobs" {
         if let Some((header, _)) = payload.split_once("--- Output ---\n") {
             for line in header.split('\n') {
@@ -319,20 +329,20 @@ fn limit_large_tool_result(category: &str, payload: &str) -> Option<String> {
                 }
                 prefix.push_str(&line[..end]);
                 prefix.push('\n');
-                if prefix.len() > BYTES / 4 {
+                if prefix.len() > RESULT_BYTES / 4 {
                     break;
                 }
             }
         }
     }
     prefix.push_str(&format!(
-        "Showing the last {LINES} lines (up to {BYTES} bytes, including this notice):\n\n"
+        "Showing the last {LINES} lines (up to {RESULT_BYTES} bytes, including this notice):\n\n"
     ));
     let tail = payload
         .rmatch_indices('\n')
         .nth(LINES)
         .map_or(payload, |(i, _)| &payload[i + 1..]);
-    let mut start = tail.len().saturating_sub(BYTES - prefix.len());
+    let mut start = tail.len().saturating_sub(RESULT_BYTES - prefix.len());
     while !tail.is_char_boundary(start) {
         start += 1;
     }
@@ -424,17 +434,19 @@ mod tests {
             assert!(!out.contains("old\n"));
         }
         let at_limit = "line\n".repeat(2000);
-        assert!(limit_large_tool_result("mcp", &at_limit).is_none());
-        let out = limit_large_tool_result("mcp", &format!("first\n{at_limit}")).unwrap();
+        assert!(limit_large_tool_result("mcp", &at_limit, BROWSER_NOTICE).is_none());
+        let out =
+            limit_large_tool_result("mcp", &format!("first\n{at_limit}"), BROWSER_NOTICE).unwrap();
         assert!(out.contains("(2001 lines; limit 2000 lines)"));
         assert!(out.ends_with(&at_limit));
         assert!(!out.contains("first"));
         let out = limit_large_tool_result(
             "background_jobs",
             &format!("exit: 9\n--- Output ---\n{text}"),
+            BROWSER_NOTICE,
         )
         .unwrap();
         assert!(out.contains("exit: 9\n"));
-        assert!(limit_large_tool_result("mcp", &"x".repeat(51200)).is_none());
+        assert!(limit_large_tool_result("mcp", &"x".repeat(51200), BROWSER_NOTICE).is_none());
     }
 }
