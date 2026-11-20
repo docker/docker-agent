@@ -504,10 +504,7 @@ async function run() {
 toolsets:
   echo: {type: mcp, ref: remote, name: named, instruction: 'Use the named MCP.', tools: [named_echo]}
 agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets: [echo], model: local/test');
-  tests.mcp = await replay(api, 'mcp', mcp,[tool('named_echo',{text:'from MCP'}),answer], async ({api,options,record,trace}) => {
-    const s=await api.createSession({...options, autoApprove:true}, record);
-    try {trace.results.push(await s.send('echo'));} finally {await s.close();}
-  }, '/v1/chat/completions', async req => {
+  const echoService = output => async req => {
     if (req.url !== 'https://tool.invalid/mcp') throw new Error('unexpected MCP endpoint');
     if (req.method === 'DELETE') return new Response(null,{status:204});
     if (req.headers.get('X-Agent') !== 'Ada') throw new Error('missing inherited MCP header');
@@ -516,10 +513,14 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
     if (m.method==='notifications/initialized') return new Response(null,{status:202});
     const val = m.method==='initialize' ? {protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}
       : m.method==='tools/list' ? {tools:[{name:'echo',description:'Echo a word',inputSchema:{type:'object',properties:{text:{type:'string'}},required:['text'],additionalProperties:false}}]}
-      : m.method==='tools/call' && m.params.name==='echo' ? {content:[{type:'text',text:m.params.arguments.text}]} : undefined;
+      : m.method==='tools/call' && m.params.name==='echo' ? {content:[{type:'text',text:output ?? m.params.arguments.text}]} : undefined;
     if (!val) throw new Error(`unexpected MCP method ${m.method}`);
     return Response.json({jsonrpc:'2.0',id:m.id,result:val},{headers:{'Mcp-Session-Id':'replay'}});
-  });
+  };
+  tests.mcp = await replay(api, 'mcp', mcp,[tool('named_echo',{text:'from MCP'}),answer], async ({api,options,record,trace}) => {
+    const s=await api.createSession({...options, autoApprove:true}, record);
+    try {trace.results.push(await s.send('echo'));} finally {await s.close();}
+  }, '/v1/chat/completions', echoService());
   const redacted = 'dckr_pat_' + 'A'.repeat(27);
   tests.hostRedaction = await replay(api,'hostRedaction',apiTool,[tool('greet',{}),answer],single,'/v1/chat/completions', req => {
     if(req.url!=='https://tool.invalid/greet') throw new Error('unexpected URL');
@@ -1457,6 +1458,104 @@ agents:`)
       trace.results.push(await api.chat({...options, messages: [{role: 'user', content: 'a'}, {role: 'assistant', content: 'ok'}, prompt]}, record));
     });
   }
+  // One synthetic candidate per pinned scanner rule, in catalog order. x{N} repeats a character.
+  const fixtureJWT = [btoa('{"alg":"HS256"}'), btoa('{"sub":"fixture"}').replace(/=+$/, ''), 'a'.repeat(15)].join('.');
+  const catalogSamples = [
+    'AKIA' + 'RZPUZDIKQEXAMPLE', 'AWSKEYa{40}', 'ghp_A{30}0uCPlr', 'gho_A{30}0uCPlr', 'ghs_A{30}0uCPlr',
+    'ghs_' + fixtureJWT, 'ghr_A{30}0uCPlr', 'github_pat_a{22}_a{53}0RaYBX', 'glpat-a{20}', 'hf_a{34}',
+    '-----BEGIN PRIVATE KEY-----\n' + 'a'.repeat(5) + '\n-----END PRIVATE KEY-----', 'shpss_a{32}', 'xoxa-a{10}',
+    'SK_TEST_a{10}', 'HEROKU="{uuid}"', 'https://hooks.slack.com/services/a{44}', 'SKa{32}',
+    'AGE-SECRET-KEY-1Q{52}8H00W3', 'FACEBOOK="a{32}"', 'TWITTER="a{35}"', 'ADOBE="a{32}"', 'p8e-a{32}',
+    'ALIBABA="a{30}"', 'ASANA="1{16}"', 'ASANA="a{32}"', 'ATLASSIAN="a{24}"', 'BITBUCKET="a{32}"', 'BITBUCKET="a{64}"',
+    'BEAMER="B_a{44}"', 'CLOJARS_a{60}', 'CONTENTFUL="a{43}"', 'dapia{32}', 'DISCORD="a{64}"', 'DISCORD="1{18}"',
+    'DISCORD="a{32}"', 'dp.pt.a{43}', 'DROPBOX="a{15}"', 'DROPBOX="SL.a{135}"', 'DROPBOX="a{11}A{10}a{43}"',
+    '"duffel_test_a{43}"', 'dt0c01.a{24}.a{64}', 'EZAKa{54}', 'FASTLY="a{32}"', 'FINICITY="a{20}"', 'FINICITY="a{32}"',
+    'FLWPUBK_TEST-a{32}-X', 'FLWSECK_TESTa{12}', 'fio-u-a{64}', '"live_a{40}"', 'eyJrIjoia{72}', 'a{14}.ATLASV1.a{60}',
+    'HUBSPOT="{uuid}"', 'INTERCOM="a{60}"', 'INTERCOM="{uuid}"', 'IONIC="ION_a{42}"', fixtureJWT, 'lin_api_a{40}',
+    'LINEAR="a{32}"', 'LOB="LIVE_a{35}"', 'LOB="TEST_PUB_a{31}"', 'MAILCHIMP="a{32}-US20"', 'MAILGUN="KEY-a{32}"',
+    'MAILGUN="a{32}-a{8}-a{8}"', 'PK.a{60}.a{22}', 'MESSAGEBIRD="a{25}"', 'MESSAGEBIRD="{uuid}"', 'NRAK-A{27}',
+    'NEWRELIC="a{64}"', 'NRJS-a{19}', 'npm_a{36}', 'pscale_pw_a{43}', 'pscale_tkn_a{43}', 'packagist_uut_a{68}',
+    'PMAK-a{24}-a{34}', 'pul-a{40}', 'rubygems_a{48}', 'SG.a{66}', 'xkeysib-a{64}-a{16}', 'shippo_live_a{40}',
+    'LINKEDIN="a{16}"', 'LINKEDIN="a{14}"', 'TWITCH="a{30}"', 'TYPEFORM=TFP_a{59}',
+    '.dockerconfigjson: ' + btoa(JSON.stringify({auths: {fixture: {auth: btoa('a:')}}})), 'dckr_pat_a{27}',
+    'dckr_oat_a{27}', 'sk-a{20}T3BlbkFJa{20}', 'sk-ant-api11-a{93}AA', 'AIzaa{35}', 'GOCSPX-a{28}', 'doo_v1_a{64}',
+    'whsec_a{32}', 'AKCpa{69}', 'sntrys_eyJa{40}', 'RK_TEST_a{10}', 'ntn_a{46}', 'glptt-a{40}', 'hvs.a{90}',
+    'xoxe-a{40}', 'r8_a{37}', 'ATATT3xFfGF0a{180}', 'MTa{22}.b{6}.c{27}', 'https://discord.com/api/webhooks/1/a{16}',
+    '1{8}:AAa{33}', 'FlyV1 fm2_a{40}', 'gsk_a{52}', 'pplx-a{48}', 'xai-a{80}', 'co_a{40}', 'bkua_a{40}',
+    'CCIPRJ_a_a{32}', 'cloudinary://' + '1:a@a', 'mongodb://' + 'a:a@', 'postgres://' + 'a:a@',
+    'DefaultEndpointsProtocol=https;AccountName=fixture;AccountKey=' + btoa('a'.repeat(64)), 'SK.a{60}.a{22}',
+    'hvb.a{90}', 'hvr.a{90}', 'nfp_a{40}', '1/1{14}:a{32}', 'v1.0-a{32}-a{146}', 'ops_eyJa{250}', 'sk-or-v1-a{64}',
+    'sqa_a{40}', 'pckey_a_a{24}', 'sb_secret_a{40}', 'tskey-auth-a{10}-a{20}', 'tskey-api-a{10}-a{20}', 'vci_a{20}',
+    'rzp_test_a{14}', 'access-sandbox-{uuid}', 'phx_a{43}', 'rnd_a{30}', 'hcaic_a{58}', 'akab-a{16}-a{16}',
+    'aio_a{28}', 'A3-A{6}-A{11}-A{5}-A{5}-A{5}', 'glcbt-a_a{20}', 'gldt-a{20}', 'glffct-a{20}', 'glft-a{20}',
+    'glagent-a{50}', 'gloas-a{64}', 'GR1348941a{20}', 'glrt-a{20}', 'glsoat-a{20}', 'glimt-a{25}', 'glpat-a{27}.a{9}',
+    'ABSK' + btoa('BedrockAPIKey-'.padEnd(96, 'a')), 'bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29ta{20}',
+    'HRKU-AAa{58}', 'a{3}1Q~a{31}', 'sha256~a{43}', 'pscale_oauth_a{32}', 'glc_a{32}', 'glsa_a{32}_a{8}', 'NRII-a{32}',
+    'sntryu_a{64}', 'xapp-1-A{8}-1{8}-a{32}',
+    'https://a.webhook.office.com/webhookb2/{uuid}@{uuid}/IncomingWebhook/a{32}/{uuid}', 'cmVmda{59}', 'ico-a{32}',
+    'pnu_a{36}', 'rdme_a{70}', 'a{6}_a{29}_mmk', 'AQVNa{35}', 'sgp_a{40}', 'dnkey-a{26}-a{52}', 'tk-us-a{48}',
+    'DATADOG=a{40}', 'SNYK={uuid}', 'LAUNCHDARKLY=a{40}', 'CLOUDFLARE=a{40}', 'CLOUDFLARE=a{37}', 'CONFLUENT=a{16}',
+    'CONFLUENT=a{64}', 'LOOKER=a{20}', 'LOOKER=a{24}', 'MATTERMOST=a{26}', 'SUMO=a{64}', 'TRAVIS=a{22}',
+    'ZENDESK=a{40}', 'CODECOV=a{32}', 'ALGOLIA=a{32}', 'AIRTABLE=a{17}', 'SENDBIRD=a{40}', 'OKTA=00a{40}',
+    'TRELLO=a{32}', 'MERAKI=a{40}', 'pk_1{7}_A{32}', 'alcht_a{30}', 'NGROK=2a{26}_1a{20}', 'DEEPSEEK=SK-a{32}',
+    'ASSEMBLYAI=a{32}', 'DEEPGRAM=a{40}', 'LOGZ={uuid}', 'ETHERSCAN=a{34}', 'MORALIS=a{64}', 'figd_a{22}',
+    'CFPAT-a{43}', 'dp.st.a{43}', 'pat-na1-{uuid}', 'sdk-{uuid}', 'access_token$production$a$a{25}',
+    'mysql://' + 'a:a@', 'redis://' + ':a@', 'amqp://' + 'a:a@', 'HTTP://a{8}:a{8}@GEMS.CONTRIBSYS.COM',
+    'pat.a{22}.a{24}.a{20}', 'api_org_a{34}', 'sm_pat_a{16}', 'sc_a{5}.a{4}.acc-a{10}.a{30}', 'pcsk_a{5}_a{63}',
+    'lsv2_pt_a{32}_a{10}', 'nvapi-a{64}', 'NF-a{32}', 'https://hooks.zapier.com/hooks/catch/a{16}',
+    'https://a.tines.com/webhook/a{32}/a{32}', 'pub-c-{uuid}', 'sub-c-{uuid}', 'rootly_a{64}', 'VF.a{24}.a{16}',
+    'ddp_a{36}', 'BBFF-a{30}', 'CCIPAT_a{22}_a{40}', 'endr+a{16}', 'ATBBa{20}', 'pi_a{24}_secret_a{25}',
+    'thog-key-a{16}', 'ramp_id_a{40}', 's-s4t2ud-a{64}', 'FLWSECK-a{32}-X',
+    'https://hooks.slack.com/workflows/TA/AA/1{17}/a{20}', 'slk_a{64}', 'dtn_a{64}', 'bl_a{32}', 'sq0atp-a{22}',
+    'API-A{26}', '4242 '.repeat(3) + '4242', 'DE89' + ' 3704 0044 0532 0130 00', '123-45-' + '6789',
+    'secret-live-a{40}',
+  ].map(s => s.replaceAll('{uuid}', 'a{8}-a{4}-a{4}-a{4}-a{12}').replace(/(.)\{(\d+)\}/g, (_, ch, n) => ch.repeat(Number(n))));
+  tests.redactCatalog = await replay(api, 'redactCatalog', config, [answer], async ({api, options, record, trace}) => {
+    // Keep keyword prefilters and positional assertions local to each sample.
+    const messages = catalogSamples.flatMap(content => [{role: 'user', content}, {role: 'assistant', content: 'ok'}]);
+    trace.results.push(await api.chat({...options, messages: [...messages, {role: 'user', content: 'done'}]}, record));
+    const scrubbed = trace.requests[0].body.messages.filter(m => m.role === 'user').slice(0, -1);
+    if (scrubbed.length !== catalogSamples.length || scrubbed.some(m => !m.content.includes('[REDACTED]'))) throw new Error('unmasked catalog sample');
+  });
+  const leg = {type: 'builtin', command: 'redact_secrets'};
+  const escapedArgs = `{"thought":"${secret.replace('pat', 'p\\u0061t')}","extra":[3,true,null,{"${secret}":"${secret}"}]}`;
+  for (const [name, setting] of [
+    ['redactAllLegs', {}], ['redactOff', {redact_secrets: false}],
+    ...['before_llm_call', 'tool_input_transform', 'tool_response_transform'].map(event => [
+      'redactLeg_' + event, {redact_secrets: false, hooks: {[event]: event === 'before_llm_call' ? leg : [{matcher: 'think|other', hooks: [leg]}]}},
+    ]),
+  ]) {
+    const yaml = thinks.replace("instruction: 'Hello ${env.WHO}'", Object.entries({instruction: secret, ...setting}).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(', '));
+    tests[name] = await replay(api, name, yaml, [rawTool('think', escapedArgs), secretReply, answer], sends([secret, 'again']));
+  }
+  const promptExpressions = ['${f("}", "${env.WHO}")} ${env.WHO}', '${g(`{`)} ${ env.WHO }',
+    '${\u00a0env.WHO} ${\u000benv.WHO} ${\tenv.WHO}', '$${env.WHO} ${env.MISSING} ${unbound} ${env.WHO'];
+  tests.promptExpressions = await replay(api, 'promptExpressions', config.replace("'Hello ${env.WHO}'", () => JSON.stringify(promptExpressions)), [answer, answer], turns);
+  tests.guardCanonicalArguments = await replay(api, 'guardCanonicalArguments', thinks.replace('model: local/test', 'max_consecutive_tool_calls: 2, model: local/test'),
+    [rawTool('think', '{"thought":"x","extras":[1.0,9007199254740993,"\\ud800"]}'),
+      rawTool('think', '{"extras":[1,9007199254740992,"�"],"thought":"x"}', 'other'), answer], rejectsThenRecovers);
+  for (const [name, yaml] of [['redactDocumentLabels', config], ['rawDocumentLabels', config.replace('model: local/test', 'redact_secrets: false, model: local/test')]]) {
+    tests[name] = await replay(api, name, yaml, [answer], async ({api, options, record, trace}) => {
+      const documents = [doc(secret + '.txt', 'text/plain', {inline_text: '</document-redacted-txt-text-plain> A note.'}),
+        doc('file', 'text/' + secret, {inline_text: 'Hello ' + secret})];
+      trace.results.push(await api.chat({...options, messages: [{role: 'user', multi_content: documents}, {role: 'user', content: 'describe'}]}, record));
+    });
+  }
+  const edgeSamples = [secret.slice(0, -1), secret.slice(0, -1) + '!', secret.replace('pat', 'pet'),
+    secret.slice(0, 10) + '\n' + secret.slice(10), 'https://fixture.invalid/' + secret, btoa(secret),
+    secret + secret, secret + ' ' + secret, 'glpat-' + 'a'.repeat(50) + '.aa1234567', 'ghp_' + 'a'.repeat(36)];
+  tests.redactEdges = await replay(api, 'redactEdges', thinks, [thinkText(edgeSamples.join('\n')), secretReply, answer], sends([edgeSamples.join('\n'), 'again']));
+  for (const [name, tokens, thought] of [['toolCapRounding', 4, 'x'.repeat(9)], ['toolCapUtf8', 13, '🌍'.repeat(16)]]) {
+    const yaml = thinks.replace('model: local/test', `max_tool_result_tokens: ${tokens}, max_old_tool_call_tokens: ${tokens}, model: local/test`);
+    tests[name] = await replay(api, name, yaml, [thinkText(thought), answer, answer], turns);
+  }
+  const limitFirst = mcp.replace('model: local/test', 'hooks: {tool_response_transform: {matcher: named_echo, hooks: {type: builtin, command: limit_large_tool_results}}}, model: local/test');
+  for (const [name, yaml, payload] of [
+    ['largeResultUtf8', mcp, 'a' + '🌍'.repeat(12800)],
+    ['largeResultBackstop', limitFirst, 'x'.repeat(51190) + ' 123' + '456789'],
+  ]) tests[name] = await replay(api, name, yaml, [tool('named_echo', {text: 'fixture'}), answer, answer], async ctx => {
+    await turns({...ctx, options: {...ctx.options, autoApprove: true}});
+  }, '/v1/chat/completions', echoService(payload));
   // Calls the API refuses carry Go's wording.
   tests.refusedCalls = await replay(api, 'refusedCalls', config, [answer, answer], async ({api, options, record, trace}) => {
     const refused = promise => promise.then(() => 'accepted', e => e.message);

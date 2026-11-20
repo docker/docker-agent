@@ -754,6 +754,7 @@ impl Conversation {
             source,
             self.profile.spec.models[0].media_projection(),
             std::mem::take(&mut self.messages),
+            self.profile.spec.hooks.redact_messages,
         ));
     }
 
@@ -1300,12 +1301,11 @@ impl Conversation {
         turn.current_calls = calls
             .values()
             .map(|call| {
-                let args = serde_json::from_str::<Value>(&call.arguments)
-                    .map(|mut value| {
-                        value.sort_all_objects();
-                        value.to_string()
-                    })
-                    .unwrap_or_else(|_| call.arguments.clone());
+                let args = crate::go_json::normalize_json(&call.arguments)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                    .map(|v| crate::go_json::encode_decoded(&v))
+                    .unwrap_or_else(|| call.arguments.clone());
                 (call.name.clone(), args)
             })
             .collect();
@@ -2235,6 +2235,7 @@ mod tests {
             assert!(crate::media::history(
                 history,
                 crate::media::Projection::new(None, "model", false),
+                false,
                 false
             )
             .is_err());

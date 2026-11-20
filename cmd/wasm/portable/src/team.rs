@@ -201,7 +201,12 @@ impl Session {
         let source = reproject.then(|| history.clone());
         // Go's chat.Message has no name field.
         let preserve_names = routing && !limited;
-        let history = media::history(history, primary.media_projection(), preserve_names)?;
+        let history = media::history(
+            history,
+            primary.media_projection(),
+            preserve_names,
+            profile.spec.hooks.redact_messages,
+        )?;
         let mut conversation = Conversation::open(profile, history);
         conversation.set_seed_estimates_lost(seed_estimates_lost);
         if let Some(source) = source {
