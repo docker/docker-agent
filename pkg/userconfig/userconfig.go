@@ -19,6 +19,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/markdowntransform"
 	"github.com/docker/docker-agent/pkg/paths"
 )
 
@@ -63,6 +64,8 @@ func (a *Alias) GetSafety() latest.SafetyMode {
 
 // Settings represents global user settings
 type Settings struct {
+	// MarkdownTransformers rewrites assistant Markdown for terminal display only.
+	MarkdownTransformers []markdowntransform.Config `yaml:"markdown_transformers,omitempty"`
 	// HideToolResults hides tool call results in the TUI by default
 	HideToolResults bool `yaml:"hide_tool_results,omitempty"`
 	// ExpandThinking expands reasoning/tool blocks in the TUI by default.

@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/history"
+	"github.com/docker/docker-agent/pkg/markdowntransform"
 	"github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/programstatus"
@@ -223,6 +224,12 @@ type appModel struct {
 
 	// dockerDesktop enables terminal mode restoration after a focus change.
 	dockerDesktop bool
+
+	// markdown is shared by every tab so transformers run once per program.
+	// stopMarkdown ends its worker and processes with the TUI, not the caller.
+	markdown     *markdowntransform.Display
+	stopMarkdown context.CancelFunc
+	markdownDone <-chan struct{}
 
 	// focused tracks whether the terminal currently has focus. Used to
 	// filter spurious FocusMsg events (RestoreTerminal re-enables focus
@@ -525,6 +532,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	}
 
 	initialSessionState := service.NewSessionState(initialApp.Session())
+	markdownCtx, stopMarkdown := context.WithCancel(ctx)
 	sessID := initialApp.Session().ID
 	initialTab := &tabModel{sessionState: initialSessionState}
 
@@ -561,6 +569,9 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		showBanner:                    userSettings.GetShowBanner(),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
+		markdown:                      markdowntransform.Start(markdownCtx, userSettings.MarkdownTransformers),
+		stopMarkdown:                  stopMarkdown,
+		markdownDone:                  markdownCtx.Done(),
 		appName:                       "docker agent",
 		appVersion:                    version.Version,
 	}
@@ -742,6 +753,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithSendMode(m.sendMode),
 		chat.WithInterruptMode(m.interruptMode),
 		chat.WithShowBanner(m.showBanner),
+		chat.WithMarkdownDisplay(m.markdown),
 	}
 
 	if m.leanMode {
@@ -820,7 +832,7 @@ func (m *appModel) contextShutdownCmd() tea.Cmd {
 
 // Init initializes the model.
 func (m *appModel) Init() tea.Cmd {
-	return tea.Batch(m.init(), m.loadHistoryCmd(), m.waitForThemeChange(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.refreshPlanSidebarCmd(), m.initTmuxVisibilityCmd(), m.refreshProgramStatus(), m.programStatusProbeCmd())
+	return tea.Batch(m.init(), m.loadHistoryCmd(), m.waitForThemeChange(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.refreshPlanSidebarCmd(), m.initTmuxVisibilityCmd(), m.refreshProgramStatus(), m.programStatusProbeCmd(), m.waitMarkdownTransform())
 }
 
 // loadHistoryCmd reads the command history off the UI goroutine, so the
@@ -1576,6 +1588,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.ThemeChangedMsg:
 		return m.applyThemeChanged()
+
+	case messages.MarkdownTransformedMsg:
+		return m.handleMarkdownTransformed()
 
 	case messages.ThemeFileChangedMsg:
 		model, cmd := m.handleThemeFileChanged(msg.ThemeRef)
@@ -3269,6 +3284,9 @@ func (m *appModel) shutdownTimeoutOrDefault() time.Duration {
 // exit) and the context watcher (external cancellation).
 func (m *appModel) cleanupManagedResources() {
 	m.cleanupOnce.Do(func() {
+		if m.stopMarkdown != nil {
+			m.stopMarkdown()
+		}
 		if m.cancelSpeech != nil {
 			m.cancelSpeech()
 		}

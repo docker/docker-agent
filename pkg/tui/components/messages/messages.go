@@ -15,6 +15,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/lrucache"
+	"github.com/docker/docker-agent/pkg/markdowntransform"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -74,6 +75,8 @@ type Model interface {
 
 	// SetToolRenderers must be called before adding messages.
 	SetToolRenderers(registry *tool.Registry)
+	// SetMarkdownDisplay must be called before adding messages.
+	SetMarkdownDisplay(display *markdowntransform.Display)
 	layout.Help
 	layout.Positionable
 
@@ -93,6 +96,9 @@ type Model interface {
 	AppendReasoningContent(sessionID, messageID, agentName, content string) tea.Cmd
 	ResetReasoningContent(sessionID, messageID, agentName string) tea.Cmd
 	ReconcileAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd
+	// CompleteSession ends streaming for the replies of a session whose last
+	// stream stopped.
+	CompleteSession(sessionID string) tea.Cmd
 	AppendAssistantMediaContent(sessionID, messageID, agentName string, media []types.AssistantMedia) tea.Cmd
 	AdoptAssistantMediaIdentity(sessionID, messageID, agentName string, media []types.AssistantMedia)
 	// BreakMessageGroup prevents merging across streams without flushing deferred content.
@@ -208,6 +214,7 @@ func nextBlockID() string {
 
 // model implements Model
 type model struct {
+	markdown      *markdowntransform.Display
 	toolRenderers *tool.Registry
 	ar            *animation.Runtime
 	messages      []*types.Message
@@ -264,6 +271,11 @@ type model struct {
 }
 
 type Option func(*model)
+
+// SetMarkdownDisplay must be called before adding messages.
+func (m *model) SetMarkdownDisplay(display *markdowntransform.Display) {
+	m.markdown = display
+}
 
 // WithToolRenderers supplies the registry used for tools, including reasoning blocks.
 func WithToolRenderers(registry *tool.Registry) Option {
@@ -337,6 +349,15 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case messages.MarkdownTransformedMsg:
+		var changed []int
+		for i, view := range m.views {
+			if mv, ok := view.(message.Model); ok && mv.RefreshMarkdown() {
+				changed = append(changed, i)
+			}
+		}
+		m.refreshItems(changed)
+		return m, nil
 	case *runtime.SessionRecoveredEvent:
 		finalizeCmd := m.FinalizeStream()
 		m.removeSpinner()
@@ -1178,7 +1199,25 @@ func (m *model) materializeDeferredTailForInteraction() tea.Cmd {
 // FinalizeStream establishes the exact externally visible content boundary
 // even when the user remains scrolled above the active response.
 func (m *model) FinalizeStream() tea.Cmd {
-	return m.materializeDeferredTailForInteraction()
+	cmd := m.materializeDeferredTailForInteraction()
+	// Display transforms receive is_streaming: replies that never got their
+	// canonical message (cancellation, recovery) complete with the stream.
+	m.completeReplies(func(*types.Message) bool { return true })
+	return cmd
+}
+
+// refreshItems re-renders changed items. The live reply alone is spliced in
+// cheaply; other changes, such as restored history or several completed
+// segments, share one rebuild instead of copying the transcript per item.
+func (m *model) refreshItems(changed []int) {
+	if len(changed) == 1 && changed[0] == len(m.views)-1 {
+		m.refreshRenderedItem(changed[0])
+		m.visualGeneration++
+		return
+	}
+	for _, i := range changed {
+		m.invalidateItem(i)
+	}
 }
 
 func deferredBytes(chunks []string) int {
@@ -2146,7 +2185,7 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 	// removal the transcript can legitimately be empty; create the streaming
 	// message rather than dropping the first and every later chunk.
 	if len(m.messages) == 0 {
-		return m.addMessage(types.Agent(types.MessageTypeAssistant, agentName, content))
+		return m.addStreamingReply(agentName, content)
 	}
 
 	lastIdx := len(m.messages) - 1
@@ -2178,7 +2217,15 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 		return tea.Batch(materializeCmd, cmd)
 	}
 
-	return m.addMessage(types.Agent(types.MessageTypeAssistant, agentName, content))
+	return m.addStreamingReply(agentName, content)
+}
+
+// addStreamingReply starts a reply from its first chunk, which arrives without
+// an AppendContent call to mark the view live.
+func (m *model) addStreamingReply(agentName, content string) tea.Cmd {
+	cmd := m.addMessage(types.Agent(types.MessageTypeAssistant, agentName, content))
+	m.views[len(m.views)-1].(message.Model).SetStreaming(true)
+	return cmd
 }
 
 // AppendAssistantMedia mirrors AppendToLastMessage for generated media: it
@@ -2391,7 +2438,7 @@ func (m *model) createToolCallView(msg *types.Message) layout.Model {
 }
 
 func (m *model) createMessageView(msg *types.Message) layout.Model {
-	view := message.New(m.ar, msg, m.sessionState.PreviousMessage())
+	view := message.New(m.ar, msg, m.sessionState.PreviousMessage(), message.WithMarkdownDisplay(m.markdown))
 	view.SetSize(m.contentWidth(), 0)
 	return view
 }
