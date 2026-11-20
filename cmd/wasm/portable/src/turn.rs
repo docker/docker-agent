@@ -979,9 +979,10 @@ impl Conversation {
         let mut unavailable = BTreeSet::new();
         let mut wire_calls = Vec::with_capacity(calls.len());
         if calls.len() != 1
-            && calls
-                .values()
-                .any(|c| matches!(c.name.as_str(), "transfer_task" | "handoff"))
+            && calls.values().any(|c| {
+                matches!(c.name.as_str(), "transfer_task" | "handoff")
+                    && self.profile.catalog.borrow().tools.contains_key(&c.name)
+            })
         {
             return Err("team tools must be called alone, not in a parallel batch".into());
         }
