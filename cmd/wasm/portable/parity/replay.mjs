@@ -45,15 +45,17 @@ async function replay(api, name, yaml, replies, drive, endpoint = '/v1/chat/comp
   let unexpected = '';
   globalThis.fetch = async (input, init) => {
     const req = new Request(input, init);
-    if (service && req.url !== new URL(endpoint, location.origin).href) return service(req);
-    if (req.url !== new URL(endpoint, location.origin).href || req.method !== 'POST' || !replies[trace.requests.length]) {
+    const expected = Array.isArray(endpoint) ? endpoint[trace.requests.length] : endpoint;
+    const match = expected && req.url === new URL(expected, location.origin).href;
+    if (service && !match) return service(req);
+    if (!match || req.method !== 'POST' || !replies[trace.requests.length]) {
       unexpected = `unexpected ${req.method} ${req.url} (call ${trace.requests.length + 1})`;
       throw new Error(unexpected);
     }
     const chunks = replies[trace.requests.length];
     trace.requests.push({ method: req.method, path: new URL(req.url).pathname,
       authorization: req.headers.get('Authorization'), body: await req.json() });
-    const isChat = endpoint.endsWith('/chat/completions');
+    const isChat = expected.endsWith('/chat/completions');
     const stream = chunks.map(c => `data: ${JSON.stringify(isChat ? { id: 'completion', object: 'chat.completion.chunk', model: 'test', ...c } : c)}\r\n\r\n`).join('');
     return new Response(stream + (isChat ? 'data: [DONE]\r\n\r\n' : ''), { headers: { 'Content-Type': 'text/event-stream' } });
   };
@@ -423,7 +425,7 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
 agents:`)
     .replace('model: local/test', 'model: capable');
   const doc = (name, mime_type, source) => ({ type: 'document', document: { name, mime_type, source } });
-  const note = doc('Note.txt', 'text/plain', { inline_text: 'body </DOCUMENT-NOTE-TXT-TEXT-PLAIN x> end' });
+  const note = doc('Note.txt', 'text/plain', { inline_text: `body </DOCUMENT-NOTE-TXT-TEXT-PLAIN x> end ${secret}` });
   const image = doc('tiny.gif', 'image/gif', { inline_data: 'R0lGODlhAQABAAAAACwAAAAAAQABAAA=' });
   const pdf = doc('page.pdf', 'application/pdf', { inline_data: btoa('%PDF-1.7\nmock') });
   const wav = doc('note.wav', 'audio/wav', { inline_data: btoa('RIFFmockWAVEdata') });
@@ -450,6 +452,45 @@ agents:`)
     [[{ error: { message: 'vision primary unavailable' } }], answer], mediaHistory);
   tests.mediaFailoverResponses = await replay(api, 'mediaFailoverResponses', withMediaBackup.replace('provider: openai,', 'provider: openai, api_type: openai_responses,'),
     [[{ type:'response.failed', response:{id:'failed',status:'failed',error:{code:'invalid_request',message:'vision primary unavailable'}} }], text], mediaHistory, '/v1/responses');
+  const chatPath = '/v1/chat/completions', responsesPath = '/v1/responses';
+  async function routedMedia(args) {
+    args.options.env.SPARE_KEY = 'route-token';
+    await mediaHistory(args);
+    if (JSON.stringify(args.trace.requests).includes(secret)) throw new Error('unredacted routed attachment');
+  }
+  for (const [name, first, second] of [
+    ['mediaChatToResponses', chatPath, responsesPath], ['mediaResponsesToChat', responsesPath, chatPath],
+    ['mediaCapabilityChange', chatPath, chatPath], ['mediaRestoredOnBackup', chatPath, responsesPath],
+  ]) {
+    const protocol = path => path === chatPath ? 'openai_chatcompletions' : 'openai_responses';
+    let yaml = withMediaBackup.replace('providers:', `providers:\n  spare: { provider: openai, base_url: ${location.origin}/v1, token_key: SPARE_KEY, api_type: ${protocol(second)} }`)
+      .replace('  local: { provider: openai,', `  local: { provider: openai, api_type: ${protocol(first)},`)
+      .replace('backup: {provider: local', 'backup: {provider: spare')
+      .replace('model: backup, capabilities: {image: true, pdf: true, audio: true}', 'model: backup, capabilities: {image: false, pdf: true}')
+      .replace('model: capable, fallback:', 'model: capable, toolsets: [{type: think}], fallback:');
+    if (name === 'mediaRestoredOnBackup') {
+      yaml = yaml.replace('model: test, capabilities: {image: true, pdf: true, audio: true}', 'model: test, capabilities: {image: false}')
+        .replace('model: backup, capabilities: {image: false, pdf: true}', 'model: backup, capabilities: {image: true, pdf: true}');
+    }
+    const failure = first === chatPath ? [{ error: { message: 'vision primary unavailable' } }] : responseError('vision primary unavailable');
+    tests[name] = await replay(api, name, yaml,
+      [failure, second === chatPath ? tool('think', {thought:'plan'}) : responseTool, second === chatPath ? answer : text],
+      routedMedia, [first, second, second]);
+  }
+  const mediaTeam = mediaConfig.replace('providers:', `providers:\n  worker: {provider: openai, base_url: ${location.origin}/v1, token_key: SPARE_KEY, api_type: openai_responses}`)
+    .replace('model: capable,', 'model: capable, handoffs: [helper], sub_agents: [helper],') +
+    '  helper: {model: worker/worker, description: Helps, instruction: Be precise}\n';
+  for (const transfer of [false, true]) {
+    const name = transfer ? 'mediaTransfer' : 'mediaHandoff';
+    const call = transfer ? tool('transfer_task', {agent:'helper', task:'answer'}) : tool('handoff', {agent:'helper'});
+    const replies = transfer ? [call, text, answer] : [call, text];
+    tests[name] = await replay(api, name, mediaTeam, replies,
+      routedMedia,
+      transfer ? [chatPath, responsesPath, chatPath] : [chatPath, responsesPath]);
+  }
+  const forcedMedia = mediaTeam.replace('handoffs: [helper], sub_agents: [helper]', 'force_handoff: helper');
+  tests.mediaForcedHandoff = await replay(api, 'mediaForcedHandoff', forcedMedia, [answer, text],
+    routedMedia, [chatPath, responsesPath]);
   tests.mediaNoCaps = await replay(api, 'mediaNoCaps', config, [answer], mediaHistory);
   async function mediaFallback({ api, options, record, trace }) {
     const messages = [

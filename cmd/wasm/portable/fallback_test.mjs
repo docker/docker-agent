@@ -237,16 +237,31 @@ test('compatible fallback replays the image bytes but never the primary credenti
   assert.equal(events.filter(e => e.type === 'fallback').length, 1);
 });
 
-test('checks every fallback media projection before making even the primary request', async t => {
+test('a later capable backup gets the original image bytes even after two text-only attempts', async t => {
+  const yaml = visionConfig('{image: true}', 'openai_responses')
+    .replace('model: vision, capabilities: {image: true}', 'model: vision, capabilities: {image: false}')
+    .replace('[second]', '[p/text-only, second]');
+  const requests = script(t, () => error(401, 'unavailable'), () => error(401, 'unavailable'), responses);
+  await api.chat({ yaml, env: options.env, messages: imageHistory });
+  assert.deepEqual(requests.map(r => [r.body.model, r.auth]), [
+    ['vision', 'Bearer first-token'], ['text-only', 'Bearer first-token'], ['vision-backup', 'Bearer second-token'],
+  ]);
+  for (const req of requests.slice(0, 2)) assert.doesNotMatch(JSON.stringify(req.body), /image_url|R0lGOD/);
+  assert.ok(requests[2].body.input.some(m => Array.isArray(m.content) && m.content.some(p =>
+    p.type === 'input_image' && p.image_url === 'data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=')));
+});
+
+test('checks malformed or unreplayable seed history before any model or discovery request', async t => {
   const requests = script(t);
-  const base = visionConfig('{image: true}');
-  for (const yaml of [
-    visionConfig('{image: false}'),
-    visionConfig('{image: true}', 'openai_responses'),
-    base.replace('[second]', '[second, b/text-only]'),
-    // An absent override can enable legacy image URLs for Claude but not other models.
-    base.replace('model: vision, capabilities: {image: true}', 'model: claude-vision').replace('model: vision-backup, capabilities: {image: true}', 'model: text-only'),
-  ]) await assert.rejects(api.chat({ yaml, env: options.env, messages: imageHistory }), /multipart history/);
-  await assert.rejects(api.chat({ yaml: base, env: options.env, messages: [{ role: 'user', multi_content: [{ type: 'image_url', image_url: { url: 'file:///tmp/image.png' } }] }, imageHistory.at(-1)] }), /image URL/);
+  const yaml = visionConfig('{image: true}', 'openai_responses')
+    .replace('model: vision, capabilities: {image: true}', 'model: vision, capabilities: {image: false}')
+    .replace('model: first,', 'model: first, toolsets: [{type: mcp, remote: {url: https://mcp.invalid}}],');
+  for (const [first, reason] of [
+    [{ ...imageHistory[0], name: 'Alice' }, /named or reasoning/],
+    [{ ...imageHistory[0], reasoning_content: 'internal' }, /named or reasoning/],
+    [{ ...imageHistory[0], provider_state: {} }, /provider state/],
+    [{ role: 'user', multi_content: [{ type: 'image_url', image_url: { url: 'file:///tmp/image.png' } }] }, /image URL/],
+    [{ role: 'user', multi_content: [{ type: 'document', document: { name: 'bad.gif', mime_type: 'image/gif', source: {inline_data:'AA=='} } }] }, /signature/],
+  ]) await assert.rejects(api.chat({ yaml, env: options.env, messages: [first, imageHistory.at(-1)] }), reason);
   assert.equal(requests.length, 0);
 });

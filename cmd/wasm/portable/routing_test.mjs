@@ -249,5 +249,5 @@ test('rejects unsupported policy and media combinations before tool discovery or
     [yaml.replace('handoffs: [helper]', 'fallback: {models: [small]}'), /compaction/],
     [yaml.replace('p/child}', 'p/child, use_toolsets: [web]}') + '\ntoolsets: {web: {type: api, api_config: {name: test, method: TRACE, endpoint: https://tool.invalid}}}', /api_config.method/],
   ]) await assert.rejects(api.createSession({ yaml: cfg }), reason);
-  await assert.rejects(api.chat({ yaml, messages: [{ role: 'user', multi_content: [{ type: 'text', text: 'first' }] }, { role: 'user', content: 'go' }] }), /multipart/);
+  await assert.rejects(api.chat({ yaml, messages: [{ role: 'user', multi_content: [{ type: 'file_id', id: 'untrusted' }] }, { role: 'user', content: 'go' }] }), /invalid history/);
 });

@@ -449,7 +449,7 @@ pub struct Target {
     pub model_params: Map<String, Value>,
     pub transport: Transport,
     pub compaction: crate::compaction::Policy,
-    pub capabilities: Option<crate::media::Capabilities>,
+    capabilities: Option<crate::media::Capabilities>,
     pub key_base: Option<String>,
     pub responses: bool,
     pub merge_messages: bool,
@@ -462,8 +462,8 @@ impl Target {
             .expect("configured model")
     }
 
-    pub(super) fn media_projection(&self) -> (crate::media::Capabilities, bool) {
-        crate::media::Capabilities::projection(self.capabilities, self.model())
+    pub(super) fn media_projection(&self) -> crate::media::Projection {
+        crate::media::Projection::new(self.capabilities, self.model(), self.responses)
     }
 }
 

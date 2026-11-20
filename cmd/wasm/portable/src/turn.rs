@@ -71,6 +71,7 @@ pub struct Conversation {
     pub archive: Option<crate::session_context::Archive>,
     compaction: Compactor,
     messages: Vec<Value>,
+    routed_seed: Option<crate::media::RoutedSeed>,
     scratchpads: BTreeMap<String, String>,
     pub switch: Option<Switch>,
     run_number: u64,
@@ -375,6 +376,7 @@ impl Conversation {
             archive: None,
             compaction: Compactor::default(),
             messages,
+            routed_seed: None,
             scratchpads: BTreeMap::new(),
             active: None,
             switch: None,
@@ -422,9 +424,18 @@ impl Conversation {
     pub fn restart(&mut self, stamp: crate::session_context::Stamp) -> Result<(), String> {
         self.cancel();
         if let Some(archive) = &mut self.archive {
-            archive.restart(stamp, &self.messages)?;
+            if let Some(seed) = &mut self.routed_seed {
+                let mut messages = seed
+                    .for_target(self.profile.spec.models[self.attempt.current].media_projection())?
+                    .to_vec();
+                messages.extend_from_slice(&self.messages);
+                archive.restart(stamp, &messages)?;
+            } else {
+                archive.restart(stamp, &self.messages)?;
+            }
         }
         self.messages.clear();
+        self.routed_seed = None;
         self.scratchpads.clear();
         self.compaction.truncate(0);
         self.compaction.context_tokens = 0;
@@ -474,6 +485,14 @@ impl Conversation {
         });
         self.messages.push(json!({"role":"user", "content":prompt}));
         self.prepare_request()
+    }
+
+    pub fn set_routed_seed(&mut self, source: Vec<Value>) {
+        self.routed_seed = Some(crate::media::RoutedSeed::new(
+            source,
+            self.profile.spec.models[0].media_projection(),
+            std::mem::take(&mut self.messages),
+        ));
     }
 
     pub fn request_target(&self) -> usize {
@@ -535,7 +554,7 @@ impl Conversation {
         self.active.as_mut().expect("active summary").summarizing = None;
     }
 
-    pub fn request(&self) -> Result<Value, String> {
+    pub fn request(&mut self) -> Result<Value, String> {
         if self.profile.needs_host()
             || self.profile.spec.hooks.add_date
             || self.profile.spec.hooks.add_environment_info
@@ -547,7 +566,7 @@ impl Conversation {
     }
 
     pub fn prepare(
-        &self,
+        &mut self,
         environment: Option<String>,
         date: Option<String>,
     ) -> Result<Value, String> {
@@ -573,6 +592,10 @@ impl Conversation {
         }
         if turn.reminders > 0 {
             messages.push(json!({"role":"system", "content":structured_output::REMINDER}));
+        }
+        if let Some(seed) = &mut self.routed_seed {
+            let target = &self.profile.spec.models[self.attempt.current];
+            messages.extend_from_slice(seed.for_target(target.media_projection())?);
         }
         messages.extend_from_slice(&self.messages);
         self.profile
@@ -1490,7 +1513,12 @@ mod tests {
             vec![assistant.clone()],
             vec![assistant, tool.clone(), tool],
         ] {
-            assert!(crate::media::history(history, None, "model", false, false).is_err());
+            assert!(crate::media::history(
+                history,
+                crate::media::Projection::new(None, "model", false),
+                false
+            )
+            .is_err());
         }
     }
 

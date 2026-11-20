@@ -114,26 +114,20 @@ impl Session {
         let primary = &profile.spec.models[0];
         let team = !profile.spec.team_prompts.is_empty() || !profile.spec.force_handoff.is_empty();
         let routing = team || profile.spec.models.len() > 1;
-        // Seed history is projected once. Never reuse Chat parts on Responses or
-        // a projection that admits media the next model would have stripped.
-        if routing
+        let routed_media = routing
             && history
                 .iter()
-                .any(|m| m["multi_content"].as_array().is_some_and(|p| !p.is_empty()))
-        {
-            let incompatible = profile.spec.models.iter().skip(1).any(|m| {
-                m.responses != primary.responses
-                    || m.media_projection() != primary.media_projection()
-            });
-            if primary.compaction.enabled() {
-                return Err("multipart history with routed compaction is not supported".into());
-            }
-            if team || incompatible {
-                return Err("multipart history requires a single agent and fallback models with the same API and media capabilities".into());
-            }
+                .any(|m| m["multi_content"].as_array().is_some_and(|p| !p.is_empty()));
+        if routed_media && primary.compaction.enabled() {
+            return Err("multipart history with routed compaction is not supported".into());
         }
+        let targets = || agents.values().flat_map(|p| &p.spec.models);
+        let reproject =
+            routed_media && targets().any(|m| m.media_projection() != primary.media_projection());
+        let checks_responses =
+            primary.responses || (routed_media && targets().any(|m| m.responses));
         if routing
-            && primary.responses
+            && checks_responses
             && history
                 .iter()
                 .any(|m| !m["name"].is_null() || !m["reasoning_content"].is_null())
@@ -144,14 +138,12 @@ impl Session {
             .spec
             .limits
             .check_seed(&history, !profile.spec.tool_models.is_empty())?;
-        let history = media::history(
-            history,
-            primary.capabilities,
-            primary.model(),
-            primary.responses,
-            routing,
-        )?;
+        let source = reproject.then(|| history.clone());
+        let history = media::history(history, primary.media_projection(), routing)?;
         let mut conversation = Conversation::open(profile, history);
+        if let Some(source) = source {
+            conversation.set_routed_seed(source);
+        }
         conversation.archive = context.then(|| session_context::Archive::new(stamp));
         Ok(Self {
             conversation,
@@ -281,7 +273,8 @@ impl Session {
             }
             self.conversation.skip_summary();
             self.resume_after_summary(now);
-            let request = self.request(self.conversation.request()?)?;
+            let body = self.conversation.request()?;
+            let request = self.request(body)?;
             return Ok(
                 json!({"request":request, "event":{"type":"error", "message":format!("run compaction agent: model failed: {reason}")}}),
             );
@@ -317,7 +310,8 @@ impl Session {
                 return Err(format!("{prefix}: {reason}"));
             }
         };
-        next["request"] = self.request(self.conversation.request()?)?;
+        let body = self.conversation.request()?;
+        next["request"] = self.request(body)?;
         Ok(next)
     }
 

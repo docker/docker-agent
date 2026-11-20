@@ -78,26 +78,62 @@ fn claude(id: &str) -> bool {
             }))
 }
 
-impl Capabilities {
-    pub fn projection(caps: Option<Self>, model: &str) -> (Self, bool) {
-        (
-            caps.unwrap_or_default(),
-            caps.map_or_else(|| claude(model), |c| c.image),
-        )
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Projection {
+    caps: Capabilities,
+    legacy_image: bool,
+    responses: bool,
+}
+
+impl Projection {
+    pub fn new(caps: Option<Capabilities>, model: &str, responses: bool) -> Self {
+        Self {
+            caps: caps.unwrap_or_default(),
+            legacy_image: caps.map_or_else(|| claude(model), |c| c.image),
+            responses,
+        }
+    }
+}
+
+// Chat can add attachment messages where Responses uses one function_call_output.
+// Keep the original seed and only the current view, separate from the live transcript.
+pub struct RoutedSeed {
+    source: Vec<Value>,
+    projection: Projection,
+    messages: Vec<Value>,
+}
+
+impl RoutedSeed {
+    pub fn new(source: Vec<Value>, projection: Projection, messages: Vec<Value>) -> Self {
+        Self {
+            source,
+            projection,
+            messages,
+        }
+    }
+
+    pub fn for_target(&mut self, projection: Projection) -> Result<&[Value], String> {
+        if projection != self.projection {
+            self.messages = history(self.source.clone(), projection, true)?;
+            self.projection = projection;
+        }
+        Ok(&self.messages)
     }
 }
 
 pub fn history(
     messages: Vec<Value>,
-    caps: Option<Capabilities>,
-    model: &str,
-    responses: bool,
+    projection: Projection,
     preserve_names: bool,
 ) -> Result<Vec<Value>, String> {
     if messages.len() > 4096 {
         return Err("too many history messages".into());
     }
-    let (caps, legacy_image) = Capabilities::projection(caps, model);
+    let Projection {
+        caps,
+        legacy_image,
+        responses,
+    } = projection;
     let mut profile = Profile {
         caps,
         legacy_image,
@@ -502,13 +538,15 @@ mod tests {
     fn with_part(p: Value) -> Result<Vec<Value>, String> {
         history(
             vec![json!({"role":"user", "multi_content":[p]})],
-            Some(Capabilities {
-                image: true,
-                audio: true,
-                pdf: true,
-            }),
-            "test",
-            false,
+            Projection::new(
+                Some(Capabilities {
+                    image: true,
+                    audio: true,
+                    pdf: true,
+                }),
+                "test",
+                false,
+            ),
             false,
         )
     }
@@ -524,7 +562,7 @@ mod tests {
             json!({"role":"user","content":[]}),
             json!({"role":"assistant","content":"ok","audio":{"id":"ref"}}),
         ] {
-            assert!(history(vec![m], None, "test", false, false).is_err());
+            assert!(history(vec![m], Projection::new(None, "test", false), false).is_err());
         }
         for p in [
             json!({"type":"file","file":{"file_id":"123"}}),
@@ -532,6 +570,28 @@ mod tests {
             json!({"type":"text","text":"ok","extra":true}),
         ] {
             assert!(with_part(p).is_err());
+        }
+    }
+
+    #[test]
+    fn routed_seed_restores_projection_without_accumulating_tool_attachments() {
+        let source = vec![
+            json!({"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"look","arguments":"{}"}}]}),
+            json!({"role":"tool","tool_call_id":"a","content":"caption","multi_content":[{"type":"image_url","image_url":{"url":"https://img.invalid/a"}}]}),
+        ];
+        let vision = Projection::new(None, "claude-vision", false);
+        let blind = Projection::new(None, "text", true);
+        let chat = history(source.clone(), vision, true).unwrap();
+        assert_eq!(chat.len(), 3); // Chat emits a user attachment after the tool reply.
+        let mut seed = RoutedSeed::new(source, vision, chat.clone());
+        for _ in 0..2 {
+            let text = seed.for_target(blind).unwrap();
+            assert_eq!(text.len(), 2);
+            assert_eq!(
+                text[1],
+                json!({"role":"tool","tool_call_id":"a","content":"caption"})
+            );
+            assert_eq!(seed.for_target(vision).unwrap(), chat);
         }
     }
 
@@ -563,9 +623,7 @@ mod tests {
         let p = json!({"type":"text", "text":"x"});
         assert!(history(
             vec![json!({"role":"user", "multi_content":vec![p; 1025]})],
-            None,
-            "test",
-            false,
+            Projection::new(None, "test", false),
             false
         )
         .is_err());
