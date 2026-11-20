@@ -455,6 +455,12 @@ pub struct Target {
     pub merge_messages: bool,
 }
 
+impl Selected {
+    pub fn capped_fallback(&self) -> bool {
+        self.models.len() > 1 && (self.limits.max_iterations > 0 || self.hooks.max_calls.is_some())
+    }
+}
+
 impl Target {
     pub fn model(&self) -> &str {
         self.model_params["model"]
@@ -897,8 +903,8 @@ fn resolve(
         return Err("readonly agents cannot delegate or hand off to a writable agent".into());
     }
     let chain = !a.fallback.models.is_empty();
-    if (team || chain) && a.hooks.max_calls.is_some() {
-        return Err("the max_iterations hook with fallback or local teams is not supported".into());
+    if team && a.hooks.max_calls.is_some() {
+        return Err("the max_iterations hook with local teams is not supported".into());
     }
     if team && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
         return Err("session_context with local delegation or handoff is not supported".into());
@@ -945,8 +951,23 @@ fn resolve(
         return Err("agent max_iterations with local teams is not supported".into());
     }
     // An overflow can start compaction in Go even without a declared context window.
-    if chain && a.limits.max_iterations > 0 && a.session_compaction != Some(false) {
-        return Err("fallback with agent max_iterations requires session_compaction: false".into());
+    if chain
+        && (a.limits.max_iterations > 0 || a.hooks.max_calls.is_some())
+        && a.session_compaction != Some(false)
+    {
+        return Err("fallback with an iteration limit requires session_compaction: false".into());
+    }
+    if chain
+        && a.hooks
+            .max_calls
+            .is_some_and(|n| n as usize > crate::limits::MAX_TOOL_ROUNDS)
+    {
+        return Err("fallback max_iterations hook exceeds the portable tool round limit".into());
+    }
+    if chain && a.hooks.max_calls.is_some() && output_tool.is_some() {
+        return Err(
+            "fallback max_iterations hook with tool-mode structured output is not supported".into(),
+        );
     }
     if (chain || team) && history_or_override {
         return Err(

@@ -66,6 +66,20 @@ test('transient failover spends one iteration and the next send starts fresh on 
   } finally { await s.close(); }
 });
 
+test('the maximum routed cap keeps eight tool results without a ninth model call', async t => {
+  const calls = Array.from({length:8}, (_, i) => [call('think', {thought:`step ${i}`}, `id_${i}`)]);
+  const requests = intercept(t, [503, ...calls, null]);
+  const yaml = config('max_iterations: 8, session_compaction: false, fallback: {models: [local/backup], retries: -1}, toolsets: [{type: think}]');
+  const s = await api.createSession(opts(yaml));
+  try {
+    assert.match((await s.send('start')).message.content, /max_iterations limit \(8\)/);
+    assert.deepEqual(requests.map(r => r.model), ['test', 'backup', ...Array(7).fill('test')]);
+    await s.send('new turn');
+    assert.deepEqual(requests.at(-1).messages.filter(m => m.role === 'tool').map(m => m.tool_call_id),
+      calls.map(([c]) => c.id));
+  } finally { await s.close(); }
+});
+
 test('pending user_prompt is answered and capped before agent stop', async t => {
   const requests = intercept(t, [[call('user_prompt', {message:'ok?'})], null]);
   const yaml = config('toolsets: [{type: user_prompt}], max_iterations: 1, max_tool_result_tokens: 1');
@@ -130,7 +144,9 @@ test('routed iteration cap rejects incompatible settings before any request', as
   for (const [yaml, reason] of [
     [config(fields.replace('max_iterations: 1', 'max_iterations: 9')), /tool round limit/],
     [config(fields.replace('session_compaction: false, ', '')), /requires session_compaction: false/],
-    [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['1']}}`), /max_iterations hook/],
+    [config(`fallback: {models: [local/backup]}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}`), /requires session_compaction: false/],
+    [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['9']}}`), /portable tool round limit/],
+    [config(`${fields.replace('max_iterations: 1, ', '')}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
     [config(`${fields}, sub_agents: [root]`), /max_iterations with local teams/],
     [config(`${fields}, num_history_items: 1`), /history limits/],
     [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],

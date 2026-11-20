@@ -173,13 +173,22 @@ async function run() {
     [tool('think', {thought:'one'}), [{error:{message:'invalid model'}}], answer, answer], turns);
   tests.cappedContinuationError = await replay(api, 'cappedContinuationError', twoRounds,
     [tool('think', {thought:'committed'}), [{error:{message:'invalid model'}}], [{error:{message:'backup unavailable'}}], answer],
-    async ({api, options, record, trace}) => {
-      const s = await api.createSession(options, record);
-      try {
-        await s.send('first').then(() => { throw new Error('expected exhausted fallback'); }, e => trace.results.push(e.message));
-        trace.results.push(await s.send('recover'));
-      } finally { await s.close(); }
-    });
+    rejectsThenRecovers);
+  const hookedFallback = twoRounds.replace('max_iterations: 2', 'hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ["2"]}}');
+  async function rejectsThenRecovers({api, options, record, trace}) {
+    const s = await api.createSession(options, record);
+    try {
+      await s.send('first').then(() => { throw new Error('expected rejected send'); }, e => trace.results.push(e.message));
+      trace.results.push(await s.send('again'));
+    } finally { await s.close(); }
+  }
+  tests.fallbackIterationHook = await replay(api, 'fallbackIterationHook', hookedFallback,
+    [[{error:{message:'service unavailable'}}], tool('think', {thought:'first'}),
+      rawTool('think', '{"thought":"second"}', 'second_call'), answer], rejectsThenRecovers);
+  tests.fallbackIterationHookAndCap = await replay(api, 'fallbackIterationHookAndCap',
+    hookedFallback.replace('session_compaction: false', 'session_compaction: false, max_iterations: 2'),
+    [[{error:{message:'invalid model'}}], tool('think', {thought:'first'}),
+      rawTool('think', '{"thought":"second"}', 'second_call'), answer], turns);
   tests.plain = await replay(api, 'plain', config, [answer, answer], turns);
   const team = config.replace('model: local/test', 'model: local/test, sub_agents: [helper], handoffs: [helper]') + '  helper: {model: local/worker, description: Helps, instruction: Be precise}\n';
   tests.transfer = await replay(api, 'transfer', team, [tool('transfer_task', { agent: 'helper', task: 'count', expected_output: 'numbers' }), answer, answer, answer], turns);

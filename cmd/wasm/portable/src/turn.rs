@@ -1235,8 +1235,15 @@ impl Conversation {
                 self.active = None;
                 return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
             }
-            if max > 1 && self.profile.spec.models.len() > 1 {
-                // Check the cooldown at dispatch, after tool results and approvals reach the host.
+            if self.profile.spec.capped_fallback() {
+                // A later cancellation or projection error must not erase completed tool effects.
+                let t = self.active.as_mut().expect("active tool round");
+                t.messages_before = self.messages.len();
+                t.scratchpads_before = self
+                    .scratchpads
+                    .iter()
+                    .map(|(k, s)| (k.clone(), s.len()))
+                    .collect();
                 return json!({"events":events, "nextIteration":true});
             }
             match self.prepare_request() {

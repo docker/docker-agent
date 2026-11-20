@@ -168,6 +168,32 @@ agents:
   checkRoute(backup, 'spare', 'backup-key', true);
 });
 
+test('abort on an approved write result keeps its receipt and never dispatches the continuation', async t => {
+  const primary = await endpoint(t, 401);
+  const backup = await endpoint(t, responseCall('record', {}), responseText('recovered'));
+  const service = await endpoint(t, 'kept receipt');
+  const yaml = `providers:
+  p: {base_url: ${primary.url}, token_key: PRIMARY}
+  b: {base_url: ${backup.url}, api_type: openai_responses, token_key: BACKUP}
+agents:
+  root:
+    model: p/main
+    fallback: {models: [b/spare], retries: -1}
+    hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ["2"]}}
+    session_compaction: false
+    toolsets: [{type: api, allow_private_ips: true, api_config: {name: record, method: POST, endpoint: '${service.url}/record'}}]`;
+  const s = await api.createSession({yaml, env:{PRIMARY:'primary-key', BACKUP:'backup-key'}}, e => {
+    if (e.type === 'tool_confirmation') return s.confirm({confirmationId:e.confirmationId, decision:'approve'});
+    if (e.type === 'tool_result') s.abort();
+  });
+  t.after(() => s.close());
+  await assert.rejects(s.send('write'), /chat aborted/);
+  assert.equal(backup.requests.length, 1);
+  assert.equal((await s.send('recover')).message.content, 'recovered');
+  assert.equal(backup.requests[1].body.input.filter(m => m.type === 'function_call_output' && m.output === 'kept receipt').length, 1);
+  assert.equal(service.requests.length, 1);
+});
+
 test('a picker change belongs to the selected agent, not the delegated or resumed frame', async t => {
   const parent = await endpoint(t, call('change_model', { model: 'p/precise' }), call('transfer_task', { agent: 'helper', task: 'compute' }), text('done'));
   const child = await endpoint(t, 403, text('backup'));

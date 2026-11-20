@@ -190,7 +190,8 @@ impl Session {
         let body = self.conversation.begin(prompt, id)?;
         self.summary_attempt = Default::default();
         self.replayable = !self.conversation.summarizing()
-            && self.conversation.profile.spec.hooks.max_calls.is_none();
+            && (self.conversation.profile.spec.hooks.max_calls.is_none()
+                || self.conversation.profile.spec.capped_fallback());
         self.switches = 0;
         self.turn_id = id.into();
         self.request(body)
