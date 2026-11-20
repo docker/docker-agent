@@ -1600,6 +1600,8 @@ agents:`)
     ['blankPromptWithTool', thinks, [tool('think', {thought: 'x'}), answer], [' ']],
     ['blankPromptResponses', plainResponses, [text], [''], '/v1/responses'],
     ['blankInstruction', config.replace("'Hello ${env.WHO}'", "'  '"), [answer], ['hi']],
+    ['nullInstruction', config.replace("'Hello ${env.WHO}'", '~'), [answer], ['hi']],
+    ['markedConfig', '\ufeff' + config, [answer], ['hi']],
     ['emptyRequest', unprompted, [answer], ['', 'two']],
   ]) tests[name] = await replay(api, name, yaml, replies, sending(...prompts), endpoint);
   for (const [name, prompt] of [['blankChatPrompt', {role: 'user', content: ''}], ['absentChatPrompt', {role: 'user'}], ['nullChatPrompt', {role: 'user', content: null}]]) {

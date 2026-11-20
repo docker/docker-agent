@@ -227,10 +227,13 @@ fn load_instruction<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error>
     enum Instruction {
         Text(String),
         Paragraphs(Vec<String>),
+        // Go reads a key without a value as empty text.
+        Nothing(()),
     }
     Ok(match Instruction::deserialize(d)? {
         Instruction::Text(text) => text,
         Instruction::Paragraphs(parts) => parts.join("\n\n"),
+        Instruction::Nothing(()) => String::new(),
     })
 }
 
@@ -551,6 +554,8 @@ impl Target {
 fn load(yaml: &str) -> Result<Config, String> {
     // Reading as YAML values first also rejects duplicate keys in named maps,
     // rather than letting IndexMap/BTreeMap silently replace the first entry.
+    // Go's parser skips a leading byte order mark.
+    let yaml = yaml.strip_prefix('\u{feff}').unwrap_or(yaml);
     let doc = serde_yaml_ng::from_str(yaml).map_err(|e| e.to_string())?;
     let mut cfg: Config = serde_yaml_ng::from_value(doc).map_err(|e| e.to_string())?;
     if let Some(v) = &cfg.version {
