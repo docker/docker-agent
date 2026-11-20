@@ -547,6 +547,37 @@ agents: {root: {model: ordinary, ${smallSummary && !failed ? 'compaction_model: 
   tests.structuredResponses = await replay(api, 'structuredResponses',
     withSchema(responses, { description: 'Chosen colors', strict: true, mode: 'native' }),
     [responseTool, responsesJSON, responsesJSON], turns, '/v1/responses');
+  const claude = 'local/anthropic/CLAUDE-sonnet-4';
+  const escapedSchema = { ...schema, $defs: { 'z<&>': { enum: ['🌍\u2028\u2029<> & " \\', -7, 9007199254740991, null, true] } } };
+  const claudeOutput = yaml => withSchema(yaml, { schema: escapedSchema, strict: true, description: 'Palette <&>' })
+    .replace('local/test', claude);
+  tests.claudeStructuredChat = await replay(api, 'claudeStructuredChat', claudeOutput(local(['think'])),
+    [tool('think', {thought: 'plan'}), chatJSON, chatJSON], turns);
+  tests.claudeStructuredResponses = await replay(api, 'claudeStructuredResponses', claudeOutput(responses),
+    [responseTool, responsesJSON, responsesJSON], turns, '/v1/responses');
+  tests.claudeCopilot = await replay(api, 'claudeCopilot', withSchema(local(['think']), {}).replace('local/test', 'github-copilot/claude-test'),
+    [chatJSON], async args => { args.options.env.GITHUB_TOKEN = 'fixture'; await single(args); }, 'https://api.githubcopilot.com/chat/completions');
+  const noInstruction = withSchema(config, {}).replace('local/test', 'local/claude-test').replace(/, instruction: '[^']*'/, '');
+  tests.claudeStructuredHistory = await replay(api, 'claudeStructuredHistory', noInstruction, [chatJSON], async ({api, options, record, trace}) => {
+    const messages = [{role:'system', content:'first system'}, {role:'system', content:'second system'}, {role:'user', content:'go'}];
+    trace.results.push(await api.chat({...options, messages}, record));
+  });
+  const claudeFallback = withSchema(config, {}).replace('model: local/test',
+    'model: local/openai/claude-test, fallback: {models: [local/global.anthropic.claude-test]}');
+  tests.claudeStructuredFallback = await replay(api, 'claudeStructuredFallback', claudeFallback,
+    [[{error:{message:'invalid model'}}], chatJSON, chatJSON], turns);
+  const claudePicker = claudeOutput(picker).replace(claude, 'primary')
+    .replace('models: {careful:', 'models: {primary: {provider: local, model: claude-start, context_window: 2048}, careful:')
+    .replace('model: precise', 'model: claude-picked, context_window: 2048')
+    .replace('models: [careful, local/fast]', 'models: [careful]');
+  tests.claudeStructuredPicker = await replay(api, 'claudeStructuredPicker', claudePicker,
+    [tool('change_model', {model:'careful'}), [chatJSON[0], {...usage, usage:{prompt_tokens:1900, completion_tokens:2, total_tokens:1902}}],
+      [piece({content:'key facts'}, 'stop'), usage], tool('revert_model', {}), chatJSON], turns);
+  tests.claudeStructuredToolOverride = await replay(api, 'claudeStructuredToolOverride', claudeOutput(override).replace('model: fast', 'model: claude-override'),
+    [tool('think', {thought:'plan'}), chatJSON, chatJSON], turns);
+  const claudeCompact = chain.replace('model: main, context_window', 'model: claude-main, context_window');
+  tests.claudeStructuredCompaction = await replay(api, 'claudeStructuredCompaction', claudeCompact,
+    [[piece({content:'first'}, 'stop'), highUsage], [piece({content:'key facts'}, 'stop'), usage], chatJSON], turns);
   const output = '__structured_output__';
   const final = tool(output, JSON.parse(jsonAnswer));
   const palette = withSchema(local(['think']), { mode: 'tool', description: 'Chosen colors' });

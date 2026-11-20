@@ -64,20 +64,6 @@ struct Profile {
     total: usize,
 }
 
-// The small build has no models.dev snapshot. Its runtime does recognize Claude
-// names for modality stripping; only legacy image URLs bypass the converter's caps lookup.
-fn claude(id: &str) -> bool {
-    let lower = id.trim().to_ascii_lowercase();
-    let mut segments = lower.rsplit('/');
-    let model = segments.next().unwrap_or("");
-    segments.next() != Some("openai")
-        && (model.starts_with("claude-")
-            || model.starts_with("anthropic.claude-")
-            || model.split_once('.').is_some_and(|(region, id)| {
-                !region.is_empty() && id.starts_with("anthropic.claude-")
-            }))
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Projection {
     caps: Capabilities,
@@ -89,7 +75,7 @@ impl Projection {
     pub fn new(caps: Option<Capabilities>, model: &str, responses: bool) -> Self {
         Self {
             caps: caps.unwrap_or_default(),
-            legacy_image: caps.map_or_else(|| claude(model), |c| c.image),
+            legacy_image: caps.map_or_else(|| crate::config::is_claude(model), |c| c.image),
             responses,
         }
     }

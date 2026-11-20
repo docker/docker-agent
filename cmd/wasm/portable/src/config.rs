@@ -103,7 +103,7 @@ struct StructuredOutput {
 }
 
 impl StructuredOutput {
-    fn check_session(&self, model: &str, env: &BTreeMap<String, String>) -> Result<(), String> {
+    fn check_session(&self, id: &str) -> Result<(), String> {
         if self.name.is_empty()
             || self.name.len() > 64
             || !self
@@ -113,13 +113,17 @@ impl StructuredOutput {
         {
             return Err("name must be 1-64 ASCII letters, digits, hyphens or underscores".into());
         }
-        let id = expand_model_field(model, env)?;
-        if matches!(self.mode, OutputMode::Native)
-            && claude_name(&id.trim().to_ascii_lowercase()).is_some()
-        {
-            return Err(format!(
-                "the Claude schema instruction for {id:?} is not supported in portable sessions"
-            ));
+        if matches!(self.mode, OutputMode::Native) {
+            if id.contains(',') && id.split(',').any(is_claude) {
+                return Err("Claude structured output requires a single model per target".into());
+            }
+            if is_claude(id) {
+                crate::structured_output::check_prompt_schema(
+                    &self.name,
+                    &self.description,
+                    &self.schema,
+                )?;
+            }
         }
         Ok(())
     }
@@ -192,7 +196,11 @@ fn output_schema<'de, D: Deserializer<'de>>(de: D) -> Result<Value, D::Error> {
     Ok(schema)
 }
 
-// Go adds a schema instruction on both OpenAI protocols for modelinfo.IsClaude(nil, id).
+// modelinfo.IsClaude(nil, id) uses the model name, not the transport provider.
+pub fn is_claude(id: &str) -> bool {
+    claude_name(&id.trim().to_ascii_lowercase()).is_some()
+}
+
 pub fn claude_name(normalized: &str) -> Option<&str> {
     let mut segments = normalized.rsplit('/');
     let name = segments.next().unwrap();
@@ -453,6 +461,7 @@ pub struct Selected {
 pub struct Target {
     pub id: String,
     pub model_params: Map<String, Value>,
+    pub schema_instruction: Option<String>,
     pub transport: Transport,
     pub compaction: crate::compaction::Policy,
     capabilities: Option<crate::media::Capabilities>,
@@ -462,6 +471,10 @@ pub struct Target {
 }
 
 impl Selected {
+    pub fn has_schema_instruction(&self) -> bool {
+        self.models.iter().any(|m| m.schema_instruction.is_some())
+    }
+
     pub fn targets(&self) -> impl Iterator<Item = &Target> {
         self.models.iter().chain(&self.summary_model)
     }
@@ -824,8 +837,8 @@ pub fn team(
                     .map_err(|e| format!("agents.{name}.structured_output: {e}"))?;
                 output_tools.insert(name.as_str(), tool);
             }
-            output
-                .check_session(&cfg.models[&a.model].model, env)
+            expand_model_field(&primary.model, env)
+                .and_then(|id| output.check_session(&id))
                 .map_err(|e| format!("agents.{name}.structured_output: {e}"))?;
         }
         for ts in &a.toolsets {
@@ -898,6 +911,15 @@ pub fn team(
             team,
             output_tools.remove(name),
         )?);
+    }
+    // Standard YAML tags and raw NEL can be lost before serde exposes the schema.
+    if agents.iter().any(Selected::has_schema_instruction)
+        && (yaml.contains('\u{85}') || ["!!", "!<", "%TAG"].iter().any(|tag| yaml.contains(tag)))
+    {
+        return Err(
+            "Claude schema instructions do not support YAML tag syntax or raw NEL in the config"
+                .into(),
+        );
     }
     Ok((entry.into(), agents))
 }
@@ -1010,18 +1032,10 @@ fn resolve(
             .map_or("", |p| &p.compaction_model),
     ]);
     let multi_target = chain || team || !summary_name.is_empty();
-    let resolve_target = |m: &Model| {
-        resolve_model(
-            cfg,
-            m,
-            a,
-            env,
-            has_tools,
-            multi_target,
-            a.structured_output.as_ref(),
-        )
-    };
-    let request = resolve_target(primary)?;
+    let resolve_target =
+        |m: &Model, output| resolve_model(cfg, m, a, env, has_tools, multi_target, output);
+    let output = a.structured_output.as_ref();
+    let request = resolve_target(primary, output)?;
     let compatible = |name: &str, feature: &str| -> Result<Target, String> {
         let inline;
         let m = if let Some(m) = cfg.models.get(name) {
@@ -1041,7 +1055,8 @@ fn resolve(
         if m.provider != primary.provider {
             return Err(format!("{feature} cannot switch providers"));
         }
-        let target = resolve_target(m)?;
+        // Runtime picker and tool overrides build fresh providers without agent structured output.
+        let target = resolve_target(m, None)?;
         if target.media_projection() != request.media_projection() {
             return Err(format!("{feature} cannot change media capabilities"));
         }
@@ -1095,7 +1110,7 @@ fn resolve(
                 inline_model(name).ok_or_else(|| format!("fallback model {name:?} not found"))?;
             &inline
         };
-        models.push(resolve_target(m)?);
+        models.push(resolve_target(m, output)?);
     }
     if (team || chain) && models.iter().any(|m| m.compaction.enabled()) {
         let primary = &models[0];
@@ -1238,12 +1253,20 @@ fn resolve_model(
     };
     let model_id = format!("{provider_id}/{id}");
     let compaction = compaction_policy(a, m)?;
+    let output = output.filter(|o| matches!(o.mode, OutputMode::Native));
+    if let Some(output) = output {
+        output.check_session(&id)?;
+    }
+    let schema_instruction = output.filter(|_| is_claude(&id)).map(|output| {
+        crate::structured_output::schema_instruction(
+            &output.name,
+            &output.description,
+            &output.schema,
+        )
+    });
     let mut params = model_params(id, m, p, tools, compaction)?;
     if let Some(output) = output {
-        output.check_session(&m.model, env)?;
-        if matches!(output.mode, OutputMode::Native) {
-            params.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":output.name,"description":output.description,"strict":output.strict,"schema":output.schema}}));
-        }
+        params.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":output.name,"description":output.description,"strict":output.strict,"schema":output.schema}}));
     }
     if multi_target
         && responses
@@ -1273,6 +1296,7 @@ fn resolve_model(
     Ok(Target {
         id: model_id,
         model_params: params,
+        schema_instruction,
         transport: providers::transport(builtin, &base, route, key, &m.provider_opts, env)?,
         responses,
         merge_messages,
@@ -1419,7 +1443,7 @@ agents: {root: {model: main, compaction_model: a}}";
     }
 
     #[test]
-    fn rejects_native_claude_fallback_before_open() {
+    fn claude_schema_uses_the_expanded_model_not_the_provider() {
         let cfg = "providers: {local: {}}\nagents:\n  root: {model: local/test}\n  other: {model: 'local/$MODEL', structured_output: {mode: native, name: output, schema: {type: object, properties: {}}}}";
         for model in [
             " claude-opus-4.8 ",
@@ -1428,13 +1452,13 @@ agents: {root: {model: main, compaction_model: a}}";
             "foo/global.anthropic.claude-test",
         ] {
             let env = BTreeMap::from([("MODEL".into(), model.into())]);
-            assert!(
-                select(cfg, "root", &env).err().unwrap().contains("Claude"),
-                "{model}"
-            );
+            let selected = select(cfg, "other", &env).unwrap();
+            assert!(selected.models[0].schema_instruction.is_some(), "{model}");
         }
         let env = BTreeMap::from([("MODEL".into(), "org/openai/claude-test".into())]);
-        assert!(select(cfg, "other", &env).is_ok()); // Go preserves an explicit openai/ qualifier.
+        assert!(select(cfg, "other", &env).unwrap().models[0]
+            .schema_instruction
+            .is_none());
         assert!(select(&cfg.replace("mode: native", "mode: ''"), "other", &env).is_ok());
         for name in ["''", "two words", &"x".repeat(65)] {
             assert!(select(
@@ -1446,6 +1470,40 @@ agents: {root: {model: main, compaction_model: a}}";
             .unwrap()
             .contains("name must be"));
         }
+    }
+
+    #[test]
+    fn rejects_lossy_claude_schema_on_primary_and_fallback() {
+        let cfg = "providers: {local: {}}\nagents: {root: {model: local/claude-test, structured_output: {name: answer, schema: {type: object, properties: {}, $defs: {nested: [{const: VALUE}]}}}}}";
+        for value in [
+            "1.0",
+            "1e-7",
+            "-0.0",
+            "1_000",
+            "0123",
+            "!!int '0x11'",
+            r#""a\tb""#,
+            "'? key'",
+        ] {
+            let primary = cfg.replace("VALUE", value);
+            let fallback = primary.replace(
+                "model: local/claude-test",
+                "model: local/main, fallback: {models: [local/claude-test]}",
+            );
+            for yaml in [primary, fallback] {
+                assert!(
+                    select(&yaml, "", &BTreeMap::new())
+                        .err()
+                        .unwrap()
+                        .contains("Claude"),
+                    "{yaml}"
+                );
+            }
+        }
+        let non_claude = cfg
+            .replace("local/claude-test", "local/openai/claude-test")
+            .replace("VALUE", "1.5");
+        assert!(select(&non_claude, "", &BTreeMap::new()).is_ok());
     }
 
     const CONFIG: &str = "

@@ -48,6 +48,38 @@ pub fn stop_error(model: &str, reminders: usize) -> Option<String> {
     (reminders >= MAX_REMINDERS).then(|| format!("Agent terminated: the model did not deliver structured output via the {NAME} tool after {MAX_REMINDERS} reminders."))
 }
 
+// Go's YAML round trip and encoding/json don't preserve every serde scalar spelling.
+pub fn check_prompt_schema(name: &str, description: &str, schema: &Value) -> Result<(), String> {
+    fn plain(s: &str) -> bool {
+        let numeric = s.starts_with(|c: char| c.is_ascii_digit() || matches!(c, '+' | '-' | '.'))
+            && s.bytes().any(|b| b.is_ascii_digit());
+        !(numeric || s.starts_with("? ") || s.chars().any(char::is_control))
+    }
+    fn check(v: &Value) -> bool {
+        match v {
+            Value::Object(o) => o.iter().all(|(k, v)| plain(k) && check(v)),
+            Value::Array(a) => a.iter().all(check),
+            Value::Number(n) => !n.is_f64(),
+            Value::String(s) => plain(s),
+            _ => true,
+        }
+    }
+    if !plain(name) || !plain(description) || !check(schema) {
+        return Err("Claude schema instruction contains a float or YAML-ambiguous string".into());
+    }
+    Ok(())
+}
+
+pub fn schema_instruction(name: &str, description: &str, schema: &Value) -> String {
+    // serde_json::Map uses sorted keys; go_json also escapes HTML and U+2028/U+2029.
+    let mut text = format!("Your entire reply MUST be a single JSON object that validates against this JSON schema:\nSchema name: {name}");
+    if !description.is_empty() {
+        write!(text, "\nSchema description: {description}").unwrap();
+    }
+    write!(text, "\n\n{}\n\nOutput raw JSON only: no Markdown formatting, no code fences, no explanations, and no text before or after the JSON object.", crate::go_json::encode(schema)).unwrap();
+    text
+}
+
 pub struct OutputTool {
     name: String,
     schema: Schema,

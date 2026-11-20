@@ -387,3 +387,20 @@ test('unsupported tool schemas fail before fetch even on unselected agents', asy
   }
   assert.equal(fetch.mock.callCount(), 0);
 });
+
+test('native Claude schemas reject ambiguous values and seeds before model I/O', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', () => assert.fail('unexpected fetch'));
+  const yaml = config([], {}, { fallback:{models:['local/claude-test']}, structured_output:{name:'report',
+    schema:{type:'object', properties:{rows:{type:'array', items:{oneOf:[{const:'value'}]}}}}} });
+  for (const literal of ['0.125', '1.0', '-0.0', '1e-7', '1_000', '010', '!!int "0x11"', '"a\\tb"']) {
+    await assert.rejects(api.createSession({yaml:yaml.replace('"value"', literal)}), /Claude schema/);
+  }
+  for (const seed of [
+    {role:'system', content:'fallback', multi_content:[{type:'text', text:'leading system'}]},
+    {role:'system', content:'fallback', multi_content:[{type:'image_url', image_url:{url:'https://media.invalid/pic'}}]},
+    {role:'user', name:'caller', content:'previous'},
+  ]) {
+    await assert.rejects(api.chat({yaml, messages:[seed, ...messages]}), /unnamed text-only history/);
+  }
+  assert.equal(fetch.mock.callCount(), 0);
+});
