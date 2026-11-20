@@ -28,7 +28,7 @@ Every session runs in a **safety mode** that decides what happens when no permis
 
 - **`strict`** prompts for every tool call, read-only ones included. Only an `allow:` rule silences a prompt.
 - **`balanced`** runs safe calls silently and asks about everything else.
-- **`restricted`** is the fail-closed profile for unattended/headless runs: safe calls run silently and everything else is **denied without asking** — the mode's fallback never prompts. Custom rules still win: an `allow:` rule can approve a destructive/unknown call, a `deny:` rule always blocks, and session-scoped `ask:` rules still prompt (as can a `preempt_yolo` hook). Restricted is defense in depth against unwanted tool calls, not a security boundary — for real isolation use [sandbox mode](../sandbox/index.md).
+- **`restricted`** is the fail-closed profile for unattended/headless runs: safe calls run silently and everything else is **denied without asking** — the mode's fallback never prompts. Custom rules still win: an `allow:` rule can approve a destructive/unknown call, a `deny:` rule always blocks, and session-scoped `ask:` rules still prompt (as can a `preempt_yolo` hook). Restricted is defense in depth against unwanted tool calls, not a security boundary — for real isolation use [Docker Sandboxes](../sandbox/index.md).
 - **`autonomous`** is the legacy `--yolo` behavior: everything runs. Only `deny:` rules, session-scoped `ask:` rules, `tool_guard`, and `preempt_yolo` hooks still gate.
 
 Pick a mode with the `--safety` flag (`docker-agent run --safety balanced ...`), the `safety_policy` field on session create (`POST /api/sessions`) or mid-session (`PATCH /api/sessions/:id/safety-policy`), or escalate directly from a confirmation prompt (`B` switches to balanced, `A` to autonomous; the `restricted` fallback never prompts, so the mode is only selected via flag/config/API). Sessions that never choose a mode keep the historical default: read-only tools auto-approve, everything else asks.
@@ -322,4 +322,4 @@ Default-lane hooks only see calls the mode routed to "ask"; they cannot override
 > [!WARNING]
 > **Security Note**
 >
-> Permissions are enforced client-side. They help prevent accidental operations but should not be relied upon as a security boundary for untrusted agents. For stronger isolation, use [sandbox mode](../sandbox/index.md).
+> Permissions are enforced client-side. They help prevent accidental operations but should not be relied upon as a security boundary for untrusted agents. For stronger isolation, use [Docker Sandboxes](../sandbox/index.md).

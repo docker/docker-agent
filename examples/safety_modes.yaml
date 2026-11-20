@@ -63,7 +63,7 @@ agents:
   # destructive or unknown is denied without prompting. Pair with an
   # `allow:` permissions list for the commands the job actually needs
   # (explicit rules win over the mode). Defense in depth, not isolation —
-  # use --sandbox for a real security boundary.
+  # run inside a Docker sandbox with sbx for VM isolation.
   ci:
     model: anthropic/claude-haiku-4-5
     description: Headless agent that denies unmatched calls instead of prompting (restricted mode)

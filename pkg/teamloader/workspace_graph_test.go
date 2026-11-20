@@ -70,7 +70,6 @@ func TestWorkspaceLoaderRebindsEveryAgent(t *testing.T) {
 
 func TestWorkspaceInitialSkillsDefaultToProcessDirectory(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "dummy")
-	t.Setenv("DOCKER_AGENT_KIT_DIR", "")
 	dir := t.TempDir()
 	t.Chdir(dir)
 	path := filepath.Join(dir, ".claude", "skills", "local-only", "SKILL.md")

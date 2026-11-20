@@ -102,19 +102,20 @@ Under the default policy, read-only tools run without confirmation and other cal
 Two different questions come up here, and it's worth keeping them separate:
 
 - **What is allowed to run without asking?** — the safety mode (`--safety strict|balanced|restricted|autonomous`, with `--yolo` as the legacy spelling of `autonomous`) and permission allow-lists answer this.
-- **What happens if the model runs something it shouldn't have?** — only `--sandbox` answers that one. The rest of this section explains why, and treats that distinction as the whole point.
+- **What happens if the model runs something it shouldn't have?** — run the agent inside a separate VM to limit what it can reach.
 
-### `--sandbox`: the isolation boundary
+### Docker Sandboxes: an isolation boundary
 
-For an untrusted or autonomous agent — anything acting without a human watching approvals — **`--sandbox` is the isolation boundary to reach for**, not a cleverer allow-list. It runs the entire agent, shell calls included, inside a VM managed by [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/), using standalone `sbx` or the `docker sandbox` plugin. The working directory is mounted read-write; configuration directories and staged kits may also be exposed read-only. Treat every mounted file and configured network destination as accessible to the agent, and mount only what the task needs. That VM isn't disposable or ephemeral — a sandbox matching the current workspace and mount set is retained and reused across subsequent runs rather than torn down when the session ends (see [How local sandbox mode works](../../configuration/sandbox/index.md#how-local-sandbox-mode-works)). See [Sandbox Mode](../../configuration/sandbox/index.md) for the full flag reference, `sbx` requirement, network allowlist, and kit staging behavior.
+For unattended or untrusted agents, [run Docker Agent inside a sandbox with `sbx`](../../configuration/sandbox/index.md). The VM contains the agent and its tool processes, but files in the shared workspace and allowed network destinations remain accessible. Mount only the directories the job needs and use least-privilege credentials.
+
+On a runner with `sbx` configured, start a named sandbox with the Docker Agent kit, then run the job with `sbx exec`:
 
 ```bash
-$ docker agent run --sandbox --exec agent.yaml --json "Fix the failing test"
+sbx run --detach --name review-job docker-agent .
+sbx exec review-job docker-agent run --exec --json --safety restricted ./agent.yaml "Summarize this project"
 ```
 
-Because the blast radius is contained by the VM boundary, `--sandbox` also makes unattended operation reasonable in CI — and it defaults to exactly that: unless you already passed a `--yolo` or `--safety` flag of your own, `--sandbox` injects `--yolo` for the agent process it runs inside the VM, so the command above already runs unattended with no confirmation prompts. Passing `--yolo` explicitly (`--sandbox --yolo --exec ...`) is equivalent and can make the intent clearer in a script, but it's optional. To keep confirmation prompts even inside the sandbox, select a stricter mode (`--sandbox --safety strict`) or opt out of the legacy default with `--yolo=false` — `--sandbox` only fills in `--yolo` when neither safety flag was set.
-
-If your CI provider already runs each job in its own disposable VM or container — many hosted runners do — and nothing on the runner matters once the job ends, that may already give you an isolation boundary on its own. `--sandbox` still gives you the same guarantee independent of the CI provider, and starts to matter as soon as the agent runs on a persistent self-hosted runner, a long-lived container, or your own workstation.
+Configure kit approvals and secrets before the job. Remove the sandbox when it is no longer needed.
 
 ### Defense in depth, not a boundary: permissions and shell command matching
 
@@ -138,19 +139,19 @@ permissions:
 $ docker agent run --exec --safety restricted agent.yaml --json "Fix the failing test"
 ```
 
-Like the allow-list itself, `restricted` is defense in depth, not a security boundary: it narrows what runs unattended, but only `--sandbox` contains what a misbehaving agent can do with the calls that are allowed.
+Like the allow-list itself, `restricted` is defense in depth, not a security boundary: it narrows what runs unattended, but it does not contain the calls that are allowed.
 
-Treat permissions and the balanced/restricted modes as a way to reduce prompt fatigue and catch the obvious cases, paired with least-privilege CI credentials — never as the reason a CI job is safe to run unattended. For that, use `--sandbox`.
+Treat permissions and the balanced/restricted modes as a way to reduce prompt fatigue and catch the obvious cases, paired with least-privilege CI credentials — never as the reason a CI job is safe to run unattended. Use a separate VM for isolation.
 
 > [!WARNING]
-> **`--yolo` without `--sandbox` runs untrusted, unattended code with no boundary**
+> **`--yolo` is not an isolation boundary**
 >
-> A CI job is exactly the environment where a runaway or misled agent does the most damage before anyone notices — no one is at the keyboard to catch a bad `shell` call before it runs, and, per above, a permission allow-list or the shell classifier can't be trusted to catch everything either. If you can't add `--sandbox`, prefer `--safety restricted` with a permission allow-list scoped to what the job actually needs over blanket `--yolo`, and budget for the credentials and blast radius of the agent's toolsets as if the job itself were compromised — see [`examples/permissions.yaml`](https://github.com/docker/docker-agent/blob/main/examples/permissions.yaml) for a worked allow/deny list.
+> A CI job is exactly the environment where a runaway or misled agent does the most damage before anyone notices — no one is at the keyboard to catch a bad `shell` call before it runs, and, per above, a permission allow-list or the shell classifier can't be trusted to catch everything either. If you can't run the agent in a sandbox, prefer `--safety restricted` with a permission allow-list scoped to what the job actually needs over blanket `--yolo`, and budget for the credentials and blast radius of the agent's toolsets as if the job itself were compromised — see [`examples/permissions.yaml`](https://github.com/docker/docker-agent/blob/main/examples/permissions.yaml) for a worked allow/deny list.
 
 > [!NOTE]
 > **A worktree is not a security boundary either**
 >
-> [`--worktree`](../../features/cli/index.md#docker-agent-run) isolates *which branch and checkout* the agent modifies — it gives the agent its own working directory and branch so your primary checkout stays untouched — but the shell toolset still runs as a native process on the host, and the worktree shares the repository's underlying object store with the rest of your checkouts. It's checkout isolation, not a security boundary. Only `--sandbox` provides that.
+> [`--worktree`](../../features/cli/index.md#docker-agent-run) isolates *which branch and checkout* the agent modifies — it gives the agent its own working directory and branch so your primary checkout stays untouched — but the shell toolset still runs as a native process on the host, and the worktree shares the repository's underlying object store with the rest of your checkouts. It's checkout isolation, not a security boundary.
 
 ## Providing Secrets in CI
 
@@ -221,13 +222,7 @@ jobs:
           path: agent-events.ndjson
 ```
 
-This job auto-approves every shell call the review agent makes (`--yolo`) rather than trying to allow-list every `git`/`grep`/`cat` invocation a code review might need — the read surface for "review this diff" is open-ended, and a fixed pattern list is exactly the kind of shell-matching boundary the [previous section](#defense-in-depth-not-a-boundary-permissions-and-shell-command-matching) says not to rely on. If your CI environment has `sbx` installed and configured (GitHub-hosted `ubuntu-latest` does not ship it out of the box), add `--sandbox` and get a real isolation boundary around that `--yolo`:
-
-```bash
-$ docker-agent run --sandbox --exec --yolo .github/agents/review-agent.yaml --json "..."
-```
-
-Without `--sandbox`, this workflow's safety instead rests on least-privilege secrets (only `ANTHROPIC_API_KEY` is injected — no repo-write token), the top-level `permissions: contents: read` block and `persist-credentials: false` on the checkout step (which together mean the job never holds a write-capable `GITHUB_TOKEN` and never persists one to disk for `git` to pick up), and the job running on a GitHub-hosted, ephemeral runner that's discarded after the job.
+This job auto-approves tool calls with `--yolo`. It runs on an ephemeral GitHub-hosted runner with a read-only repository token (`permissions: contents: read` and `persist-credentials: false`) and injects only `ANTHROPIC_API_KEY`. For a dedicated VM boundary on a runner that supports `sbx`, use the [sandbox job pattern above](#docker-sandboxes-an-isolation-boundary).
 
 This example omits the GitHub MCP toolset (`docker:github-official`) shown in earlier revisions of this guide: that server requires a `GITHUB_PERSONAL_ACCESS_TOKEN` this workflow doesn't provide, and — because the toolset above has no `name:` field — its tools would be exposed under their raw MCP names (`get_file_contents`, `search_code`, …) rather than a `github_*`-style qualified name, so permission patterns written against that prefix wouldn't match anything anyway. If your review agent needs GitHub API access, add the toolset back with an explicit `name: github`, wire `GITHUB_PERSONAL_ACCESS_TOKEN` through `env:` from a repository secret, and write any `permissions` patterns against the tool names it actually exposes (`github_get_*` only works once the toolset carries that `name:`).
 

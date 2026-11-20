@@ -117,10 +117,9 @@ ready-to-run `claude-code-agent.yaml`.
 > prefer isolation — `docker agent run --worktree` runs it on an isolated git
 > worktree, keeping its changes off your checkout (a worktree with work, or
 > from a non-interactive run, is kept for inspection per the normal cleanup
-> rules). `docker agent run --sandbox` does not automatically carry the
-> `claude` CLI or its login into the sandbox, so it cannot isolate the
-> harness unless the sandbox image is separately provisioned and
-> authenticated.
+> rules). For VM isolation with [Docker Sandboxes](../../configuration/sandbox/index.md),
+> use a kit that provides the `claude` CLI and configure authentication inside
+> the sandbox.
 
 #### Questions and plan approval
 

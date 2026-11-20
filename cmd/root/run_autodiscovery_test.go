@@ -93,20 +93,6 @@ func TestDiscoverRunAgentArgs(t *testing.T) {
 		assert.False(t, discovered)
 	})
 
-	t.Run("discovered config participates in sandbox default resolution", func(t *testing.T) {
-		t.Chdir(t.TempDir())
-		require.NoError(t, os.WriteFile("docker-agent.yaml",
-			[]byte("runtime:\n  sandbox: true\nagents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n"),
-			0o644))
-
-		args, discovered := (&runExecFlags{}).discoverRunAgentArgs(nil)
-		got, cfg := resolveSandboxDefault(t.Context(), args[0], false, nil)
-
-		assert.True(t, discovered)
-		assert.True(t, got)
-		assert.NotNil(t, cfg)
-	})
-
 	t.Run("stat errors shadow later candidates", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("self-referential symlink behavior is platform-specific")

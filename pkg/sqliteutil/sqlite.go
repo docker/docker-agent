@@ -62,8 +62,6 @@ func OpenDB(ctx context.Context, path string) (*sql.DB, error) {
 // forwards correctly; it also folds any leftover -wal file back into the main
 // database on open.
 func journalMode() string {
-	// Mirrors environment.InSandbox; checked directly to keep sqliteutil
-	// dependency-free.
 	if os.Getenv("SANDBOX_VM_ID") != "" {
 		return "DELETE"
 	}

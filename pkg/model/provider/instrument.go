@@ -170,7 +170,7 @@ func (t *tracedChat) rerankSpan(ctx context.Context, docCount int) (context.Cont
 	}
 	// Carry `gen_ai.conversation.id` from baggage like every other
 	// span helper in the branch. The chat / embedding / retrieval /
-	// fallback / sandbox / MCP starters all do this; rerank was the
+	// fallback and MCP starters all do this; rerank was the
 	// odd one out, leaving rerank latency unattributable in
 	// per-conversation dashboards.
 	if convID := genai.ConversationIDFromContext(ctx); convID != "" {

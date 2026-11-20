@@ -126,7 +126,7 @@ Fork skills inherit the parent's model and tools, with `allowed-tools` able to
 restrict inherited tools. Symlinks and other non-regular entries inside selected
 skill directories are rejected; Git submodules are not fetched.
 
-In sandbox mode, GitHub sources are fetched inside the VM rather than staged as
+In Docker Sandboxes, GitHub sources are fetched inside the VM rather than staged as
 local skills. Permit network access to `api.github.com` and `codeload.github.com`
 and make any optional token available through the sandbox's environment provider.
 
@@ -164,7 +164,7 @@ agents:
       - type: filesystem
 ```
 
-Inline skills carry their body in the config itself, so they need no `SKILL.md` file and require no filesystem source. They are **always exposed** — the name filter only applies to file- and URL-based skills. An inline skill also **takes precedence** over a discovered skill of the same name: the config is explicit, whereas local skills are picked up from whatever happens to sit in the [search paths](#search-paths). The shadowed skill is dropped and a warning is logged at startup. Because inline skills travel inside the agent YAML, they also work in `--sandbox` mode without any kit staging, and they can be shared with the agent via `share push`.
+Inline skills carry their body in the config itself, so they need no `SKILL.md` file and require no filesystem source. They are **always exposed** — the name filter only applies to file- and URL-based skills. An inline skill also **takes precedence** over a discovered skill of the same name: the config is explicit, whereas local skills are picked up from whatever happens to sit in the [search paths](#search-paths). The shadowed skill is dropped and a warning is logged at startup. Because inline skills travel inside the agent YAML, they also work inside a sandbox without a separate skill mount, and they can be shared with the agent via `share push`.
 
 ### Inline Skill Fields
 
@@ -449,9 +449,9 @@ When multiple skills share the same name:
 4. At the same directory level, `.agents/skills/` overrides `.github/skills/`
 5. An [inline skill](#inline-skills) overrides any discovered skill of the same name
 
-## Skills in Sandbox Mode
+## Skills in Docker Sandboxes
 
-When you run an agent with [`--sandbox`](../../configuration/sandbox/index.md), the sandbox VM has its own filesystem with no access to your host's skill directories. Docker Agent handles this transparently via the [auto-kit](../../configuration/sandbox/index.md#auto-kit): every discovered local skill is staged into a per-agent kit on the host, run through best-effort secret redaction (see the [auto-kit](../../configuration/sandbox/index.md#secret-redaction) docs), and bind-mounted read-only into the sandbox so the agent sees the same skills inside the VM as on the host. No configuration is required — use `--no-kit` only if you explicitly want to run the sandbox without any host skills.
+When Docker Agent runs in a [sandbox](../../configuration/sandbox/index.md), local skill discovery uses the workspace and home directory it sees inside the VM. Project skills work from a shared workspace. Use a Sandbox Kit to provide shared skills from outside the project; Docker Agent does not stage them from the host.
 
 ## Creating a Skill
 

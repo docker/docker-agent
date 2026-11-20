@@ -198,7 +198,6 @@ We collect anonymous usage data to help improve docker agent. To disable:
 		newDebugCmd(),
 		newAliasCmd(),
 		newPlansCmd(),
-		newSandboxCmd(),
 		newBoardCmd(),
 		newServeCmd(),
 		newAskpassCmd(),

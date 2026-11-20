@@ -97,7 +97,6 @@ agents:
 
 func TestWorkspacePreservesToolAndSkillFilters(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "dummy")
-	t.Setenv("DOCKER_AGENT_KIT_DIR", "")
 	originalDir, workspaceDir := t.TempDir(), t.TempDir()
 	for _, dir := range []string{originalDir, workspaceDir} {
 		for _, name := range []string{"allowed", "excluded"} {

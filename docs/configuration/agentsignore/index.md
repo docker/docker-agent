@@ -79,7 +79,7 @@ They are separate, and they do different amounts of work.
 >
 > An agent with the [`shell`](../../tools/shell/index.md) toolset can still run `cat secrets.env`, because the shell runs commands the toolset never inspects. The same applies to any toolset that reaches the filesystem on its own, such as [`lsp`](../../tools/lsp/index.md).
 >
-> Treat `.agentsignore` as a strong default that keeps sensitive files out of the agent's view and context — not as a boundary against an agent actively trying to reach them. When you need a real boundary, combine it with [permissions](../permissions/index.md) that restrict `shell`, or run in [sandbox mode](../sandbox/index.md).
+> Treat `.agentsignore` as a strong default that keeps sensitive files out of the agent's view and context — not as a boundary against an agent actively trying to reach them. When you need a real boundary, combine it with [permissions](../permissions/index.md) that restrict `shell`, or run with [Docker Sandboxes](../sandbox/index.md).
 
 The derived permission rules are best-effort for the same reason: permission patterns match the argument string as the model wrote it, without resolving it first, so `./secrets.env` can slip past a rule written for `secrets.env`. The filesystem toolset's own check resolves paths first and is the part that actually enforces.
 

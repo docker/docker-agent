@@ -84,7 +84,7 @@ The background jobs toolset exposes five tools:
 > [!WARNING]
 > **Safety**
 >
-> Background jobs run shell commands with the same access as the agent process. Stop servers and watchers when they are no longer needed, and use [Sandbox Mode](../../configuration/sandbox/index.md) for additional isolation.
+> Background jobs run shell commands with the same access as the agent process. Stop servers and watchers when they are no longer needed, and use [Docker Sandboxes](../../configuration/sandbox/index.md) for additional isolation.
 
 ### Command classification
 

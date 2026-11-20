@@ -77,7 +77,6 @@ Examples that wire up one of the toolsets shipped with docker-agent
 | [`typo.yaml`](typo.yaml) | Restricts a `filesystem` toolset to a subset of tools and exposes them as a `fix` command. |
 | [`toolset-working-dir.yaml`](toolset-working-dir.yaml) | Setting a `working_dir` for MCP/LSP toolsets. |
 | [`post_edit.yaml`](post_edit.yaml) | Auto-runs `gofmt -w` on every `.go` file the agent edits via `filesystem.post_edit`. |
-| [`sandbox_agent.yaml`](sandbox_agent.yaml) | Same shell-based agent run with `--sandbox` to confine commands to a Docker container. |
 | [`deferred.yaml`](deferred.yaml) | Wraps the agent in a deferred-execution container (`runtime: deferred`). |
 
 ### Calculator, random choices, and date/time
@@ -264,7 +263,6 @@ and `opencode-zen` remain accepted for existing configurations.
 | [`llm_judge.yaml`](llm_judge.yaml) | Layered defense: deterministic permissions + an LLM-as-judge `pre_tool_use` hook + user prompts. |
 | [`redact_secrets.yaml`](redact_secrets.yaml) | Single-flag (`redact_secrets: true`) scrubbing of detected secrets in args, chat content, and tool output. |
 | [`redact_secrets_hooks.yaml`](redact_secrets_hooks.yaml) | The same scrubbing wired manually as three hooks. |
-| [`sandbox_agent.yaml`](sandbox_agent.yaml) | Running tools inside a Docker sandbox via `docker agent run --sandbox`. |
 | [`filesystem_allow_deny.yaml`](filesystem_allow_deny.yaml) | Path-level allow/deny for the filesystem toolset. |
 | [`readonly.yaml`](readonly.yaml) | `readonly: true` on a toolset or agent keeps only read-only tools (mutating tools are filtered out). |
 

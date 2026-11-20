@@ -2052,17 +2052,6 @@
         "stream_idle_timeout": {
           "$ref": "#/definitions/StreamIdleTimeout"
         },
-        "sandbox": {
-          "type": "boolean",
-          "description": "When true, run the agent inside a Docker sandbox by default \u2014 equivalent to passing --sandbox on the command line. An explicit --sandbox=false on the CLI still wins."
-        },
-        "network_allowlist": {
-          "type": "array",
-          "description": "Hosts to add to the sandbox's default-deny network proxy when this agent runs in a sandbox. Each entry is a hostname with an optional ':port' suffix (e.g. 'api.example.com', 'registry.npmjs.org:443'). Unioned with the gateway and tool-install hosts the runner already opens automatically. Use this for hosts the auto-installer can't infer (custom MCP endpoints, third-party APIs, registries not covered by the aqua resolver) instead of relying on the wider fallback host set.",
-          "items": {
-            "type": "string"
-          }
-        },
         "safety": {
           "type": "string",
           "enum": [

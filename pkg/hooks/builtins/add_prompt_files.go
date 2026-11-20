@@ -12,7 +12,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/promptfiles"
-	"github.com/docker/docker-agent/pkg/skills"
 )
 
 // AddPromptFiles is the registered name of the add_prompt_files builtin.
@@ -65,7 +64,7 @@ func addPromptFiles(ctx context.Context, in *hooks.Input, args []string) (*hooks
 	var sources []hooks.InstructionContext
 	var loaded []string
 	for _, name := range names {
-		paths, err := promptfiles.PathsWithError(in.Cwd, home, os.Getenv(skills.KitDirEnv), name)
+		paths, err := promptfiles.PathsWithError(in.Cwd, home, name)
 		if strict && err != nil {
 			slog.WarnContext(ctx, "discovering prompt files", "error", err)
 			return instructionContextOutput(hooks.InstructionContext{Group: promptfiles.InstructionGroup, Unavailable: true, SetMarker: true}), nil

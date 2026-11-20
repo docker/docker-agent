@@ -5852,17 +5852,8 @@
         "stream_idle_timeout": {
           "$ref": "#/$defs/StreamIdleTimeout"
         },
-        "sandbox": {
-          "type": "boolean"
-        },
         "safety": {
           "$ref": "#/$defs/SafetyMode"
-        },
-        "network_allowlist": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
         }
       },
       "$comment": "pkg/config/latest/types.go RuntimeDefaults"

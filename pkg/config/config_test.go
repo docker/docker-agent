@@ -1315,3 +1315,25 @@ agents:
 	assert.Contains(t, err.Error(), "supported by config version 10")
 	assert.Contains(t, err.Error(), "currently 2")
 }
+
+func TestLoadRemovedSandboxDefaults(t *testing.T) {
+	t.Parallel()
+
+	const agent = `agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`
+	for _, version := range []string{"", "version: \"9\"\n", "version: \"15\"\n"} {
+		_, err := Load(t.Context(), NewBytesSource("test.yaml", []byte(version+`runtime:
+  sandbox: true
+`+agent)), WithVersions(legacy.Register))
+		require.Error(t, err, "an agent that requested isolation must not silently run on the host")
+		assert.Contains(t, err.Error(), "sandbox")
+	}
+
+	_, err := Load(t.Context(), NewBytesSource("test.yaml", []byte(`runtime:
+  network_allowlist: [example.com]
+`+agent)), WithVersions(legacy.Register))
+	require.ErrorContains(t, err, `unknown field "network_allowlist"`)
+}
