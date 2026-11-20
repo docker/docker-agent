@@ -13,7 +13,9 @@ do not validate every call or answer against the schema offered to the model.
   decline or cancel); non-object content is omitted. Its JSON uses Go's HTML
   escaping, float64 number spelling and sorted keys.
 - `get_datetime` uses the IANA database bundled with Go for named zones,
-  including historical abbreviations and future DST rules. `Local` uses Intl
+  including future DST rules. History before 2020 is not shipped: the tool
+  only formats the current time, and an earlier clock is formatted with the
+  rules in force since then. `Local` uses Intl
   to select the name, falling back to the browser's offset if necessary.
   Stored memory and session timestamps instead use the runtime's fixed local
   offset. The clock fixtures advance wall time between provider requests.

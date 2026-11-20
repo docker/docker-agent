@@ -9,6 +9,9 @@ import zipfile
 from pathlib import Path
 
 
+CUTOFF = 1577836800  # 2020-01-01T00:00:00Z
+
+
 def tzif(data):
     # Skip the TZif v1 block. Go ships slim v2/v3 files with 64-bit transitions.
     def counts(at):
@@ -74,6 +77,10 @@ def generate():
     states, steps, rules, zones = {}, {}, {}, []
     for data, names in aliases.items():
         initial, transitions, tail = tzif(data)
+        # The clock tools only format the current time: history before CUTOFF costs size for nothing.
+        transitions = list(transitions)
+        initial = next((st for t, st in reversed(transitions) if t <= CUTOFF), initial)
+        transitions = [(t, st) for t, st in transitions if t > CUTOFF]
         first = index(states, initial)
         # Each distinct (interval, state) pair gets a shared 16-bit index.
         packed = bytearray()

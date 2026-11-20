@@ -1284,8 +1284,7 @@ agents:`)
     ['memoryMutations', 'memory', [remember, tool('update_memory', {id: memoryID, memory: 'changed'}), tool('get_memories', {}),
       tool('delete_memory', {id: memoryID}), tool('delete_memory', {id: memoryID}), tool('update_memory', {id: memoryID}), tool('get_memories', {})]],
     ['memoryUnixNanoWrap', 'memory', [remember, tool('get_memories', {})], Date.UTC(2400, 10, 3)],
-    ...[['clockHistorical', Date.UTC(1900, 6, 1), ['Europe/Paris', 'Europe/Dublin', 'Antarctica/Troll', 'Asia/Jerusalem']],
-      ['clockSeasonal', memStart, ['America/Vancouver', 'Canada/Mountain', 'Local', 'Asia/Kathmandu']],
+    ...[['clockSeasonal', memStart, ['America/Vancouver', 'Canada/Mountain', 'Local', 'Asia/Kathmandu']],
       ['clockFuture', Date.UTC(2050, 2, 25), ['America/Vancouver', 'Asia/Hebron', 'Europe/Paris', 'Europe/Dublin', 'Pacific/Chatham']],
     ].map(([name, start, zones]) => [name, 'datetime', zones.map(timezone => tool('get_datetime', {format: 'Mon _2 15:04:05 MST Z07:00:00', timezone})), start]),
   ]) await datedReplay(name, local([kind]), [...replies, answer], approve, undefined, start);
