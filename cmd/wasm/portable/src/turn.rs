@@ -432,7 +432,8 @@ impl Catalog {
             }
         }
         let mut instructions = agent.team_prompts.clone();
-        if !agent.instruction.is_empty() {
+        // Like a blank prompt, a whitespace-only instruction never reaches a request.
+        if !agent.instruction.trim().is_empty() {
             instructions.push(agent.instruction.clone());
         }
         for (index, spec) in agent.toolsets.iter().enumerate() {
@@ -546,7 +547,7 @@ impl Catalog {
             // Like Go, a filtered toolset keeps its instructions; one restricted mode hides does not.
             let custom = !spec.instruction.is_empty()
                 && !spec.instruction.contains("{ORIGINAL_INSTRUCTIONS}");
-            if !text.is_empty() && (!withheld || custom) {
+            if !text.trim().is_empty() && (!withheld || custom) {
                 instructions.push(text);
             }
         }
@@ -731,7 +732,16 @@ impl Conversation {
             atomic_host: None,
             serial_batch: false,
         });
-        self.messages.push(json!({"role":"user", "content":prompt}));
+        // Go keeps a whitespace-only prompt out of every request. Under a history limit it
+        // still counts as an item, and `project` drops it after trimming.
+        if !prompt.trim().is_empty()
+            || self
+                .frame
+                .acting(&self.profile.spec.limits)
+                .limits_history()
+        {
+            self.messages.push(json!({"role":"user", "content":prompt}));
+        }
         self.prepare_request()
     }
 
@@ -883,16 +893,26 @@ impl Conversation {
             .acting(&self.profile.spec.limits)
             .project(&mut messages, &self.profile.spec.hooks)?;
         let model = self.attempt_model(self.attempt.current);
-        if let Some(instruction) = &model.schema_instruction {
+        if model.schema_instruction.is_some() {
             // Go normalizes blank messages before selecting the leading role.
             messages.retain(|m| {
                 m["role"] == "tool"
                     || !m["tool_calls"].is_null()
                     || m["content"].as_str().is_none_or(|s| !s.trim().is_empty())
             });
-            if messages.is_empty() {
+        }
+        if messages.is_empty() {
+            if model.schema_instruction.is_some() {
                 return Err("Claude schema instruction needs a nonempty request".into());
             }
+            // Go's provider refuses an empty request before any I/O, on each model of a chain.
+            let scope = match self.profile.spec.models.len() {
+                1 => "model failed",
+                _ => "all models failed",
+            };
+            return Err(format!("{scope}: at least one message is required"));
+        }
+        if let Some(instruction) = &model.schema_instruction {
             // Only the outgoing view is amended, after hooks and before either wire protocol.
             if let Some(first) = messages.first_mut().filter(|m| m["role"] == "system") {
                 let Value::String(text) = &mut first["content"] else {

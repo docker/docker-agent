@@ -1438,6 +1438,23 @@ agents:`)
     ['emptiedInstructions', narrowed('{type: memory, tools: [nope]}'), [tool('think', {thought: 'x'})]],
     ['filteredCustomInstructions', narrowed('{type: memory, tools: [get_memories], instruction: "Mine. {ORIGINAL_INSTRUCTIONS} End."}'), [tool('get_memories', {})]],
   ]) tests[name] = await replay(api, name, yaml, [...replies, answer], approve);
+  // Go drops a whitespace-only message from each request and refuses a request left empty.
+  const sending = (...prompts) => async ({api, options, record, trace}) => {
+    const s = await api.createSession(options, record);
+    try { for (const prompt of prompts) trace.results.push(await s.send(prompt).catch(e => `error: ${e.message}`)); } finally { await s.close(); }
+  };
+  const unprompted = config.replace(", instruction: 'Hello ${env.WHO}'", '');
+  for (const [name, yaml, replies, prompts, endpoint] of [
+    ['blankPrompt', config, [answer, answer], ['', 'two']],
+    ['blankFollowUp', config, [answer, answer], ['one', ' \u00a0\u3000\n']],
+    ['blankPromptWithTool', thinks, [tool('think', {thought: 'x'}), answer], [' ']],
+    ['blankPromptResponses', plainResponses, [text], [''], '/v1/responses'],
+    ['blankInstruction', config.replace("'Hello ${env.WHO}'", "'  '"), [answer], ['hi']],
+    ['emptyRequest', unprompted, [answer], ['', 'two']],
+  ]) tests[name] = await replay(api, name, yaml, replies, sending(...prompts), endpoint);
+  tests.blankChatPrompt = await replay(api, 'blankChatPrompt', config, [answer], async ({api, options, record, trace}) => {
+    trace.results.push(await api.chat({...options, messages: [{role: 'user', content: 'a'}, {role: 'assistant', content: 'ok'}, {role: 'user', content: ''}]}, record));
+  });
   // Argument conditions see what Go's map[string]any holds: nothing unless the arguments are an object.
   const declining = answering({decision: 'reject', reason: 'no'});
   const noBad = {deny: ['think:thought=bad*']}, safeIds = {allow: ['delete_memory:id=safe*']};
