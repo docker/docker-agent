@@ -219,7 +219,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       let runError, roundContext;
       try {
         signal.throwIfAborted();
-        let request = call('begin', { session, prompt, id: crypto.randomUUID(), now: performance.now() });
+        let request = call('begin', { session, prompt, visible_agent: visibleAgent, id: crypto.randomUUID(), now: performance.now() });
         if (request.event) emit(request.event);
         for (;;) {
           signal.throwIfAborted();
@@ -311,7 +311,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
         }
       } catch (e) {
         if (signal.aborted) {
-          call('interrupt', { session, visible_agent: visibleAgent });
+          call('interrupt', { session });
           throw new Error('chat aborted');
         }
         call('rollback', { session });

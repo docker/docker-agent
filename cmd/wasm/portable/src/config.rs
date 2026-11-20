@@ -450,6 +450,7 @@ struct Provider {
 pub struct Selected {
     pub output_tool: Option<OutputTool>,
     pub separate_model_attempts: bool,
+    pub checkpoint_tools: bool,
     pub selected_fallback_chain: bool,
     pub tool_policy: Policy,
     pub name: String,
@@ -1286,12 +1287,15 @@ fn resolve(
         }
         Some(target)
     };
+    let checkpoint_tools = bounded_fallback || bounded_output || selected_fallback_chain;
+    let routed_rounds = (team || !picker.choices.is_empty()) && !models[0].compaction.enabled();
     Ok(Selected {
         limits: a.limits,
         tool_models,
         summary_model,
         output_tool,
-        separate_model_attempts: bounded_fallback || bounded_output || selected_fallback_chain,
+        separate_model_attempts: checkpoint_tools || routed_rounds,
+        checkpoint_tools,
         selected_fallback_chain,
         hooks,
         tool_policy: Policy {
@@ -1308,7 +1312,12 @@ fn resolve(
         },
         picker,
         models,
-        policy: a.fallback.policy(),
+        // Go only loads fallback settings alongside a model chain.
+        policy: if chain {
+            a.fallback.policy()
+        } else {
+            Default::default()
+        },
         instruction: instruction(&a.instruction, env),
         name: name.into(),
         team_prompts,

@@ -1578,6 +1578,59 @@ agents:`)
         }, path);
     }
   }
+  const guardedTeam = limitedTeam('max_consecutive_tool_calls: 2,', '');
+  const roster = limitedTrio('sub_agents: [second, first, second], handoffs: [first, second],', '', '')
+    .replace('description: First', 'description: "Line one\\n${env.WHO} | 🌍"').replace('description: Second', 'description: ""');
+  const nestedNames = ['root', ...Array.from({length: 11}, (_, i) => `child${i + 1}`)];
+  const nestedTeam = config.slice(0, config.indexOf('agents:')) + 'agents:\n' + nestedNames.map((name, i) =>
+    `  ${name}: {model: local/${name}${nestedNames[i + 1] ? `, sub_agents: [${nestedNames[i + 1]}]` : ''}}`).join('\n');
+  const usageTeam = limitedTrio('sub_agents: [first],', 'sub_agents: [second],', '')
+    .replaceAll('toolsets: [', 'session_compaction: false, toolsets: [')
+    .replace('agents:', 'models: {first: {provider: local, model: first, context_window: 8192}, second: {provider: local, model: second, context_window: 4096}}\nagents:')
+    .replace('model: local/first', 'model: first').replace('model: local/second', 'model: second');
+  const pickModel = model => tool('change_model', {model});
+  const revert = tool('revert_model', {});
+  const pickerSet = '{type: model_picker, models: [careful, local/fast, local/test]}';
+  const teamPicker = limitedTeam('', 'handoffs: [root],').replaceAll('toolsets: [', `toolsets: [${pickerSet}, `)
+    .replace('agents:', 'models: {careful: {provider: local, model: precise, temperature: 0.2, max_tokens: 33}}\nagents:');
+  const standby = 'fallback: {models: [local/backup], retries: -1, cooldown: 1h},';
+  const invalidModel = [{error: {message: 'invalid model'}}], unavailable = [{error: {message: 'service unavailable'}}];
+  for (const [name, yaml, replies, drive = turns] of [
+    ['transferDepthBoundary', nestedTeam, [...nestedNames.slice(1).map(n => delegate(n)), ...nestedNames.map(() => answer)]],
+    ['teamUsageByFrame', usageTeam, [delegate('first'), delegate('second'), answer, answer, answer, answer].map((step, i) =>
+      [...step.slice(0, -1), {choices: [], usage: {prompt_tokens: 10 * (i + 1), completion_tokens: i + 1, total_tokens: 11 * (i + 1),
+        prompt_tokens_details: {cached_tokens: 3 * (i + 1)}}}])],
+    ['transferNestedCycle', team.replace('model: local/worker', 'model: local/worker, sub_agents: [root, helper]'),
+      [delegate(), delegate('root'), delegate(), answer, answer, answer]],
+    ['teamRosterOrder', roster, [delegate('unknown'), pass('unknown'), answer, answer]],
+    ['transferEmptyFields', limitedTeam('', ''), [tool('transfer_task', {agent: 'helper', task: '', expected_output: ' '}),
+      says({reasoning_content: 'only reasoning'}), tool('transfer_task', {agent: 'helper'}), ponder('fresh'), answer, answer, answer]],
+    ['transferLongReply', team, [delegate(), says({content: '0123456789'.repeat(6000)}), answer, answer]],
+    ['transferChildQuestion', team.replace('model: local/worker', 'model: local/worker, toolsets: [{type: user_prompt}]'),
+      [delegate(), tool('user_prompt', {message: 'Which?'}), answer, answer], approve],
+    ['teamNonRootEntry', limitedTrio('handoffs: [first],', 'handoffs: [second],', 'handoffs: [root],'),
+      [ponder('starting here'), pass('second'), pass('root'), pass('first'), answer, answer],
+      ctx => turns({...ctx, options: {...ctx.options, agentName: 'first'}})],
+    ['transferRepetition', guardedTeam, [delegate(), answer, delegate(), answer, answer], rejectsThenRecovers],
+    ['transferBreaksRepetition', guardedTeam, [ponder('same'), delegate(), answer, ponder('same'), answer, answer]],
+    ['handoffDeniedRepetition', guardedTeam, [pass('ghost'), pass('ghost'), answer], rejectsThenRecovers],
+    ['handoffGuardBeforeCap', limitedTeam('max_consecutive_tool_calls: 1, max_iterations: 1,', ''), [pass(), answer], rejectsThenRecovers],
+    ['pickerReferences', teamPicker, [revert, pickModel('local/test'), pickModel('careful'), pickModel('careful'),
+      pickModel('a\u0007\u200b "🌙"'), answer, pickModel('local/fast'), revert, answer]],
+    ['pickerAcrossHandoff', teamPicker, [pickModel('careful'), pass(), pickModel('local/fast'), pass('root'), ponder('back'), answer,
+      pass(), revert, answer]],
+    ['pickerAcrossTransfers', teamPicker, [pickModel('local/fast'), delegate(), pickModel('careful'), answer, delegate(),
+      ponder('fresh task'), answer, answer, delegate(), revert, answer, answer]],
+    ['pickerContinuationRetry', picker.replace('model: local/test,', 'model: local/test, fallback: {retries: -1},'), [pickModel('careful'), unavailable, answer, answer]],
+    ['pickerOverflowDisabled', picker.replace('model: local/test,', 'model: local/test, session_compaction: false,'),
+      [pickModel('careful'), [{error: {message: 'prompt too long'}}], answer], rejectsThenRecovers],
+    ['handoffEntryFallback', limitedTeam('', standby), [pass(), invalidModel, answer, answer]],
+    ['handoffHookRetry', handoffOnly(limitedTeam('', callLimit(2))), [pass(), unavailable, answer, answer]],
+    ['forcedEntryFallback', limitedPipeline('', standby), [answer, invalidModel, answer, answer]],
+    ['transferCallerFallback', limitedTeam(standby, ''), [delegate(), answer, invalidModel, answer, answer]],
+    ['transferChildToolFallback', limitedTeam('', standby), [delegate(), ponder('once'), invalidModel, answer, answer, answer]],
+    ['transferTransientFallback', limitedTeam('', standby), [delegate(), unavailable, ponder('once'), answer, answer, answer]],
+  ]) tests[name] = await replay(api, name, yaml, replies, drive);
   // An api tool passes Go's strict-mode check, so Responses marks it strict.
   for (const [name, api_config] of [
     ['responsesApiStrict', {name: 'greet', method: 'GET', endpoint: fixture + '/greet', instruction: 'Greets', args: {who: {type: 'string'}}, required: ['who']}],

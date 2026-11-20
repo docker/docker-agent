@@ -50,7 +50,7 @@ function checkRoute({ requests }, model, key, responses = false) {
   }
 }
 
-test('child retries only its first request; each frame resumes its own pinned target and tools', async t => {
+test('each frame resumes its own pinned target and tools after failover', async t => {
   const transfer = call('transfer_task', { agent: 'helper', task: 'count' });
   const root = await endpoint(t, 401);
   const rootBackup = await endpoint(t, transfer, text('done'), transfer, text('again'));

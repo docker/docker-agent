@@ -105,8 +105,6 @@ pub struct Session {
     summary_attempt: fallback::Attempt,
     switches: usize,
     turn_id: String,
-    // The next send announces an agent change the interrupted or capped run never projected.
-    unannounced: Option<Value>,
 }
 
 impl Session {
@@ -223,7 +221,6 @@ impl Session {
             summary_attempt: Default::default(),
             switches: 0,
             turn_id: String::new(),
-            unannounced: None,
         })
     }
 
@@ -253,7 +250,13 @@ impl Session {
         Ok(&mut self.conversation)
     }
 
-    pub fn begin(&mut self, prompt: &str, id: &str, now: f64) -> Result<Value, String> {
+    pub fn begin(
+        &mut self,
+        prompt: &str,
+        id: &str,
+        now: f64,
+        visible_agent: Option<&str>,
+    ) -> Result<Value, String> {
         self.conversation.attempt = self.conversation.profile.spec.policy.begin(now);
         let body = self.conversation.begin(prompt, id)?;
         self.replayable = !self.conversation.summarizing()
@@ -262,8 +265,10 @@ impl Session {
         self.switches = 0;
         self.turn_id = id.into();
         let mut request = self.request(body)?;
-        if let Some(event) = self.unannounced.take() {
-            request["event"] = event;
+        // A cap, interrupt or error can end a run before its agent switch is projected.
+        let agent = &self.conversation.profile.spec.name;
+        if let Some(from) = visible_agent.filter(|&from| from != agent) {
+            request["event"] = handoff(from, agent);
         }
         Ok(request)
     }
@@ -488,13 +493,7 @@ impl Session {
         let attempt = &mut self.conversation.attempt;
         let previous = attempt.current;
         let decision = if self.replayable {
-            // Go loads fallback.retries only when it loads fallback.models.
-            let policy = if http_status.is_some() && spec.models.len() == 1 {
-                &Default::default()
-            } else {
-                &spec.policy
-            };
-            attempt.fail(policy, transient, spec.models.len())
+            attempt.fail(&spec.policy, transient, spec.models.len())
         } else {
             fallback::Decision::Stop
         };
@@ -509,7 +508,7 @@ impl Session {
                 } else {
                     "model failed"
                 };
-                let message = if http_status.is_some() || spec.selected_fallback_chain {
+                let message = if http_status.is_some() || spec.separate_model_attempts {
                     fallback::model_error(prefix, overflow, &reason)
                 } else {
                     format!("{prefix}: {reason}")
@@ -527,13 +526,22 @@ impl Session {
     }
 
     fn stop(&mut self, message: String) -> Result<Value, String> {
+        self.fail_run()?;
+        Err(message)
+    }
+
+    fn fail_run(&mut self) -> Result<(), String> {
         // Keep completed caller tools without copying a child's diagnostics into its history.
-        while let Some(mut parent) = self.parents.pop() {
-            parent.complete_switch("transfer_task", "Delegated task failed".into(), true)?;
-            self.conversation = parent;
+        if let Some(root) = self.parents.drain(..).next() {
+            self.conversation = root;
+            self.conversation.complete_switch(
+                "transfer_task",
+                "Delegated task failed".into(),
+                true,
+            )?;
         }
         self.conversation.fail();
-        Err(message)
+        Ok(())
     }
 
     fn begin_model_attempt(&mut self, now: f64) {
@@ -579,10 +587,8 @@ impl Session {
             let profile = self.agents[&target].clone();
             let note=format!("The agent {from} finished its response and the conversation was automatically handed off to you. Your available handoff agents and tools are specified in the system messages that follow. Only use those capabilities - do not attempt to use tools or hand off to agents that you see in the conversation history from previous agents, as those were available to different agents with different capabilities. Look at the conversation history for context, continue the work from where the previous agent stopped, and complete your part of the task.");
             let switched = handoff(from, &target);
-            self.conversation.attempt = profile.spec.policy.begin(now);
             self.conversation.forced(profile, note);
-            self.announce(switched, &mut events);
-            return Ok(self.conversation.resume(events));
+            return Ok(self.conversation.resume(events, Some(switched)));
         }
         let (target, allowed, name, action, list) = match &switch {
             Switch::Forced(_) => unreachable!(),
@@ -616,14 +622,14 @@ impl Session {
             Some(format!("delegation cycle detected: {path}. Agent {target} is already part of the active delegation chain; complete the task directly or delegate to a different agent."))
         } else if name == "transfer_task" && self.parents.len() >= MAX_DEPTH {
             Some(format!(
-                "delegation depth limit exceeded: maximum depth is {MAX_DEPTH}"
+                "delegation depth limit exceeded: agent {from} is at delegation depth {MAX_DEPTH} and delegating to {target} would reach depth {}, exceeding the maximum of {MAX_DEPTH}. Complete the task directly instead of delegating further.", MAX_DEPTH + 1
             ))
         } else {
             None
         };
         if let Some(reason) = denial {
             events.push(self.conversation.complete_switch(name, reason, true)?);
-            return Ok(self.conversation.resume(events));
+            return Ok(self.conversation.resume(events, None));
         }
         if self.switches == MAX_SWITCHES {
             return Err("team switch limit reached".into());
@@ -637,17 +643,13 @@ impl Session {
                 let note = handoff_note(from);
                 let changed = &agent != from;
                 events.push(self.conversation.complete_switch(name, note, false)?);
-                if changed {
-                    self.conversation.attempt = profile.spec.policy.begin(now);
-                }
                 self.conversation.hand_off(profile);
-                if changed {
-                    self.announce(switched, &mut events);
-                }
-                Ok(self.conversation.resume(events))
+                Ok(self
+                    .conversation
+                    .resume(events, changed.then_some(switched)))
             }
             Switch::Transfer(task) => {
-                let mut child = Conversation::open(profile, vec![task.system_message()]);
+                let mut child = self.conversation.child(profile, task.system_message());
                 child.attempt = child.profile.spec.policy.begin(now);
                 self.replayable = true; // Only the new child request can be retried.
                 let body = child.begin(
@@ -659,15 +661,6 @@ impl Session {
                 events.push(switched);
                 Ok(json!({"events":events, "request":body}))
             }
-        }
-    }
-
-    // Go names the acting agent after its cap check; a stopped root run does so on its next send.
-    fn announce(&mut self, switched: Value, events: &mut Vec<Value>) {
-        if !self.conversation.at_cap() {
-            events.push(switched);
-        } else if self.parents.is_empty() {
-            self.unannounced = Some(switched);
         }
     }
 
@@ -698,7 +691,10 @@ impl Session {
                 false,
             )?);
             self.conversation.delegated(reply);
-            next = self.conversation.resume(events);
+            next = self.conversation.resume(events, None);
+        }
+        if next.get("error").is_some() && !self.parents.is_empty() {
+            self.fail_run()?;
         }
         if next
             .as_object_mut()
@@ -715,20 +711,11 @@ impl Session {
 
     pub fn restart(&mut self, stamp: session_context::Stamp) -> Result<(), String> {
         self.rollback();
-        self.unannounced = None;
-        self.conversation.restart(stamp)?;
-        for profile in self.agents.values() {
-            profile.clear_grants();
-        }
-        Ok(())
+        self.conversation.restart(stamp)
     }
 
-    pub fn interrupt(&mut self, visible_agent: Option<String>) -> Result<(), String> {
+    pub fn interrupt(&mut self) -> Result<(), String> {
         self.unwind();
-        let agent = &self.conversation.profile.spec.name;
-        if let Some(from) = visible_agent.filter(|from| from != agent) {
-            self.unannounced = Some(handoff(&from, agent));
-        }
         self.conversation.interrupt()
     }
 
