@@ -106,14 +106,6 @@ impl RoutedSeed {
         }
     }
 
-    pub fn last_reply(&self) -> Option<String> {
-        self.source
-            .iter()
-            .rev()
-            .find(|m| m["role"] == "assistant")
-            .map(|m| m["content"].as_str().unwrap_or_default().trim().into())
-    }
-
     pub fn for_target(&mut self, projection: Projection) -> Result<&[Value], String> {
         if projection != self.projection {
             self.messages = history(self.source.clone(), projection, true, self.redact_documents)?;
@@ -121,6 +113,23 @@ impl RoutedSeed {
         }
         Ok(&self.messages)
     }
+}
+
+// GetLastAssistantMessageContent reads stored messages, not the provider's multipart view.
+pub fn seed_reply(source: &[Value]) -> Option<String> {
+    source
+        .iter()
+        .rev()
+        .filter(|m| m["role"] == "assistant")
+        .find_map(|m| {
+            let content = m["content"].as_str().unwrap_or_default().trim();
+            (m["usage"].is_null()
+                || !content.is_empty()
+                || ["multi_content", "tool_calls"]
+                    .iter()
+                    .any(|key| m[*key].as_array().is_some_and(|a| !a.is_empty())))
+            .then(|| content.to_owned())
+        })
 }
 
 pub fn history(
@@ -539,6 +548,16 @@ fn redacted_envelope(
 
 const DELIMITER_REMOVED: &str = "[docker-agent: envelope delimiter removed]";
 
+// Go's case-insensitive ASCII tag regexp also matches the Kelvin sign.
+fn starts_with_tag(s: &str, tag: &str) -> bool {
+    let mut chars = s.chars();
+    tag.bytes().all(|b| {
+        chars
+            .next()
+            .is_some_and(|c| c.to_ascii_lowercase() == char::from(b) || (b == b'k' && c == 'K'))
+    })
+}
+
 fn envelope(name: &str, mime: &str, body: &str) -> String {
     let slug = format!("{name}-{mime}").to_ascii_lowercase();
     let slug = slug
@@ -552,10 +571,7 @@ fn envelope(name: &str, mime: &str, body: &str) -> String {
     while let Some((prefix, tail)) = rest.split_once('<') {
         out.push_str(prefix);
         let name = tail.trim_start_matches(|c: char| c == '/' || c.is_ascii_whitespace());
-        if name
-            .get(..tag.len())
-            .is_some_and(|s| s.eq_ignore_ascii_case(&tag))
-        {
+        if starts_with_tag(name, &tag) {
             // Defuse even nested/padded delimiters without interpreting other document markup.
             if let Some((_, suffix)) = name.split_once('>') {
                 out.push_str(DELIMITER_REMOVED);
@@ -723,6 +739,18 @@ mod tests {
         let body = "postgres://u:fixture</document-file-text-plain@host private>";
         let original = envelope("file", "text/plain", body);
         assert!(redacted_envelope("file", "text/plain", body, original).is_err());
+    }
+
+    #[test]
+    fn last_seed_reply_ignores_only_usage_records() {
+        let mut messages = vec![
+            json!({"role":"assistant", "content":" stored ", "multi_content":[{"type":"text","text":"shown"}]}),
+            json!({"role":"assistant","usage":{}, "reasoning_content":"ignored"}),
+        ];
+        assert_eq!(seed_reply(&messages).as_deref(), Some("stored"));
+        messages[1]["multi_content"] = json!([{"type":"text","text":" "}]);
+        assert_eq!(seed_reply(&messages).as_deref(), Some(""));
+        assert_eq!(seed_reply(&[]), None);
     }
 
     #[test]

@@ -127,11 +127,11 @@ impl OutputTool {
         let raw = if raw.trim().is_empty() { "{}" } else { raw };
         // JSON syntax only. This value visitor also rejects duplicate keys, including escaped aliases.
         let value: Instance = serde_json::from_str(raw).map_err(|e| {
-            if e.is_eof() {
-                "arguments are not valid JSON: unexpected end of JSON input".into()
-            } else {
-                format!("arguments are not valid JSON: {e}")
-            }
+            let reason = crate::go_json::syntax_error(raw)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| e.to_string());
+            format!("arguments are not valid JSON: {reason}")
         })?;
         self.schema
             .validate(&self.schema.root, &value, "")
@@ -404,17 +404,9 @@ impl Schema {
             return validate_union(keyword, branches.as_array().unwrap(), v, path);
         }
         let ty = s["type"].as_str().unwrap();
-        let bounds = |n: usize, min: &str, max: &str| {
-            if s[min].as_u64().is_some_and(|v| (n as u64) < v) {
-                Err(format!("{min}: length {n} is less than {}", s[min]))
-            } else if s[max].as_u64().is_some_and(|v| n as u64 > v) {
-                Err(format!("{max}: length {n} is greater than {}", s[max]))
-            } else {
-                Ok(())
-            }
-        };
         match (ty, v) {
             ("object", Instance::Mapping(m)) => {
+                let mut extras = Vec::new();
                 for (key, value) in m {
                     let key = key.as_str().expect("JSON key");
                     if let Some(child) = s["properties"].get(key) {
@@ -422,8 +414,14 @@ impl Schema {
                         self.validate(child, value, &path)
                             .map_err(|e| format!("validating {path}: {e}"))?;
                     } else if s["additionalProperties"] == false {
-                        return Err(format!("unexpected additional properties [{key:?}]"));
+                        extras.push(crate::go_json::quote(key));
                     }
+                }
+                if !extras.is_empty() {
+                    return Err(format!(
+                        "unexpected additional properties [{}]",
+                        extras.join(" ")
+                    ));
                 }
                 let missing: Vec<_> = s["required"]
                     .as_array()
@@ -431,7 +429,7 @@ impl Schema {
                     .flatten()
                     .filter_map(Value::as_str)
                     .filter(|k| !m.contains_key(*k))
-                    .map(|s| format!("{s:?}"))
+                    .map(crate::go_json::quote)
                     .collect();
                 if !missing.is_empty() {
                     return Err(format!(
@@ -441,50 +439,76 @@ impl Schema {
                 }
             }
             ("array", Instance::Sequence(a)) => {
-                bounds(a.len(), "minItems", "maxItems")?;
                 let path = format!("{path}/items");
                 for item in a {
                     self.validate(&s["items"], item, &path)
                         .map_err(|e| format!("validating {path}: {e}"))?;
                 }
+                let n = a.len() as u64;
+                if let Some(min) = s["minItems"].as_u64().filter(|&min| n < min) {
+                    return Err(format!("minItems: array length {n} is less than {min}"));
+                }
+                if let Some(max) = s["maxItems"].as_u64().filter(|&max| n > max) {
+                    return Err(format!("maxItems: array length {n} is greater than {max}"));
+                }
             }
             ("string", Instance::String(text)) => {
-                if s["enum"]
-                    .as_array()
-                    .is_some_and(|a| !a.iter().any(|v| v == text.as_str()))
-                {
-                    return Err("string is not a member of enum".into());
+                if let Some(options) = s["enum"].as_array() {
+                    if !options.iter().any(|x| x == text) {
+                        return Err(enum_error(text, options));
+                    }
                 }
-                bounds(text.chars().count(), "minLength", "maxLength")?;
+                if s.get("minLength").is_some() || s.get("maxLength").is_some() {
+                    let n = text.chars().count() as u64;
+                    let error = |key, relation, limit| {
+                        format!(
+                            "{key}: {} contains {n} Unicode code points, {relation} than {limit}",
+                            crate::go_json::quote(text)
+                        )
+                    };
+                    if let Some(min) = s["minLength"].as_u64().filter(|&min| n < min) {
+                        return Err(error("minLength", "fewer", min));
+                    }
+                    if let Some(max) = s["maxLength"].as_u64().filter(|&max| n > max) {
+                        return Err(error("maxLength", "more", max));
+                    }
+                }
             }
-            ("null", Instance::Null)
-            | ("boolean", Instance::Bool(_))
-            | ("number", Instance::Number(_)) => (),
-            ("integer", Instance::Number(n)) => {
+            ("integer", Instance::Number(n)) if instance_type(v) == "integer" => {
                 let n = n
                     .as_i64()
                     .filter(|&n| safe_integer(n))
                     .ok_or("expected a safe integer literal")?;
                 if s["minimum"].as_i64().is_some_and(|m| n < m) {
-                    return Err(format!("minimum: {n} is less than {}", s["minimum"]));
+                    return Err(format!(
+                        "minimum: {n}/1 is less than {}.000000",
+                        s["minimum"]
+                    ));
                 }
                 if s["maximum"].as_i64().is_some_and(|m| n > m) {
-                    return Err(format!("maximum: {n} is greater than {}", s["maximum"]));
+                    return Err(format!(
+                        "maximum: {n}/1 is greater than {}.000000",
+                        s["maximum"]
+                    ));
                 }
             }
-            _ => return Err(format!("expected type {ty:?}")),
+            ("null", Instance::Null)
+            | ("boolean", Instance::Bool(_))
+            | ("number", Instance::Number(_)) => (),
+            _ => {
+                return Err(format!(
+                    "type: {} has type {:?}, want {ty:?}",
+                    diagnostic_value(v),
+                    instance_type(v)
+                ))
+            }
         }
         Ok(())
     }
 }
 
-fn validate_union(
-    keyword: &str,
-    branches: &[Value],
-    v: &Instance,
-    path: &str,
-) -> Result<(), String> {
-    let got = match v {
+fn instance_type(v: &Instance) -> &'static str {
+    match v {
         Instance::String(_) => "string",
         Instance::Number(n) if n.as_f64().unwrap().fract() == 0.0 => "integer",
         Instance::Number(_) => "number",
@@ -493,13 +517,40 @@ fn validate_union(
         Instance::Sequence(_) => "array",
         Instance::Mapping(_) => "object",
         Instance::Tagged(_) => unreachable!("JSON instance"),
-    };
+    }
+}
+
+fn diagnostic_value(v: &Instance) -> String {
+    let mut value = String::new();
+    if v.is_null() {
+        value.push_str("<invalid reflect.Value>");
+    } else {
+        write_go_value(&mut value, v);
+    }
+    value
+}
+
+fn enum_error(text: &str, options: &[Value]) -> String {
+    let options: Vec<_> = options.iter().map(|x| x.as_str().unwrap()).collect();
+    format!(
+        "enum: {text} does not equal any of: [{}]",
+        options.join(" ")
+    )
+}
+
+fn validate_union(
+    keyword: &str,
+    branches: &[Value],
+    v: &Instance,
+    path: &str,
+) -> Result<(), String> {
+    let got = instance_type(v);
     let matches_type = |b: &Value| b["type"] == got || (got == "integer" && b["type"] == "number");
     let mut matches = branches.iter().filter(|b| {
         matches_type(b)
             && b["enum"]
                 .as_array()
-                .is_none_or(|a| a.iter().any(|x| x.as_str() == v.as_str()))
+                .is_none_or(|options| options.iter().any(|x| x.as_str() == v.as_str()))
     });
     if matches.next().is_some() {
         if keyword == "oneOf" && matches.next().is_some() {
@@ -511,35 +562,16 @@ fn validate_union(
     }
     let names = vec!["<anonymous schema>"; branches.len()].join(" ");
     let mut error = format!("{keyword}: did not validate against any of [{names}]");
-    if keyword == "oneOf" {
-        return Err(error);
-    }
-
-    // Only anyOf includes each branch's failure in jsonschema-go's diagnostic.
-    error.push(':');
-    let mut value = String::new();
-    if v.is_null() {
-        value.push_str("<invalid reflect.Value>");
-    } else {
-        write_go_value(&mut value, v);
-    }
-    for (i, b) in branches.iter().enumerate() {
-        write!(error, "\nvalidating {path}/anyOf/{i}: ").unwrap();
-        if matches_type(b) {
-            let options: Vec<_> = b["enum"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|x| x.as_str().unwrap())
-                .collect();
-            write!(
-                error,
-                "enum: {value} does not equal any of: [{}]",
-                options.join(" ")
-            )
-            .unwrap();
-        } else {
-            write!(error, "type: {value} has type {got:?}, want {}", b["type"]).unwrap();
+    if keyword == "anyOf" {
+        error.push(':');
+        let value = diagnostic_value(v);
+        for (i, b) in branches.iter().enumerate() {
+            write!(error, "\nvalidating {path}/anyOf/{i}: ").unwrap();
+            if matches_type(b) {
+                error.push_str(&enum_error(&value, b["enum"].as_array().unwrap()));
+            } else {
+                write!(error, "type: {value} has type {got:?}, want {}", b["type"]).unwrap();
+            }
         }
     }
     Err(error)
@@ -658,6 +690,22 @@ mod tests {
             assert!(err.starts_with("Structured output rejected:"), "{err}");
             assert!(err.ends_with("call __structured_output__ again."), "{err}");
         }
+    }
+
+    #[test]
+    fn checks_declared_properties_before_listing_extras() {
+        let t = tool(&object(
+            json!({"type":"array", "maxItems":1, "items":{"type":"boolean"}}),
+        ))
+        .unwrap();
+        assert!(t
+            .validate(r#"{"extra":true,"x":[null,false]}"#)
+            .unwrap_err()
+            .contains("validating /properties/x/items: type: <invalid reflect.Value>"));
+        assert!(t
+            .validate(r#"{"x":[],"b\u0007":0,"a":1}"#)
+            .unwrap_err()
+            .ends_with(r#"unexpected additional properties ["b\a" "a"]"#));
     }
 
     #[test]

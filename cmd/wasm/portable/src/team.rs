@@ -198,6 +198,7 @@ impl Session {
             return Err("cannot replay named or reasoning history with Responses".into());
         }
         limits.check_seed(&history, !profile.spec.tool_models.is_empty())?;
+        let seed_reply = media::seed_reply(&history);
         let source = reproject.then(|| history.clone());
         // Go's chat.Message has no name field.
         let preserve_names = routing && !limited;
@@ -208,6 +209,7 @@ impl Session {
             profile.spec.hooks.redact_messages,
         )?;
         let mut conversation = Conversation::open(profile, history);
+        conversation.seed_reply = seed_reply;
         conversation.set_seed_estimates_lost(seed_estimates_lost);
         if let Some(source) = source {
             conversation.set_routed_seed(source);
