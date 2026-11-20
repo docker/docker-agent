@@ -2,6 +2,8 @@
 package legacy
 
 import (
+	"errors"
+
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
 	v0 "github.com/docker/docker-agent/pkg/config/v0"
@@ -48,6 +50,9 @@ func upgradeToLatest(c any, _ []byte) (any, error) {
 	old, ok := c.(v15.Config)
 	if !ok {
 		return c, nil
+	}
+	if old.Runtime != nil && old.Runtime.Sandbox {
+		return nil, errors.New("runtime.sandbox is no longer supported; launch Docker Agent with sbx and remove runtime.sandbox and runtime.network_allowlist from the agent config")
 	}
 	var config latest.Config
 	if err := types.TryCloneThroughJSON(old, &config); err != nil {

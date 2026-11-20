@@ -209,9 +209,9 @@ $ docker agent run agent.yaml --yolo
 - Agents with shell or filesystem write access
 - Any situation where unreviewed actions could cause harm
 
-### Combine Permissions with Sandbox
+### Combine permissions with a sandbox
 
-For defense in depth, use both permissions and [sandbox mode](../../configuration/sandbox/index.md):
+For defense in depth, use both permissions and [Docker Sandboxes](../../configuration/sandbox/index.md):
 
 ```yaml
 agents:
@@ -234,8 +234,8 @@ permissions:
 ```
 
 ```bash
-# Run with sandbox enabled
-docker-agent run --sandbox agent.yaml
+sbx run --detach --name my-project docker-agent .
+sbx exec -it my-project docker-agent run --safety strict ./agent.yaml
 ```
 
 ### Set Global Permission Guardrails

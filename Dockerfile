@@ -72,33 +72,6 @@ COPY --from=builder-cross /binaries/docker-agent-$TARGETOS-$TARGETARCH* docker-a
 FROM scratch AS cross
 COPY --from=builder-cross /binaries .
 
-# Sandbox template for docker/sandboxes, pushed as
-# docker/docker-agent-sbx-templates: layers the binary built above onto the
-# sandboxes shell-docker base.
-FROM docker/sandbox-templates:shell-docker AS template
-ARG TARGETOS TARGETARCH
-USER root
-RUN <<EOF
-set -euxo pipefail
-apt-get update
-apt-get install -yy --no-install-recommends vim tmux
-apt-get clean
-rm -rf /var/lib/apt/lists/*
-EOF
-COPY --chmod=0755 --from=docker/mcp-gateway:v2 /docker-mcp /usr/local/lib/docker/cli-plugins/docker-mcp
-COPY --chmod=0755 --from=registry.k8s.io/kubectl:v1.37.0 /bin/kubectl /usr/local/bin/kubectl
-COPY --chmod=0755 --from=amazon/aws-cli:2.36.42 /usr/local/aws-cli/ /usr/local/aws-cli/
-RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws && \
-    ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer
-USER agent
-ENV DOCKER_AGENT_NO_TOUR=1 \
-    DOCKER_AGENT_HIDE_TELEMETRY_BANNER=1 \
-    COLORTERM=truecolor \
-    LANG=C.UTF-8
-COPY --from=builder-linux --chmod=0755 /binaries/docker-agent-$TARGETOS-$TARGETARCH /usr/local/bin/docker-agent
-LABEL com.docker.sandboxes.flavor="docker-agent-docker"
-CMD [ "docker-agent" ]
-
 FROM alpine:${ALPINE_VERSION}
 RUN apk add --no-cache ca-certificates docker-cli && \
     addgroup -S docker-agent && adduser -S -G docker-agent docker-agent && \

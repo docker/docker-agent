@@ -10,8 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/docker/docker-agent/pkg/skills"
 )
 
 func TestDebug_Toolsets_None(t *testing.T) {
@@ -97,15 +95,8 @@ func TestDebug_Skills_JSON_None(t *testing.T) {
 }
 
 func TestDebug_Skills_JSON_Local(t *testing.T) {
-	kit := t.TempDir()
-	writeSkill(t, filepath.Join(kit, skills.KitSkillsSubdir, "plain"),
-		"---\nname: plain\ndescription: A plain skill\n---\nbody\n")
-	writeSkill(t, filepath.Join(kit, skills.KitSkillsSubdir, "forky"),
-		"---\nname: forky\ndescription: A forked skill\ncontext: fork\n---\nbody\n")
-
-	t.Setenv(skills.KitDirEnv, kit)
-
-	output := runCLI(t, "debug", "skills", "--json", "testdata/skills_local.yaml")
+	skillDir, config := setupLocalSkills(t)
+	output := runCLI(t, "debug", "skills", "--json", config)
 
 	var got []struct {
 		Agent  string `json:"agent"`
@@ -124,27 +115,20 @@ func TestDebug_Skills_JSON_Local(t *testing.T) {
 	assert.Equal(t, "forky", got[0].Skills[0].Name)
 	assert.Equal(t, "A forked skill", got[0].Skills[0].Description)
 	assert.True(t, got[0].Skills[0].Forked)
-	assert.Equal(t, filepath.Join(kit, skills.KitSkillsSubdir, "forky", "SKILL.md"), got[0].Skills[0].Path)
+	assert.Equal(t, filepath.Join(skillDir, "forky", "SKILL.md"), got[0].Skills[0].Path)
 
 	assert.Equal(t, "plain", got[0].Skills[1].Name)
 	assert.Equal(t, "A plain skill", got[0].Skills[1].Description)
 	assert.False(t, got[0].Skills[1].Forked)
-	assert.Equal(t, filepath.Join(kit, skills.KitSkillsSubdir, "plain", "SKILL.md"), got[0].Skills[1].Path)
+	assert.Equal(t, filepath.Join(skillDir, "plain", "SKILL.md"), got[0].Skills[1].Path)
 }
 
-// TestDebug_Skills_Local stages two skills (one regular, one forked) in an
-// isolated kit directory and asserts that `debug skills` lists each one with
+// TestDebug_Skills_Local writes two skills (one regular, one forked) to
+// an isolated home directory and asserts that `debug skills` lists each one with
 // its name, description, and the [forked] marker for fork-context skills.
 func TestDebug_Skills_Local(t *testing.T) {
-	kit := t.TempDir()
-	writeSkill(t, filepath.Join(kit, skills.KitSkillsSubdir, "plain"),
-		"---\nname: plain\ndescription: A plain skill\n---\nbody\n")
-	writeSkill(t, filepath.Join(kit, skills.KitSkillsSubdir, "forky"),
-		"---\nname: forky\ndescription: A forked skill\ncontext: fork\n---\nbody\n")
-
-	t.Setenv(skills.KitDirEnv, kit)
-
-	output := runCLI(t, "debug", "skills", "testdata/skills_local.yaml")
+	_, config := setupLocalSkills(t)
+	output := runCLI(t, "debug", "skills", config)
 
 	require.Equal(t,
 		"2 skill(s) for root:\n"+
@@ -152,6 +136,25 @@ func TestDebug_Skills_Local(t *testing.T) {
 			" + plain - A plain skill\n",
 		output,
 	)
+}
+
+func setupLocalSkills(t *testing.T) (skillDir, config string) {
+	t.Helper()
+	contents, err := os.ReadFile("testdata/skills_local.yaml")
+	require.NoError(t, err)
+	t.Chdir(t.TempDir())
+	config = "agent.yaml"
+	require.NoError(t, os.WriteFile(config, contents, 0o600))
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	skillDir = filepath.Join(home, ".agents", "skills")
+	writeSkill(t, filepath.Join(skillDir, "plain"),
+		"---\nname: plain\ndescription: A plain skill\n---\nbody\n")
+	writeSkill(t, filepath.Join(skillDir, "forky"),
+		"---\nname: forky\ndescription: A forked skill\ncontext: fork\n---\nbody\n")
+
+	return skillDir, config
 }
 
 func writeSkill(t *testing.T, dir, content string) {

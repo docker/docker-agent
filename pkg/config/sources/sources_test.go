@@ -302,11 +302,6 @@ func TestResolve_BuiltinAgents(t *testing.T) {
 			require.Contains(t, resolved, name)
 			assert.Equal(t, name, resolved[name].Name())
 
-			fromConfig, alias, err := ResolveWithConfig(ref, &userconfig.Config{}, nil)
-			require.NoError(t, err)
-			assert.Nil(t, alias)
-			assert.Equal(t, name, fromConfig.Name())
-
 			cfg, err := config.Load(t.Context(), source)
 			require.NoError(t, err)
 			require.Len(t, cfg.Agents, 1)
@@ -569,25 +564,6 @@ func TestResolveAlias_WithBothOptions(t *testing.T) {
 	assert.Equal(t, "anthropic/claude-sonnet-4-0", alias.Model)
 }
 
-func TestResolveAlias_WithSandboxOption(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-
-	cfg, err := userconfig.Load()
-	require.NoError(t, err)
-	require.NoError(t, cfg.SetAlias("safe-coder", &userconfig.Alias{
-		Path:    "myorg/coder",
-		Sandbox: true,
-	}))
-	require.NoError(t, cfg.Save())
-
-	alias := ResolveAlias("safe-coder")
-	require.NotNil(t, alias)
-	assert.True(t, alias.Sandbox)
-	assert.False(t, alias.Yolo)
-}
-
 func TestResolveAlias_NoOptions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -722,18 +698,4 @@ func TestResolveSources_URLReference(t *testing.T) {
 	source, ok := sources[expectedKey]
 	require.True(t, ok)
 	assert.Equal(t, testURL, source.Name())
-}
-
-func TestResolveWithConfigUsesProvidedSnapshot(t *testing.T) {
-	t.Parallel()
-	alias := &userconfig.Alias{Path: "docker/reviewed:latest", Safety: "strict"}
-	cfg := &userconfig.Config{Aliases: map[string]*userconfig.Alias{"coder": alias}}
-	source, gotAlias, err := ResolveWithConfig("coder", cfg, nil)
-	require.NoError(t, err)
-	assert.Equal(t, alias.Path, source.Name())
-	assert.Same(t, alias, gotAlias)
-	source, gotAlias, err = ResolveWithConfig("default", cfg, nil)
-	require.NoError(t, err)
-	assert.Equal(t, "default", source.Name())
-	assert.Nil(t, gotAlias)
 }

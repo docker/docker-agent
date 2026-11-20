@@ -959,41 +959,6 @@ func TestGitAnchoredDirs(t *testing.T) {
 	})
 }
 
-func TestLoad_KitDirOverridesEverything(t *testing.T) {
-	// Inside a sandbox the host stages a kit. The kit's skills directory
-	// is the *only* search root — host paths like ~/.agents/skills or
-	// .claude/skills under cwd are intentionally ignored because they
-	// don't exist inside the sandbox.
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("USERPROFILE", tmpHome)
-
-	// Stage a host-only skill the test must NOT see.
-	hostSkillDir := filepath.Join(tmpHome, ".agents", "skills", "host-only")
-	require.NoError(t, os.MkdirAll(hostSkillDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(hostSkillDir, "SKILL.md"),
-		[]byte("---\nname: host-only\ndescription: must be hidden\n---\n"), 0o644))
-
-	// Stage a kit skill the test MUST see.
-	kitDir := t.TempDir()
-	kitSkillDir := filepath.Join(kitDir, KitSkillsSubdir, "from-kit")
-	require.NoError(t, os.MkdirAll(kitSkillDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(kitSkillDir, "SKILL.md"),
-		[]byte("---\nname: from-kit\ndescription: kit skill\n---\n"), 0o644))
-
-	t.Setenv(KitDirEnv, kitDir)
-	t.Chdir(t.TempDir())
-
-	skills := Load(t.Context(), []string{"local"})
-
-	names := make([]string, 0, len(skills))
-	for _, s := range skills {
-		names = append(names, s.Name)
-	}
-	assert.Contains(t, names, "from-kit")
-	assert.NotContains(t, names, "host-only", "host paths must be ignored when a kit is set")
-}
-
 func TestIsHomeSkillPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

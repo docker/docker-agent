@@ -13,16 +13,6 @@ import (
 
 const skillFile = "SKILL.md"
 
-// KitDirEnv names the environment variable that points at a docker-agent kit
-// directory staged by the host before launching a sandbox. When set, local
-// skill discovery is rooted exclusively at the kit's skills directory; the
-// usual $HOME / git-walking lookups are skipped because they target paths
-// that don't exist inside the sandbox.
-const KitDirEnv = "DOCKER_AGENT_KIT_DIR"
-
-// KitSkillsSubdir is the path inside a kit that holds the staged skills.
-const KitSkillsSubdir = "skills"
-
 // localSearchPath describes one directory to scan for local skills, and
 // whether subdirectories should be walked recursively (Codex/agents format)
 // or only as immediate children of the search root (Claude format).
@@ -35,12 +25,6 @@ type localSearchPath struct {
 // load order. Entries appearing later in the list override skills with the
 // same name from earlier entries.
 //
-// When DOCKER_AGENT_KIT_DIR is set (i.e. running inside a sandbox where the
-// host has staged a kit) only the kit's skills directory is scanned, since
-// the usual host paths don't exist inside the sandbox.
-//
-// Otherwise the search paths are:
-//
 //  1. Global directories (under $HOME).
 //  2. .claude/skills under cwd (Claude project format, flat).
 //  3. .github/skills (GitHub Copilot format) and .agents/skills in each
@@ -48,10 +32,6 @@ type localSearchPath struct {
 //     outside $HOME — down to cwd (closest wins; .agents/skills overrides
 //     .github/skills at the same level).
 func localSearchPathsFromDir(cwd string) []localSearchPath {
-	if kit := os.Getenv(KitDirEnv); kit != "" {
-		return []localSearchPath{{filepath.Join(kit, KitSkillsSubdir), true}}
-	}
-
 	var searchPaths []localSearchPath
 
 	if home := paths.GetHomeDir(); home != "" {

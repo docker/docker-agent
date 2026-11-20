@@ -15,7 +15,7 @@ const (
 // acquireFileLock takes an exclusive advisory lock on path, waiting up to
 // lockTimeout for another process to release it. The lock serializes
 // read-modify-write cycles on the config file across processes so concurrent
-// writers (TUI toggles, alias and sandbox commands, the board) cannot
+// writers (TUI toggles, alias commands, the board) cannot
 // overwrite each other's changes. The returned release function unlocks and
 // closes the lock file.
 func acquireFileLock(path string) (release func(), err error) {

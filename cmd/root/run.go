@@ -32,7 +32,6 @@ import (
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/profiling"
 	"github.com/docker/docker-agent/pkg/runtime"
-	"github.com/docker/docker-agent/pkg/sandbox"
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -94,11 +93,6 @@ type runExecFlags struct {
 	memProfile        string
 	forceTUI          bool
 	tour              bool
-	sandbox           bool
-	sandboxTemplate   string
-	sandboxOptions    sandbox.Options
-	sbx               bool
-	noKit             bool
 	agentPickerSpec   string
 	worktree          bool
 	worktreeName      string
@@ -218,16 +212,6 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().BoolVar(&flags.sidebar, "sidebar", true, "Show the sidebar in the TUI (set --sidebar=false to hide it)")
 	cmd.PersistentFlags().StringVar(&flags.theme, "theme", "", "Preselect a TUI theme by name, or \"auto\" to match the terminal's light/dark background (overrides the theme from user config; ignored outside the interactive TUI)")
 	_ = cmd.RegisterFlagCompletionFunc("theme", completeTheme)
-	cmd.PersistentFlags().BoolVar(&flags.sandbox, "sandbox", false, "Run the agent inside a Docker sandbox")
-	cmd.PersistentFlags().StringVar(&flags.sandboxTemplate, "template", "docker/docker-agent-sbx-templates:latest", "Local sandbox OCI image, or cloud template name with --cloud")
-	cmd.PersistentFlags().BoolVar(&flags.sbx, "sbx", true, "Prefer the sbx CLI backend when available (set --sbx=false to force docker sandbox)")
-	cmd.PersistentFlags().BoolVar(&flags.noKit, "no-kit", false, "Do not stage a docker-agent kit (skills, prompt files) when running in a sandbox")
-	cmd.PersistentFlags().BoolVar(&flags.sandboxOptions.Cloud, "cloud", false, "Use a cloud sandbox (implies --sandbox; no host files or credentials are uploaded)")
-	cmd.PersistentFlags().StringVar(&flags.sandboxOptions.Workload, "sandbox-kit", "", "Sandbox workload kit reference (directory, ZIP, git, or OCI; must provide docker-agent)")
-	cmd.PersistentFlags().StringArrayVar(&flags.sandboxOptions.Kits, "kit", nil, "Additional sandbox mixin kit reference (repeatable)")
-	cmd.PersistentFlags().StringArrayVar(&flags.sandboxOptions.KitArgs, "kit-arg", nil, "Sandbox kit argument KEY=VALUE (repeatable)")
-	cmd.PersistentFlags().DurationVar(&flags.sandboxOptions.TTL, "sandbox-ttl", time.Hour, "Cloud sandbox time-to-live; stopped on expiry")
-	cmd.MarkFlagsMutuallyExclusive("template", "sandbox-kit")
 	cmd.PersistentFlags().StringVar(&flags.agentPickerSpec, "agent-picker", "", "Show a full-screen picker to choose an agent before launching. Optional comma-separated list of agent refs; \"defaults\" (or no value) offers the built-in agents plus any configs in ~/.agents")
 	cmd.PersistentFlags().Lookup("agent-picker").NoOptDefVal = agentPickerDefaultsSpec
 	cmd.PersistentFlags().StringVarP(&flags.worktreeName, "worktree", "w", "", "Run the agent in a fresh git worktree of the working directory (isolates changes from your checkout). Optionally name it: --worktree=my-name")
@@ -236,27 +220,19 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().StringVar(&flags.worktreeBase, "worktree-base", "", "Branch the --worktree from this ref instead of the current HEAD (e.g. main, origin/main). A remote-tracking ref is fetched first so the worktree starts from the latest remote state.")
 	cmd.PersistentFlags().BoolVar(&flags.sessionReadOnly, "session-read-only", false, "Open the session in read-only mode (view conversation history but prevent new messages)")
 	cmd.MarkFlagsMutuallyExclusive("fake", "record")
-	cmd.MarkFlagsMutuallyExclusive("remote", "sandbox")
 	cmd.MarkFlagsMutuallyExclusive("remote", "session-db")
 	cmd.MarkFlagsMutuallyExclusive("remote", "session")
 	cmd.MarkFlagsMutuallyExclusive("remote", "record")
 	cmd.MarkFlagsMutuallyExclusive("remote", "fake")
-	// A worktree is a local directory: it has no meaning for a remote runtime
-	// and is not wired through the sandbox boundary.
+	// A worktree is a local directory: it has no meaning for a remote runtime.
 	cmd.MarkFlagsMutuallyExclusive("remote", "worktree")
-	cmd.MarkFlagsMutuallyExclusive("sandbox", "worktree")
 	cmd.MarkFlagsMutuallyExclusive("remote", "worktree-pr")
-	cmd.MarkFlagsMutuallyExclusive("sandbox", "worktree-pr")
 	cmd.MarkFlagsMutuallyExclusive("worktree", "worktree-pr")
 	// --worktree-base picks the start-point of the branch --worktree creates,
 	// so it is meaningless for a PR worktree (which continues the PR's branch)
-	// or a remote/sandbox run (which has no local worktree).
+	// or a remote run (which has no local worktree).
 	cmd.MarkFlagsMutuallyExclusive("worktree-base", "worktree-pr")
 	cmd.MarkFlagsMutuallyExclusive("remote", "worktree-base")
-	cmd.MarkFlagsMutuallyExclusive("sandbox", "worktree-base")
-	for _, flag := range []string{"remote", "worktree", "worktree-pr", "worktree-base"} {
-		cmd.MarkFlagsMutuallyExclusive("cloud", flag)
-	}
 
 	// --exec only
 	cmd.PersistentFlags().BoolVar(&flags.exec, "exec", false, "Execute without a TUI")
@@ -319,11 +295,7 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	useTUI := !f.exec && (f.forceTUI || isatty.IsTerminal(os.Stdout.Fd()))
 	f.leanChanged = cmd.Flags().Changed("lean")
 
-	// When --agent-picker is set, show a full-screen picker up front and use
-	// the chosen ref as the agent to run. Resolving it here (before sandbox
-	// and alias resolution) means the selected agent's own sandbox/alias
-	// defaults are honoured exactly as if it had been passed positionally.
-	// The picker is interactive, so it requires a TUI.
+	// The interactive picker chooses the agent ref before positional args are resolved.
 	if cmd.Flags().Changed("agent-picker") {
 		if !useTUI {
 			return errors.New("--agent-picker requires an interactive terminal and cannot be used with --exec")
@@ -358,22 +330,7 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		args = prependAgentRef(chosen, args)
 	}
 
-	var discoveredProjectConfig bool
-	if !f.sandboxOptions.Cloud {
-		args, discoveredProjectConfig = f.discoverRunAgentArgs(args)
-	}
-
-	// Resolve alias / runtime-declared sandbox opt-in before dispatch.
-	// An explicit --sandbox=<bool> on the CLI always wins, so we only
-	// consult the lower-priority sources when the flag wasn't set.
-	if !cmd.Flags().Changed("sandbox") && !f.sandboxOptions.Cloud {
-		var agentRef string
-		if len(args) > 0 {
-			agentRef = args[0]
-		}
-		f.sandbox, _ = resolveSandboxDefault(ctx, agentRef, f.sandbox, f.runConfig.Flavors)
-	}
-
+	args, discoveredProjectConfig := f.discoverRunAgentArgs(args)
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	if discoveredProjectConfig {
 		if f.last {
@@ -381,25 +338,6 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		} else {
 			out.Println("Using project config: " + args[0])
 		}
-	}
-
-	if f.sandboxOptions.Cloud {
-		if cmd.Flags().Changed("sandbox") && !f.sandbox {
-			return errors.New("--cloud cannot be combined with --sandbox=false")
-		}
-		f.sandbox = true
-	}
-	if err := validateSandboxOptions(cmd, f.sandbox, f.sandboxOptions); err != nil {
-		return err
-	}
-	if f.sandbox {
-		if cmd.Flags().Changed("worktree") || cmd.Flags().Changed("worktree-pr") {
-			return errors.New("--worktree/--worktree-pr cannot be combined with a sandboxed run")
-		}
-		if cmd.Flags().Changed("template") || (!f.sandboxOptions.Cloud && f.sandboxOptions.Workload == "") {
-			f.sandboxOptions.Template = f.sandboxTemplate
-		}
-		return runInSandbox(ctx, cmd, args, &f.runConfig, f.sbx, f.noKit, f.sandboxOptions)
 	}
 
 	// --worktree was provided (with or without a value). The string flag lets
@@ -711,7 +649,7 @@ func (f *runExecFlags) applyUserSettings(ctx context.Context, userSettings *user
 // applied after applyUserSettings so an alias's own choices (including its
 // safety default) take priority over the global settings.
 func (f *runExecFlags) applyAliasOptions(ctx context.Context, alias *userconfig.Alias) {
-	slog.DebugContext(ctx, "Applying alias options", "yolo", alias.Yolo, "safety", string(alias.Safety), "model", alias.Model, "hide_tool_results", alias.HideToolResults, "sandbox", alias.Sandbox)
+	slog.DebugContext(ctx, "Applying alias options", "yolo", alias.Yolo, "safety", string(alias.Safety), "model", alias.Model, "hide_tool_results", alias.HideToolResults)
 	if alias.Yolo && !f.yoloChanged && !f.autoApprove {
 		f.autoApprove = true
 	}
@@ -726,16 +664,10 @@ func (f *runExecFlags) applyAliasOptions(ctx context.Context, alias *userconfig.
 	if alias.HideToolResults && !f.hideToolResults {
 		f.hideToolResults = true
 	}
-	// alias.Sandbox is consumed earlier in runRunCommand before
-	// dispatch; reaching runOrExec means the sandbox decision
-	// resolved to false (or the user opted out via --sandbox=false),
-	// so flipping it here would be a no-op.
 }
 
 // aliasOptions resolves the alias options for an agent reference from an
-// already-loaded user config, mirroring sources.ResolveAlias: the empty
-// reference maps to the "default" alias, and an alias without options is
-// not returned.
+// already-loaded user config. An empty reference maps to "default".
 func aliasOptions(cfg *userconfig.Config, agentFileName string) *userconfig.Alias {
 	alias, ok := cfg.GetAlias(cmp.Or(agentFileName, "default"))
 	if !ok || !alias.HasOptions() {

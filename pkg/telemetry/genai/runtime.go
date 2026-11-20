@@ -30,11 +30,6 @@ const (
 	AttrAgentNameRuntime = "cagent.agent.name"
 
 	AttrRetrievalResultCount = "cagent.retrieval.result_count"
-
-	AttrSandboxRuntime   = "cagent.sandbox.runtime"
-	AttrSandboxImage     = "cagent.sandbox.image"
-	AttrSandboxContainer = "cagent.sandbox.container"
-	AttrSandboxExitCode  = "cagent.sandbox.exit_code"
 )
 
 // FallbackOutcome values for AttrFallbackOutcome.

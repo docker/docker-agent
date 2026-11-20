@@ -195,11 +195,10 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	// Seed `gen_ai.conversation.id` into baggage at the session
 	// boundary. Every span the runtime, providers, MCP client, RAG,
-	// sandbox, evaluation, hooks, and (downstream) any subprocess
+	// evaluation, hooks, and (downstream) any subprocess
 	// or remote service create from here on will pick it up
 	// automatically without per-helper plumbing — and the value
-	// rides over W3C `baggage` so it crosses MCP / sandbox /
-	// HTTP boundaries too.
+	// rides over W3C `baggage` so it crosses MCP and HTTP boundaries too.
 	ctx = genai.WithConversationID(ctx, sess.ID)
 
 	// A non-interactive session (background_agents via runCollecting, MCP

@@ -597,8 +597,8 @@ func (w *setupWizard) setupClaudeHarness(ctx context.Context) (*setupResult, err
 	fmt.Fprintln(w.out, "its own tools and skips Claude Code's permission prompts")
 	fmt.Fprintln(w.out, "(--dangerously-skip-permissions). Use it in a repository you trust, and prefer")
 	fmt.Fprintln(w.out, "`docker agent run --worktree` to isolate its changes in a git worktree.")
-	fmt.Fprintln(w.out, "`--sandbox` does not carry the `claude` CLI or its login into the sandbox;")
-	fmt.Fprintln(w.out, "use it only with a sandbox image that ships and authenticates the CLI.")
+	fmt.Fprintln(w.out, "When running in an sbx sandbox, use a kit that provides the `claude` CLI")
+	fmt.Fprintln(w.out, "and configure its authentication inside the sandbox.")
 
 	path, err := w.writeClaudeAgentFile(ctx, content)
 	if err != nil {

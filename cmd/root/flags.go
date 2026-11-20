@@ -121,8 +121,7 @@ func addGatewayFlags(cmd *cobra.Command, runConfig *config.RuntimeConfig, loadUs
 		// overrides (--config-dir, --cache-dir, --data-dir) and other
 		// global setup land before we materialise the env provider —
 		// otherwise the cached provider chain captures a stale config
-		// dir and breaks downstream consumers like the sandbox token
-		// reader.
+		// dir.
 		if err := runParentPreRun(cmd, persistentPreRunE, args); err != nil {
 			return err
 		}

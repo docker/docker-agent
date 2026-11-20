@@ -71,8 +71,7 @@ func initOTelSDK(ctx context.Context) (err error) {
 	// and extracts them on incoming ones. The propagator is a global
 	// no-op until set; without this the SDK records spans locally
 	// but they never chain across processes — `gen_ai.conversation.id`
-	// baggage and the MCP `_meta` / sandbox env-var injectors are
-	// dormant until this runs.
+	// baggage and MCP `_meta` propagation are dormant until this runs.
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},

@@ -87,7 +87,7 @@ func spawnLSPProcess(callerCtx context.Context, h *lspHandler) (*lspProcess, err
 	// Inherit the caller's W3C trace context (the Connect call's
 	// `toolset.start` or per-request span) so an OTel-aware LSP server
 	// can chain its spans onto the agent trace. Most LSPs do not emit
-	// OTel today, so this is defensive parity with sandbox.exec.
+	// OTel today, but instrumented subprocesses can use the context.
 	cmd.Env = append(os.Environ(), h.env...)
 	cmd.Env = append(cmd.Env, genai.InjectTraceContextEnv(callerCtx)...)
 	cmd.Dir = h.workingDir
