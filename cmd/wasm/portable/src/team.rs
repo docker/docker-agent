@@ -204,7 +204,7 @@ impl Session {
         self.summary_attempt = Default::default();
         self.replayable = !self.conversation.summarizing()
             && (self.conversation.profile.spec.hooks.max_calls.is_none()
-                || self.conversation.profile.spec.bounded_fallback());
+                || self.conversation.profile.spec.separate_model_attempts);
         self.switches = 0;
         self.turn_id = id.into();
         let mut request = self.request(body)?;

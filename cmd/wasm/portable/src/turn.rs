@@ -39,7 +39,7 @@ pub fn response_strict(name: &str) -> bool {
 struct Target {
     host: Option<usize>,
     safe: bool,
-    source: Option<usize>,
+    model_source: Option<usize>,
 }
 
 type Tools = IndexMap<String, Tool<Target>>;
@@ -302,7 +302,7 @@ impl Catalog {
                     Target {
                         host: hosted.then_some(index),
                         safe,
-                        source: Some(index),
+                        model_source: (!spec.model.is_empty()).then_some(index),
                     },
                 ));
             }
@@ -332,7 +332,7 @@ impl Catalog {
                             target: Target {
                                 host: None,
                                 safe: helpers.read_only[name],
-                                source: None,
+                                model_source: None,
                             },
                             toon: false,
                         },
@@ -352,7 +352,7 @@ impl Catalog {
                     definition: output.definition.clone(),
                     target: Target {
                         host: None,
-                        source: None,
+                        model_source: None,
                         safe: true,
                     },
                     toon: false,
@@ -516,12 +516,11 @@ impl Conversation {
         &self.profile.spec.models[self.attempt.current]
     }
 
-    fn params(&self) -> &Map<String, Value> {
-        self.profile
-            .spec
-            .picker
-            .params()
-            .unwrap_or(&self.target().model_params)
+    fn override_params(&self, source: Option<usize>) -> Option<&Map<String, Value>> {
+        let spec = &self.profile.spec;
+        source
+            .and_then(|i| spec.tool_models.get(&spec.toolsets[i].model))
+            .or_else(|| spec.picker.params())
     }
 
     pub fn summarizing(&self) -> bool {
@@ -620,15 +619,7 @@ impl Conversation {
             .spec
             .limits
             .project(&mut messages, &self.profile.spec.hooks)?;
-        let override_params = turn
-            .tool_model_source
-            .and_then(|i| {
-                self.profile
-                    .spec
-                    .tool_models
-                    .get(&self.profile.spec.toolsets[i].model)
-            })
-            .or_else(|| self.profile.spec.picker.params());
+        let override_params = self.override_params(turn.tool_model_source);
         let target = self.target();
         if let Some(instruction) = target
             .schema_instruction
@@ -814,7 +805,10 @@ impl Conversation {
                 }
                 if self.profile.spec.output_tool.is_some() {
                     let reminders = turn.reminders;
-                    let model = self.params()["model"].as_str().unwrap();
+                    let source = turn.tool_model_source.take();
+                    let model = self
+                        .override_params(source)
+                        .map_or_else(|| self.target().model(), |p| p["model"].as_str().unwrap());
                     if let Some(error) = structured_output::stop_error(model, reminders) {
                         self.messages
                             .push(json!({"role":"assistant", "content":error}));
@@ -858,10 +852,11 @@ impl Conversation {
 
     fn execute_calls(
         &mut self,
-        mut calls: BTreeMap<u64, Call>,
+        calls: BTreeMap<u64, Call>,
         mut message: Value,
         mut events: Vec<Value>,
     ) -> Result<Value, String> {
+        let mut model_source = None;
         let mut ids = BTreeSet::new();
         let mut wire_calls = Vec::with_capacity(calls.len());
         if calls.len() != 1
@@ -876,9 +871,13 @@ impl Conversation {
             if *key != index as u64 || call.id.is_empty() || !ids.insert(&call.id) {
                 return Err("missing or duplicate tool call ID or index".into());
             }
-            if !self.profile.catalog.borrow().tools.contains_key(&call.name) {
-                return Err("missing or invalid tool name".into());
-            }
+            let catalog = self.profile.catalog.borrow();
+            let tool = catalog
+                .tools
+                .get(&call.name)
+                .ok_or("missing or invalid tool name")?;
+            // Go routes on offered calls in model order, including calls denied during dispatch.
+            model_source = model_source.or(tool.target.model_source);
             if call.name == structured_output::NAME
                 && self.profile.spec.output_tool.is_some()
                 && call.arguments.len() > structured_output::MAX_ARGS
@@ -905,28 +904,29 @@ impl Conversation {
         turn.exempt_batch = calls
             .values()
             .all(|c| matches!(c.name.as_str(), "random_int" | "get_datetime"));
-        turn.tool_model_source = None;
+        turn.tool_model_source = model_source;
         turn.selection = self.profile.spec.picker.active.get();
         let exclusive = calls.len() == 1;
         if let Some(output) = &self.profile.spec.output_tool {
             // Go records intercepted replies first; none can reach approval, hooks or host dispatch.
             let mut final_answer = None;
-            calls.retain(|_, call| {
-                if call.name != structured_output::NAME {
-                    return true;
-                }
+            for call in calls.values().filter(|c| c.name == structured_output::NAME) {
                 let result = output.call(&call.arguments, exclusive);
                 let error = result.is_err();
                 let content = result.unwrap_or_else(|e| e);
                 events.push(call.event());
                 events.push(tool_result(&call.id, &call.name, &content, error));
-                self.messages
-                    .push(json!({"role":"tool", "tool_call_id":call.id, "content":content}));
                 if !error {
-                    final_answer = Some(content);
+                    final_answer = Some(content.clone());
                 }
-                false
-            });
+                let stored = self
+                    .profile
+                    .spec
+                    .limits
+                    .stored_content(content, &self.profile.spec.hooks)?;
+                self.messages
+                    .push(json!({"role":"tool", "tool_call_id":call.id, "content":stored}));
+            }
             if let Some(content) = final_answer {
                 let visible = content
                     .split_once("<tool_call>")
@@ -941,6 +941,9 @@ impl Conversation {
             }
         }
         for call in calls.into_values() {
+            if self.profile.spec.output_tool.is_some() && call.name == structured_output::NAME {
+                continue;
+            }
             let index = self.messages.len();
             self.messages
                 .push(json!({"role":"tool", "tool_call_id":call.id}));
@@ -969,7 +972,7 @@ impl Conversation {
                 safe,
             ) {
                 Verdict::Allow => self.dispatch(op, events)?,
-                Verdict::Deny(reason) => self.reject(op, reason, events),
+                Verdict::Deny(reason) => self.reject(op, reason, events)?,
                 Verdict::Ask
                     if self.profile.spec.tool_policy.grantable()
                         && self.profile.grants.borrow().contains(&call.name) =>
@@ -1020,30 +1023,34 @@ impl Conversation {
                 text.push_str(" Reason: ");
                 text.push_str(reason);
             }
-            self.reject(op, text, &mut events);
+            self.reject(op, text, &mut events)?;
         }
         self.drain_calls(&mut events)?;
         Ok(self.continue_turn(events))
     }
 
-    fn reject(&mut self, op: Invocation, reason: String, events: &mut Vec<Value>) {
-        self.active.as_mut().unwrap().exempt_batch = false;
-        events.push(tool_result(&op.call.id, &op.call.name, &reason, true));
-        self.messages[op.index]["content"] = reason.into();
+    fn reject(
+        &mut self,
+        op: Invocation,
+        reason: String,
+        events: &mut Vec<Value>,
+    ) -> Result<(), String> {
+        let reply = Reply {
+            index: op.index,
+            name: op.call.name,
+            toon: false,
+        };
+        events.push(self.complete(reply, reason, true)?);
+        Ok(())
     }
 
     fn dispatch(&mut self, op: Invocation, events: &mut Vec<Value>) -> Result<(), String> {
         let call = op.call;
-        let (source, toon, model_source) = {
+        let (source, toon) = {
             let catalog = self.profile.catalog.borrow();
             let tool = &catalog.tools[&call.name];
-            (tool.target.host, tool.toon, tool.target.source)
+            (tool.target.host, tool.toon)
         };
-        let turn = self.active.as_mut().unwrap();
-        if turn.tool_model_source.is_none() {
-            turn.tool_model_source =
-                model_source.filter(|i| !self.profile.spec.toolsets[*i].model.is_empty());
-        }
         let reply = Reply {
             index: op.index,
             name: call.name.clone(),
@@ -1264,8 +1271,13 @@ impl Conversation {
     }
 
     pub fn at_cap(&self) -> bool {
+        self.max_iterations > 0 && self.iterations() >= self.max_iterations
+    }
+
+    // Reminders and forced handoffs are model calls without a tool round.
+    fn iterations(&self) -> usize {
         let t = self.active.as_ref().expect("active turn");
-        self.max_iterations > 0 && t.tool_rounds + t.forced >= self.max_iterations
+        t.tool_rounds + t.reminders + t.forced
     }
 
     // Go checks the session cap, then the acting agent's hook, before each model call.
@@ -1287,7 +1299,7 @@ impl Conversation {
             self.active = None;
             return json!({"events":events,"result":result});
         }
-        let calls = t.tool_rounds + t.reminders + t.forced;
+        let calls = self.iterations();
         if let Some(limit) = self
             .profile
             .spec
@@ -1298,7 +1310,7 @@ impl Conversation {
             self.active = None;
             return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
         }
-        if self.profile.spec.bounded_fallback() {
+        if self.profile.spec.separate_model_attempts {
             // A later cancellation or projection error must not erase completed tool effects.
             let t = self.active.as_mut().expect("active tool round");
             t.messages_before = self.messages.len();

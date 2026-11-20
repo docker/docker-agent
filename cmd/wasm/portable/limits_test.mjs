@@ -135,6 +135,59 @@ test('seeded text results are capped on the actual request (Go len/4 and UTF-8 c
   }
 });
 
+const outputName = '__structured_output__';
+const outputMode = 'structured_output: {mode: tool, name: result, schema: {type: object, properties: {text: {type: string}}, required: [text]}}, session_compaction: false';
+
+test('the agent cap counts reminders and accepts an exclusive output on the last iteration', async t => {
+  const requests = intercept(t, [null, ...Array.from({length: 6}, (_, i) => [call('think', {thought: String(i)}, `t${i}`)]),
+    [call(outputName, {text: 'final'})], null, null, null]);
+  const yaml = config(`${outputMode}, max_iterations: 8, toolsets: [{type: think}]`);
+  const s = await api.createSession(opts(yaml));
+  try {
+    assert.equal((await s.send('first')).message.content, '{"text":"final"}');
+    // Exhausting the reminder budget is an error, not a successful cap stop.
+    await assert.rejects(s.send('again'), /after 2 reminders/);
+    assert.equal(requests.length, 11);
+  } finally { await s.close(); }
+});
+
+test('reused IDs synthesize missing results outside the old-tool budget but inside the read-time cap', async t => {
+  const requests = intercept(t, [[call(outputName, {text: 'ok'})]]);
+  const batch = [call('think', {}, 'repeat'), call('think', {}, 'kept')];
+  const messages = [{role: 'assistant', tool_calls: [batch[0]]}, {role: 'tool', tool_call_id: 'repeat', content: 'old'},
+    {role: 'assistant', tool_calls: batch}, {role: 'tool', tool_call_id: 'repeat', content: 'new'},
+    {role: 'tool', tool_call_id: 'kept', content: 'four'}, {role: 'user', content: 'go'}];
+  const yaml = config(`${outputMode}, num_history_items: 4, max_old_tool_call_tokens: 1, max_tool_result_tokens: 1, redact_secrets: false`);
+  await api.chat({...opts(yaml), messages});
+  assert.deepEqual(requests[0].messages.filter(m => m.role === 'tool').map(m => [m.tool_call_id, m.content]),
+    [['kept', 'four'], ['repeat', 'N...']]);
+});
+
+test('a rejected tool still selects its model; its redacted receipt precedes an unmodified output call', async t => {
+  const secret = 'dckr_pat_' + 'A'.repeat(27);
+  const requests = intercept(t, [[call('think', {thought: 'ask'})], [call(outputName, {text: secret})]]);
+  const yaml = config(`${outputMode}, toolsets: [{type: think, model: local/cheap}]`) + '\npermissions: {ask: [think]}';
+  const result = await api.chat({...opts(yaml), messages: [{role:'user', content:'go'}]}, e =>
+    e.type === 'tool_confirmation' ? {decision:'reject', reason:secret} : undefined);
+  assert.deepEqual(requests.map(r => r.model), ['test', 'cheap']);
+  assert.equal(requests[1].messages.at(-1).content, 'The user rejected the tool call. Reason: [REDACTED]');
+  assert.equal(JSON.parse(result.message.content).text, secret);
+});
+
+test('output mode rejects unsafe result truncation, fallback routing and incompatible overrides before I/O', async t => {
+  const requests = intercept(t, []);
+  for (const fields of ['max_tool_result_tokens: 1',
+    'max_tool_result_tokens: 4, redact_secrets: false, hooks: {before_llm_call: {type: builtin, command: redact_secrets}}']) {
+    await assert.rejects(api.createSession(opts(config(`${outputMode}, ${fields}`))), /cannot safely truncate results before secret redaction/);
+  }
+  for (const fields of ['max_iterations: 1', 'num_history_items: 2', 'max_old_tool_call_tokens: 3',
+    'max_tool_result_tokens: 4, redact_secrets: false', 'toolsets: [{type: think, model: local/fast}]']) {
+    await assert.rejects(api.createSession(opts(config(`${outputMode}, fallback: {models: [local/backup]}, ${fields}`))), /cannot use fallback models/);
+  }
+  await assert.rejects(api.createSession(opts(config(`${outputMode}, toolsets: [{type: think, model: local/gpt-5}]`))), /cannot change/);
+  assert.deepEqual(requests, []);
+});
+
 test('unsafe projections and model routes reject before any request', async t => {
   const requests = intercept(t, []);
   for (const field of ['num_history_items: 1', 'max_tool_result_tokens: 1', 'max_old_tool_call_tokens: 1', 'toolsets: [{type: think, model: local/other}]']) {
