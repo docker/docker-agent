@@ -102,10 +102,11 @@ flags.
 task build-wasm-small
 
 # which runs:
+mkdir -p bin/wasm-small
 GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" \
   -tags docker_agent_wasm_small,docker_agent_no_hook_templates,docker_agent_no_js_expansion,nethttpomithttp2 \
-  -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
-go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
+  -o bin/wasm-small/unpacked.wasm ./cmd/wasm
+go run ./scripts/wasmpack -o cmd/wasm/web/docker-agent.wasm bin/wasm-small/unpacked.wasm
 ```
 
 | | Default | Small |

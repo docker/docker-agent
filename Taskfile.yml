@@ -199,8 +199,9 @@ tasks:
   build-wasm-small:
     desc: Build the size-optimised browser binary (the cmd/wasm small profile)
     cmds:
-      - GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
-      - go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
+      - mkdir -p bin/wasm-small
+      - GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o bin/wasm-small/unpacked.wasm ./cmd/wasm
+      - go run ./scripts/wasmpack -o cmd/wasm/web/docker-agent.wasm bin/wasm-small/unpacked.wasm
 
   generate-wasm-portable-tools:
     desc: Refresh the portable tool instructions and OpenAI schemas from their Go implementations
