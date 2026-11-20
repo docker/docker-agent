@@ -557,10 +557,17 @@ impl Conversation {
         self.active.as_mut().expect("active summary").summarizing = None;
     }
 
+    // session_start belongs to the agent that opened this run, even after a handoff.
+    pub fn add_environment_info(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|turn| turn.profile_before.spec.hooks.add_environment_info)
+    }
+
     pub fn request(&mut self) -> Result<Value, String> {
         if self.profile.needs_host()
             || self.profile.spec.hooks.add_date
-            || self.profile.spec.hooks.add_environment_info
+            || self.add_environment_info()
         {
             // The host samples context only when it is actually about to fetch.
             return Ok(Value::Null);
@@ -583,7 +590,7 @@ impl Conversation {
         }
         let mut messages = catalog.instructions.clone();
         for (enabled, text) in [
-            (self.profile.spec.hooks.add_environment_info, environment),
+            (self.add_environment_info(), environment),
             (self.profile.spec.hooks.add_date, date),
         ] {
             if enabled {

@@ -81,6 +81,53 @@ test('dynamic flags and equivalent hooks add one transient system message per so
   }
 });
 
+test('date is scoped to a model round across retries and sessions, including limited tool history', async t => {
+  const day = n => Date.UTC(2030, 4, n, 12) + new Date().getTimezoneOffset() * 60_000;
+  t.mock.timers.enable({ apis: ['Date'], now: day(2) });
+  const yaml = `providers: {local: {provider: openai, base_url: https://model.invalid/v1, token_key: KEY}}
+agents:
+  root:
+    model: local/main
+    session_compaction: false
+    num_history_items: 4
+    fallback: {models: [local/backup], retries: 1}
+    hooks: {turn_start: {type: builtin, command: add_date}}
+    toolsets: [{type: think}]`;
+  const opts = {yaml, env:{KEY:'key'}};
+  const requests = [];
+  const result = (delta, finish_reason = 'stop') => new Response(`data: ${JSON.stringify({choices:[{index:0, delta, finish_reason}]})}\n\ndata: [DONE]\n\n`,
+    {headers:{'Content-Type':'text/event-stream'}});
+  const other = await api.createSession(opts);
+  const s = await api.createSession(opts);
+  t.after(() => Promise.all([s.close(), other.close()]));
+  t.mock.method(globalThis, 'fetch', async (_, init) => {
+    requests.push(JSON.parse(init.body));
+    switch (requests.length) {
+      case 1:
+        t.mock.timers.setTime(day(3));
+        await other.send('independent');
+        return new Response(null, {status:503});
+      case 3: return new Response(null, {status:401});
+      case 4:
+        t.mock.timers.setTime(day(4));
+        return result({tool_calls:[{id:'a', index:0, type:'function', function:{name:'think',arguments:'{"thought":"once"}'}}]}, 'tool_calls');
+      default: return result({content:'ok'});
+    }
+  });
+  const secret = 'dckr_pat_' + 'A'.repeat(27);
+  await s.send(secret);
+  t.mock.timers.setTime(day(5));
+  await s.send('again');
+  assert.deepEqual(requests.map(r => r.model), ['main', 'main', 'main', 'backup', 'backup', 'backup']);
+  assert.deepEqual(requests.map(r => /Today's date: (\d{4}-\d{2}-\d{2})/.exec(r.messages[0].content)?.[1]),
+    ['2030-05-02', '2030-05-03', '2030-05-02', '2030-05-02', '2030-05-04', '2030-05-05']);
+  assert.deepEqual(requests[0].messages, requests[2].messages);
+  assert.deepEqual(requests[2].messages, requests[3].messages);
+  assert.equal(requests[3].messages.at(-1).content, '[REDACTED]');
+  assert.equal(JSON.stringify(requests).includes(secret), false);
+  assert.equal(requests[4].messages.at(-1).content, 'Thoughts:\nonce');
+});
+
 test('explicit output redaction protects elicitation events and model history even with flag off', async t => {
   const token = 'dckr_pat_' + 'B'.repeat(27);
   const requests = mock(t, [{ name: 'user_prompt', arguments: '{"message":"choose"}' }, null]);

@@ -364,6 +364,27 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
     return new Response(redacted);
   });
   tests.dynamicContext = await replay(api,'dynamicContext',config.replace('model: local/test','add_date: true, add_environment_info: true, model: local/test'),[answer,answer],turns);
+  // Advance the wall clock after each request, leaving retry/cooldown timers monotonic.
+  async function datedReplay(name, yaml, replies, drive = turns) {
+    tests[name] = await replay(api, name, yaml, replies, async args => {
+      const Clock = globalThis.Date;
+      const start = Clock.UTC(2030, 4, 2, 12) + new Clock().getTimezoneOffset() * 60_000;
+      globalThis.Date = class extends Clock {
+        constructor(...a) { super(...(a.length ? a : [start + args.trace.requests.length * 86_400_000])); }
+      };
+      try { await drive(args); } finally { globalThis.Date = Clock; }
+    });
+  }
+  const datedFallback = historyFallback.replace('num_history_items: 5', 'add_date: true, add_environment_info: true, num_history_items: 5');
+  await datedReplay('dateDuringFailover', datedFallback,
+    [[{error:{message:'invalid model'}}], tool('think', {thought:'once'}), answer, answer]);
+  const datedTeam = team.replace('sub_agents: [helper]', 'add_environment_info: true, sub_agents: [helper]')
+    .replace('model: local/worker', 'model: local/worker, add_date: true');
+  await datedReplay('contextAcrossHandoff', datedTeam, [tool('handoff', {agent:'helper'}), answer, answer]);
+  await datedReplay('contextAcrossTransfer', datedTeam, [tool('transfer_task', {agent:'helper', task:'count'}), answer, answer, answer]);
+  const forcedContext = pipeline.replace('force_handoff: helper', 'add_date: true, force_handoff: helper')
+    .replace('model: local/worker', 'model: local/worker, add_environment_info: true');
+  await datedReplay('contextAcrossForcedHandoff', forcedContext, [answer, answer, answer]);
   const deferred = config.replace('model: local/test', 'toolsets: [{type: think, defer: true}], model: local/test');
   tests.discovery = await replay(api, 'discovery', deferred, [tool('search_tool',{query:'think'}),tool('add_tool',{name:'think'}),tool('think',{thought:'plan'}),answer],single);
   const compactTodo = config.replace('model: local/test','toolsets: [{type: todo, toon: create_todo}], model: local/test');

@@ -202,7 +202,7 @@ impl Session {
     pub fn request(&mut self, mut body: Value) -> Result<Value, String> {
         let spec = &self.conversation.profile.spec;
         if body.is_null() {
-            let mut next = json!({"dynamic": {"addEnvironmentInfo":spec.hooks.add_environment_info,"addDate":spec.hooks.add_date}});
+            let mut next = json!({"dynamic": {"addEnvironmentInfo":self.conversation.add_environment_info(),"addDate":spec.hooks.add_date}});
             if self.conversation.profile.needs_host() {
                 next["openTools"] = json!(spec.name);
             }
@@ -310,7 +310,11 @@ impl Session {
             }
         };
         let body = self.conversation.request()?;
-        next["request"] = self.request(body)?;
+        let mut request = self.request(body)?;
+        if let Some(dynamic) = request.get_mut("dynamic") {
+            dynamic["reuse"] = true.into();
+        }
+        next["request"] = request;
         Ok(next)
     }
 

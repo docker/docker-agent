@@ -166,8 +166,6 @@ test('fallback history limits reject incompatible configurations and seeds befor
     [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],
     [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
     [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}`), /history limits with an iteration limit/],
-    [config(`${fields}, add_date: true`), /add_date/],
-    [config(`${fields}, hooks: {turn_start: {type: builtin, command: add_date}}`), /add_date/],
     [config(fields.replace('[local/backup]', '[local/backup, local/gpt-5]')), /Chat Completions on every target/],
   ]) await assert.rejects(api.createSession(opts(yaml)), reason);
   for (const field of ['num_history_items: 1', 'max_tool_result_tokens: 4', 'max_old_tool_call_tokens: 3']) {

@@ -116,7 +116,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     }
     async function run(prompt, signal) {
       const session = handle.session;
-      let runError;
+      let runError, roundContext;
       try {
         signal.throwIfAborted();
         let request = call('begin', { session, prompt, id: crypto.randomUUID(), now: performance.now() });
@@ -129,13 +129,16 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             signal.throwIfAborted();
           }
           if (request.dynamic) {
-            const { addEnvironmentInfo, addDate } = request.dynamic;
-            const { dynamicPrompt } = addEnvironmentInfo || addDate ? await import('./clock.mjs') : {};
-            signal.throwIfAborted();
-            request = call('prepare', { session,
-              environment: addEnvironmentInfo ? dynamicPrompt({ add_environment_info: true })[0] : undefined,
-              date: addDate ? dynamicPrompt({ add_date: true })[0] : undefined,
-            });
+            const { addEnvironmentInfo, addDate, reuse } = request.dynamic;
+            if (!reuse) {
+              const { dynamicPrompt } = addEnvironmentInfo || addDate ? await import('./clock.mjs') : {};
+              signal.throwIfAborted();
+              roundContext = {
+                environment: addEnvironmentInfo ? dynamicPrompt({ add_environment_info: true })[0] : undefined,
+                date: addDate ? dynamicPrompt({ add_date: true })[0] : undefined,
+              };
+            }
+            request = call('prepare', { session, ...roundContext });
           }
           let outcome;
           try {
