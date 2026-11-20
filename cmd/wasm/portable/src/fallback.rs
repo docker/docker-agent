@@ -174,9 +174,8 @@ pub fn status(error: &Value) -> Option<u16> {
     })
 }
 
-pub fn retryable(status: Option<u16>, reason: &str) -> bool {
-    let message = reason.to_ascii_lowercase();
-    if [
+pub fn context_limit_error(message: &str) -> bool {
+    [
         "prompt is too long",
         "prompt too long",
         "maximum context length",
@@ -207,7 +206,11 @@ pub fn retryable(status: Option<u16>, reason: &str) -> bool {
     ]
     .iter()
     .any(|s| message.contains(s))
-    {
+}
+
+pub fn retryable(status: Option<u16>, reason: &str) -> bool {
+    let message = reason.to_ascii_lowercase();
+    if context_limit_error(&message) {
         return false;
     }
     // Typed status wins over an incidental number in provider diagnostics.

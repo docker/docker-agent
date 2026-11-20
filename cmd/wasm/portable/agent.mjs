@@ -116,6 +116,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
     }
     async function run(prompt, signal) {
       const session = handle.session;
+      let runError;
       try {
         signal.throwIfAborted();
         let request = call('begin', { session, prompt, id: crypto.randomUUID(), now: performance.now() });
@@ -141,26 +142,35 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
             const response = await modelFetch(transport, request.body, signal);
             for await (const chunk of sse(response, request.responses)) {
               signal.throwIfAborted();
-              const step = call('chunk', { session, chunk });
-              if (step.request) { outcome = step; break; }
+              const step = call('chunk', { session, chunk, now: performance.now() });
+              if (step.request || step.retry) { outcome = step; break; }
               for (const event of step.events) {
                 signal.throwIfAborted();
-                emit(event);
+                if (!runError) emit(event);
               }
             }
           } catch (e) {
             signal.throwIfAborted();
             if (!(e instanceof TransportError)) throw e;
-            outcome = call('failure', { session, status: e.status, reason: e.message });
+            outcome = call('failure', { session, now: performance.now(), status: e.status, reason: e.message });
           }
           signal.throwIfAborted();
           if (outcome) {
-            if (outcome.event) emit(outcome.event);
+            if (outcome.event && !runError) {
+              if (outcome.event.type === 'error') runError = new Error(outcome.event.message);
+              emit(outcome.event);
+            }
             if (outcome.delay) await backoff(outcome.delay, signal);
-            request = outcome.request;
+            if (!outcome.retry) request = outcome.request;
             continue;
           }
           let next = call('end', { session, now: performance.now() });
+          if (runError) {
+            // Like Go's event bridge, drain the tool-free continuation without projecting it.
+            if (next.result || next.waiting || next.error) throw runError;
+            request = next.request;
+            continue;
+          }
           if (next.waiting) {
             next = await elicit(next.events, signal);
             signal.throwIfAborted();
@@ -177,6 +187,7 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
       } catch (e) {
         call('cancel', { session });
         if (signal.aborted) throw new Error('chat aborted');
+        if (runError) throw runError;
         emit({ type: 'error', message: e.message });
         throw e;
       }

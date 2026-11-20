@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 const SYSTEM: &str = include_str!("../../../../pkg/compaction/prompts/compaction-system.txt");
 const USER: &str = include_str!("../../../../pkg/compaction/prompts/compaction-user.txt");
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub struct Policy {
     pub window: u32,
     threshold: Option<f64>,
@@ -66,7 +66,13 @@ impl Usage {
     }
 }
 
-type Marks = BTreeMap<usize, Usage>;
+#[derive(Clone)]
+struct Mark {
+    model: String,
+    usage: Usage,
+}
+
+type Marks = BTreeMap<usize, Mark>;
 
 #[derive(Default)]
 pub struct Compactor {
@@ -90,7 +96,7 @@ struct Entry<'a> {
     message: &'a Value,
     heuristic: u64,
     reported: u64,
-    usage: Option<Usage>,
+    mark: Option<&'a Mark>,
 }
 
 fn bytes(v: &Value) -> usize {
@@ -102,12 +108,13 @@ fn heuristic(n: usize) -> u64 {
 }
 
 impl<'a> Entry<'a> {
-    fn new(index: usize, message: &'a Value, usage: Option<Usage>) -> Self {
+    fn new(index: usize, message: &'a Value, mark: Option<&'a Mark>) -> Self {
         let mut n = bytes(&message["content"]) + bytes(&message["reasoning_content"]);
         for call in message["tool_calls"].as_array().into_iter().flatten() {
             n += bytes(&call["function"]["name"]) + bytes(&call["function"]["arguments"]);
         }
-        let reported = usage.map_or(0, |u| {
+        let reported = mark.map_or(0, |m| {
+            let u = m.usage;
             if bytes(&message["reasoning_content"]) > 0 {
                 u.completion_tokens
             } else {
@@ -119,7 +126,7 @@ impl<'a> Entry<'a> {
             message,
             heuristic: heuristic(n),
             reported: reported.into(),
-            usage,
+            mark,
         }
     }
 
@@ -137,15 +144,16 @@ fn scale(entries: &[Entry]) -> f64 {
     let (mut estimated, mut actual) = (0, 0);
     let (mut previous, mut guessed, mut known) = (None, 0, 0);
     for entry in entries {
-        if let Some(u) = entry.usage.filter(|u| u.prompt_tokens > 0) {
+        if let Some(m) = entry.mark.filter(|m| m.usage.prompt_tokens > 0) {
+            let u = m.usage;
             let prompt = u64::from(u.prompt_tokens);
-            if let Some(total) = previous {
-                if prompt > total + known && guessed > 0 {
+            if let Some((total, model)) = previous {
+                if model == m.model && prompt > total + known && guessed > 0 {
                     actual += prompt - total - known;
                     estimated += guessed;
                 }
             }
-            previous = Some(prompt + u64::from(u.visible_output()));
+            previous = Some((prompt + u64::from(u.visible_output()), m.model.as_str()));
             guessed = 0;
             known = 0;
         } else if entry.reported > 0 {
@@ -177,11 +185,17 @@ fn split(entries: &[Entry], keep: u64, scale: f64) -> usize {
 }
 
 impl Compactor {
-    pub fn record(&mut self, index: usize, usage: Usage) {
+    pub fn record(&mut self, index: usize, model: &str, usage: Usage) {
         if self.policy.threshold.is_some() {
             self.context_tokens =
                 u64::from(usage.prompt_tokens) + u64::from(usage.completion_tokens);
-            self.marks.insert(index, usage);
+            self.marks.insert(
+                index,
+                Mark {
+                    model: model.to_owned(),
+                    usage,
+                },
+            );
         }
     }
 
@@ -214,7 +228,7 @@ impl Compactor {
             .iter()
             .enumerate()
             .filter(|(_, m)| !is_instruction(m))
-            .map(|(i, m)| Entry::new(i, m, self.marks.get(&i).copied()))
+            .map(|(i, m)| Entry::new(i, m, self.marks.get(&i)))
             .collect();
         let calibrated = scale(&entries);
         let added: u64 = entries
@@ -282,7 +296,7 @@ impl Compactor {
         self.marks.extend(
             marks
                 .range(boundary..)
-                .map(|(i, u)| (offset + (i - boundary), *u)),
+                .map(|(i, mark)| (offset + (i - boundary), mark.clone())),
         );
         self.context_tokens = output.into();
         Undo(original, marks)
@@ -324,9 +338,9 @@ mod tests {
             json!({"role":"developer", "content":"do not remove"}),
             json!({"role":"user", "content":"continue"}),
         ];
-        c.record(2, usage(998, 2));
+        c.record(2, "a", usage(998, 2));
         assert!(c.plan(&messages, &params(), false).unwrap().is_none());
-        c.record(2, usage(999, 2));
+        c.record(2, "a", usage(999, 2));
         let (prefix, body) = c.plan(&messages, &params(), false).unwrap().unwrap();
         assert_eq!(body["messages"].as_array().unwrap()[1..5], messages[1..5]);
         assert_eq!(body["messages"].as_array().unwrap().len(), 6);
@@ -362,9 +376,12 @@ mod tests {
         ];
         c.context_tokens = 43_210;
         assert!(c.plan(&messages, &params(), false).unwrap().is_none());
-        c.record(0, usage(3000, 100));
-        c.record(2, usage(43_110, 100));
+        c.record(0, "a", usage(3000, 100));
+        c.record(2, "a", usage(43_110, 100));
         // The 2x calibration crosses 90%; the whole prefix would no longer fit.
         assert!(c.plan(&messages, &params(), false).is_err());
+        // Different tokenizers cannot calibrate each other's history.
+        c.record(2, "b", usage(43_110, 100));
+        assert!(c.plan(&messages, &params(), false).unwrap().is_none());
     }
 }

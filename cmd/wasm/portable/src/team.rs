@@ -79,6 +79,7 @@ pub struct Session {
     parents: Vec<Conversation>,
     responses: Option<responses::Stream>,
     replayable: bool,
+    summary_attempt: fallback::Attempt,
     switches: usize,
     turn_id: String,
 }
@@ -124,6 +125,9 @@ impl Session {
                 m.responses != primary.responses
                     || m.media_projection() != primary.media_projection()
             });
+            if primary.compaction.enabled() {
+                return Err("multipart history with routed compaction is not supported".into());
+            }
             if team || incompatible {
                 return Err("multipart history requires a single agent and fallback models with the same API and media capabilities".into());
             }
@@ -156,6 +160,7 @@ impl Session {
             parents: vec![],
             responses: None,
             replayable: false,
+            summary_attempt: Default::default(),
             switches: 0,
             turn_id: String::new(),
         })
@@ -191,6 +196,7 @@ impl Session {
     pub fn begin(&mut self, prompt: &str, id: &str, now: f64) -> Result<Value, String> {
         self.conversation.attempt = self.conversation.profile.spec.policy.begin(now);
         let body = self.conversation.begin(prompt, id)?;
+        self.summary_attempt = Default::default();
         self.replayable = !self.conversation.summarizing()
             && self.conversation.profile.spec.hooks.max_calls.is_none();
         self.switches = 0;
@@ -207,7 +213,7 @@ impl Session {
             }
             return Ok(next);
         }
-        let index = self.conversation.attempt.current;
+        let index = self.conversation.request_target();
         let target = &spec.models[index];
         self.responses = target.responses.then(responses::Stream::default);
         if target.responses {
@@ -222,7 +228,7 @@ impl Session {
         Ok(json!({"agent":spec.name, "target": index, "responses":target.responses, "body":body}))
     }
 
-    pub fn chunk(&mut self, chunk: Value) -> Result<Value, String> {
+    pub fn chunk(&mut self, chunk: Value, now: f64) -> Result<Value, String> {
         let failure = if self.responses.is_some() {
             responses::failure(&chunk)
         } else {
@@ -238,7 +244,7 @@ impl Session {
                 .is_none_or(Vec::is_empty)
                 && chunk["choices"].as_array().is_none_or(Vec::is_empty);
             let transient = fallback::retryable(fallback::status(error), &reason);
-            return self.failure(reason, transient);
+            return self.failure(reason, transient, now);
         }
         self.replayable &= fallback::prelude(&chunk, self.responses.is_some());
         let mut events;
@@ -253,13 +259,29 @@ impl Session {
         Ok(json!({"events":events}))
     }
 
-    pub fn failure(&mut self, reason: String, transient: bool) -> Result<Value, String> {
-        let reason = self
-            .conversation
-            .target()
+    pub fn failure(&mut self, reason: String, transient: bool, now: f64) -> Result<Value, String> {
+        let spec = &self.conversation.profile.spec;
+        let reason = spec.models[self.conversation.request_target()]
             .transport
             .safe_diagnostic(reason)?;
-        let spec = &self.conversation.profile.spec;
+        if self.conversation.summarizing() && spec.models.len() > 1 {
+            if fallback::context_limit_error(&reason.to_ascii_lowercase()) {
+                return Err("compaction: retrying a smaller summary after a context overflow is not supported".into());
+            }
+            // The child summarizer has its own default retries and no fallback chain.
+            if let fallback::Decision::Retry(delay) =
+                self.summary_attempt.fail(&Default::default(), transient, 1)
+            {
+                self.conversation.discard_summary_output();
+                return Ok(json!({"retry":true,"delay":delay}));
+            }
+            self.conversation.skip_summary();
+            self.resume_after_summary(now);
+            let request = self.request(self.conversation.request()?)?;
+            return Ok(
+                json!({"request":request, "event":{"type":"error", "message":format!("run compaction agent: model failed: {reason}")}}),
+            );
+        }
         let attempt = &mut self.conversation.attempt;
         let previous = attempt.current;
         let decision = if self.replayable {
@@ -295,7 +317,18 @@ impl Session {
         Ok(next)
     }
 
+    fn resume_after_summary(&mut self, now: f64) {
+        // The pin may have expired during summarization; the summary never updates it.
+        self.conversation.attempt = self.conversation.profile.spec.policy.begin(now);
+        self.replayable = true;
+    }
+
     pub fn end(&mut self, now: f64) -> Result<Value, String> {
+        if self.conversation.summarizing() && self.conversation.profile.spec.models.len() > 1 {
+            self.resume_after_summary(now);
+            let next = self.conversation.end()?;
+            return self.next(next);
+        }
         let mut next = self.conversation.end()?;
         self.replayable = false; // Follow-ups must not replay a completed tool or parent transfer.
         self.conversation

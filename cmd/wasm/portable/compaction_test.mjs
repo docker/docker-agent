@@ -40,11 +40,77 @@ test('explicit unsupported strategies, thresholds and unknown windows reject bef
   assert.equal(requests.length, 0);
 });
 
-test('a compatible fallback chain rejects active compaction before contacting either model', async t => {
-  const yaml = readFileSync(new URL('./testdata/fallback-compaction.yaml', import.meta.url), 'utf8');
+const chain = readFileSync(new URL('./testdata/fallback-compaction.yaml', import.meta.url), 'utf8');
+const env = { MODEL_URL: 'https://primary.invalid/v1', LOCAL_KEY: 'primary-only', BACKUP_KEY: 'backup-only' };
+
+test('incompatible or tool-using compaction routes reject before model I/O', async t => {
   const requests = intercept(t, () => assert.fail('unexpected model request'));
-  await assert.rejects(api.createSession({ yaml, env: { MODEL_URL: 'https://fixture.invalid/v1', LOCAL_KEY: 'fixture' } }), /compaction with fallback/);
+  for (const yaml of [
+    chain.replace('model: spare, context_window: 2048', 'model: spare, context_window: 8192'),
+    chain.replace('openai_chatcompletions', 'openai_responses'),
+    chain.replace('    fallback:', '    toolsets: [{type: think}]\n    fallback:'),
+    chain.replace('name: answer', 'mode: tool, name: answer'),
+    chain.replace('    fallback:', '    handoffs: [other]\n    fallback:') + '\n  other: {model: main}',
+  ]) await assert.rejects(api.createSession({ yaml, env }), /compaction/);
+  await assert.rejects(api.chat({ yaml: chain, env, messages: [
+    { role: 'user', multi_content: [{ type: 'text', text: 'earlier' }] }, { role: 'user', content: 'go' },
+  ] }), /multipart history with routed compaction/);
   assert.equal(requests.length, 0);
+});
+
+test('summary retries stay on the primary with its bearer; continuation selects a fresh route', async t => {
+  const yaml = chain.replace('model: spare,', 'model: spare, base_url: https://backup.invalid/v1, token_key: BACKUP_KEY,');
+  const sent = [];
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body);
+    const backup = body.model === 'spare';
+    assert.equal(new URL(url).hostname, backup ? 'backup.invalid' : 'primary.invalid');
+    assert.equal(init.headers.Authorization, 'Bearer ' + (backup ? env.BACKUP_KEY : env.LOCAL_KEY));
+    switch (sent.length) {
+      case 1: return stream({ error: { message: 'primary unavailable' } });
+      case 2: return stream(answer('first answer'), usage(1024, 1));
+      case 3: return stream(answer('discard this fragment', null), { error: { code: 503, message: 'retry summary' } });
+      case 4:
+        now = 3_600_001; // The old pin expires while the summary is running.
+        return stream(answer('key facts'), usage(20, 1));
+      case 5: return stream({ error: { message: 'primary still unavailable' } });
+      case 6: return stream(answer('done'), usage(20, 2));
+      default: assert.fail('extra model request');
+    }
+  });
+  const events = [];
+  const s = await api.createSession({ yaml, env }, e => events.push(e));
+  t.after(() => s.close());
+  await s.send('old '.repeat(500));
+  assert.equal((await s.send('continue')).message.content, 'done');
+  assert.deepEqual(sent.map(b => b.model), ['main', 'spare', 'main', 'main', 'main', 'spare']);
+  assert.deepEqual(sent[2], sent[3]);
+  assert.match(sent[3].messages[0].content, /summarize conversations/);
+  assert.equal(sent[3].response_format, undefined);
+  assert.equal(sent[3].temperature, 0.25);
+  assert.equal(sent[5].temperature, 0.75);
+  assert.deepEqual(sent[5].messages, sent[4].messages);
+  assert.match(sent[4].messages[0].content, /Session Summary: key facts/);
+  assert.equal(events.filter(e => e.type === 'fallback').length, 2);
+  assert.doesNotMatch(JSON.stringify([sent, events]), /discard this fragment/);
+});
+
+test('summary overflow or malformed output never drains an uncompressed fallback request', async t => {
+  let response;
+  const requests = intercept(t, (_, n) => n === 1 ? stream({ error: { message: 'primary unavailable' } })
+    : n === 2 ? stream(answer('first'), usage(1024, 1)) : stream(...response));
+  const s = await api.createSession({ yaml: chain, env });
+  t.after(() => s.close());
+  await s.send('old '.repeat(500));
+  response = [{ error: { message: 'context_length_exceeded' } }];
+  await assert.rejects(s.send('overflow'), /context overflow/);
+  response = [answer('partial', 'length')];
+  await assert.rejects(s.send('malformed'), /complete, non-empty text summary/);
+  assert.deepEqual(requests.map(r => r.model), ['main', 'spare', 'main', 'main']);
+  assert.equal(requests.at(-1).messages.some(m => m.content?.includes('overflow')), false);
 });
 
 test('disabled compaction still reports the window and clamps the ordinary completion cap', async t => {

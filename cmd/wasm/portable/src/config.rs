@@ -1026,6 +1026,18 @@ fn resolve(
         };
         models.push(resolve_target(m)?);
     }
+    if (team || chain) && models.iter().any(|m| m.compaction.enabled()) {
+        let primary = &models[0];
+        // A failed summary can cause an unobserved continuation. Never run tools on that path.
+        if team
+            || has_tools
+            || models
+                .iter()
+                .any(|m| m.responses || m.compaction != primary.compaction)
+        {
+            return Err("routed compaction requires a single tool-free agent, Chat Completions and matching context windows and thresholds; otherwise set session_compaction: false".into());
+        }
+    }
     Ok(Selected {
         limits: a.limits,
         tool_models,
@@ -1131,10 +1143,6 @@ fn resolve_model(
     };
     let model_id = format!("{provider_id}/{id}");
     let compaction = compaction_policy(a, m)?;
-    // Go's summarizer clones the primary even when cooldown pins user calls to a fallback.
-    if multi_target && compaction.enabled() {
-        return Err("compaction with fallback or local teams is not supported; set session_compaction: false".into());
-    }
     let mut params = model_params(id, m, p, tools, compaction)?;
     if let Some(output) = &a.structured_output {
         output.check_session(&m.model, env)?;
@@ -1258,16 +1266,21 @@ agents:
     }
 
     #[test]
-    fn matching_windows_do_not_make_fallback_compaction_same_model() {
+    fn fallback_compaction_admission_checks_the_whole_chain() {
         let cfg = include_str!("../testdata/fallback-compaction.yaml");
         let env = BTreeMap::from([
             ("MODEL_URL".into(), "https://fixture.invalid/v1".into()),
             ("LOCAL_KEY".into(), "fixture".into()),
         ]);
-        assert!(select(cfg, "root", &env)
+        assert_eq!(select(cfg, "root", &env).unwrap().models.len(), 2);
+        let different = cfg.replace(
+            "temperature: 0.75",
+            "temperature: 0.75, compaction_threshold: 0.9",
+        );
+        assert!(select(&different, "root", &env)
             .err()
             .unwrap()
-            .contains("compaction with fallback"));
+            .contains("routed compaction"));
         let disabled = cfg.replace("session_compaction: true", "session_compaction: false");
         assert_eq!(select(&disabled, "root", &env).unwrap().models.len(), 2);
     }

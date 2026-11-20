@@ -476,7 +476,15 @@ impl Conversation {
         self.prepare_request()
     }
 
-    pub fn target(&self) -> &crate::config::Target {
+    pub fn request_target(&self) -> usize {
+        if self.summarizing() {
+            0
+        } else {
+            self.attempt.current
+        }
+    }
+
+    fn target(&self) -> &crate::config::Target {
         &self.profile.spec.models[self.attempt.current]
     }
 
@@ -495,10 +503,18 @@ impl Conversation {
     }
 
     fn prepare_request(&mut self) -> Result<Value, String> {
-        self.compaction.policy = self.target().compaction;
+        // Compaction clones the primary (or explicitly picked model), not the serving fallback.
+        let primary = &self.profile.spec.models[0];
+        self.compaction.policy = primary.compaction;
+        let params = self
+            .profile
+            .spec
+            .picker
+            .params()
+            .unwrap_or(&primary.model_params);
         if let Some((prefix, mut request)) =
             self.compaction
-                .plan(&self.messages, self.params(), self.target().merge_messages)?
+                .plan(&self.messages, params, primary.merge_messages)?
         {
             self.active.as_mut().expect("active turn").summarizing = Some(prefix);
             if let Some(msgs) = request["messages"].as_array_mut() {
@@ -508,6 +524,15 @@ impl Conversation {
         } else {
             self.request()
         }
+    }
+
+    pub fn discard_summary_output(&mut self) {
+        self.active.as_mut().expect("active summary").step = Step::default();
+    }
+
+    pub fn skip_summary(&mut self) {
+        self.discard_summary_output();
+        self.active.as_mut().expect("active summary").summarizing = None;
     }
 
     pub fn request(&self) -> Result<Value, String> {
@@ -684,7 +709,11 @@ impl Conversation {
             step.finish = Some("stop".into());
         }
         if let Some(usage) = step.usage {
-            self.compaction.record(self.messages.len(), usage);
+            self.compaction.record(
+                self.messages.len(),
+                &self.profile.spec.models[self.attempt.current].id,
+                usage,
+            );
             let input = u64::from(usage.prompt_tokens);
             let output = u64::from(usage.completion_tokens);
             turn.input += input;

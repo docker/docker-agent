@@ -53,10 +53,12 @@ enum Command {
         date: Option<String>,
     },
     Chunk {
+        now: f64,
         session: u32,
         chunk: Value,
     },
     Failure {
+        now: f64,
         session: u32,
         reason: String,
         status: Option<u16>,
@@ -157,14 +159,19 @@ impl Core {
                 let body = s.conversation.prepare(environment, date)?;
                 s.request(body)
             }
-            Command::Chunk { session, chunk } => self.session(session)?.chunk(chunk),
+            Command::Chunk {
+                session,
+                chunk,
+                now,
+            } => self.session(session)?.chunk(chunk, now),
             Command::Failure {
                 session,
                 reason,
                 status,
+                now,
             } => {
                 let transient = status.is_none() || fallback::retryable(status, &reason);
-                self.session(session)?.failure(reason, transient)
+                self.session(session)?.failure(reason, transient, now)
             }
             Command::End { session, now } => self.session(session)?.end(now),
             Command::RegisterTools {
