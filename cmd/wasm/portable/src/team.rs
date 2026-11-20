@@ -126,7 +126,8 @@ impl Session {
             routed_media && targets().any(|m| m.media_projection() != primary.media_projection());
         let checks_responses = primary.responses
             || profile.spec.summary_target().1.responses
-            || (routed_media && targets().any(|m| m.responses));
+            || ((routed_media || profile.spec.limits.limits_history())
+                && targets().any(|m| m.responses));
         if routing
             && checks_responses
             && history
@@ -140,7 +141,7 @@ impl Session {
             .limits
             .check_seed(&history, !profile.spec.tool_models.is_empty())?;
         let source = reproject.then(|| history.clone());
-        // History-limited routes are Chat-only; Go's chat.Message has no name field.
+        // Go's chat.Message has no name field.
         let preserve_names = routing && !profile.spec.limits.limits_history();
         let history = media::history(history, primary.media_projection(), preserve_names)?;
         let mut conversation = Conversation::open(profile, history);

@@ -83,8 +83,9 @@ async function run() {
     tool('change_model', { model: 'local/fast' }), tool('revert_model', {}), answer], turns);
   const limited = config.replace('model: local/test', 'model: local/test, num_history_items: 2, toolsets: [{type: think}]');
   tests.historyLimit = await replay(api, 'historyLimit', limited, [tool('think', { thought: 'private assistant work' }), answer, answer], turns);
+  const historyLimits = 'num_history_items: 5, max_tool_result_tokens: 4, max_old_tool_call_tokens: 4';
   const historyFallback = limited.replace('num_history_items: 2',
-    'num_history_items: 5, max_tool_result_tokens: 4, max_old_tool_call_tokens: 4, session_compaction: false, fallback: {models: [local/backup], retries: -1, cooldown: 1h}');
+    `${historyLimits}, session_compaction: false, fallback: {models: [local/backup], retries: -1, cooldown: 1h}`);
   for (const [name, failure] of [['historyFallbackTransient', 'service unavailable'], ['historyFallbackPinned', 'invalid model']]) {
     tests[name] = await replay(api, name, historyFallback,
       [tool('think', {thought: 'first long thought'}), [{error: {message: failure}}],
@@ -407,17 +408,60 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
   const text = [{ type: 'response.output_text.delta', item_id: 'm', output_index: 0, delta: 'hi' }, fin([])];
   const fn = { type: 'function_call', id: 'item_1', name: 'think', call_id: 'call_1', arguments: '' };
   const args = '{"thought":"plan"}';
-  const responseTool = [{ type: 'response.output_item.added', output_index: 0, item: fn },
-    { type: 'response.function_call_arguments.delta', output_index: 0, item_id: fn.id, delta: args },
-    { type: 'response.function_call_arguments.done', output_index: 0, item_id: fn.id, arguments: args },
-    fin([{ ...fn, arguments: args, status: 'completed' }])];
+  const responseCall = (item, args) => [{ type: 'response.output_item.added', output_index: 0, item },
+    { type: 'response.function_call_arguments.delta', output_index: 0, item_id: item.id, delta: args },
+    { type: 'response.function_call_arguments.done', output_index: 0, item_id: item.id, arguments: args },
+    fin([{ ...item, arguments: args, status: 'completed' }])];
+  const responseTool = responseCall(fn, args);
+  const withSpareKey = drive => async args => {
+    args.options.env.SPARE_KEY = 'spare-only';
+    await drive(args);
+  };
   const responseBackup = twoRounds.replace('providers:', `providers:\n  spare: {provider: openai, api_type: openai_responses, base_url: ${location.origin}/v1, token_key: SPARE_KEY}`)
     .replace('backup: {provider: local', 'backup: {provider: spare');
   tests.cappedCrossApi = await replay(api, 'cappedCrossApi', responseBackup,
-    [[{error:{message:'service unavailable'}}], responseTool, answer, answer], async args => {
-      args.options.env.SPARE_KEY = 'spare-only';
-      await turns(args);
-    }, ['/v1/chat/completions', '/v1/responses', '/v1/chat/completions', '/v1/chat/completions']);
+    [[{error:{message:'service unavailable'}}], responseTool, answer, answer], withSpareKey(turns),
+    ['/v1/chat/completions', '/v1/responses', '/v1/chat/completions', '/v1/chat/completions']);
+  const responseError = message => [{ type: 'response.failed', response: { id: 'id', status: 'failed', error: { code: 'invalid', message } } }];
+  const chat = 'openai_chatcompletions', resp = 'openai_responses';
+  const historyRoutes = (main, spare, cap = '') => `providers:
+  local: {provider: openai, api_type: ${main}, base_url: ${location.origin}/v1, token_key: LOCAL_KEY}
+  spare: {provider: openai, api_type: ${spare}, base_url: ${location.origin}/backup, token_key: SPARE_KEY, max_tokens: 71}
+agents: {root: {model: local/test, instruction: 'Hello \${env.WHO}', ${historyLimits}, ${cap}
+  session_compaction: false, fallback: {models: [spare/backup], retries: -1, cooldown: 1h}, toolsets: [{type: think}]}}`;
+  const pathFor = protocol => protocol === chat ? 'chat/completions' : 'responses';
+  function thought(protocol, id) {
+    const args = JSON.stringify({ thought: `long thought ${id}` });
+    return protocol === chat ? rawTool('think', args, id) : responseCall({...fn, call_id: id}, args);
+  }
+  const iterationHook = 'hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ["3"]}},';
+  for (const [name, main, spare, cap, pinned, drive] of [
+    ['historyResponsesFallback', resp, resp, '', true, turns],
+    ['historyChatToResponsesHook', chat, resp, iterationHook, false, rejectsThenRecovers],
+    ['historyResponsesToChatCap', resp, chat, 'max_iterations: 3,', true, turns],
+    ['historyChatToResponsesCapAndHook', chat, resp, `max_iterations: 3, ${iterationHook}`, true, turns],
+  ]) {
+    const active = pinned ? spare : main;
+    const mainPath = `/v1/${pathFor(main)}`, sparePath = `/backup/${pathFor(spare)}`;
+    const activePath = pinned ? sparePath : mainPath;
+    const failure = pinned ? 'invalid model' : 'service unavailable';
+    const finish = active === chat ? answer : text;
+    const replies = [thought(main, 'first'), main === chat ? [{error:{message:failure}}] : responseError(failure),
+      thought(spare, 'second'), cap ? thought(active, 'third') : finish, finish];
+    tests[name] = await replay(api, name, historyRoutes(main, spare, cap), replies, withSpareKey(drive),
+      [mainPath, mainPath, sparePath, activePath, activePath]);
+  }
+  const seedRoutes = historyRoutes(chat, resp).replace('num_history_items: 5', 'num_history_items: 7');
+  tests.historySeedCrossApi = await replay(api, 'historySeedCrossApi', seedRoutes,
+    [[{error:{message:'invalid model'}}], text], withSpareKey(async ({api, options, record, trace}) => {
+      const call = id => ({id, type: 'function', function: {name: 'think', arguments: '{}'}});
+      const messages = [{role: 'user', content: 'one'}, {role: 'assistant', tool_calls: [call('trim')]},
+        {role: 'tool', tool_call_id: 'trim', content: 'drop with call'}, {role: 'user', content: 'two'},
+        {role: 'assistant', content: 'checking', tool_calls: [call('a'), call('b')]},
+        {role: 'tool', tool_call_id: 'a', content: '🌍'.repeat(5)}, {role: 'tool', tool_call_id: 'b', content: 'four'},
+        {role: 'user', content: 'again'}];
+      trace.results.push(await api.chat({...options, messages}, record));
+    }), ['/v1/chat/completions', '/backup/responses']);
   const switchArgs = '{"model":"careful"}';
   const change = { ...fn, name: 'change_model' };
   const switched = [{ type: 'response.output_item.added', output_index: 0, item: change },
@@ -430,11 +474,12 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
   const combined = config.replace('model: local/test', 'toolsets: [{type: user_prompt}, {type: think}, {type: calculator}], model: local/test');
   tests.toolOrder = await replay(api, 'toolOrder', combined, [answer, answer], turns);
   tests.responses = await replay(api, 'responses', responses, [responseTool, text, text], turns, '/v1/responses');
+  tests.historyResponses = await replay(api, 'historyResponses', responses.replace('model: local/test', `model: local/test, ${historyLimits}`),
+    [thought(resp, 'first'), thought(resp, 'second'), text, text], turns, '/v1/responses');
   const compactResponses = compact.replace('provider: openai,', 'provider: openai, api_type: openai_responses,');
   const busy = structuredClone(text);
   busy.at(-1).response.usage = { input_tokens: 1000, output_tokens: 25, total_tokens: 1025 };
   tests.compactResponses = await replay(api, 'compactResponses', compactResponses, [busy, text, text], turns, '/v1/responses');
-  const responseError = message => [{ type: 'response.failed', response: { id: 'id', status: 'failed', error: { code: 'invalid', message } } }];
   const responseText = delta => [{ ...text[0], delta }, fin([])];
   for (const failed of [false, true]) {
     const name = failed ? 'fallbackCompactionErrorResponses' : 'fallbackCompactionResponses';
