@@ -52,7 +52,8 @@ impl Picker {
         }
         *selection = Some(self.choices.get_index_of(&name).ok_or_else(|| {
             format!(
-                "model {name:?} is not in the allowed list. Available models: {}",
+                "model {} is not in the allowed list. Available models: {}",
+                crate::go_json::quote(&name),
                 self.models()
             )
         })?);

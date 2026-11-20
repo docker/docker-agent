@@ -46,6 +46,7 @@ enum Command {
         session: u32,
         now: f64,
         prompt: String,
+        visible_agent: Option<String>,
         id: String,
     },
     NextIteration {
@@ -118,7 +119,6 @@ enum Command {
     },
     Interrupt {
         session: u32,
-        visible_agent: Option<String>,
     },
     Rollback {
         session: u32,
@@ -174,7 +174,10 @@ impl Core {
                 prompt,
                 id,
                 now,
-            } => self.session(session)?.begin(&prompt, &id, now),
+                visible_agent,
+            } => self
+                .session(session)?
+                .begin(&prompt, &id, now, visible_agent.as_deref()),
             Command::NextIteration { session, now } => self.session(session)?.next_iteration(now),
             Command::Prepare {
                 session,
@@ -266,11 +269,8 @@ impl Core {
                 let next = s.conversation.run_tools()?;
                 s.advance(next, now)
             }
-            Command::Interrupt {
-                session,
-                visible_agent,
-            } => {
-                self.session(session)?.interrupt(visible_agent)?;
+            Command::Interrupt { session } => {
+                self.session(session)?.interrupt()?;
                 Ok(Value::Null)
             }
             Command::Rollback { session } => {

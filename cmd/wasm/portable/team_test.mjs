@@ -14,7 +14,7 @@ const piece = (delta, finish_reason) => ({ choices: [{ index: 0, delta, finish_r
 const text = content => piece({ content }, 'stop');
 const tool = (name, args, index = 0) => ({ index, id: `call-${index}`, type: 'function', function: { name, arguments: JSON.stringify(args) } });
 const calls = (...tool_calls) => piece({ tool_calls }, 'tool_calls');
-const transfer = agent => calls(tool('transfer_task', { agent, task: 'count to 3' }));
+const transfer = (agent, task = 'count to 3') => calls(tool('transfer_task', { agent, task }));
 const handoff = agent => calls(tool('handoff', { agent }));
 const sse = chunks => new Response(chunks.map(c => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
 
@@ -308,7 +308,7 @@ test('shared todos follow the team, scratchpads follow the conversation and agen
 test('a transfer at depth ten succeeds and a transfer beyond it returns a tool error', async t => {
   const names = ['root', ...Array.from({ length: 11 }, (_, i) => `child${i + 1}`)];
   const opts = options(names.map((name, i) => `  ${name}: {model: local/${name}, sub_agents: [${names[i + 1] ?? name}]}`).join('\n'));
-  const req = model(t, ...names.slice(1).map(transfer), ...names.slice(1).map(() => text('done')));
+  const req = model(t, ...names.slice(1).map(n => transfer(n)), ...names.slice(1).map(() => text('done')));
   const events = [];
   const result = await api.chat({ ...opts, messages: [{ role: 'user', content: 'go' }] }, e => events.push(e));
   assert.equal(result.message.content, 'done');
@@ -325,7 +325,7 @@ test('the global switch budget stops repeated nested fan-out and the session rec
   for (let i = 0; i < 4; i++) {
     steps.push(transfer('worker'));
     const count = i === 3 ? 5 : 8;
-    for (let j = 0; j < count; j++) steps.push(transfer('leaf'), text('leaf'));
+    for (let j = 0; j < count; j++) steps.push(transfer('leaf', `part ${j}`), text('leaf'));
     steps.push(text('worker'));
   }
   // At switch #33 the guard fires before a leaf gets a request.
@@ -372,4 +372,38 @@ permissions: {ask: [write_plan], allow: ['*']}`, {autoApprove:true});
   await other.send('isolated');
   assert.match(req.at(-1).messages.at(-2).content, /not found/);
   assert.equal(req.at(-1).messages.at(-1).content, 'null');
+});
+
+test('an approve_tool grant from a delegate stays in that task', async t => {
+  const opts = options(`  root: {model: local/root, sub_agents: [helper], toolsets: [{type: memory}]}
+  helper: {model: local/worker, toolsets: [{type: memory}]}`);
+  const remove = calls(tool('delete_memory', {id: 'absent'}));
+  model(t, transfer('helper'), remove, remove, text('first'), transfer('helper'), remove, text('second'), remove, text('done'));
+  const asked = [];
+  const s = await api.createSession(opts, e => {
+    if (e.type === 'tool_confirmation') {
+      asked.push(e.agent);
+      return s.confirm({decision: 'approve_tool', confirmationId: e.confirmationId, toolName: e.name});
+    }
+  });
+  t.after(() => s.close());
+  await s.send('delegate twice');
+  assert.deepEqual(asked, ['helper', 'helper', 'root']);
+});
+
+test('a loop in a nested transfer stops without running a hidden continuation', async t => {
+  const opts = options(`  root: {model: local/root, sub_agents: [helper], toolsets: [{type: think}]}
+  helper: {model: local/worker, sub_agents: [leaf], max_consecutive_tool_calls: 1}
+  leaf: {model: local/leaf}`);
+  const req = model(t, calls(tool('think', {thought: 'keep'})), transfer('helper'), transfer('leaf'), text('from leaf'), text('recovered'));
+  const events = [];
+  const s = await api.createSession(opts, e => events.push(e));
+  t.after(() => s.close());
+  await assert.rejects(s.send('first'), /consecutive identical calls to transfer_task/);
+  assert.deepEqual(req.map(r => r.model), ['root', 'root', 'worker', 'leaf']);
+  const stopped = events.length;
+  await s.send('again');
+  assert.deepEqual(events[stopped], {type: 'handoff', from: 'helper', to: 'root'});
+  assert.deepEqual(req[4].messages.filter(m => m.role === 'tool').map(m => m.content), ['Thoughts:\nkeep', 'Delegated task failed']);
+  assert.doesNotMatch(JSON.stringify(req[4].messages), /from leaf/);
 });

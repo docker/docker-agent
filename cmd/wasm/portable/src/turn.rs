@@ -59,7 +59,6 @@ pub struct HostSet {
 pub struct Profile {
     pub spec: Selected,
     catalog: RefCell<Catalog>,
-    grants: RefCell<BTreeSet<String>>,
     shared_todos: Rc<RefCell<crate::todo::Todos>>,
     private_todos: RefCell<BTreeMap<usize, crate::todo::Todos>>,
 }
@@ -84,6 +83,7 @@ pub struct Conversation {
     messages: Vec<Value>,
     routed_seed: Option<crate::media::RoutedSeed>,
     scratchpads: BTreeMap<String, String>,
+    grants: BTreeMap<String, BTreeSet<String>>,
     pub switch: Option<Switch>,
     run_number: u64,
     active: Option<Turn>,
@@ -383,7 +383,6 @@ impl Profile {
     ) -> Result<Self, String> {
         Ok(Self {
             catalog: RefCell::new(Catalog::build(&spec, None)?),
-            grants: Default::default(),
             spec,
             shared_todos,
             private_todos: Default::default(),
@@ -399,10 +398,6 @@ impl Profile {
             .and_then(|i| self.spec.tool_models.get(&self.spec.toolsets[i].model))
             .or_else(|| self.spec.picker.selected())
             .unwrap_or(configured)
-    }
-
-    pub fn clear_grants(&self) {
-        self.grants.borrow_mut().clear();
     }
 
     pub fn needs_host(&self) -> bool {
@@ -618,6 +613,7 @@ impl Conversation {
             messages,
             routed_seed: None,
             scratchpads: BTreeMap::new(),
+            grants: Default::default(),
             active: None,
             switch: None,
         }
@@ -651,6 +647,14 @@ impl Conversation {
         ))
     }
 
+    pub fn child(&self, profile: Rc<Profile>, task: Value) -> Self {
+        // Existing grants remain agent-scoped; a child cannot grant tools to its caller.
+        Self {
+            grants: self.grants.clone(),
+            ..Self::open(profile, vec![task])
+        }
+    }
+
     pub fn forced(&mut self, profile: Rc<Profile>, note: String) {
         self.hand_off(profile);
         self.messages.push(json!({"role":"user","content":note}));
@@ -676,6 +680,7 @@ impl Conversation {
         self.delegated.clear();
         self.routed_seed = None;
         self.scratchpads.clear();
+        self.grants.clear();
         self.compaction.truncate(0);
         self.compaction.context_tokens = 0;
         self.compaction.seed_estimates_lost = false;
@@ -1536,7 +1541,11 @@ impl Conversation {
     }
 
     fn granted(&self, name: &str) -> bool {
-        self.profile.spec.tool_policy.grantable() && self.profile.grants.borrow().contains(name)
+        self.profile.spec.tool_policy.grantable()
+            && self
+                .grants
+                .get(&self.profile.spec.name)
+                .is_some_and(|tools| tools.contains(name))
     }
 
     fn ask(&mut self, op: Invocation, events: &mut Vec<Value>) {
@@ -1561,9 +1570,9 @@ impl Conversation {
         let mut events = Vec::new();
         if approved {
             if remember && self.profile.spec.tool_policy.grantable() {
-                self.profile
-                    .grants
-                    .borrow_mut()
+                self.grants
+                    .entry(self.profile.spec.name.clone())
+                    .or_default()
                     .insert(op.call.name.clone());
             }
             self.dispatch(op, &mut events)?;
@@ -1967,28 +1976,22 @@ impl Conversation {
         if turn.waiting() {
             return json!({"events":events, "waiting":true, "serial":turn.serial_batch, "logged":!turn.logged.is_empty(), "unlocked":turn.confirmation.is_none() && !turn.approval_queue.is_empty()});
         }
-        if let Some(error) = self.repetition_error() {
-            return json!({"events":events,"error":error});
-        }
-        self.resume(events)
+        self.resume(events, None)
     }
 
     pub fn opener(&self) -> &str {
         &self.opener
     }
 
-    pub fn at_cap(&self) -> bool {
-        let max = self.frame.max_iterations as usize;
-        max > 0 && self.active.as_ref().expect("active turn").iterations >= max
-    }
-
     // Go checks the session cap, then the acting agent's hook, before each model call.
-    pub fn resume(&mut self, mut events: Vec<Value>) -> Value {
-        let capped = self.at_cap();
+    pub fn resume(&mut self, mut events: Vec<Value>, handoff: Option<Value>) -> Value {
+        if let Some(error) = self.repetition_error() {
+            return json!({"events":events,"error":error});
+        }
+        let max = self.frame.max_iterations as usize;
         let t = self.active.as_mut().expect("active turn");
         t.message_id = format!("{}:{}", t.id, t.iterations);
-        if capped {
-            let max = self.frame.max_iterations;
+        if max > 0 && t.iterations >= max {
             let text = format!(
                 "Execution stopped after reaching the configured max_iterations limit ({max})."
             );
@@ -2003,6 +2006,7 @@ impl Conversation {
             self.active = None;
             return json!({"events":events,"result":result});
         }
+        events.extend(handoff);
         if let Some(limit) = self
             .profile
             .spec
@@ -2013,7 +2017,7 @@ impl Conversation {
             self.active = None;
             return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
         }
-        if self.profile.spec.separate_model_attempts {
+        if self.profile.spec.checkpoint_tools {
             // A later cancellation or projection error must not erase completed tool effects.
             t.messages_before = self.messages.len();
             t.scratchpads_before = self
@@ -2021,6 +2025,8 @@ impl Conversation {
                 .iter()
                 .map(|(k, s)| (k.clone(), s.len()))
                 .collect();
+        }
+        if self.profile.spec.separate_model_attempts {
             return json!({"events":events, "nextIteration":true});
         }
         match self.prepare_request() {
