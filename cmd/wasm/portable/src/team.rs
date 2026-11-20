@@ -113,7 +113,7 @@ impl Session {
             .any(|ts| ts.kind == "session_context");
         let primary = &profile.spec.models[0];
         let team = !profile.spec.team_prompts.is_empty() || !profile.spec.force_handoff.is_empty();
-        let routing = team || profile.spec.models.len() > 1;
+        let routing = team || profile.spec.routed_summary();
         let routed_media = routing
             && history
                 .iter()
@@ -121,11 +121,12 @@ impl Session {
         if routed_media && primary.compaction.enabled() {
             return Err("multipart history with routed compaction is not supported".into());
         }
-        let targets = || agents.values().flat_map(|p| &p.spec.models);
+        let targets = || agents.values().flat_map(|p| p.spec.targets());
         let reproject =
             routed_media && targets().any(|m| m.media_projection() != primary.media_projection());
-        let checks_responses =
-            primary.responses || (routed_media && targets().any(|m| m.responses));
+        let checks_responses = primary.responses
+            || profile.spec.summary_target().1.responses
+            || (routed_media && targets().any(|m| m.responses));
         if routing
             && checks_responses
             && history
@@ -165,8 +166,7 @@ impl Session {
                 .map(|(name, p)| {
                     let targets: Vec<_> = p
                         .spec
-                        .models
-                        .iter()
+                        .targets()
                         .map(|t| json!({"transport":t.transport,"keyBase":t.key_base}))
                         .collect();
                     (
@@ -206,11 +206,10 @@ impl Session {
             }
             return Ok(next);
         }
-        let index = self.conversation.request_target();
-        let target = &spec.models[index];
+        let (index, target) = self.conversation.request_target();
         self.responses = target.responses.then(responses::Stream::default);
         if target.responses {
-            if spec.models.len() > 1 || self.team {
+            if spec.routed_summary() || self.team {
                 fallback::check_responses_history(&body)?;
             }
             body = responses::request(body, spec.output_tool.as_ref())?;
@@ -254,10 +253,9 @@ impl Session {
 
     pub fn failure(&mut self, reason: String, transient: bool, now: f64) -> Result<Value, String> {
         let spec = &self.conversation.profile.spec;
-        let reason = spec.models[self.conversation.request_target()]
-            .transport
-            .safe_diagnostic(reason)?;
-        if self.conversation.summarizing() && spec.models.len() > 1 {
+        let (_, target) = self.conversation.request_target();
+        let reason = target.transport.safe_diagnostic(reason)?;
+        if self.conversation.summarizing() && spec.routed_summary() {
             if fallback::context_limit_error(&reason.to_ascii_lowercase()) {
                 return Err("compaction: retrying a smaller summary after a context overflow is not supported".into());
             }
@@ -327,7 +325,7 @@ impl Session {
     }
 
     pub fn end(&mut self, now: f64) -> Result<Value, String> {
-        if self.conversation.summarizing() && self.conversation.profile.spec.models.len() > 1 {
+        if self.conversation.summarizing() && self.conversation.profile.spec.routed_summary() {
             self.begin_model_attempt(now);
             let next = self.conversation.end()?;
             return self.next(next);

@@ -43,6 +43,67 @@ test('explicit unsupported strategies, thresholds and unknown windows reject bef
 const chain = readFileSync(new URL('./testdata/fallback-compaction.yaml', import.meta.url), 'utf8');
 const env = { MODEL_URL: 'https://primary.invalid/v1', LOCAL_KEY: 'primary-only', BACKUP_KEY: 'backup-only' };
 
+const dedicated = `providers:
+  primary: {provider: openai, base_url: https://primary.invalid/v1, token_key: LOCAL_KEY}
+  briefs: {provider: openai, api_type: openai_responses, base_url: https://summary.invalid/v1, token_key: BACKUP_KEY}
+models:
+  main: {provider: primary, model: writer, context_window: 4096}
+  brief: {provider: briefs, model: summarizer, context_window: 2048}
+agents: {root: {model: main, compaction_model: brief, compaction_threshold: 0.5}}`;
+
+test('dedicated summary routes validate both models and credentials before model I/O', async t => {
+  const requests = intercept(t, () => assert.fail('unexpected model request'));
+  for (const [yaml, reason] of [
+    [dedicated.replace('compaction_model: brief', 'compaction_model: missing'), /must name a model/],
+    [dedicated.replace('compaction_model: brief', 'compaction_model: primary/inline'), /must name a model/],
+    [dedicated.replace(', context_window: 2048', ''), /context_window/],
+    [dedicated.replace('model: summarizer', 'model: "a,b"'), /multi-model/],
+    [dedicated.replace('compaction_threshold: 0.5', 'session_compaction: false'), /active compaction/],
+    [dedicated.replace('model: main,', 'toolsets: [{type: think}], model: main,'), /tool-free/],
+    [dedicated.replace('model: main,', 'structured_output: {mode: tool, name: answer, schema: {type: object, properties: {}}}, model: main,'), /tool-free/],
+    [dedicated.replace('model: main,', 'max_iterations: 2, model: main,'), /iteration limits/],
+    [dedicated.replace('model: main,', 'handoffs: [root], model: main,'), /routed compaction/],
+    [dedicated.replace('model: summarizer,', 'model: summarizer, base_url: https://other.invalid/v1,'), /explicit model token_key/],
+  ]) await assert.rejects(api.createSession({yaml, env}), reason);
+  await assert.rejects(api.createSession({yaml: dedicated, env: {LOCAL_KEY: 'ordinary'}}), /BACKUP_KEY/);
+  for (const [first, reason] of [
+    [{role:'user', multi_content:[{type:'text',text:'seed'}]}, /multipart history/],
+    [{role:'assistant', content:'seed', reasoning_content:'private'}, /reasoning history/],
+  ]) await assert.rejects(api.chat({yaml: dedicated, env, messages:[first, {role:'user',content:'go'}]}), reason);
+  assert.equal(requests.length, 0);
+});
+
+test('the dedicated route never handles ordinary inference; summary retries use only its credentials', async t => {
+  const sent = [];
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push({url, auth:init.headers.Authorization, body});
+    switch (sent.length) {
+      case 1: return stream(answer('first answer'), usage(1024, 1));
+      case 2: return new Response('unavailable', {status:503});
+      case 3: return stream({type:'response.failed', response:{error:{code:'bad_token', message:`invalid bearer ${env.BACKUP_KEY}`}}});
+      case 4: return stream(answer('unreported reply'), usage(4, 1));
+      case 5: return stream(answer('recovered'), usage(4, 1));
+      default: assert.fail('unexpected model request');
+    }
+  });
+  const events = [];
+  const s = await api.createSession({yaml: dedicated, env}, e => events.push(e));
+  t.after(() => s.close());
+  await s.send('old '.repeat(500));
+  const boundary = events.length;
+  await assert.rejects(s.send('continue'), /provider diagnostic contained credentials/);
+  assert.deepEqual(events.slice(boundary).map(e => e.type), ['error']);
+  assert.equal((await s.send('again')).message.content, 'recovered');
+  assert.deepEqual(sent.map(r => [new URL(r.url).hostname, r.auth]), [
+    ['primary.invalid','Bearer primary-only'], ['summary.invalid','Bearer backup-only'],
+    ['summary.invalid','Bearer backup-only'], ['primary.invalid','Bearer primary-only'], ['primary.invalid','Bearer primary-only'],
+  ]);
+  assert.deepEqual(sent[1], sent[2]);
+  assert.equal(sent[4].body.messages.at(-2).content, 'unreported reply');
+  assert.doesNotMatch(JSON.stringify([events, ...sent.map(r => r.body)]), /backup-only|primary-only/);
+});
+
 test('incompatible or tool-using compaction routes reject before model I/O', async t => {
   const requests = intercept(t, () => assert.fail('unexpected model request'));
   for (const yaml of [

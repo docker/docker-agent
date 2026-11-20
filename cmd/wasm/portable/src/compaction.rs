@@ -1,4 +1,4 @@
-//! Foreground, same-model LLM compaction (pkg/compaction and pkg/runtime/compactor).
+//! Foreground LLM compaction (pkg/compaction and pkg/runtime/compactor).
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -28,6 +28,10 @@ impl Policy {
             window,
             threshold: (window > 0 && enabled != Some(false)).then(|| threshold.unwrap_or(0.9)),
         })
+    }
+
+    pub fn effective_window(self, summary: Self) -> u32 {
+        self.window.min(summary.window)
     }
 
     pub fn enabled(self) -> bool {
@@ -213,13 +217,14 @@ impl Compactor {
         &self,
         messages: &[Value],
         params: &Map<String, Value>,
+        summary_policy: Policy,
         merge: bool,
     ) -> Result<Option<(Prefix, Value)>, String> {
         let Some(threshold) = self.policy.threshold else {
             return Ok(None);
         };
-        let window = u64::from(self.policy.window);
-        let trigger = (window as f64 * threshold) as u64;
+        let window = u64::from(summary_policy.window);
+        let trigger = (f64::from(self.policy.effective_window(summary_policy)) * threshold) as u64;
         // BeforeTurn checks the last call's usage; AfterMessages also counts completed tool results.
         if self.context_tokens <= trigger && messages.last().is_none_or(|m| m["role"] != "tool") {
             return Ok(None);
@@ -264,7 +269,7 @@ impl Compactor {
         body.remove("tool_choice");
         body.remove("parallel_tool_calls");
         let key = crate::config::cap_key(params["model"].as_str().expect("configured model"));
-        body.insert(key.into(), self.policy.clamp(cap as i64).into());
+        body.insert(key.into(), summary_policy.clamp(cap as i64).into());
         body.insert("messages".into(), input.into());
         body.insert("stream".into(), true.into());
         body.insert("stream_options".into(), json!({"include_usage":true}));
@@ -339,9 +344,15 @@ mod tests {
             json!({"role":"user", "content":"continue"}),
         ];
         c.record(2, "a", usage(998, 2));
-        assert!(c.plan(&messages, &params(), false).unwrap().is_none());
+        assert!(c
+            .plan(&messages, &params(), c.policy, false)
+            .unwrap()
+            .is_none());
         c.record(2, "a", usage(999, 2));
-        let (prefix, body) = c.plan(&messages, &params(), false).unwrap().unwrap();
+        let (prefix, body) = c
+            .plan(&messages, &params(), c.policy, false)
+            .unwrap()
+            .unwrap();
         assert_eq!(body["messages"].as_array().unwrap()[1..5], messages[1..5]);
         assert_eq!(body["messages"].as_array().unwrap().len(), 6);
         let saved = messages.clone();
@@ -375,13 +386,19 @@ mod tests {
             json!({"role":"tool", "content":"z".repeat(120_000)}),
         ];
         c.context_tokens = 43_210;
-        assert!(c.plan(&messages, &params(), false).unwrap().is_none());
+        assert!(c
+            .plan(&messages, &params(), c.policy, false)
+            .unwrap()
+            .is_none());
         c.record(0, "a", usage(3000, 100));
         c.record(2, "a", usage(43_110, 100));
         // The 2x calibration crosses 90%; the whole prefix would no longer fit.
-        assert!(c.plan(&messages, &params(), false).is_err());
+        assert!(c.plan(&messages, &params(), c.policy, false).is_err());
         // Different tokenizers cannot calibrate each other's history.
         c.record(2, "b", usage(43_110, 100));
-        assert!(c.plan(&messages, &params(), false).unwrap().is_none());
+        assert!(c
+            .plan(&messages, &params(), c.policy, false)
+            .unwrap()
+            .is_none());
     }
 }

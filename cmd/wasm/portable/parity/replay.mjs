@@ -404,6 +404,48 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
     tests[name] = await compactModels(name, chain.replace('openai_chatcompletions', 'openai_responses'), '/v1/responses',
       [responseError('primary unavailable'), busy, summary, responseText('second answer'), text], failed);
   }
+  // Distinct windows, formats and bearers catch accidental reuse of the conversation route.
+  for (const [name, smallSummary, failed] of [
+    ['dedicatedSmallerSummary', true, false], ['dedicatedLargerSummary', false, false], ['dedicatedSummaryFailure', true, true],
+  ]) {
+    const mainApi = smallSummary ? 'openai_chatcompletions' : 'openai_responses';
+    const summaryApi = smallSummary ? 'openai_responses' : 'openai_chatcompletions';
+    const mainPath = smallSummary ? '/v1/chat/completions' : '/v1/responses';
+    const summaryPath = smallSummary ? '/summary/responses' : '/summary/chat/completions';
+    const yaml = `providers:
+  local: {provider: openai, api_type: ${mainApi}, base_url: ${location.origin}/v1, token_key: LOCAL_KEY${failed ? ', compaction_model: summarizer' : ''}}
+  brief: {provider: openai, api_type: ${summaryApi}, base_url: ${location.origin}/summary, token_key: SUMMARY_KEY}
+models:
+  ordinary: {provider: local, model: main, temperature: 0.7, context_window: ${smallSummary ? 8192 : 2048}, max_tokens: 6000${!smallSummary ? ', compaction_model: summarizer' : ''}}
+  summarizer: {provider: brief, model: short, temperature: 0.25, context_window: ${smallSummary ? 2048 : 4096}, max_tokens: 17}
+agents: {root: {model: ordinary, ${smallSummary && !failed ? 'compaction_model: summarizer, ' : ''}session_compaction: true, compaction_threshold: 0.5,
+  structured_output: {name: result, schema: {type: object, properties: {}}}}}`;
+    const summary = failed ? responseError('summary unavailable') : smallSummary ? responseText('key facts') : [piece({content:'key facts'}, 'stop'),usage];
+    const ordinary = smallSummary ? answer : text;
+    tests[name] = await replay(api, name, yaml, [smallSummary ? [piece({content:'first'},'stop'),highUsage] : busy, summary, ordinary, ordinary],
+      async ({api, options, record, trace}) => {
+        options.env.SUMMARY_KEY = 'summary-only';
+        const s = await api.createSession(options, record);
+        try {
+          trace.results.push(await s.send('old '.repeat(800) + secret));
+          const next = s.send('continue');
+          if (failed) await next.then(() => {throw new Error('expected summary failure');}, e => trace.results.push(e.message));
+          else trace.results.push(await next);
+          trace.results.push(await s.send('afterwards'));
+          if (trace.requests[1].authorization !== 'Bearer summary-only' || JSON.stringify(trace.requests).includes(secret)) throw new Error('bad summary credentials or unredacted history');
+        } finally { await s.close(); }
+      }, [mainPath, summaryPath, mainPath, mainPath]);
+  }
+  const summaryChain = chain.replace('providers:', `providers:\n  brief: {provider: openai, api_type: openai_responses, base_url: ${location.origin}/summary, token_key: LOCAL_KEY}`)
+    .replace('models:', 'models:\n  brief: {provider: brief, model: summary, context_window: 2048, temperature: 0.25}')
+    .replace('session_compaction: true', 'session_compaction: true\n    compaction_model: brief');
+  for (const failed of [false, true]) {
+    const name = failed ? 'dedicatedPinnedFailure' : 'dedicatedPinned';
+    const main = '/v1/chat/completions';
+    tests[name] = await compactModels(name, summaryChain, [main, main, '/summary/responses', main, main],
+      [...failover, failed ? responseError('summary unavailable') : responseText('key facts'),
+        [piece({content:'second answer'}, 'stop'), usage], answer], failed);
+  }
   const schema = { type: 'object', properties: { colors: { type: 'array', items: { type: 'string' } } },
     required: ['colors'], additionalProperties: false };
   const jsonAnswer = '{"colors":["blue"]}';

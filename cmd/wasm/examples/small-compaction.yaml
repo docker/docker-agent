@@ -1,0 +1,18 @@
+# Supply OPENAI_API_KEY in the browser session's env.
+models:
+  writer:
+    provider: openai
+    model: gpt-4o
+    context_window: 128000
+    compaction_model: brief
+  brief:
+    provider: openai
+    model: gpt-4o-mini
+    context_window: 128000
+
+agents:
+  root:
+    model: writer
+    instruction: Help the user revise a long document. Preserve their constraints and decisions.
+    session_compaction: true
+    compaction_threshold: 0.75

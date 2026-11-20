@@ -52,6 +52,8 @@ struct Agent {
     limits: crate::limits::Limits,
     model: String,
     session_compaction: Option<bool>,
+    #[serde(default)]
+    compaction_model: String,
     redact_secrets: Option<bool>,
     compaction_threshold: Option<f64>,
     structured_output: Option<StructuredOutput>,
@@ -387,6 +389,8 @@ impl Toolset {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Model {
+    #[serde(default)]
+    compaction_model: String,
     context_window: Option<u32>,
     compaction_threshold: Option<f64>,
     #[serde(rename = "description")]
@@ -411,6 +415,7 @@ struct Model {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Provider {
+    compaction_model: String,
     provider_opts: Options,
     provider: String,
     base_url: String,
@@ -439,6 +444,7 @@ pub struct Selected {
     pub hooks: crate::hooks::Hooks,
     pub picker: crate::model_picker::Picker,
     pub models: Vec<Target>,
+    pub summary_model: Option<Target>,
     pub policy: crate::fallback::Policy,
     pub instruction: String,
     pub toolsets: Vec<Toolset>,
@@ -456,6 +462,29 @@ pub struct Target {
 }
 
 impl Selected {
+    pub fn targets(&self) -> impl Iterator<Item = &Target> {
+        self.models.iter().chain(&self.summary_model)
+    }
+
+    pub fn summary_target(&self) -> (usize, &Target) {
+        // Summary-only transports come last in the host table, outside the fallback chain.
+        match &self.summary_model {
+            Some(target) => (self.models.len(), target),
+            None => (0, &self.models[0]),
+        }
+    }
+
+    pub fn routed_summary(&self) -> bool {
+        self.summary_model.is_some() || self.models.len() > 1
+    }
+
+    pub fn context_window(&self) -> u32 {
+        let (_, summary) = self.summary_target();
+        self.models[0]
+            .compaction
+            .effective_window(summary.compaction)
+    }
+
     pub fn capped_fallback(&self) -> bool {
         self.models.len() > 1 && (self.limits.max_iterations > 0 || self.hooks.max_calls.is_some())
     }
@@ -976,7 +1005,25 @@ fn resolve(
         );
     }
     let has_tools = output_tool.is_some() || !toolsets.is_empty();
-    let resolve_target = |m: &Model| resolve_model(cfg, m, a, env, has_tools, chain || team);
+    let summary_name = first_nonempty([
+        &a.compaction_model,
+        &primary.compaction_model,
+        cfg.providers
+            .get(&primary.provider)
+            .map_or("", |p| &p.compaction_model),
+    ]);
+    let multi_target = chain || team || !summary_name.is_empty();
+    let resolve_target = |m: &Model| {
+        resolve_model(
+            cfg,
+            m,
+            a,
+            env,
+            has_tools,
+            multi_target,
+            a.structured_output.as_ref(),
+        )
+    };
     let request = resolve_target(primary)?;
     let compatible = |name: &str, feature: &str| -> Result<Target, String> {
         let inline;
@@ -1065,9 +1112,32 @@ fn resolve(
             return Err("routed compaction requires a single tool-free agent and matching APIs, context windows and thresholds; otherwise set session_compaction: false".into());
         }
     }
+    let summary_model = if summary_name.is_empty() {
+        None
+    } else {
+        if team || has_tools || a.hooks.max_calls.is_some() || !models[0].compaction.enabled() {
+            return Err("a dedicated compaction_model requires one tool-free agent with active compaction and no history/iteration limits".into());
+        }
+        let summary = cfg.models.get(summary_name).ok_or_else(|| format!("compaction_model {summary_name:?} must name a model with a declared context_window"))?;
+        if summary.context_window.is_none() {
+            return Err("compaction_model requires a declared context_window".into());
+        }
+        let target = resolve_model(cfg, summary, a, env, false, true, None)?;
+        if a.model.contains(',')
+            || summary_name.contains(',')
+            || models
+                .iter()
+                .chain([&target])
+                .any(|m| m.model().contains(','))
+        {
+            return Err("dedicated compaction cannot use a multi-model reference".into());
+        }
+        Some(target)
+    };
     Ok(Selected {
         limits: a.limits,
         tool_models,
+        summary_model,
         output_tool,
         hooks: a.hooks.clone().with_defaults(
             a.redact_secrets.unwrap_or(true),
@@ -1122,6 +1192,7 @@ fn resolve_model(
     env: &BTreeMap<String, String>,
     tools: bool,
     multi_target: bool,
+    output: Option<&StructuredOutput>,
 ) -> Result<Target, String> {
     let p = cfg.providers.get(&m.provider);
     let builtin = check_provider(p, m)?;
@@ -1171,7 +1242,7 @@ fn resolve_model(
     let model_id = format!("{provider_id}/{id}");
     let compaction = compaction_policy(a, m)?;
     let mut params = model_params(id, m, p, tools, compaction)?;
-    if let Some(output) = &a.structured_output {
+    if let Some(output) = output {
         output.check_session(&m.model, env)?;
         if matches!(output.mode, OutputMode::Native) {
             params.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":output.name,"description":output.description,"strict":output.strict,"schema":output.schema}}));
@@ -1290,6 +1361,44 @@ agents:
         ] {
             assert!(parse(&format!("agents: {{root: {{model: openai/test, structured_output: {output}}}}}")).is_err(), "{output}");
         }
+    }
+
+    #[test]
+    fn dedicated_summary_target_is_separate_and_uses_go_precedence() {
+        let cfg = "providers: {local: {compaction_model: p}}
+models:
+  main: {provider: local, model: ordinary, context_window: 3000, compaction_model: m}
+  a: {provider: local, model: agent-choice, context_window: 3000}
+  m: {provider: local, model: model-choice, context_window: 4000}
+  p: {provider: local, model: provider-choice, context_window: 2000}
+agents: {root: {model: main, compaction_model: a}}";
+        let no_agent_override = cfg.replace(", compaction_model: a", "");
+        for (cfg, expected, window) in [
+            (cfg.to_owned(), "agent-choice", 3000),
+            (no_agent_override.clone(), "model-choice", 3000),
+            (
+                no_agent_override.replace(", compaction_model: m", ""),
+                "provider-choice",
+                2000,
+            ),
+        ] {
+            let spec = select(&cfg, "root", &BTreeMap::new()).unwrap();
+            assert_eq!(spec.models.len(), 1);
+            assert_eq!(spec.targets().count(), 2);
+            let (i, summary) = spec.summary_target();
+            assert_eq!(i, 1);
+            assert_eq!(summary.model(), expected);
+            assert_eq!(spec.context_window(), window);
+        }
+    }
+
+    #[test]
+    fn small_compaction_example_resolves_both_models() {
+        let yaml = include_str!("../../examples/small-compaction.yaml");
+        let env = BTreeMap::from([("OPENAI_API_KEY".into(), "test".into())]);
+        let spec = select(yaml, "root", &env).unwrap();
+        assert_eq!(spec.models[0].model(), "gpt-4o");
+        assert_eq!(spec.summary_target().1.model(), "gpt-4o-mini");
     }
 
     #[test]

@@ -495,11 +495,12 @@ impl Conversation {
         ));
     }
 
-    pub fn request_target(&self) -> usize {
+    pub fn request_target(&self) -> (usize, &crate::config::Target) {
+        let spec = &self.profile.spec;
         if self.summarizing() {
-            0
+            spec.summary_target()
         } else {
-            self.attempt.current
+            (self.attempt.current, self.target())
         }
     }
 
@@ -522,19 +523,21 @@ impl Conversation {
     }
 
     fn prepare_request(&mut self) -> Result<Value, String> {
-        // Compaction clones the primary (or explicitly picked model), not the serving fallback.
-        let primary = &self.profile.spec.models[0];
-        self.compaction.policy = primary.compaction;
+        // The summary never inherits a serving fallback's parameters.
+        let (_, summary) = self.profile.spec.summary_target();
+        self.compaction.policy = self.profile.spec.models[0].compaction;
         let params = self
             .profile
             .spec
             .picker
             .params()
-            .unwrap_or(&primary.model_params);
-        if let Some((prefix, mut request)) =
-            self.compaction
-                .plan(&self.messages, params, primary.merge_messages)?
-        {
+            .unwrap_or(&summary.model_params);
+        if let Some((prefix, mut request)) = self.compaction.plan(
+            &self.messages,
+            params,
+            summary.compaction,
+            summary.merge_messages,
+        )? {
             self.active.as_mut().expect("active turn").summarizing = Some(prefix);
             if let Some(msgs) = request["messages"].as_array_mut() {
                 self.profile.spec.hooks.rewrite_messages(msgs)?;
@@ -743,7 +746,7 @@ impl Conversation {
             turn.output += output;
             events.push(json!({
                 "type": "usage", "input_tokens": input, "output_tokens": output,
-                "context_length": input + output, "context_limit": self.profile.spec.models[0].compaction.window, "cost": 0
+                "context_length": input + output, "context_limit": self.profile.spec.context_window(), "cost": 0
             }));
         }
         let mut message = json!({"role":"assistant"});
