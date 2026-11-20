@@ -485,8 +485,8 @@ impl Selected {
             .effective_window(summary.compaction)
     }
 
-    pub fn capped_fallback(&self) -> bool {
-        self.models.len() > 1 && (self.limits.max_iterations > 0 || self.hooks.max_calls.is_some())
+    pub fn bounded_fallback(&self) -> bool {
+        self.models.len() > 1 && self.limits.needs_bounded_fallback(&self.hooks)
     }
 }
 
@@ -971,20 +971,17 @@ fn resolve(
         }
     }
     let primary = &cfg.models[&a.model];
-    let history_or_override =
-        a.limits.limits_history() || a.toolsets.iter().any(|ts| !ts.model.is_empty());
-    if output_tool.is_some() && (history_or_override || a.limits.max_iterations > 0) {
+    let history = a.limits.limits_history();
+    let overrides = a.toolsets.iter().any(|ts| !ts.model.is_empty());
+    if output_tool.is_some() && (history || overrides || a.limits.max_iterations > 0) {
         return Err("tool-mode structured output with history limits, max_iterations or toolset model overrides is not supported".into());
     }
     if team && a.limits.max_iterations > 0 {
         return Err("agent max_iterations with local teams is not supported".into());
     }
     // An overflow can start compaction in Go even without a declared context window.
-    if chain
-        && (a.limits.max_iterations > 0 || a.hooks.max_calls.is_some())
-        && a.session_compaction != Some(false)
-    {
-        return Err("fallback with an iteration limit requires session_compaction: false".into());
+    if chain && a.limits.needs_bounded_fallback(&a.hooks) && a.session_compaction != Some(false) {
+        return Err("bounded fallback requires session_compaction: false".into());
     }
     if chain
         && a.hooks
@@ -998,11 +995,20 @@ fn resolve(
             "fallback max_iterations hook with tool-mode structured output is not supported".into(),
         );
     }
-    if (chain || team) && history_or_override {
-        return Err(
-            "history limits and toolset model overrides with teams or fallback are not supported"
-                .into(),
-        );
+    if (chain || team) && overrides {
+        return Err("toolset model overrides with teams or fallback are not supported".into());
+    }
+    if history && team {
+        return Err("history limits with local teams are not supported".into());
+    }
+    if chain && history {
+        if a.limits.max_iterations > 0 || a.hooks.max_calls.is_some() {
+            return Err("fallback history limits with an iteration limit are not supported".into());
+        }
+        // Go samples the date once per round, not once per fallback attempt.
+        if a.add_date || a.hooks.add_date {
+            return Err("fallback history limits with add_date are not supported".into());
+        }
     }
     let has_tools = output_tool.is_some() || !toolsets.is_empty();
     let summary_name = first_nonempty([
@@ -1099,6 +1105,9 @@ fn resolve(
             &inline
         };
         models.push(resolve_target(m)?);
+    }
+    if chain && history && models.iter().any(|m| m.responses) {
+        return Err("fallback history limits require Chat Completions on every target".into());
     }
     if (team || chain) && models.iter().any(|m| m.compaction.enabled()) {
         let primary = &models[0];

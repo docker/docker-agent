@@ -140,7 +140,9 @@ impl Session {
             .limits
             .check_seed(&history, !profile.spec.tool_models.is_empty())?;
         let source = reproject.then(|| history.clone());
-        let history = media::history(history, primary.media_projection(), routing)?;
+        // History-limited routes are Chat-only; Go's chat.Message has no name field.
+        let preserve_names = routing && !profile.spec.limits.limits_history();
+        let history = media::history(history, primary.media_projection(), preserve_names)?;
         let mut conversation = Conversation::open(profile, history);
         if let Some(source) = source {
             conversation.set_routed_seed(source);
@@ -191,7 +193,7 @@ impl Session {
         self.summary_attempt = Default::default();
         self.replayable = !self.conversation.summarizing()
             && (self.conversation.profile.spec.hooks.max_calls.is_none()
-                || self.conversation.profile.spec.capped_fallback());
+                || self.conversation.profile.spec.bounded_fallback());
         self.switches = 0;
         self.turn_id = id.into();
         self.request(body)

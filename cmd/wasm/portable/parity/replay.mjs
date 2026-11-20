@@ -83,6 +83,23 @@ async function run() {
     tool('change_model', { model: 'local/fast' }), tool('revert_model', {}), answer], turns);
   const limited = config.replace('model: local/test', 'model: local/test, num_history_items: 2, toolsets: [{type: think}]');
   tests.historyLimit = await replay(api, 'historyLimit', limited, [tool('think', { thought: 'private assistant work' }), answer, answer], turns);
+  const historyFallback = limited.replace('num_history_items: 2',
+    'num_history_items: 5, max_tool_result_tokens: 4, max_old_tool_call_tokens: 4, session_compaction: false, fallback: {models: [local/backup], retries: -1, cooldown: 1h}');
+  for (const [name, failure] of [['historyFallbackTransient', 'service unavailable'], ['historyFallbackPinned', 'invalid model']]) {
+    tests[name] = await replay(api, name, historyFallback,
+      [tool('think', {thought: 'first long thought'}), [{error: {message: failure}}],
+        rawTool('think', '{"thought":"second long thought"}', 'call_2'), answer, answer], turns);
+  }
+  tests.historyFallbackSeed = await replay(api, 'historyFallbackSeed', historyFallback,
+    [[{error: {message: 'invalid model'}}], answer], async ({api, options, record, trace}) => {
+      const messages = [
+        {role: 'user', name: 'caller', content: 'previous'},
+        {role: 'assistant', tool_calls: [{id: 'old', type: 'function', function: {name: 'think', arguments: '{}'}}]},
+        {role: 'tool', tool_call_id: 'old', content: '🌍'.repeat(5)},
+        {role: 'user', content: 'again'},
+      ];
+      trace.results.push(await api.chat({...options, messages}, record));
+    });
   const override = config.replace('agents:', 'models: {cheap: {provider: local, model: fast, max_tokens: 37}}\nagents:')
     .replace('model: local/test', 'model: local/test, toolsets: [{type: think, model: cheap}, {type: calculator}]');
   tests.toolModel = await replay(api, 'toolModel', override, [tool('think', { thought: 'plan' }), tool('calculate', { expression: '2+2' }), answer, answer], turns);

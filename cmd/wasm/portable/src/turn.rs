@@ -1238,7 +1238,7 @@ impl Conversation {
                 self.active = None;
                 return json!({"events":events, "error":format!("Agent terminated: max_iterations builtin reached its limit of {limit} model call(s).")});
             }
-            if self.profile.spec.capped_fallback() {
+            if self.profile.spec.bounded_fallback() {
                 // A later cancellation or projection error must not erase completed tool effects.
                 let t = self.active.as_mut().expect("active tool round");
                 t.messages_before = self.messages.len();

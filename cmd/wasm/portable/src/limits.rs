@@ -33,6 +33,10 @@ impl Limits {
         Ok(())
     }
 
+    pub fn needs_bounded_fallback(&self, hooks: &Hooks) -> bool {
+        self.limits_history() || self.max_iterations > 0 || hooks.max_calls.is_some()
+    }
+
     pub fn repetition_limit(self) -> u32 {
         if self.max_consecutive_tool_calls == 0 {
             5
@@ -40,6 +44,7 @@ impl Limits {
             self.max_consecutive_tool_calls
         }
     }
+
     pub fn limits_history(&self) -> bool {
         self.num_history_items > 0
             || self.max_old_tool_call_tokens > 0
