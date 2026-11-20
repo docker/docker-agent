@@ -1188,10 +1188,14 @@ fn resolve(
         hooks,
         tool_policy: Policy {
             rules: cfg.permissions.clone(),
-            safety: if a.safety == Safety::Legacy {
+            // Go small leaves approval to the host: a config cannot waive it.
+            safety: match if a.safety == Safety::Legacy {
                 cfg.runtime.safety
             } else {
                 a.safety
+            } {
+                Safety::Autonomous => Safety::Legacy,
+                safety => safety,
             },
         },
         picker,
