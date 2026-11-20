@@ -1,3 +1,4 @@
+use crate::chat_stream::{Chunk, Fragment, Object};
 use crate::compaction::{Compactor, Prefix, Undo, Usage};
 use crate::discovery::{self, Discovery, Tool};
 use crate::permission::{self, Verdict};
@@ -309,8 +310,11 @@ fn api_arguments(method: &Value, input: &str) -> Result<String, String> {
 struct Step {
     text: String,
     reasoning: String,
-    calls: BTreeMap<u64, Call>,
+    calls: IndexMap<u64, Call>,
     finish: Option<String>,
+    terminal: bool,
+    implicit_stop: bool,
+    ambiguous: bool,
     usage: Option<Usage>,
 }
 
@@ -319,7 +323,7 @@ struct Call {
     id: String,
     name: String,
     arguments: String,
-    announced: bool,
+    renamed: bool,
 }
 
 // Schedule only network calls known to reach I/O, not synchronous decoder or policy failures.
@@ -917,21 +921,37 @@ impl Conversation {
     }
 
     pub fn chunk(&mut self, chunk: Value) -> Result<Vec<Value>, String> {
+        let chunk = serde_json::from_value(chunk).map_err(|_| {
+            self.cancel();
+            "invalid stream chunk"
+        })?;
+        self.chat_chunk(chunk)
+    }
+
+    pub fn stream_state(&self) -> (bool, bool) {
+        let turn = self.active.as_ref().expect("active stream");
+        let step = &turn.step;
+        (
+            step.terminal && (!step.implicit_stop || turn.summarizing.is_some()),
+            !step.calls.is_empty(),
+        )
+    }
+
+    pub fn chat_chunk(&mut self, chunk: Chunk) -> Result<Vec<Value>, String> {
         let turn = self.active.as_mut().ok_or("no active turn")?;
         if turn.waiting() {
             return Err("waiting for elicitation".into());
         }
-        let result = if turn.summarizing.is_some() {
-            turn.step
-                .chunk(chunk, &turn.message_id, &Tools::new())
-                .map(|_| Vec::new())
-        } else {
-            let catalog = self.profile.catalog.borrow();
-            if catalog.needs_host {
-                return Err("host catalog not registered".into());
+        if turn.summarizing.is_none() && self.profile.needs_host() {
+            return Err("host catalog not registered".into());
+        }
+        let result = turn.step.chunk(chunk, &turn.message_id).map(|events| {
+            if turn.summarizing.is_some() {
+                Vec::new()
+            } else {
+                events
             }
-            turn.step.chunk(chunk, &turn.message_id, &catalog.tools)
-        };
+        });
         if result.is_err() {
             self.cancel();
         }
@@ -1030,7 +1050,7 @@ impl Conversation {
                     // Go infers a reason when the stream gave none it can use.
                     Some("tool_calls") => "null",
                     Some(reason) => reason,
-                    None if step.usage.is_some() || !step.text.is_empty() => "stop",
+                    None if !step.text.is_empty() => "stop",
                     None => "null",
                 };
                 let message = if refused {
@@ -1043,6 +1063,9 @@ impl Conversation {
                     format!("Model {model} returned an empty response (stop reason: {reason}). Send a follow-up to continue if the task is unfinished.")
                 };
                 // Go explains a turn without a visible reply before it reports usage.
+                let message = self.profile.spec.models[self.attempt.current]
+                    .transport
+                    .safe_diagnostic(message)?;
                 events.push(json!({"type":"warning", "message":message}));
             }
         }
@@ -1052,8 +1075,8 @@ impl Conversation {
             } else {
                 model.name()
             };
+            let input = u64::from(usage.fresh_input()?);
             self.compaction.record(self.messages.len(), model, usage);
-            let input = u64::from(usage.fresh_input());
             let output = u64::from(usage.completion_tokens);
             turn.input += input;
             turn.output += output;
@@ -1068,7 +1091,7 @@ impl Conversation {
         if !step.text.is_empty() || step.calls.is_empty() {
             message["content"] = Value::String(step.text);
         }
-        if !step.reasoning.is_empty() {
+        if !step.reasoning.trim().is_empty() {
             message["reasoning_content"] = Value::String(step.reasoning);
         }
         match step.finish.as_deref() {
@@ -1105,12 +1128,29 @@ impl Conversation {
                 }
                 turn.tool_rounds += 1;
                 turn.after_tools = true;
+                for call in step.calls.values_mut() {
+                    let missing = call.name.is_empty();
+                    if missing {
+                        call.name = "unknown_tool".into();
+                    }
+                    if (missing || call.renamed)
+                        && self.profile.catalog.borrow().tools.contains_key(&call.name)
+                    {
+                        return Err("ambiguous streamed tool name".into());
+                    }
+                    if call.name.len() > 64
+                        || !call
+                            .name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+                    {
+                        return Err("invalid streamed tool name".into());
+                    }
+                }
                 self.execute_calls(step.calls, message, events)
             }
             None => Err("incomplete stream: missing finish_reason".into()),
-            Some(reason) => Err(format!(
-                "incomplete or unsupported model response (finish_reason: {reason})"
-            )),
+            Some(_) => Err("incomplete or unsupported tool call finish reason".into()),
         }
     }
 
@@ -1162,7 +1202,7 @@ impl Conversation {
 
     fn execute_calls(
         &mut self,
-        calls: BTreeMap<u64, Call>,
+        calls: IndexMap<u64, Call>,
         mut message: Value,
         mut events: Vec<Value>,
     ) -> Result<Value, String> {
@@ -1185,8 +1225,8 @@ impl Conversation {
             return Err("team tools must be called alone, not in a parallel batch".into());
         }
         // Validate against the catalog actually advertised for this step, before any activation.
-        for (index, (key, call)) in calls.iter().enumerate() {
-            if *key != index as u64 || call.id.is_empty() || !ids.insert(&call.id) {
+        for (index, call) in &calls {
+            if *index >= calls.len() as u64 || call.id.is_empty() || !ids.insert(&call.id) {
                 return Err("missing or duplicate tool call ID or index".into());
             }
             if let Some(tool) = self.profile.catalog.borrow().tools.get(&call.name) {
@@ -1926,74 +1966,99 @@ fn tool_result(id: &str, name: &str, output: &str, is_error: bool) -> Value {
 }
 
 impl Step {
-    fn chunk(&mut self, chunk: Value, id: &str, tools: &Tools) -> Result<Vec<Value>, String> {
-        if !chunk["usage"].is_null() {
-            if !chunk["usage"].is_object() {
-                return Err("invalid token usage".into());
+    fn chunk(&mut self, chunk: Chunk, id: &str) -> Result<Vec<Value>, String> {
+        let choices = chunk.choices.unwrap_or_default();
+        if self.terminal && !self.implicit_stop && !choices.is_empty() {
+            return Err("model sent a choice after terminal usage".into());
+        }
+        let usage = chunk.usage.is_some();
+        if usage && !self.terminal {
+            self.usage = chunk.usage.map(|u| u.0);
+        }
+        let mut choices = choices.into_iter();
+        let Some(Object(choice)) = choices.next() else {
+            if usage && matches!(self.finish.as_deref(), None | Some("null")) {
+                // A usage trailer synthesizes stop, but cannot authorize an unfinished call.
+                if !self.calls.is_empty() {
+                    return Err("incomplete stream: missing finish_reason".into());
+                }
+                self.finish = Some("stop".into());
+                self.implicit_stop = true;
             }
-            // Some providers stream cumulative snapshots instead of a single usage trailer.
-            self.usage = Some(
-                Usage::deserialize(&chunk["usage"])
-                    .map_err(|e| format!("invalid token usage: {e}"))?,
-            );
+            self.terminal |= usage && self.terminal_reason();
+            return Ok(Vec::new());
+        };
+        // Secondary choices can overwrite the Go adapter's index-to-ID map or held finish reason.
+        if choices.any(|Object(c)| {
+            c.finish_reason
+                .as_ref()
+                .is_some_and(|r| !r.is_empty() && Some(r) != choice.finish_reason.as_ref())
+                || c.delta
+                    .is_some_and(|Object(d)| d.tool_calls.is_some_and(|v| !v.is_empty()))
+        }) {
+            return Err("ambiguous multi-choice stream".into());
         }
         let mut events = Vec::new();
-        let choices = chunk["choices"]
-            .as_array()
-            .ok_or("missing stream choices")?;
-        let choice = match choices.as_slice() {
-            [] => return Ok(events), // usage-only or prompt annotations
-            [choice] if choice["index"].as_u64() == Some(0) || choice.get("index").is_none() => {
-                choice
-            }
-            _ => return Err("expected a single stream choice at index 0".into()),
-        };
-        if self.finish.is_some() {
-            return Err("model sent a choice after finish_reason".into());
-        }
-        let delta = &choice["delta"];
-        if !delta.is_object() || string(delta, "role")?.is_some_and(|role| role != "assistant") {
-            return Err("invalid assistant delta".into());
-        }
-        if !delta["function_call"].is_null()
-            || string(delta, "refusal")?.is_some_and(|r| !r.is_empty())
+        let Object(delta) = choice.delta.unwrap_or_default();
+        self.ambiguous |= delta.ambiguous()
+            || delta
+                .role
+                .as_deref()
+                .is_some_and(|r| !matches!(r, "" | "assistant"));
+        if self.ambiguous
+            && (!self.calls.is_empty() || delta.tool_calls.as_ref().is_some_and(|v| !v.is_empty()))
         {
-            return Err("refusal or legacy function_call is not supported".into());
+            return Err(
+                "ambiguous role, refusal or legacy function_call beside a tool call".into(),
+            );
         }
-        // Like Go, report a chunk's tool-call fragments before its text.
-        if !delta["tool_calls"].is_null() {
-            for fragment in delta["tool_calls"]
-                .as_array()
-                .ok_or("expected tool_calls array")?
-            {
-                let index = fragment["index"]
-                    .as_u64()
-                    .filter(|n| *n < MAX_PARALLEL_CALLS)
-                    .ok_or("invalid tool call index")?;
-                if let Some(event) = self
-                    .calls
-                    .entry(index)
-                    .or_default()
-                    .append(fragment, tools)?
-                {
-                    events.push(event);
-                }
+        for Object(fragment) in delta.tool_calls.as_deref().unwrap_or_default() {
+            if self.finish.is_some() {
+                return Err("tool call after finish_reason".into());
+            }
+            let index = fragment.index.unwrap_or(0);
+            if index >= MAX_PARALLEL_CALLS {
+                return Err("invalid tool call index".into());
+            }
+            let call = self.calls.entry(index).or_insert_with(|| Call {
+                id: fragment.id.clone().unwrap_or_default(),
+                ..Call::default()
+            });
+            if let Some(event) = call.append(fragment)? {
+                events.push(event);
             }
         }
-        let reasoning = string(delta, "reasoning_content")?
-            .filter(|s| !s.is_empty())
-            .or(string(delta, "reasoning")?);
-        if let Some(s) = reasoning.filter(|s| !s.is_empty()) {
+        if let Some(s) = delta.reasoning() {
             self.reasoning.push_str(s);
             events.push(json!({"type":"delta", "message_id":id, "reasoning":s}));
         }
-        if let Some(s) = string(delta, "content")?.filter(|s| !s.is_empty()) {
-            self.text.push_str(s);
-            events.push(json!({"type":"delta", "message_id":id, "content":s}));
+        if !delta.content.is_empty() {
+            self.text.push_str(&delta.content);
+            events.push(json!({"type":"delta", "message_id":id, "content":delta.content}));
         }
-        self.finish = string(choice, "finish_reason")?.map(str::to_owned);
+        if let Some(reason) = choice.finish_reason.filter(|s| !s.is_empty()) {
+            if self.finish.is_some()
+                && !self.calls.is_empty()
+                && self.finish.as_deref() != Some(&reason)
+            {
+                return Err("conflicting tool call finish reasons".into());
+            }
+            // A held stop survives a non-terminal choice, even one carrying usage.
+            self.terminal |= usage && terminal_reason(&reason);
+            if !self.terminal_reason() || terminal_reason(&reason) {
+                self.finish = Some(reason);
+            }
+        }
         Ok(events)
     }
+
+    fn terminal_reason(&self) -> bool {
+        self.finish.as_deref().is_some_and(terminal_reason)
+    }
+}
+
+fn terminal_reason(reason: &str) -> bool {
+    matches!(reason, "stop" | "length" | "content_filter" | "refusal")
 }
 
 impl Call {
@@ -2001,50 +2066,37 @@ impl Call {
         json!({"type":"tool_call", "id":self.id, "name":self.name, "args":self.arguments})
     }
 
-    fn append(&mut self, fragment: &Value, tools: &Tools) -> Result<Option<Value>, String> {
-        if string(fragment, "type")?.is_some_and(|t| t != "function") {
+    fn append(&mut self, fragment: &Fragment) -> Result<Option<Value>, String> {
+        if fragment
+            .kind
+            .as_deref()
+            .is_some_and(|t| !matches!(t, "" | "function"))
+        {
             return Err("unsupported tool call type".into());
         }
-        if let Some(id) = string(fragment, "id")?.filter(|s| !s.is_empty()) {
-            if self.id.is_empty() {
-                self.id = id.into();
-            } else if self.id != id {
-                return Err("tool call ID changed while streaming".into());
-            }
+        if fragment
+            .id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty() && self.id != id)
+        {
+            return Err("tool call ID changed while streaming".into());
         }
-        let f = &fragment["function"];
-        if !f.is_null() && !f.is_object() {
-            return Err("invalid function delta".into());
+        let Some(Object(f)) = &fragment.function else {
+            return Ok(None);
+        };
+        let learning_name = self.name.is_empty();
+        if let Some(name) = f.name.as_ref().filter(|s| !s.is_empty()) {
+            self.renamed |= !learning_name && self.name != *name;
+            self.name.clone_from(name);
         }
-        if let Some(name) = string(f, "name")? {
-            self.name.push_str(name);
-        }
-        let args = string(f, "arguments")?.unwrap_or_default();
+        let args = f.arguments.as_deref().unwrap_or_default();
         self.arguments.push_str(args);
-        // A name that can no longer grow into a tool is complete: Go announces it too.
-        let complete = tools.contains_key(self.name.as_str())
-            || !tools.keys().any(|name| name.starts_with(&self.name));
-        if self.id.is_empty() || !complete || (self.announced && args.is_empty()) {
+        if self.name.is_empty() || self.id.is_empty() || (!learning_name && args.is_empty()) {
             return Ok(None);
         }
-        // Arguments can arrive before the name or ID. Flush them once a card can be identified.
-        let arguments = if self.announced {
-            args
-        } else {
-            &self.arguments
-        };
-        self.announced = true;
         Ok(Some(
-            json!({"type":"tool_call_delta", "id":self.id, "name":self.name, "arguments":arguments}),
+            json!({"type":"tool_call_delta", "id":self.id, "name":self.name, "arguments":args}),
         ))
-    }
-}
-
-fn string<'a>(object: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
-    match &object[key] {
-        Value::Null => Ok(None),
-        Value::String(s) => Ok(Some(s)),
-        _ => Err(format!("expected a string for {key}")),
     }
 }
 
@@ -2153,7 +2205,7 @@ mod tests {
         let events = c
             .chunk(chunk(
                 json!({"content":"planning", "reasoning_content":"why", "tool_calls":[
-                    call(1, "b", "th", r#"{"th"#), call(0, "a", "think", r#"{"thought":"#)
+                    call(1, "a", "think", r#"{"thought":"#), call(0, "b", "think", r#"{"th"#)
                 ]}),
                 None,
             ))
@@ -2162,18 +2214,19 @@ mod tests {
             events[0],
             json!({"type":"tool_call_delta", "id":"a", "name":"think", "arguments":r#"{"thought":"#})
         );
-        assert_eq!(events[1]["reasoning"], "why");
-        assert_eq!(events[2]["message_id"], "turn");
+        assert_eq!(events[1]["name"], "think");
+        assert_eq!(events[2]["reasoning"], "why");
+        assert_eq!(events[3]["content"], "planning");
         let events = c
             .chunk(chunk(
                 json!({"tool_calls":[
-                    {"index":1, "function":{"name":"ink", "arguments":"ought\":\"B\"}"}},
-                    {"index":0, "function":{"arguments":"\"A\"}"}}
+                    {"index":0, "function":{"arguments":"ought\":\"B\"}"}},
+                    {"index":1, "function":{"arguments":"\"A\"}"}}
                 ]}),
                 Some("tool_calls"),
             ))
             .unwrap();
-        assert_eq!(events[0]["arguments"], r#"{"thought":"B"}"#);
+        assert_eq!(events[0]["arguments"], r#"ought":"B"}"#);
         assert_eq!(events[1]["arguments"], r#""A"}"#);
         let usage = json!({"choices":[], "usage":{"prompt_tokens":7,"completion_tokens":3,
             "prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":1}}});
@@ -2253,7 +2306,7 @@ mod tests {
             )],
             vec![
                 chunk(json!({}), Some("stop")),
-                chunk(json!({"content":"late"}), None),
+                chunk(json!({"tool_calls":[call(0,"a","think","{}")] }), None),
             ],
             vec![chunk(json!({"content":3}), Some("stop"))],
         ] {
@@ -2547,17 +2600,17 @@ mod tests {
         let mut c = conversation(&["user_prompt"]);
         c.begin("go", "turn").unwrap();
         c.chunk(chunk(
-            json!({"tool_calls":[call(0,"one","user_",r#"{"message":"A?"}"#)]}),
+            json!({"tool_calls":[call(0,"one","",r#"{"message":"A?"}"#)]}),
             None,
         ))
         .unwrap();
         let events = c
             .chunk(chunk(
-                json!({"tool_calls":[{"index":0,"function":{"name":"prompt"}}]}),
+                json!({"tool_calls":[{"index":0,"function":{"name":"user_prompt"}}]}),
                 Some("tool_calls"),
             ))
             .unwrap();
-        assert_eq!(events[0]["arguments"], r#"{"message":"A?"}"#);
+        assert_eq!(events[0]["arguments"], "");
         let waiting = c.end().unwrap();
         let id = waiting["events"][1]["id"].as_str().unwrap();
         assert!(waiting.get("request").is_none());

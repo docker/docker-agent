@@ -48,9 +48,12 @@ impl Policy {
     }
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(default)]
 pub struct Usage {
+    #[serde(deserialize_with = "token_count")]
     pub prompt_tokens: u32,
+    #[serde(deserialize_with = "token_count")]
     pub completion_tokens: u32,
     prompt_tokens_details: Option<PromptDetails>,
     completion_tokens_details: Option<CompletionDetails>,
@@ -59,23 +62,30 @@ pub struct Usage {
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(default)]
 struct PromptDetails {
+    #[serde(deserialize_with = "token_count")]
     cached_tokens: u32,
+    #[serde(deserialize_with = "token_count")]
     cache_write_tokens: u32,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
 struct CompletionDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "token_count")]
     reasoning_tokens: u32,
+}
+
+fn token_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    Ok(Option::<u32>::deserialize(d)?.unwrap_or_default())
 }
 
 impl Usage {
     // Go reports as input only what was neither read from nor written to a prompt cache.
-    pub fn fresh_input(self) -> u32 {
+    pub fn fresh_input(self) -> Result<u32, String> {
         let details = self.prompt_tokens_details.unwrap_or_default();
         self.prompt_tokens
-            .saturating_sub(details.cached_tokens)
-            .saturating_sub(details.cache_write_tokens)
+            .checked_sub(details.cached_tokens)
+            .and_then(|n| n.checked_sub(details.cache_write_tokens))
+            .ok_or_else(|| "cached token counts exceed prompt_tokens".into())
     }
 
     fn visible_output(self) -> u32 {

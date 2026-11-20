@@ -1,4 +1,5 @@
 mod calculator;
+mod chat_stream;
 mod compaction;
 mod config;
 mod discovery;

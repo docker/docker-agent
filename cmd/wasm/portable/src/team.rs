@@ -295,6 +295,28 @@ impl Session {
     }
 
     pub fn chunk(&mut self, mut chunk: Value, now: f64) -> Result<Value, String> {
+        if self.responses.is_none() {
+            let raw = chunk
+                .as_str()
+                .ok_or("expected Chat Completions wire record")?;
+            let decoded = match crate::chat_stream::Chunk::decode(raw) {
+                Ok(chunk) => chunk,
+                Err(_) => {
+                    // Do not echo parser snippets: the wire record can contain credentials.
+                    let Some(message) = crate::go_json::syntax_error(raw).ok().flatten() else {
+                        return Err("invalid or ambiguous Chat Completions chunk".into());
+                    };
+                    let reason = format!("error receiving from stream: {message}");
+                    return self.failure(reason, None, fallback::retryable(None, &message), now);
+                }
+            };
+            if !decoded.has_error {
+                self.replayable &= decoded.prelude();
+                let events = self.conversation.chat_chunk(decoded)?;
+                let (terminal, calls) = self.conversation.stream_state();
+                return Ok(json!({"events":events, "terminal": terminal, "calls": calls}));
+            }
+        }
         let raw_detail = if let Some(raw) = chunk.as_str() {
             #[derive(Deserialize)]
             struct Envelope<'a> {
@@ -303,6 +325,12 @@ impl Session {
             }
             let envelope: Envelope =
                 serde_json::from_str(raw).map_err(|_| "invalid stream error record")?;
+            // A duplicate key can hide an earlier, escaped credential from the decoded view.
+            if envelope.error.get().contains('\\')
+                && serde_json::from_str::<serde_yaml_ng::Value>(envelope.error.get()).is_err()
+            {
+                return Err("ambiguous provider diagnostic withheld".into());
+            }
             let parsed: Value =
                 serde_json::from_str(raw).map_err(|_| "invalid stream error record")?;
             let error = &parsed["error"];
@@ -355,15 +383,15 @@ impl Session {
             let transient = fallback::retryable(status, &reason);
             return self.failure(reason, None, transient, now);
         }
-        self.replayable &= fallback::prelude(&chunk, self.responses.is_some());
-        let mut events;
-        if let Some(stream) = &mut self.responses {
-            events = Vec::new();
-            for c in stream.push(chunk)? {
-                events.extend(self.conversation.chunk(c)?);
-            }
-        } else {
-            events = self.conversation.chunk(chunk)?;
+        self.replayable &= fallback::responses_prelude(&chunk);
+        let mut events = Vec::new();
+        for c in self
+            .responses
+            .as_mut()
+            .expect("Responses stream")
+            .push(chunk)?
+        {
+            events.extend(self.conversation.chunk(c)?);
         }
         Ok(json!({"events":events}))
     }

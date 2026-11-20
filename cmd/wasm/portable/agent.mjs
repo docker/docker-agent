@@ -228,14 +228,21 @@ export async function loadDockerAgent(source = new URL('./docker-agent.wasm', im
           try {
             const { transport } = handle.profiles[request.agent].targets[request.target];
             const response = await modelFetch(transport, request, signal);
-            for await (const chunk of sse(response, request.responses, request.summary)) {
+            let calls = false;
+            for await (const chunk of sse(response, request.responses)) {
               signal.throwIfAborted();
+              if (chunk === chatEOF) {
+                if (calls) throw new Error('tool stream ended before [DONE]');
+                break;
+              }
               const step = call('chunk', { session, chunk, now: performance.now() });
               if (step.request || step.retry) { outcome = step; break; }
               for (const event of step.events) {
                 signal.throwIfAborted();
                 if (!runError) emit(event);
               }
+              calls = step.calls;
+              if (step.terminal && !calls) break;
             }
           } catch (e) {
             signal.throwIfAborted();
@@ -479,14 +486,16 @@ function wait(delay, signal) {
   });
 }
 
-async function* sse(response, responses, summary) {
+const chatEOF = Symbol('Chat Completions EOF');
+
+async function* sse(response, responses) {
   if (!response.body || !/^text\/event-stream(?:;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
     await response.body?.cancel();
     throw new Error('expected a text/event-stream model response');
   }
   const reader = response.body.getReader();
-  const utf8 = new TextDecoder('utf-8', { fatal: true });
-  let pending = '', data = [], total = 0, toolCompletion;
+  const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: !responses });
+  let pending = '', data = [], total = 0, toolCompletion, thread = false, hasData = false;
   try {
     for (;;) {
       const { done, value } = await reader.read().catch(e => { throw new TransportError(e.message); });
@@ -497,32 +506,50 @@ async function* sse(response, responses, summary) {
       while ((i = pending.indexOf('\n')) >= 0) {
         const line = pending.slice(0, i).replace(/\r$/, '');
         pending = pending.slice(i + 1);
-        if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
-        else if (!line && data.length) {
-          const record = data.join('\n');
+        if (line.startsWith('data:')) {
+          hasData = true;
+          data.push(line.slice(5).replace(/^ /, ''));
+        } else if (!responses && line === 'data') {
+          // Go's transport requires a data: line, but the SDK also reads bare data fields in that frame.
+          data.push('');
+        } else if (!responses && (line === 'event' || line.startsWith('event:'))) {
+          thread = line.slice(6).replace(/^ /, '').startsWith('thread.');
+        } else if (!line) {
+          const wrapped = thread, record = hasData ? data.join('\n') : undefined;
+          thread = hasData = false;
           data = [];
+          if (record === undefined) continue;
           if (record === '[DONE]') return;
-          const chunk = JSON.parse(record);
+          if (!responses) {
+            if (wrapped) {
+              // The SDK wraps thread.* data before decoding, except for top-level errors.
+              let event;
+              try { event = JSON.parse(record); } catch { throw new Error('invalid thread stream JSON'); }
+              if (!event || !Object.hasOwn(event, 'error')) continue;
+            }
+            yield record;
+            continue;
+          }
+          let chunk;
+          try { chunk = JSON.parse(record); } catch { throw new Error('invalid Responses stream JSON'); }
           if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) throw new Error('invalid model stream event');
           if (toolCompletion && (record === toolCompletion ||
               (chunk.type === 'response.output_text.annotation.added' && !Object.hasOwn(chunk, 'error')))) continue;
           // Go's SDK retains the original JSON of top-level stream errors.
-          yield (responses ? Object.hasOwn(chunk, 'error') : chunk.error != null) ? record : chunk;
-          // Go's Chat adapter treats usage-only chunks as terminal, even without an explicit stop.
-          if (summary && !responses && chunk.usage && (!chunk.choices?.length || chunk.choices[0].finish_reason)) return;
+          yield Object.hasOwn(chunk, 'error') ? record : chunk;
           // Go drains tool-call completions: a later stream error must veto dispatch.
-          if (responses && chunk.type === 'response.incomplete') return;
-          if (responses && ['response.completed', 'response.done'].includes(chunk.type)) {
+          if (chunk.type === 'response.incomplete') return;
+          if (['response.completed', 'response.done'].includes(chunk.type)) {
             if (!chunk.response.output?.some(i => i.type === 'function_call')) return;
             toolCompletion = record;
           }
         }
       }
-      if (done && responses) {
-        if (pending || data.length) throw new Error('incomplete Responses event at EOF');
+      if (done) {
+        if (pending || data.length) throw new Error(responses ? 'incomplete Responses event at EOF' : 'incomplete Chat Completions event at EOF');
+        if (!responses) yield chatEOF;
         return;
       }
-      if (done) throw new TransportError('model stream ended before [DONE]');
     }
   } finally {
     try { await reader.cancel(); } finally { reader.releaseLock(); }

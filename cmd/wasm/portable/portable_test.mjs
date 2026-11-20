@@ -180,3 +180,51 @@ test('Responses never dispatches a mismatched item or a call without a clean com
     assert.ok(!events.some(e => ['tool_call', 'tool_result', 'finish'].includes(e)));
   }
 });
+
+test('Chat Completions never dispatches ambiguous, truncated or superseded calls', async t => {
+  const frag = (id, name, args = '{}') => ({index: 0, id, type: 'function', function: {name, arguments: args}});
+  const tc = (f, reason) => chunk({tool_calls: [f]}, reason);
+  const call = tc(frag('a', 'think'), 'tool_calls');
+  const line = c => `data: ${JSON.stringify(c)}\n\n`;
+  const done = 'data: [DONE]\n\n';
+  let body, requests = 0;
+  t.mock.method(globalThis, 'fetch', () => {
+    requests++;
+    return new Response(body, {headers: {'Content-Type': 'text/event-stream'}});
+  });
+  const options = {yaml: config('https://fixture.invalid'), env: {LOCAL_KEY: 'session-only', WHO: 'Ada'}};
+  for (const [records, tail, pattern] of [
+    [[tc(frag(undefined, 'think', '{')), tc(frag('a', undefined, '}'), 'tool_calls')], done, /ID changed/],
+    [[tc(frag('a', 'old')), tc(frag('a', 'think', ''), 'tool_calls')], done, /ambiguous streamed tool name/],
+    [[tc(frag('a', 'think')), tc(frag('b', 'think'), 'tool_calls')], done, /ID changed/],
+    [[tc(frag('a', 'think'), 'length'), chunk({}, 'stop')], done, /conflicting/],
+    [[{choices: [...call.choices, ...tc(frag('b', 'think')).choices]}], done, /multi-choice/],
+    [[chunk({refusal: 'blocked'}), call], done, /refusal/],
+    [[tc(frag('a', 'think extra'), 'tool_calls')], done, /invalid streamed tool name/],
+    [[tc(frag('a', 'think')), {usage: {}}], done, /missing finish_reason/],
+    [[call], '', /before \[DONE\]/], [[call], 'data: {', /incomplete/],
+    [[{...tc(frag('a', 'think'), 'stop'), usage: {}}, {error: {message: 'veto'}}], done, /veto/],
+    [[], line(call).replace('"name":"think"', '"name":"other","name":"think"') + done, /ambiguous/],
+    [[tc({...frag('a', 'think'), function: ['think', '{}']}, 'tool_calls')], done, /ambiguous/],
+    [[], 'data: {"error":{"message":"\\u0073ession-only","message":"ok"}}\n\n', /withheld/],
+    [[], 'data: session-only is not JSON\n\n', /invalid character/],
+  ]) {
+    body = records.map(line).join('') + tail;
+    const before = requests, events = [];
+    const s = await api.createSession(options, e => events.push(e));
+    try { await assert.rejects(s.send('go'), pattern); } finally { await s.close(); }
+    assert.equal(requests, before + 1);
+    assert.ok(!events.some(e => ['tool_call', 'tool_result', 'tool_confirmation', 'finish'].includes(e.type)));
+    assert.ok(!JSON.stringify(events).includes('session-only'));
+  }
+});
+
+test('a provider-controlled stop reason cannot echo the endpoint credential in a warning', async t => {
+  t.mock.method(globalThis, 'fetch', () => new Response(`data: ${JSON.stringify(chunk({}, 'session-only'))}\n\ndata: [DONE]\n\n`,
+    {headers: {'Content-Type': 'text/event-stream'}}));
+  const events = [];
+  await api.chat({yaml: config('https://fixture.invalid'), env: {LOCAL_KEY: 'session-only', WHO: 'Ada'},
+    messages: [{role: 'user', content: 'go'}]}, e => events.push(e));
+  assert.equal(events.find(e => e.type === 'warning').message, 'provider diagnostic contained credentials');
+  assert.doesNotMatch(JSON.stringify(events), /session-only/);
+});
