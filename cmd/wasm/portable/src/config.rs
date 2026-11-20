@@ -448,7 +448,6 @@ pub struct Selected {
     pub sub_agents: Vec<String>,
     pub handoffs: Vec<String>,
     pub force_handoff: String,
-    pub shared_todo: bool,
     pub limits: crate::limits::Limits,
     pub tool_models: BTreeMap<String, RequestModel>,
     pub hooks: crate::hooks::Hooks,
@@ -1050,13 +1049,6 @@ fn resolve(
         ts.readonly |= a.readonly;
         ts.instruction = instruction(&ts.instruction, env);
     }
-    let mut todos = a.toolsets.iter().filter(|ts| ts.kind == "todo");
-    let shared_todo = todos.next().is_some_and(|ts| ts.shared);
-    if todos.any(|ts| ts.shared != shared_todo) {
-        return Err(format!(
-            "agent {name:?}: mixing shared and private todo toolsets is not supported"
-        ));
-    }
     let mut team_prompts = Vec::new();
     for (tool, targets) in [("transfer_task", &a.sub_agents), ("handoff", &a.handoffs)] {
         if !targets.is_empty() {
@@ -1295,7 +1287,6 @@ fn resolve(
         sub_agents: a.sub_agents.clone(),
         handoffs: a.handoffs.clone(),
         force_handoff: a.force_handoff.clone(),
-        shared_todo,
         toolsets,
     })
 }

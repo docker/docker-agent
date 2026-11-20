@@ -459,10 +459,10 @@ agents:`).replace('model: local/test', 'toolsets: [{type: think}], use_toolsets:
   });
   tests.dynamicContext = await replay(api,'dynamicContext',config.replace('model: local/test','add_date: true, add_environment_info: true, model: local/test'),[answer,answer],turns);
   // Advance the wall clock after each request, leaving retry/cooldown timers monotonic.
-  async function datedReplay(name, yaml, replies, drive = turns, endpoints) {
+  async function datedReplay(name, yaml, replies, drive = turns, endpoints, timestamp) {
     tests[name] = await replay(api, name, yaml, replies, async args => {
       const Clock = globalThis.Date;
-      const start = Clock.UTC(2030, 4, 2, 12) + new Clock().getTimezoneOffset() * 60_000;
+      const start = timestamp ?? (Clock.UTC(2030, 4, 2, 12) + new Clock().getTimezoneOffset() * 60_000);
       globalThis.Date = class extends Clock {
         constructor(...a) { super(...(a.length ? a : [start + args.trace.requests.length * 86_400_000])); }
       };
@@ -1093,10 +1093,10 @@ agents:`)
     [[text[0], {type: 'response.completed', response: {id: 'resp', status: 'completed', output: [],
       usage: {input_tokens: 100, output_tokens: 7, total_tokens: 107, input_tokens_details: {cached_tokens: 60}}}}], text], turns, '/v1/responses');
   // Arguments decode like encoding/json; what cannot be decoded goes back to the model.
-  const answering = decision => async ({api, options, record, trace}) => {
+  const answering = (decision, elicitation = {action: 'accept', content: {answer: 'blue'}}) => async ({api, options, record, trace}) => {
     trace.results.push(await api.chat({...options, messages: [{role: 'user', content: 'go'}]}, e => {
       record(e);
-      return e.type === 'tool_confirmation' ? decision : e.type === 'elicitation' ? {action: 'accept', content: {answer: 'blue'}} : undefined;
+      return e.type === 'tool_confirmation' ? decision : e.type === 'elicitation' ? elicitation : undefined;
     }));
   };
   const approve = answering({decision: 'approve'});
@@ -1171,6 +1171,107 @@ agents:`)
       tests[id] = await replay(api, id, yaml, [rawTool(toolName, args), ...extra, answer], drive, '/v1/chat/completions', service);
     }
   }
+  const todoLifecycle = [tool('create_todos', {descriptions: ['', ' \t', 'x,&\n']}),
+    tool('update_todos', {updates: [{id: 'todo_3', status: 'in-progress'}, {id: 'absent', status: 'completed'},
+      {id: 'todo_1', status: 'completed'}, {id: 'todo_1', status: 'other'}]}),
+    tool('update_todos', {updates: [{id: 'absent', status: 'completed'}]}), tool('list_todos', {}), answer];
+  const todoTeam = routed.replaceAll('model: local/', 'toolsets: [{type: todo, shared: true}], model: local/');
+  const makeTodo = description => tool('create_todo', {description});
+  const listTodos = tool('list_todos', {});
+  const thinkText = thought => tool('think', {thought});
+  for (const [name, yaml, replies, drive = single] of [
+    ['todoLifecycle', todo, todoLifecycle], ['todoLifecycleToon', todo.replace('type: todo', 'type: todo, toon: .*'), todoLifecycle],
+    ['todoSharedTransfer', todoTeam, [makeTodo('root'), delegate(), listTodos, makeTodo('helper'), answer, listTodos, answer]],
+    ['todoSharedHandoff', todoTeam, [makeTodo('root'), pass(), makeTodo('helper'), listTodos, answer]],
+    ['thinkAcrossTurns', thinks, [thinkText(''), thinkText(' one '), answer, thinkText('next\n'), answer], turns],
+    ['thinkAfterFailedSend', thinks, [thinkText('first'), [{error: {message: 'provider failed'}}], thinkText('second'), answer], rejectsThenRecovers],
+    ['discoveryRepeated', deferred, [tool('search_tool', {query: '  ThK '}), tool('add_tool', {name: 'THINK'}),
+      tool('add_tool', {name: 'think'}), tool('add_tool', {name: 'think'}), tool('search_tool', {query: ''}), answer]],
+    ['randomBounds', local(['random']), [...['{}', '{"min":-1,"max":-2}', '{"min":9007199254740993,"max":9007199254740993}',
+      '{"min":-9223372036854775808,"max":-9223372036854775808}', '{"min":9223372036854775808,"max":1}'].map(s => rawTool('random_int', s)), answer]],
+    ['calculatorGrammar', math, [...['-2^2 + 2^-3^2', '2e-3 + 1./3', '-17%-3', '1\u00a0+2', 'sqrt(9)', 'pi', '1/0'].map(expression => tool('calculate', {expression})), answer]],
+    ['calculatorLimits', math, [...['9'.repeat(8193), '('.repeat(64) + '1' + ')'.repeat(64), '9'.repeat(1400), '1e-1024', '1e1024', '-1/3e24'].map(expression => tool('calculate', {expression})), answer]],
+    ['sessionReferences', local(['session_context']), [...[' -01 ', '-0009', 'bell\x07\u00a0', 'x\u0301\u200b', '-9223372036854775808', '\u0085 '].map(session_id => tool('read_session', {session_id})), answer]],
+  ]) tests[name] = await replay(api, name, yaml, replies, drive);
+
+  for (const [name, firstShared, secondShared] of [['todoPrivateSources', false, false], ['todoSharedSources', true, true], ['todoMixedSources', true, false]]) {
+    const yaml = todo.replace('{type: todo}', `{type: todo, shared: ${firstShared}, tools: [create_todo]}, {type: todo, shared: ${secondShared}, tools: [list_todos, create_todos], defer: [list_todos]}`);
+    tests[name] = await replay(api, name, yaml, [makeTodo('first'), tool('add_tool', {name: 'list_todos'}), listTodos,
+      tool('create_todos', {descriptions: ['second']}), listTodos, answer], single);
+  }
+
+  const planRef = {name: 'release'};
+  const writePlan = tool('write_plan', {...planRef, title: '<ship>', author: 'A', content: ' ', status: 'draft'});
+  const memStart = Date.UTC(2026, 6, 1, 12);
+  const memoryID = String(BigInt(memStart + 86_400_000) * 1_000_000n);
+  const remember = tool('add_memory', {memory: 'Σ i, CAT dog<>', category: 'K'});
+  for (const [name, kind, replies, start = memStart] of [
+    ['planRevisions', 'plan', [writePlan, tool('write_plan', {name: '0-first_', content: 'next'}),
+      tool('set_plan_status', {...planRef, status: 'ready', last_known_revision: 1}), tool('write_plan', {...planRef, content: 'new', last_known_revision: 2}),
+      tool('read_plan', planRef), tool('list_plans', {}), tool('get_plan_status', planRef)]],
+    ['planFailures', 'plan', [writePlan, tool('delete_plan', {...planRef, last_known_revision: 0}), tool('delete_plan', planRef), tool('delete_plan', planRef),
+      tool('set_plan_status', {...planRef, status: '!'}), tool('write_plan', {name: 'a/b', content: ''}), tool('write_plan', {name: 'A\n', content: '!'})]],
+    ['memorySearch', 'memory', [remember, remember, tool('add_memory', {memory: ''}), tool('search_memories', {query: 'at\u0085DO', category: 'k'}),
+      tool('search_memories', {query: 'missing'}), tool('get_memories', {})]],
+    ['memoryMutations', 'memory', [remember, tool('update_memory', {id: memoryID, memory: 'changed'}), tool('get_memories', {}),
+      tool('delete_memory', {id: memoryID}), tool('delete_memory', {id: memoryID}), tool('update_memory', {id: memoryID}), tool('get_memories', {})]],
+    ['memoryUnixNanoWrap', 'memory', [remember, tool('get_memories', {})], Date.UTC(2400, 10, 3)],
+    ...[['clockHistorical', Date.UTC(1900, 6, 1), ['Europe/Paris', 'Europe/Dublin', 'Antarctica/Troll', 'Asia/Jerusalem']],
+      ['clockSeasonal', memStart, ['America/Vancouver', 'Canada/Mountain', 'Local', 'Asia/Kathmandu']],
+      ['clockFuture', Date.UTC(2050, 2, 25), ['America/Vancouver', 'Asia/Hebron', 'Europe/Paris', 'Europe/Dublin', 'Pacific/Chatham']],
+    ].map(([name, start, zones]) => [name, 'datetime', zones.map(timezone => tool('get_datetime', {format: 'Mon _2 15:04:05 MST Z07:00:00', timezone})), start]),
+  ]) await datedReplay(name, local([kind]), [...replies, answer], approve, undefined, start);
+
+  for (const [name, action, content] of [
+    ['promptAcceptContent', 'accept', {text: '<&>\u2028\ud800', n: [1e20, 1e-6], nested: {'2': 2, '10': 10}}],
+    ['promptAcceptArray', 'accept', ['not an object']], ['promptDeclineContent', 'decline', {why: '<no>'}], ['promptCancelContent', 'cancel', {why: '&'}],
+  ]) tests[name] = await replay(api, name, question, [tool('user_prompt', {message: 'Ask', schema: {type: 'object', required: ['missing']}}), answer],
+    answering({decision: 'approve'}, {action, content}));
+
+  await datedReplay('builtinRestartIsolation', local(['todo', 'think', 'memory', 'plan']),
+    [makeTodo('first'), thinkText('initial'), remember, writePlan, answer, makeTodo('second'), thinkText('fresh'),
+      tool('get_memories', {}), tool('list_plans', {}), answer, listTodos, thinkText('isolated'), tool('get_memories', {}), tool('list_plans', {}), answer],
+    async ({api, options, record, trace}) => {
+      const session = await api.createSession({...options, autoApprove: true}, record);
+      try {
+        trace.results.push(await session.send('first'));
+        await session.restart();
+        trace.results.push(await session.send('restart'));
+      } finally { await session.close(); }
+      const other = await api.createSession(options, record);
+      try { trace.results.push(await other.send('isolated')); } finally { await other.close(); }
+    });
+
+  for (const [name, min, max] of [['randomFullWidth', -(1n << 63n), (1n << 63n) - 1n], ['randomNegative', -7n, -2n]]) {
+    // A random 19-digit draw can pass a credit-card checksum; compare the draw itself here.
+    const yaml = local(['random']).replace('model: local/test', 'redact_secrets: false, model: local/test');
+    tests[name] = await replay(api, name, yaml, [rawTool('random_int', `{"min":${min},"max":${max}}`), answer], async args => {
+      await single(args);
+      const result = args.trace.events.find(e => e.type === 'tool_result');
+      const stored = args.trace.requests[1].body.messages.at(-1);
+      if (!/^-?\d+$/.test(result.output) || BigInt(result.output) < min || BigInt(result.output) > max || stored.content !== result.output) {
+        throw new Error('random draw out of range or lost in history');
+      }
+      result.output = stored.content = 'random draw';
+    });
+  }
+
+  await datedReplay('sessionArchiveOrder', local(['session_context']), [answer, answer, tool('list_sessions', {limit: 0}), tool('list_sessions', {limit: 1}),
+    tool('list_sessions', {limit: 101}), tool('read_session', {session_id: '-2'}), tool('read_session', {session_id: '-3'}), answer],
+    async ({api, options, record, trace}) => {
+      const s = await api.createSession(options, record);
+      try {
+        for (const prompt of ['one', 'two', 'three']) {
+          if (prompt !== 'one') await s.restart();
+          trace.results.push(await s.send(prompt));
+        }
+      } finally { await s.close(); }
+      // Rename only IDs returned by list_sessions, including their copies in history and transcripts.
+      const list = trace.events.find(e => e.type === 'tool_result' && e.name === 'list_sessions');
+      const ids = JSON.parse(list.output).map(row => row.id);
+      if (ids.length !== 2 || new Set(ids).size !== 2 || ids.some(id => !/^[\da-f-]{36}$/.test(id))) throw new Error('expected two different session IDs');
+      for (const key of ['requests', 'events']) trace[key] = JSON.parse(ids.reduce((s, id, i) => s.replaceAll(id, `session:${i}`), JSON.stringify(trace[key])));
+    });
   // Go small leaves approval to the host: a config cannot waive it.
   for (const [name, yaml] of [['runtime', local(['memory']) + 'runtime: {safety: autonomous}\n'],
     ['agent', config.replace('model: local/test', 'safety: autonomous, toolsets: [{type: memory}], model: local/test')]]) {

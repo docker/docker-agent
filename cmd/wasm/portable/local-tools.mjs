@@ -1,3 +1,4 @@
+import { localTimestamp } from './clock.mjs';
 import { decode, escaped, goQuote } from './go-json.mjs';
 
 // Session-local counterparts of plan.MemoryStorage and memory/database/inmemory.
@@ -79,7 +80,7 @@ function planTool(plans, tool, a) {
   }
   const p = {
     name, title: a.title || old?.title, content: a.content ?? old.content, author: a.author || old?.author,
-    status: a.status || old?.status, revision: current + 1, updatedAt: new Date().toISOString().slice(0, 19) + 'Z',
+    status: a.status || old?.status, revision: current + 1, updatedAt: localTimestamp(new Date(), 0),
   };
   const bytes = encoder.encode(p.content).length;
   if (bytes > maxContent) throw new Error(`plan "${name}" content is too large to store (${bytes} bytes; max ${maxContent})`);
@@ -87,13 +88,6 @@ function planTool(plans, tool, a) {
   if (size > maxEncodedPlan) throw new Error(`plan "${name}" is too large to store (${size} bytes; max ${maxEncodedPlan})`);
   plans.put(name, p, size);
   return tool === 'set_plan_status' ? statusView(p) : resultJSON(p);
-}
-
-function localTimestamp(now, offset) {
-  const wall = new Date(now.getTime() + offset * 60_000).toISOString().slice(0, 19);
-  const pad = n => String(n).padStart(2, '0');
-  const mins = Math.abs(offset);
-  return wall + (offset === 0 ? 'Z' : `${offset > 0 ? '+' : '-'}${pad(Math.floor(mins / 60))}:${pad(mins % 60)}`);
 }
 
 // strings.ToLower uses simple, context-independent mappings (no final sigma or dotted-i expansion).
@@ -116,7 +110,7 @@ function memoryTool(memories, tool, { id = '', memory = '', category = '', query
     case 'add_memory': {
       const now = new Date();
       // Go's js/wasm wall clock also has millisecond resolution. Collisions are errors, not overwrites.
-      id = String(BigInt(now.getTime()) * 1_000_000n);
+      id = String(BigInt.asIntN(64, BigInt(now.getTime()) * 1_000_000n));
       if (memories.rows.has(id)) throw new Error(`Error calling tool: failed to add memory: memory ID already exists: ${id}`);
       const row = { id, created_at: localTimestamp(new Date(), offset), memory, category: category || undefined };
       memories.put(id, row, storageBytes(row));
@@ -149,11 +143,9 @@ function memoryTool(memories, tool, { id = '', memory = '', category = '', query
 }
 
 // Create once per session, outside the restart path. Call only after any required approval.
-export function localTools() {
+export function localTools(offset = new Date().getTimezoneOffset()) {
   const plans = store('plan', maxEncodedPlan);
   const memories = store('memory', maxMemoryBytes);
-  // time.Local in Go's js/wasm build is a fixed offset, not a live timezone.
-  const offset = -new Date().getTimezoneOffset();
   return {
     call(name, argsJSON, signal) {
       try {
