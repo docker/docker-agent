@@ -268,7 +268,11 @@ impl Session {
             let parsed: Value =
                 serde_json::from_str(raw).map_err(|_| "invalid stream error record")?;
             let error = &parsed["error"];
-            let detail = error.as_str().unwrap_or_else(|| envelope.error.get());
+            let detail = if error.is_null() {
+                ""
+            } else {
+                error.as_str().unwrap_or_else(|| envelope.error.get())
+            };
             let decoded = error
                 .as_str()
                 .map_or_else(|| error.to_string(), str::to_owned);
@@ -290,31 +294,22 @@ impl Session {
         } else {
             None
         };
-        let failure = if let Some(detail) = raw_detail {
-            Some((&chunk["error"], detail))
-        } else if self.responses.is_some() {
-            let failed = responses::failure(&chunk);
-            if self.conversation.summarizing()
-                && failed.is_some()
-                && chunk["type"] != "response.failed"
-            {
-                return Err("compaction: unsupported Responses error event".into());
-            }
-            failed
-        } else {
-            None
-        };
-        if let Some((error, detail)) = failure {
+        let failure = raw_detail.or_else(|| {
+            self.responses
+                .as_ref()
+                .and_then(|_| responses::failure(&chunk))
+        });
+        if let Some(detail) = failure {
             let reason = format!("error receiving from stream: {detail}");
             self.replayable &= chunk["response"]["output"]
                 .as_array()
                 .is_none_or(Vec::is_empty)
                 && chunk["choices"].as_array().is_none_or(Vec::is_empty);
-            // SSE errors have no typed HTTP status in the child runtime.
-            let status = if self.conversation.summarizing() {
+            // Responses SSE and child summaries only classify the rendered diagnostic.
+            let status = if self.conversation.summarizing() || self.responses.is_some() {
                 None
             } else {
-                fallback::status(error)
+                fallback::status(&chunk["error"])
             };
             let transient = fallback::retryable(status, &reason);
             return self.failure(reason, None, transient, now);

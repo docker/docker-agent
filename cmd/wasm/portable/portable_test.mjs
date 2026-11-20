@@ -150,3 +150,33 @@ test('an in-flight fetch can be stopped from the delta callback', async t => {
   await session.close();
   await assert.rejects(session.send('late'), /closed/);
 });
+
+test('Responses never dispatches a mismatched item or a call without a clean completion', async t => {
+  const item = {type: 'function_call', id: 'fc', call_id: 'call', name: 'think'};
+  const added = {type: 'response.output_item.added', output_index: 0, item};
+  const args = {type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'fc', delta: '{"thought":"one"}'};
+  const done = {type: 'response.completed', response: {output: [item]}};
+  let body, requests = 0;
+  t.mock.method(globalThis, 'fetch', () => {
+    requests++;
+    return new Response(body, {headers: {'Content-Type': 'text/event-stream'}});
+  });
+  const options = {yaml: config('https://fixture.invalid').replace('provider: openai', 'provider: openai\n    api_type: openai_responses'),
+    env: {LOCAL_KEY: 'per-session-only', WHO: 'Ada'}};
+  for (const [chunks, tail, reason] of [
+    [[added, {...args, item_id: 'other'}, done], '', /missing announcement/],
+    [[added, args, {type: 'response.function_call_arguments.done', item_id: 'fc', arguments: '{}'}, done], '', /contradicts/],
+    [[added, args], '', /missing finish_reason/],
+    [[added, args, done], 'data: {', /incomplete Responses event/],
+    [[added, args, done, {type: 'error', message: 'late failure'}], '', /after terminal/],
+    [[{type: 'response.unknown'}, added, args, done], '', /unsupported response output/],
+  ]) {
+    body = chunks.map(c => `data: ${JSON.stringify(c)}\n\n`).join('') + tail;
+    const events = [];
+    const before = requests;
+    const s = await api.createSession(options, e => events.push(e.type));
+    try { await assert.rejects(s.send('go'), reason); } finally { await s.close(); }
+    assert.equal(requests, before + 1);
+    assert.ok(!events.some(e => ['tool_call', 'tool_result', 'finish'].includes(e)));
+  }
+});

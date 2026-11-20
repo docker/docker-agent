@@ -149,97 +149,103 @@ pub fn request(
 }
 
 #[derive(Default)]
-struct Fragments {
-    text: String,
-    done: bool,
-}
-
-impl Fragments {
-    // Final snapshots may repeat all streamed bytes or supply a missing suffix.
-    fn update<'a>(&mut self, value: &'a str, snapshot: bool) -> Result<&'a str, String> {
-        if value.is_empty() || (self.done && !snapshot) {
-            return Ok("");
-        }
-        let suffix = if snapshot {
-            self.done = true;
-            value
-                .strip_prefix(&self.text)
-                .ok_or("Responses snapshot contradicts streamed deltas")?
-        } else {
-            value
-        };
-        self.text.push_str(suffix);
-        Ok(suffix)
-    }
-}
-
-#[derive(Default)]
 struct Call {
     index: Option<usize>,
     id: String,
     name: String,
-    args: Fragments,
+    args: String,
+    final_args: bool,
 }
 
 impl Call {
     fn announce(
         &mut self,
-        id: Option<&str>,
-        name: Option<&str>,
-        args: Option<&str>,
-        calls: &mut usize,
+        next: &mut usize,
+        id: &str,
+        name: &str,
         out: &mut Vec<Value>,
     ) -> Result<(), String> {
-        for (stored, incoming, key) in [(&mut self.id, id, "ID"), (&mut self.name, name, "name")] {
-            if let Some(s) = incoming.filter(|s| !s.is_empty()) {
-                if stored.is_empty() {
-                    stored.push_str(s);
-                } else if stored != s {
-                    return Err(format!("function call {key} changed"));
-                }
+        if id.is_empty() || name.is_empty() {
+            return Err("function call missing name or ID".into());
+        }
+        if self.index.is_some() {
+            if self.id != id || self.name != name {
+                return Err("function call identity changed".into());
             }
+            return Ok(());
         }
-        if let Some(args) = args {
-            self.arguments(args, true, out)?;
-        }
-        if self.index.is_none() && !self.id.is_empty() && !self.name.is_empty() {
-            self.index = Some(*calls);
-            delta(
-                out,
-                json!({"tool_calls":[{
-                    "index":*calls, "id":self.id, "type":"function",
-                    "function":{"name":self.name,"arguments":self.args.text}
-                }]}),
-            );
-            *calls += 1;
+        let index = *next;
+        *next += 1;
+        self.index = Some(index);
+        self.id = id.into();
+        self.name = name.into();
+        delta(
+            out,
+            json!({"tool_calls":[{"index":index,"id":id,"type":"function",
+            "function":{"name":name,"arguments":self.args}}]}),
+        );
+        Ok(())
+    }
+
+    fn check_identity(&self, item: &Value) -> Result<(), String> {
+        if nonempty(item, "name").is_some_and(|s| s != self.name)
+            || nonempty(item, "call_id").is_some_and(|s| s != self.id)
+        {
+            return Err("function call identity changed".into());
         }
         Ok(())
     }
 
-    fn arguments(&mut self, text: &str, done: bool, out: &mut Vec<Value>) -> Result<(), String> {
-        let suffix = self.args.update(text, done)?;
-        if let Some(index) = self.index.filter(|_| !suffix.is_empty()) {
+    fn arguments(
+        &mut self,
+        args: &str,
+        snapshot: bool,
+        out: &mut Vec<Value>,
+    ) -> Result<(), String> {
+        if args.is_empty() || (!snapshot && self.final_args) {
+            return Ok(());
+        }
+        if snapshot {
+            self.final_args = true;
+            if self.index.is_none() {
+                // Nothing has been emitted: .done replaces the entire pending buffer.
+                self.args.clear();
+            } else if !self.args.is_empty() {
+                if self.args != args {
+                    return Err("Responses snapshot contradicts streamed arguments".into());
+                }
+                return Ok(());
+            }
+        }
+        self.args.push_str(args);
+        if let Some(index) = self.index {
             delta(
                 out,
-                json!({"tool_calls":[{"index":index,"function":{"arguments":suffix}}]}),
+                json!({"tool_calls":[{"index":index,"function":{"arguments":args}}]}),
             );
         }
         Ok(())
     }
 }
 
-#[derive(Default)]
-struct Item {
-    parts: BTreeMap<(&'static str, u64), Fragments>,
-    call: Option<Call>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ItemEvent {
+    Added,
+    Done,
+    Terminal,
 }
 
 #[derive(Default)]
 pub struct Stream {
-    items: Vec<Item>,
+    // Text snapshots may change item ID while retaining the same output slot.
+    parts: Vec<BTreeMap<u64, bool>>,
     by_id: BTreeMap<String, usize>,
     by_index: BTreeMap<u64, usize>,
+    // Function arguments, unlike text, are routed strictly by item_id in Go.
+    functions: BTreeMap<String, Call>,
     calls: usize,
+    // Unknown events and unfinished messages are harmless only on a text-only step.
+    ambiguous_output: bool,
     incomplete_item: bool,
     terminal: bool,
 }
@@ -248,47 +254,23 @@ fn delta(out: &mut Vec<Value>, value: Value) {
     out.push(json!({"choices":[{"index":0,"delta":value}]}));
 }
 
-impl Item {
+fn nonempty<'a>(obj: &'a Value, key: &str) -> Option<&'a str> {
+    obj[key].as_str().filter(|s| !s.is_empty())
+}
+
+impl Stream {
     fn text(
         &mut self,
-        channel: &'static str,
-        index: u64,
+        id: Option<&str>,
+        index: Option<u64>,
+        part: u64,
         text: &str,
         snapshot: bool,
         out: &mut Vec<Value>,
     ) -> Result<(), String> {
-        let fragment = self
-            .parts
-            .entry((channel, index))
-            .or_default()
-            .update(text, snapshot)?;
-        if !fragment.is_empty() {
-            let field = if channel == "text" {
-                "content"
-            } else {
-                "reasoning_content"
-            };
-            delta(out, json!({"role":"assistant", field:fragment}));
+        if text.is_empty() {
+            return Ok(());
         }
-        Ok(())
-    }
-
-    fn part(&mut self, part: &Value, index: u64, out: &mut Vec<Value>) -> Result<(), String> {
-        let channel = match string(part, "type")? {
-            "text" | "output_text" => "text",
-            "summary_text" => "summary",
-            "reasoning_text" => "reasoning",
-            "refusal" => return Err("model refused the request".into()),
-            other => return Err(format!("unsupported Responses part: {other}")),
-        };
-        self.text(channel, index, string(part, "text")?, true, out)
-    }
-}
-
-impl Stream {
-    // item_id joins providers that omit output_index; output_index joins providers that
-    // change item_id between deltas and the final snapshot of the same output slot.
-    fn slot(&mut self, id: Option<&str>, index: Option<u64>) -> Result<usize, String> {
         let index = index.or(id.is_none().then_some(0));
         let known_id = id.and_then(|id| self.by_id.get(id).copied());
         let known_index = index.and_then(|i| self.by_index.get(&i).copied());
@@ -296,8 +278,8 @@ impl Stream {
             return Err("conflicting response item identifiers".into());
         }
         let slot = known_index.or(known_id).unwrap_or_else(|| {
-            self.items.push(Item::default());
-            self.items.len() - 1
+            self.parts.push(Default::default());
+            self.parts.len() - 1
         });
         if let Some(id) = id.filter(|_| known_id.is_none()) {
             self.by_id.insert(id.into(), slot);
@@ -305,50 +287,96 @@ impl Stream {
         if let Some(i) = index.filter(|_| known_index.is_none()) {
             self.by_index.insert(i, slot);
         }
-        Ok(slot)
+        if let Some(was_snapshot) = self.parts[slot].get(&part) {
+            if snapshot {
+                return Ok(());
+            }
+            if *was_snapshot {
+                return Err("text delta after Responses snapshot".into());
+            }
+        }
+        self.parts[slot].insert(part, snapshot);
+        delta(out, json!({"role":"assistant","content":text}));
+        Ok(())
     }
 
     fn item(
         &mut self,
-        slot: usize,
         item: &Value,
         header: &Value,
-        done: bool,
+        index: Option<u64>,
+        source: ItemEvent,
         out: &mut Vec<Value>,
     ) -> Result<(), String> {
-        if done && !item["status"].is_null() && item["status"] != "completed" {
-            self.incomplete_item = true;
+        let id = nonempty(item, "id");
+        let header_id = nonempty(header, "item_id");
+        if source != ItemEvent::Added && !item["status"].is_null() && item["status"] != "completed"
+        {
+            if item["type"] == "message" && item["status"] == "in_progress" {
+                self.ambiguous_output = true;
+            } else {
+                self.incomplete_item = true;
+            }
         }
-        let state = &mut self.items[slot];
         match string(item, "type")? {
             "function_call" => {
-                let c = state.call.get_or_insert_with(Call::default);
-                let mut id = item["call_id"].as_str().filter(|s| !s.is_empty());
-                if id.is_none() && c.id.is_empty() {
-                    id = item["id"].as_str().or(header["item_id"].as_str());
+                if source == ItemEvent::Added {
+                    let key = id.or(header_id).ok_or("function call missing item ID")?;
+                    let call_id = nonempty(item, "call_id").unwrap_or(key);
+                    let name = nonempty(header, "name")
+                        .or(nonempty(item, "name"))
+                        .unwrap_or_default();
+                    let call = self.functions.entry(key.into()).or_default();
+                    return call.announce(&mut self.calls, call_id, name, out);
                 }
-                let name = header["name"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .or(item["name"].as_str());
-                let args = item["arguments"].as_str().filter(|_| done);
-                c.announce(id, name, args, &mut self.calls, out)?;
+                let call = header_id
+                    .or(id)
+                    .and_then(|key| self.functions.get_mut(key))
+                    .filter(|c| c.index.is_some());
+                let Some(call) = call else {
+                    // Terminal output selects a finish reason but never announces a tool.
+                    return if source == ItemEvent::Terminal {
+                        Ok(())
+                    } else {
+                        Err("unannounced function call snapshot".into())
+                    };
+                };
+                call.check_identity(item)?;
+                if let Some(args) = nonempty(item, "arguments") {
+                    // Only item.done can supply missing bytes. It doesn't finalize prior deltas.
+                    if source == ItemEvent::Done && call.args.is_empty() {
+                        call.arguments(args, true, out)?;
+                    } else if args != call.args {
+                        return Err("function call snapshot contradicts streamed arguments".into());
+                    }
+                }
             }
             "message" | "reasoning" => {
                 if !item["role"].is_null() && item["role"] != "assistant" {
                     return Err("non-assistant response item".into());
                 }
-                for field in ["summary", "content"] {
-                    for (i, part) in array(item, field)?.iter().enumerate() {
-                        if part["type"] == "refusal" {
-                            return Err("model refused the request".into());
+                for (i, part) in array(item, "content")?.iter().enumerate() {
+                    match part["type"].as_str() {
+                        Some("refusal") => return Err("model refused the request".into()),
+                        Some("text" | "output_text")
+                            if source != ItemEvent::Added && item["type"] == "message" =>
+                        {
+                            self.text(
+                                header_id.or(id),
+                                index,
+                                i as u64,
+                                string(part, "text")?,
+                                true,
+                                out,
+                            )?;
                         }
-                        if done {
-                            state.part(part, i as u64, out)?;
-                        }
+                        Some("reasoning_text" | "text" | "output_text") => (),
+                        _ => return Err("unsupported Responses content part".into()),
                     }
                 }
             }
+            // This is server-side activity, never a request to dispatch a local tool.
+            "web_search_call" => (),
             other => return Err(format!("unsupported Responses output item: {other}")),
         }
         Ok(())
@@ -366,110 +394,100 @@ impl Stream {
     }
 
     fn translate(&mut self, event: &Value) -> Result<Vec<Value>, String> {
-        if let Some((_, reason)) = failure(event) {
-            return Err(reason);
+        if event["type"] == "response.failed"
+            || event["type"] == "error"
+            || !event["error"].is_null()
+        {
+            return Err("Responses provider error".into());
         }
         let ty = string(event, "type")?;
         let mut out = Vec::new();
+        let id = nonempty(event, "item_id");
+        let index = event["output_index"].as_u64();
+        let part = &event["part"];
+        if part["type"] == "refusal" {
+            return Err("model refused the request".into());
+        }
         match ty {
-            "response.completed"
-            | "response.done"
-            | "response.incomplete"
-            | "response.failed"
-            | "response.cancelled" => {
-                self.finish(ty, &event["response"], &mut out)?;
-                return Ok(out);
+            "response.completed" | "response.done" | "response.incomplete" => {
+                self.finish(ty, &event["response"], &mut out)?
             }
             "response.refusal.delta" | "response.refusal.done" => {
                 return Err("model refused the request".into())
             }
-            "response.created"
-            | "response.queued"
-            | "response.in_progress"
-            | "response.output_text.annotation.added"
-            | "response.reasoning_summary_part.added" => return Ok(out),
-            _ => (),
-        }
-        let item = &event["item"];
-        let id = event["item_id"]
-            .as_str()
-            .or(item["id"].as_str())
-            .or(item["call_id"].as_str());
-        let slot = self.slot(id, event["output_index"].as_u64())?;
-        let state = &mut self.items[slot];
-        let index = event["content_index"].as_u64().unwrap_or(0);
-        let summary = event["summary_index"].as_u64().unwrap_or(0);
-        match ty {
-            "response.output_item.added" | "response.output_item.done" => {
-                self.item(slot, item, event, ty.ends_with(".done"), &mut out)?;
-            }
-            "response.output_text.delta" | "response.content_part.delta" => {
-                if event["part"]["type"] == "refusal" {
-                    return Err("model refused the request".into());
-                }
-                let text = [
-                    &event["delta"],
-                    &event["text"],
-                    &event["code"],
-                    &event["part"]["text"],
-                ]
-                .into_iter()
-                .filter_map(Value::as_str)
-                .reduce(|s, t| if s.is_empty() { t } else { s })
-                .ok_or("expected text delta")?;
-                state.text("text", index, text, false, &mut out)?;
-            }
-            "response.output_text.done" => {
-                state.text("text", index, string(event, "text")?, true, &mut out)?
-            }
-            "response.content_part.added" => {
-                if event["part"]["type"] == "refusal" {
-                    return Err("model refused the request".into());
-                }
-            }
-            "response.content_part.done" | "response.reasoning_summary_part.done" => state.part(
-                &event["part"],
-                if ty.contains("summary") {
-                    summary
+            "response.cancelled" => return Err(format!("unexpected Responses stream event: {ty}")),
+            "response.output_item.added" | "response.output_item.done" => self.item(
+                &event["item"],
+                event,
+                index,
+                if ty.ends_with(".done") {
+                    ItemEvent::Done
                 } else {
-                    index
+                    ItemEvent::Added
                 },
                 &mut out,
             )?,
-            "response.reasoning_text.delta"
-            | "response.reasoning_text.done"
-            | "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary_text.done" => {
-                let done = ty.ends_with(".done");
-                let (channel, index) = if ty.contains("summary") {
-                    ("summary", summary)
-                } else {
-                    ("reasoning", index)
+            "response.output_text.delta"
+            | "response.content_part.delta"
+            | "response.output_text.done"
+            | "response.content_part.done" => {
+                let text = match ty {
+                    "response.output_text.delta" => {
+                        nonempty(event, "delta").or(nonempty(event, "text"))
+                    }
+                    "response.content_part.delta" => nonempty(event, "delta")
+                        .or(nonempty(event, "text"))
+                        .or(nonempty(event, "code"))
+                        .or(nonempty(part, "text")),
+                    "response.content_part.done"
+                        if matches!(part["type"].as_str(), Some("output_text" | "text")) =>
+                    {
+                        nonempty(part, "text")
+                    }
+                    "response.output_text.done" => nonempty(event, "text"),
+                    _ => None,
                 };
-                state.text(
-                    channel,
-                    index,
-                    string(event, if done { "text" } else { "delta" })?,
-                    done,
-                    &mut out,
-                )?;
+                if let Some(text) = text {
+                    self.text(
+                        id,
+                        index,
+                        event["content_index"].as_u64().unwrap_or(0),
+                        text,
+                        ty.ends_with(".done"),
+                        &mut out,
+                    )?;
+                }
+            }
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                if let Some(fragment) = nonempty(event, "delta") {
+                    delta(
+                        &mut out,
+                        json!({"role":"assistant","reasoning_content":fragment}),
+                    );
+                }
             }
             "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
                 let done = ty.ends_with(".done");
-                let text = if done {
-                    event["arguments"].as_str().unwrap_or("")
-                } else {
-                    event["delta"]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .or(event["arguments"].as_str())
-                        .or(event["delta"].as_str())
-                        .ok_or("expected arguments delta")?
-                };
-                let c = state.call.get_or_insert_with(Call::default);
-                c.arguments(text, done, &mut out)?;
+                let args = if done { None } else { nonempty(event, "delta") }
+                    .or(nonempty(event, "arguments"));
+                if let Some(args) = args {
+                    let key = id.ok_or("arguments missing item ID")?;
+                    self.functions
+                        .entry(key.into())
+                        .or_default()
+                        .arguments(args, done, &mut out)?;
+                }
             }
-            _ => return Err(format!("unsupported Responses stream event: {ty}")),
+            "response.created"
+            | "response.queued"
+            | "response.in_progress"
+            | "response.content_part.added"
+            | "response.output_text.annotation.added"
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_text.done"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done" => (),
+            _ => self.ambiguous_output = true,
         }
         Ok(out)
     }
@@ -483,6 +501,9 @@ impl Stream {
             .get("status")
             .map(|_| string(response, "status"))
             .transpose()?;
+        if status == Some("failed") || !response["error"].is_null() {
+            return Err("failed terminal response".into());
+        }
         let reason = if ty == "response.incomplete"
             || status == Some("incomplete")
             || !response["incomplete_details"].is_null()
@@ -493,47 +514,21 @@ impl Stream {
                 "length"
             }
         } else {
-            if !matches!(
-                (ty, status),
-                (
-                    "response.completed" | "response.done",
-                    None | Some("completed")
-                )
-            ) {
-                return Err(format!(
-                    "unexpected terminal Responses status: {status:?} ({ty})"
-                ));
+            if status.is_some_and(|s| s != "completed") {
+                return Err("unexpected terminal Responses status".into());
             }
-            let mut listed_calls = 0;
-            for (i, item) in array(response, "output")?.iter().enumerate() {
-                if item["type"] == "function_call" {
-                    listed_calls += 1;
-                }
-                // Some gateways send type-only markers instead of snapshots in response.completed.
-                if item["type"] == "function_call" && item.as_object().is_some_and(|m| m.len() == 1)
-                {
-                    continue;
-                }
-                let slot = self.slot(
-                    item["id"].as_str().or(item["call_id"].as_str()),
-                    Some(i as u64),
-                )?;
-                self.item(slot, item, &Value::Null, true, out)?;
+            let output = array(response, "output")?;
+            for (i, item) in output.iter().enumerate() {
+                self.item(item, &Value::Null, Some(i as u64), ItemEvent::Terminal, out)?;
             }
-            if self.incomplete_item {
-                return Err("unfinished response output item".into());
+            if self.incomplete_item || (self.ambiguous_output && self.calls > 0) {
+                return Err("unfinished or unsupported response output".into());
             }
-            if listed_calls > self.calls {
-                return Err("missing function call from completed response".into());
+
+            if self.functions.values().any(|c| c.index.is_none()) {
+                return Err("function call missing announcement".into());
             }
-            if self
-                .items
-                .iter()
-                .any(|item| item.call.as_ref().is_some_and(|c| c.index.is_none()))
-            {
-                return Err("function call missing name or ID".into());
-            }
-            if self.calls > 0 {
+            if output.iter().any(|item| item["type"] == "function_call") {
                 "tool_calls"
             } else {
                 "stop"
@@ -541,54 +536,55 @@ impl Stream {
         };
         let mut chunk = json!({"choices":[{"index":0,"delta":{},"finish_reason":reason}]});
         let usage = &response["usage"];
-        if !usage.is_null() {
-            let mut u = json!({
-                "prompt_tokens":usage["input_tokens"].as_u64().ok_or("invalid input_tokens")?,
-                "completion_tokens":usage["output_tokens"].as_u64().ok_or("invalid output_tokens")?
-            });
+        if !usage.is_null() && !usage.is_object() {
+            return Err("invalid Responses usage".into());
+        }
+        let count = |obj: &Value, key: &str| match &obj[key] {
+            Value::Null => Ok(0),
+            n => n.as_u64().ok_or_else(|| format!("invalid {key}")),
+        };
+        let total = match &usage["total_tokens"] {
+            Value::Null => 0,
+            n => n.as_i64().ok_or("invalid total_tokens")?,
+        };
+        if total > 0 {
+            let prompt = count(usage, "input_tokens")?;
+            let details = &usage["input_tokens_details"];
+            let reads = count(details, "cached_tokens")?;
+            let writes = count(details, "cache_write_tokens")?;
+            if reads
+                .checked_add(writes)
+                .is_none_or(|cached| cached > prompt)
+            {
+                return Err("cached token counts exceed input_tokens".into());
+            }
+            chunk["usage"] =
+                json!({"prompt_tokens":prompt,"completion_tokens":count(usage,"output_tokens")?});
             for (from, to) in [
-                ("total_tokens", "total_tokens"),
                 ("input_tokens_details", "prompt_tokens_details"),
                 ("output_tokens_details", "completion_tokens_details"),
             ] {
                 if !usage[from].is_null() {
-                    u[to] = usage[from].clone();
+                    chunk["usage"][to] = usage[from].clone();
                 }
             }
-            chunk["usage"] = u;
         }
         out.push(chunk);
         Ok(())
     }
 }
 
-pub fn failure(event: &Value) -> Option<(&Value, String)> {
-    let (error, response) = if !event["error"].is_null() {
-        (&event["error"], event)
-    } else if event["type"] == "error" {
-        (event, event)
-    } else if matches!(
-        event["type"].as_str(),
-        Some("response.failed" | "response.completed" | "response.done" | "response.incomplete")
-    ) && event["response"].is_object()
-        && (event["type"] == "response.failed"
-            || event["response"]["status"] == "failed"
-            || !event["response"]["error"].is_null())
-    {
-        (&event["response"]["error"], &event["response"])
-    } else {
-        return None;
-    };
-    Some((error, provider_error(error, response)))
-}
-
-fn provider_error(error: &Value, response: &Value) -> String {
-    format!(
-        "openai response failed ({}): {} [response_id={}]",
-        error["code"].as_str().unwrap_or_default(),
-        error["message"].as_str().unwrap_or_default(),
-        response["id"].as_str().unwrap_or_default()
-    )
+pub fn failure(event: &Value) -> Option<String> {
+    (event["type"] == "response.failed").then(|| {
+        let response = &event["response"];
+        let error = &response["error"];
+        format!(
+            "openai response failed ({}): {} [response_id={}]",
+            error["code"].as_str().unwrap_or_default(),
+            error["message"].as_str().unwrap_or_default(),
+            response["id"].as_str().unwrap_or_default()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -692,14 +688,14 @@ mod tests {
         for event in events {
             chunks.extend(s.push(event).unwrap());
         }
-        assert_eq!(chunks.len(), 4);
-        for (c, text) in chunks.iter().zip(["Hi ", "🌍", "!"]) {
+        assert_eq!(chunks.len(), 3);
+        for (c, text) in chunks.iter().zip(["Hi ", "!"]) {
             assert_eq!(c["choices"][0]["delta"]["content"], text);
         }
-        assert_eq!(chunks[3]["choices"][0]["finish_reason"], "stop");
+        assert_eq!(chunks[2]["choices"][0]["finish_reason"], "stop");
         assert_eq!(
-            chunks[3]["usage"],
-            json!({"prompt_tokens":8,"completion_tokens":4,"total_tokens":12,
+            chunks[2]["usage"],
+            json!({"prompt_tokens":8,"completion_tokens":4,
             "prompt_tokens_details":{"cached_tokens":1},"completion_tokens_details":{"reasoning_tokens":2}})
         );
         assert!(s.push(completed(json!([]))).is_err());
@@ -719,14 +715,14 @@ mod tests {
         ] {
             chunks.extend(s.push(event).unwrap());
         }
-        assert_eq!(chunks.len(), 5);
-        for (c, text) in chunks.iter().zip(["sum", "tra", "ce"]) {
+        assert_eq!(chunks.len(), 4);
+        for (c, text) in chunks.iter().zip(["sum", "tra"]) {
             assert_eq!(
                 c["choices"][0]["delta"],
                 json!({"role":"assistant","reasoning_content":text})
             );
         }
-        assert_eq!(chunks[3]["choices"][0]["delta"]["content"], "answer");
+        assert_eq!(chunks[2]["choices"][0]["delta"]["content"], "answer");
     }
 
     #[test]
@@ -739,7 +735,7 @@ mod tests {
             json!({"type":"response.function_call_arguments.delta","item_id":"fc_a","delta":"{\"thought\":"}),
             json!({"type":"response.output_item.added","output_index":1,"item":a}),
             json!({"type":"response.output_item.added","output_index":2,"item":b}),
-            json!({"type":"response.function_call_arguments.delta","item_id":"fc_a","delta":"\"a\""}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc_a","delta":"\"a\"}"}),
             json!({"type":"response.function_call_arguments.done","item_id":"fc_a","arguments":"{\"thought\":\"a\"}"}),
             json!({"type":"response.function_call_arguments.delta","item_id":"fc_a","delta":"obsolete"}),
             json!({"type":"response.output_item.done","item":b}),
@@ -749,12 +745,11 @@ mod tests {
         for event in events {
             chunks.extend(s.push(event).unwrap());
         }
-        assert_eq!(chunks.len(), 6);
+        assert_eq!(chunks.len(), 5);
         for (c, (index, id, name, bytes)) in chunks.iter().zip([
             (0, Some("a"), Some("think"), "{\"thought\":"),
             (1, Some("b"), Some("user_prompt"), ""),
-            (0, None, None, "\"a\""),
-            (0, None, None, "}"),
+            (0, None, None, "\"a\"}"),
             (1, None, None, "{}"),
         ]) {
             let f = &c["choices"][0]["delta"]["tool_calls"][0];
@@ -763,7 +758,7 @@ mod tests {
             assert_eq!(f["function"]["name"].as_str(), name);
             assert_eq!(f["function"]["arguments"], bytes);
         }
-        assert_eq!(chunks[5]["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(chunks[4]["choices"][0]["finish_reason"], "tool_calls");
     }
 
     #[test]
@@ -800,7 +795,7 @@ mod tests {
             }
         }
         let c = s
-            .push(json!({"type":"response.done", "response":{"output":[]}}))
+            .push(json!({"type":"response.done", "response":{"output":[{"type":"function_call"}]}}))
             .unwrap();
         assert_eq!(c[0]["choices"][0]["finish_reason"], "tool_calls");
     }
@@ -812,7 +807,7 @@ mod tests {
             ("response.done", "content_filter", "content_filter"),
         ] {
             let mut s = Stream::default();
-            let c = s.push(json!({"type":ty,"response":{"status":"incomplete", "incomplete_details":{"reason":reason},"usage":{"input_tokens":1,"output_tokens":2}}})).unwrap();
+            let c = s.push(json!({"type":ty,"response":{"status":"incomplete", "incomplete_details":{"reason":reason},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}})).unwrap();
             assert_eq!(c[0]["choices"][0]["finish_reason"], finish);
             assert_eq!(
                 c[0]["usage"],
@@ -824,21 +819,21 @@ mod tests {
     #[test]
     fn failed_refused_or_unsupported_outputs_cannot_commit_a_turn() {
         let failed = json!({"id":"r","status":"failed","error":{"code":"server_error","message":"upstream failed"}});
-        for ty in ["response.failed", "response.completed", "response.done"] {
-            assert!(Stream::default()
-                .push(json!({"type":ty,"response":failed}))
-                .unwrap_err()
-                .contains("server_error): upstream failed [response_id=r]"));
-        }
+        assert_eq!(
+            failure(&json!({"type":"response.failed","response":failed})).unwrap(),
+            "openai response failed (server_error): upstream failed [response_id=r]"
+        );
         for event in [
+            json!({"type":"response.failed","response":failed}),
+            json!({"type":"response.completed","response":failed}),
+            json!({"type":"response.done","response":failed}),
             json!({"type":"error","message":"failed"}),
             json!({"error":{"message":"failed"}}),
             json!({"type":"response.refusal.delta","delta":"no"}),
             json!({"type":"response.completed"}),
             json!({"type":"response.done","response":{"status":"in_progress"}}),
             completed(json!([{"type":"message","content":[{"type":"refusal","refusal":"no"}]}])),
-            completed(json!([{"type":"function_call"}])),
-            completed(json!([{"type":"web_search_call"}])),
+            completed(json!([{"type":"unknown_action"}])),
             completed(
                 json!([{"type":"function_call","id":"fc","call_id":"c","status":"incomplete"}]),
             ),
@@ -850,11 +845,59 @@ mod tests {
         let mut unfinished = Stream::default();
         unfinished.push(json!({"type":"response.output_item.done", "item":{"type":"message", "status":"incomplete"}})).unwrap();
         assert!(unfinished.push(completed(json!([]))).is_err());
-        let mut s = Stream::default();
-        s.push(json!({"type":"response.output_text.delta","item_id":"m","delta":"a"}))
-            .unwrap();
-        assert!(s
-            .push(json!({"type":"response.output_text.done","item_id":"m","text":"b"}))
+    }
+
+    #[test]
+    fn only_added_can_announce_a_call() {
+        let item = json!({"type":"function_call","id":"item","call_id":"call","name":"think","arguments":"{}"});
+        let c = Stream::default().push(completed(json!([item]))).unwrap();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0]["choices"][0]["delta"], json!({}));
+        assert_eq!(c[0]["choices"][0]["finish_reason"], "tool_calls");
+        assert!(Stream::default()
+            .push(json!({"type":"response.output_item.done","item":item}))
             .is_err());
+    }
+
+    #[test]
+    fn snapshots_cannot_complete_or_change_emitted_arguments() {
+        let item = json!({"id":"fc","name":"think","type":"function_call"});
+        for snapshot in [
+            json!({"type":"response.function_call_arguments.done","item_id":"fc","arguments":"{}"}),
+            json!({"type":"response.output_item.done","item": {"type":"function_call","id":"fc","arguments":"{}"}}),
+            completed(json!([{"type":"function_call","id":"fc","arguments":"{}"}])),
+        ] {
+            let mut s = Stream::default();
+            s.push(json!({"type":"response.output_item.added","item":item}))
+                .unwrap();
+            s.push(
+                json!({"type":"response.function_call_arguments.delta","item_id":"fc","delta":"{"}),
+            )
+            .unwrap();
+            assert!(s.push(snapshot).is_err());
+        }
+    }
+
+    #[test]
+    fn terminal_usage_requires_a_positive_total_not_both_counts() {
+        for (usage, expected) in [
+            (json!({}), Value::Null),
+            (json!({"total_tokens":-3}), Value::Null),
+            (json!({"input_tokens":8,"output_tokens":3}), Value::Null),
+            (json!({"input_tokens":8,"total_tokens":0}), Value::Null),
+            (
+                json!({"total_tokens":4,"output_tokens":4}),
+                json!({"prompt_tokens":0,"completion_tokens":4}),
+            ),
+            (
+                json!({"total_tokens":7}),
+                json!({"prompt_tokens":0,"completion_tokens":0}),
+            ),
+        ] {
+            let c = Stream::default()
+                .push(json!({"type":"response.completed","response":{"usage":usage}}))
+                .unwrap();
+            assert_eq!(c[0]["usage"], expected);
+        }
     }
 }
