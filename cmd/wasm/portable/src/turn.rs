@@ -70,8 +70,8 @@ pub struct Conversation {
     pub attempt: crate::fallback::Attempt,
     pub archive: Option<crate::session_context::Archive>,
     compaction: Compactor,
-    // Go fixes the cap when a session opens; a handoff target's own cap never applies.
-    max_iterations: usize,
+    // Limits of the agent that opened this session or delegated task; a handoff keeps them.
+    frame: crate::limits::Limits,
     opener: String,
     messages: Vec<Value>,
     routed_seed: Option<crate::media::RoutedSeed>,
@@ -375,7 +375,7 @@ impl Conversation {
     pub fn open(profile: Rc<Profile>, messages: Vec<Value>) -> Self {
         Self {
             run_number: 0,
-            max_iterations: profile.spec.limits.max_iterations as usize,
+            frame: profile.spec.limits,
             opener: profile.spec.name.clone(),
             profile,
             attempt: Default::default(),
@@ -615,9 +615,8 @@ impl Conversation {
             messages.extend_from_slice(seed.for_target(target.media_projection())?);
         }
         messages.extend_from_slice(&self.messages);
-        self.profile
-            .spec
-            .limits
+        self.frame
+            .acting(&self.profile.spec.limits)
             .project(&mut messages, &self.profile.spec.hooks)?;
         let override_params = self.override_params(turn.tool_model_source);
         let target = self.target();
@@ -920,9 +919,7 @@ impl Conversation {
                     final_answer = Some(content.clone());
                 }
                 let stored = self
-                    .profile
-                    .spec
-                    .limits
+                    .frame
                     .stored_content(content, &self.profile.spec.hooks)?;
                 self.messages
                     .push(json!({"role":"tool", "tool_call_id":call.id, "content":stored}));
@@ -1201,9 +1198,7 @@ impl Conversation {
             is_error,
         );
         message["content"] = self
-            .profile
-            .spec
-            .limits
+            .frame
             .stored_content(output, &self.profile.spec.hooks)?;
         Ok(event)
     }
@@ -1221,6 +1216,9 @@ impl Conversation {
         error: bool,
     ) -> Result<Value, String> {
         let output = self.profile.spec.hooks.tool_result(name, name, output)?;
+        let stored = self
+            .frame
+            .stored_content(output.clone(), &self.profile.spec.hooks)?;
         let reply = self
             .messages
             .last_mut()
@@ -1231,7 +1229,7 @@ impl Conversation {
             &output,
             error,
         );
-        reply["content"] = Value::String(output);
+        reply["content"] = stored;
         Ok(event)
     }
 
@@ -1244,7 +1242,7 @@ impl Conversation {
                 1
             };
             turn.previous_calls = std::mem::take(&mut turn.current_calls);
-            if turn.consecutive >= self.profile.spec.limits.repetition_limit() {
+            if turn.consecutive >= self.frame.repetition_limit() {
                 let reason=format!("Agent terminated: detected {} consecutive identical calls to {}. This indicates a degenerate loop where the model is not making progress.",turn.consecutive,turn.previous_calls[0].0);
                 self.active = None;
                 return Some(reason);
@@ -1271,7 +1269,8 @@ impl Conversation {
     }
 
     pub fn at_cap(&self) -> bool {
-        self.max_iterations > 0 && self.iterations() >= self.max_iterations
+        let max = self.frame.max_iterations as usize;
+        max > 0 && self.iterations() >= max
     }
 
     // Reminders and forced handoffs are model calls without a tool round.
@@ -1284,7 +1283,7 @@ impl Conversation {
     pub fn resume(&mut self, mut events: Vec<Value>) -> Value {
         let t = self.active.as_ref().expect("active turn");
         if self.at_cap() {
-            let max = self.max_iterations;
+            let max = self.frame.max_iterations;
             let text = format!(
                 "Execution stopped after reaching the configured max_iterations limit ({max})."
             );

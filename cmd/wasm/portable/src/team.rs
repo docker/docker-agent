@@ -133,25 +133,29 @@ impl Session {
         let targets = || agents.values().flat_map(|p| p.spec.targets());
         let reproject =
             routed_media && targets().any(|m| m.media_projection() != primary.media_projection());
+        // A handoff can apply any agent's history limits to the seed.
+        let limits = agents
+            .values()
+            .fold(profile.spec.limits, |l, p| l.covering(&p.spec.limits));
+        let limited = limits.limits_history();
+        let annotated = history
+            .iter()
+            .any(|m| !m["name"].is_null() || !m["reasoning_content"].is_null());
+        if team && limited && annotated {
+            return Err(
+                "history limits in a local team require unnamed history without reasoning".into(),
+            );
+        }
         let checks_responses = primary.responses
             || profile.spec.summary_target().1.responses
-            || ((routed_media || profile.spec.limits.limits_history())
-                && targets().any(|m| m.responses));
-        if routing
-            && checks_responses
-            && history
-                .iter()
-                .any(|m| !m["name"].is_null() || !m["reasoning_content"].is_null())
-        {
+            || ((routed_media || limited) && targets().any(|m| m.responses));
+        if routing && checks_responses && annotated {
             return Err("cannot replay named or reasoning history with Responses".into());
         }
-        profile
-            .spec
-            .limits
-            .check_seed(&history, !profile.spec.tool_models.is_empty())?;
+        limits.check_seed(&history, !profile.spec.tool_models.is_empty())?;
         let source = reproject.then(|| history.clone());
         // Go's chat.Message has no name field.
-        let preserve_names = routing && !profile.spec.limits.limits_history();
+        let preserve_names = routing && !limited;
         let history = media::history(history, primary.media_projection(), preserve_names)?;
         let mut conversation = Conversation::open(profile, history);
         if let Some(source) = source {

@@ -222,7 +222,7 @@ test('fallback history limits reject incompatible configurations and seeds befor
   for (const [yaml, reason] of [
     [config(fields.replace('session_compaction: false, ', '')), /requires session_compaction: false/],
     [config(fields.replace('false', 'true'), 'models: {local/test: {provider: local, model: test, context_window: 4096}}'), /require session_compaction: false/],
-    [config(`${fields}, handoffs: [root]`), /history limits with local teams/],
+    [config(`${fields}, handoffs: [root]`), /fallback chain within local teams/],
     [config(`${fields}, toolsets: [{type: session_context}]`), /session_context/],
     [config(`${fields}, toolsets: [{type: think, model: local/cheap}]`), /toolset model overrides/],
     [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],

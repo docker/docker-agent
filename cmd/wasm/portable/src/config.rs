@@ -1031,9 +1031,10 @@ fn resolve(
             return Err("tool-mode structured output with max_tool_result_tokens cannot safely truncate results before secret redaction".into());
         }
     }
-    if team && chain && (a.limits.max_iterations > 0 || a.hooks.max_calls.is_some()) {
+    if team && chain && a.limits.needs_bounded_fallback(&a.hooks) {
         return Err(
-            "iteration limits on a fallback chain within local teams are not supported".into(),
+            "iteration or history limits on a fallback chain within local teams are not supported"
+                .into(),
         );
     }
     let bounded_fallback = chain && a.limits.needs_bounded_fallback(&a.hooks);
@@ -1054,9 +1055,6 @@ fn resolve(
     }
     if (chain || team) && overrides {
         return Err("toolset model overrides with teams or fallback are not supported".into());
-    }
-    if history && team {
-        return Err("history limits with local teams are not supported".into());
     }
     let has_tools = output_tool.is_some() || !toolsets.is_empty();
     let summary_name = first_nonempty([

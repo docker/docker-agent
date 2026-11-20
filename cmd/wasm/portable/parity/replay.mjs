@@ -261,6 +261,24 @@ async function run() {
     ['teamHookBounce', handoffOnly(limitedTeam(callLimit(3), 'handoffs: [root],')), [pass(), pass('root'), ponder('a'), answer], rejectsThenRecovers],
     ['teamHookForced', limitedPipeline('', callLimit(1)), [answer, answer], rejectsThenRecovers],
   ]) tests[name] = await replay(api, name, yaml, replies, drive);
+  // Tool budgets and the loop guard stay with the session; num_history_items follows the acting agent.
+  const lengthy = n => `long thought number ${n} ${'x'.repeat(40)}`;
+  const budgets = 'max_tool_result_tokens: 4, max_old_tool_call_tokens: 4, num_history_items: 3,';
+  const passAs = id => rawTool('handoff', '{"agent":"helper"}', id);
+  const afterHandoff = [ponder(lengthy(2), 'c'), ponder(lengthy(3), 'd'), answer, ponder(lengthy(4), 'e'), answer];
+  for (const [name, yaml, replies, drive = turns] of [
+    ['teamLoopGuard', limitedTeam('max_consecutive_tool_calls: 2,', ''), [pass(), ponder('same'), ponder('same'), answer], rejectsThenRecovers],
+    ['teamLoopGuardTargetIgnored', limitedTeam('', 'max_consecutive_tool_calls: 2,'), [pass(), ponder('same'), ponder('same'), ponder('same'), answer, answer]],
+    ['teamHistoryCaller', limitedTeam('max_tool_result_tokens: 4,', ''), [ponder(lengthy(1)), delegate(), ponder(lengthy(2)), answer, answer, answer]],
+    ['teamHistoryDelegate', limitedTeam('', budgets), [delegate(), ponder(lengthy(1)), ponder(lengthy(2), 'b'), ponder(lengthy(3), 'c'), answer, answer, answer]],
+    ['teamHistoryDelegatedAnswer', limitedTeam('max_tool_result_tokens: 1,', ''),
+      [delegate(), [piece({role: 'assistant', content: 'a long delegated answer that exceeds the cap'}, 'stop'), usage], answer, answer]],
+    ['teamHistoryHandoff', limitedTeam(budgets, 'num_history_items: 4, max_tool_result_tokens: 100,'), [ponder(lengthy(1), 'a'), passAs('b'), ...afterHandoff]],
+    ['teamHistoryHandoffTarget', limitedTeam('', budgets), [ponder(lengthy(1), 'a'), passAs('b'), ...afterHandoff]],
+    ['teamHistoryReusedIds', limitedTeam(budgets, ''), [ponder(lengthy(1)), pass(), ...afterHandoff]],
+    ['teamHistoryChain', limitedTeam(budgets, '').replace('model: local/worker,', 'model: local/worker, fallback: {models: [local/worker-backup]},'),
+      [ponder(lengthy(1), 'a'), passAs('b'), answer, [{error: {message: 'invalid model'}}], ponder(lengthy(2), 'c'), answer]],
+  ]) tests[name] = await replay(api, name, yaml, replies, drive);
   tests.teamCapForcedRestart = await replay(api, 'teamCapForcedRestart', limitedPipeline('max_iterations: 1,', ''), [answer, answer, answer],
     async ({api, options, record, trace}) => {
       const s = await api.createSession(options, record);

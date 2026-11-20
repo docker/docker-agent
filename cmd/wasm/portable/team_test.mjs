@@ -201,6 +201,24 @@ test('the acting agent\'s call limit counts the whole send and keeps the handoff
   assert.deepEqual(req[1].messages.filter(m => m.role === 'user').map(m => m.content), ['one', 'two']);
 });
 
+test('tool budgets and the loop guard stay with the opening agent; the trim count follows the acting agent', async t => {
+  const opts = options(`  root: {model: local/parent, max_tool_result_tokens: 4, max_consecutive_tool_calls: 2, handoffs: [helper], toolsets: [{type: think}]}
+  helper: {model: local/worker, max_tool_result_tokens: 100, num_history_items: 3, toolsets: [{type: think}]}`);
+  const named = (id, name, args) => calls({ index: 0, id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+  const repeat = id => named(id, 'think', { thought: 'same' });
+  const req = model(t, named('a', 'think', { thought: 'x'.repeat(80) }), named('b', 'handoff', { agent: 'helper' }), repeat('c'), repeat('d'));
+  const s = await api.createSession(opts);
+  t.after(() => s.close());
+  await assert.rejects(s.send('one'), /detected 2 consecutive identical calls to think/);
+  assert.deepEqual(req.map(r => r.model), ['parent', 'parent', 'worker', 'worker']);
+  assert.match(req[1].messages.at(-1).content, /^.{7}\.\.\..{6}$/s);
+  const afterHandoff = req[2].messages.filter(m => m.role !== 'system');
+  assert.deepEqual(afterHandoff.map(m => m.role), ['user', 'assistant', 'tool']);
+  assert.equal(afterHandoff[1].tool_calls[0].id, 'b');
+  assert.match(afterHandoff[2].content, /^The age\.\.\.agent\.$/);
+  assert.deepEqual(req[3].messages.filter(m => m.role !== 'system').map(m => m.tool_call_id ?? m.tool_calls?.[0].id), [undefined, 'c', 'c']);
+});
+
 test('iteration limits that Go would enforce inside a delegated task or on a team fallback chain are refused', async t => {
   const fetch = t.mock.method(globalThis, 'fetch', () => assert.fail('unexpected model request'));
   for (const [agents, reason] of [
@@ -211,7 +229,13 @@ test('iteration limits that Go would enforce inside a delegated task or on a tea
     [`  root: {model: local/parent, handoffs: [helper]}\n  helper: {model: local/worker, max_iterations: 2, session_compaction: false, fallback: {models: [local/backup]}}`, /fallback chain within local teams/],
     [`  root: {model: local/parent, handoffs: [helper]}\n  helper: {model: local/worker, ${callLimit(2)}, session_compaction: false, fallback: {models: [local/backup]}}`, /fallback chain within local teams/],
     [`  root: {model: local/parent, max_iterations: 9, handoffs: [helper]}\n  helper: {model: local/worker}`, /tool round limit/],
+    [`  root: {model: local/parent, handoffs: [helper]}\n  helper: {model: local/worker, num_history_items: 2, session_compaction: false, fallback: {models: [local/backup]}}`, /fallback chain within local teams/],
   ]) await assert.rejects(api.createSession(options(agents)), reason);
+  const limited = options(`  root: {model: local/parent, handoffs: [helper]}\n  helper: {model: local/worker, num_history_items: 2}`);
+  for (const message of [{ role: 'user', name: 'caller', content: 'named' }, { role: 'assistant', content: 'kept', reasoning_content: 'private' },
+    { role: 'user', content: 'image', multi_content: [{ type: 'text', text: 'part' }] }]) {
+    await assert.rejects(api.chat({ ...limited, messages: [message, { role: 'user', content: 'go' }] }), /unnamed history without reasoning|text-only history/);
+  }
   assert.equal(fetch.mock.callCount(), 0);
 });
 

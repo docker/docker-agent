@@ -33,6 +33,29 @@ impl Limits {
         Ok(())
     }
 
+    // Go keeps tool budgets, the loop guard and the cap on the session that an agent opened;
+    // only num_history_items follows the acting agent.
+    pub fn acting(self, agent: &Self) -> Self {
+        Self {
+            num_history_items: agent.num_history_items,
+            ..self
+        }
+    }
+
+    // A seed must survive every projection a later handoff can apply.
+    pub fn covering(self, other: &Self) -> Self {
+        Self {
+            num_history_items: self.num_history_items.max(other.num_history_items),
+            max_tool_result_tokens: self
+                .max_tool_result_tokens
+                .max(other.max_tool_result_tokens),
+            max_old_tool_call_tokens: self
+                .max_old_tool_call_tokens
+                .max(other.max_old_tool_call_tokens),
+            ..self
+        }
+    }
+
     pub fn needs_bounded_fallback(&self, hooks: &Hooks) -> bool {
         self.limits_history() || self.max_iterations > 0 || hooks.max_calls.is_some()
     }
