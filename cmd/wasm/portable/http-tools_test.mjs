@@ -139,15 +139,16 @@ test('api_config schema, instructions, Go small endpoint and header expansion', 
   assert.deepEqual(def.parameters.properties.limit.type, ['string', 'null']);
   assert.equal((await ts.call('wrong', '{}')).is_error, true);
   assert.equal((await ts.call('lookup', '{bad')).is_error, true);
-  assert.equal((await ts.call('lookup', '{"limit":"1"}')).is_error, true);
+  assert.deepEqual(await ts.call('lookup', '{"limit":"1","extra":"ok"}'), { output: 'pong', is_error: false });
+  assert.equal(new URL(calls[0].target).searchParams.get('who'), '${who}');
   assert.equal((await ts.call('lookup', '{"who":2}')).is_error, true);
   assert.equal((await ts.call('lookup', '{"who":"a","surprise":1}')).is_error, true);
   assert.deepEqual(await ts.call('lookup', '{"who":"${env.TOKEN}","limit":null}'), { output: 'pong', is_error: false });
-  assert.equal(calls.length, 1);
-  assert.equal(new URL(calls[0].target).searchParams.get('who'), '${env.TOKEN}');
-  assert.equal(calls[0].headers.get('Authorization'), 'Bearer key');
-  assert.equal(calls[0].headers.get('X-Empty'), '');
-  assert.equal(calls[0].headers.get('X-Expr'), '${f({v:"${env.TOKEN}"})}');
+  assert.equal(calls.length, 2);
+  assert.equal(new URL(calls[1].target).searchParams.get('who'), '${env.TOKEN}');
+  assert.equal(calls[1].headers.get('Authorization'), 'Bearer key');
+  assert.equal(calls[1].headers.get('X-Empty'), '');
+  assert.equal(calls[1].headers.get('X-Expr'), '${f({v:"${env.TOKEN}"})}');
 });
 
 test('api POST sends JSON, handles error statuses and truncates/cancels response streams', async t => {
@@ -169,8 +170,8 @@ test('api POST sends JSON, handles error statuses and truncates/cancels response
 
 test('reject unsupported settings and ambiguous policies when registering tools', t => {
   const calls = network(t);
-  for (const options of [{ method: 'TRACE' }, { method: 'post' }, { output_schema: {} }, { args: { p: { type: 'object', properties: {} } } },
-    { args: { p: { type: 'string', pattern: 'x' } } }, { endpoint: 'https://${who}/x' }, { required: ['unknown'] }]) {
+  for (const options of [{ method: 'TRACE' }, { method: 'post' }, { output_schema: {} }, { args: { p: { type: 'object', additionalProperties: true } } },
+    { args: { p: { type: 'string', pattern: 'x' } } }, { args: { p: { type: 'number', enum: [null] } } }, { endpoint: 'https://${who}/x' }, { required: [false] }]) {
     assert.throws(() => api(options));
   }
   assert.throws(() => api({}, { command: 'ignored?' }), /unsupported/);
@@ -271,7 +272,8 @@ test('nested POST keys and string values survive without filtering, coercion or 
   assert.deepEqual(JSON.parse(calls[0].body), values);
   assert.equal(calls[0].body, '{"rows":[{"__proto__":"${env.TOKEN}","q":"{\\"k\\":\\"\\u003c\\u0026\\u003e\\"}","v":null},{"q":"03"}]}');
   for (const rows of [[{ q: 3 }], [{ q: 'ok', v: 1.1 }], [null], [{ v: 1 }], [{ extra: 'x' }], '[{"q":"x"}]']) {
-    assert.equal((await ts.call('lookup', { rows })).is_error, true);
+    assert.deepEqual(await ts.call('lookup', { rows }), { output: 'ok', is_error: false });
+    assert.deepEqual(JSON.parse(calls.at(-1).body), { rows });
   }
   for (const prop of [{ type: 'array', prefixItems: [] }, { type: 'array', items: { anyOf: [] } },
     { type: 'object', properties: {}, additionalProperties: true }, { ...row, patternProperties: {} }]) {
@@ -280,7 +282,7 @@ test('nested POST keys and string values survive without filtering, coercion or 
   const deep = Array.from({ length: 17 }).reduce(items => ({ type: 'array', items }), { type: 'number' });
   assert.throws(() => api({ method: 'POST', args: { deep } }), /schema size or depth/);
   assert.match((await ts.call('lookup', { rows: [{ q: '<'.repeat(180000) }] })).output, /body too large/);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 7);
 });
 
 test('offline conversion processes quoted tags, comments, entities and inert resource references', async t => {
@@ -377,4 +379,19 @@ test('POST uses Go byte order for keys, replaces unpaired surrogates and preserv
   const ts = api({ method: 'POST', args: { '𐀀': { type: 'number' }, '\ue000': { type: 'string' } } });
   assert.deepEqual(await ts.call('lookup', '{"𐀀":-0,"\\ue000":"\\ud800"}'), { output: 'ok', is_error: false });
   assert.equal(calls[0].body, '{"\ue000":"�","𐀀":-0}');
+});
+
+test('GET skips the second expansion only for empty input and never discloses expanded env in URL errors', async t => {
+  const calls = network(t, () => new Response('ok'));
+  const ts = api({ endpoint: start + '/${env.PATH}?q=${env.QUERY}' }, {}, { PATH: '${part}', QUERY: '${env.SECRET}', SECRET: 'hidden' });
+  for (const [input, suffix] of [['', '/$%7Bpart%7D?q=${env.SECRET}'], ['{}', '/$%7Bpart%7D?q=hidden'], ['{"part":"done"}', '/done?q=hidden']]) {
+    assert.deepEqual(await ts.call('lookup', input), { output: 'ok', is_error: false });
+    assert.equal(calls.at(-1).target, start + suffix);
+  }
+  for (const part of ['%', '\n', '\\']) {
+    const result = await ts.call('lookup', { part });
+    assert.equal(result.is_error, true);
+    assert.doesNotMatch(result.output, /hidden/);
+  }
+  assert.equal(calls.length, 3);
 });

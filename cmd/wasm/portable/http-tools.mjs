@@ -1,3 +1,4 @@
+import { decode, escaped, goQuote } from './go-json.mjs';
 import { convertHTML } from './http-html.mjs';
 
 // Browser fetch has no dial hook. Only the operator's proxy can enforce the IP
@@ -338,7 +339,8 @@ function fetchTool(ts, env, policy, seconds) {
   return {
     name: 'fetch', description: 'Fetch HTTP/HTTPS URLs; return response bodies and metadata.',
     parameters: structuredClone(fetchParameters), instructions,
-    async run(args, signal) {
+    async run(raw, signal) {
+      const args = (typeof raw === 'string' ? JSON.parse(raw || '{}') : raw) ?? {};
       fields(args, ['urls', 'format', 'timeout'], 'fetch argument');
       const { urls, format, timeout } = args;
       if (!Array.isArray(urls) || urls.length === 0 || urls.some(url => typeof url !== 'string')) throw new Error('Error calling tool: at least one URL is required');
@@ -387,7 +389,7 @@ function fetchTool(ts, env, policy, seconds) {
         return `Successfully fetched ${r.url} (Status: ${r.statusCode}, Length: ${r.contentLength} bytes):\n\n${r.body ?? ''}`;
       }
       const json = JSON.stringify(results);
-      return escape ? json.replace(/[<>&]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`) : json;
+      return escape ? json.replace(/[<>&]/g, escaped) : json;
     },
   };
 }
@@ -404,12 +406,11 @@ function compareKeys(a, b) {
 
 // Keep the API schema subset small and explicit rather than silently dropping
 // constraints while translating optional properties for OpenAI strict mode.
-function apiParameters(args, required, method) {
+function apiParameters(args, required) {
   let nodes = 0;
   function schema(prop, depth) {
     if (++nodes > 512 || depth > 16) throw new Error('portable API schema size or depth limit reached');
     const type = prop?.type;
-    if (method === 'GET' && depth === 1 && type !== 'string') throw new Error('GET arguments must be strings');
     const keys = ['type', 'description'];
     if (type === 'array') keys.push('items');
     else if (type === 'object') keys.push('properties', 'required', 'additionalProperties');
@@ -422,10 +423,10 @@ function apiParameters(args, required, method) {
       if (!properties || typeof properties !== 'object' || Array.isArray(properties) || ('additionalProperties' in prop && prop.additionalProperties !== false)) {
         throw new Error('portable API objects require named properties');
       }
-      if (!Array.isArray(required) || required.length > 512 || required.some(k => typeof k !== 'string' || !Object.hasOwn(properties, k))) throw new Error('invalid api_config.required');
+      if (!Array.isArray(required) || required.length > 512 || required.some(k => typeof k !== 'string')) throw new Error('invalid api_config.required');
       const names = Object.keys(properties), strict = Object.create(null);
       if (names.length > 512) throw new Error('portable API schema size limit reached');
-      if (names.some(name => !name.isWellFormed())) throw new Error('invalid Unicode API argument name');
+      if (names.some(name => !name.isWellFormed() || name === 'x-docker-agent-property-order')) throw new Error('unsupported API argument name');
       names.sort(compareKeys);
       for (const name of names) {
         const child = schema(properties[name], depth + 1);
@@ -436,64 +437,84 @@ function apiParameters(args, required, method) {
       return { ...prop, properties: strict, required: names, additionalProperties: false };
     }
     if (!['string', 'integer', 'number', 'boolean'].includes(type)) throw new Error('unsupported portable API argument type');
-    if ('enum' in prop && (!Array.isArray(prop.enum) || !prop.enum.length || prop.enum.length > 512 || prop.enum.some(v => !scalarMatches(type, v)))) throw new Error('invalid argument enum');
-    return structuredClone(prop);
+    if ('enum' in prop && (!Array.isArray(prop.enum) || prop.enum.length > 512 ||
+      prop.enum.some(v => typeof v !== 'string' && typeof v !== 'boolean' && !Number.isFinite(v)))) {
+      throw new Error('invalid argument enum');
+    }
+    return prop;
   }
-  return schema({ type: 'object', properties: args, required }, 0);
+  return schema({ type: 'object', properties: args ?? {}, required: required ?? [] }, 0);
 }
 
-// Only POST encodes the validated values. A JSON.stringify key-list would
-// filter nested keys too; encode each object's own keys in Go's sorted order.
-function apiArguments(values, args, required, post) {
+const anyMap = ['map[string]interface {}', []];
+
+// JSON.stringify reorders integer keys even in a sorted object. Write keys in UTF-8 order at every level.
+function postBody(raw) {
+  // JSON.parse alone loses overflow errors in overwritten object members.
+  try { decode(raw, anyMap); }
+  catch (e) { throw new Error('Error calling tool: invalid arguments: ' + e.message); }
+  const values = JSON.parse(raw || '{}');
   const parts = [];
-  let nodes = 0, size = 0, inputChars = 0;
+  let nodes = 0, size = 0;
   function write(s) {
-    if ((size += s.length) > maxBody) throw new Error('API argument size limit reached');
+    if ((size += s.length) > maxBody) throw new Error('API request body too large');
     parts.push(s);
   }
-  function visit(value, prop, key, optional = false) {
-    if (++nodes > 16384) throw new Error('API argument size limit reached');
-    if (value === null && optional) { if (post) write('null'); return; }
-    if (prop.type === 'object') {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`invalid argument: ${key}`);
-      const required = prop.required ?? [];
-      for (const name of required) if (!Object.hasOwn(value, name) || value[name] == null) throw new Error(`missing required argument: ${name}`);
-      const names = Object.keys(value);
-      if (names.length > 512) throw new Error('API argument size limit reached');
-      if (post) { write('{'); names.sort(compareKeys); }
-      for (const [i, name] of names.entries()) {
-        if (!Object.hasOwn(prop.properties, name)) throw new Error(`unsupported API argument option: ${name}`);
-        if (post) write((i ? ',' : '') + JSON.stringify(name) + ':');
-        visit(value[name], prop.properties[name], name, !required.includes(name));
+  function visit(value, depth) {
+    if (++nodes > 16384 || depth > 128) throw new Error('API argument size limit reached');
+    if (Array.isArray(value)) {
+      write('[');
+      for (const [i, item] of value.entries()) { if (i) write(','); visit(item, depth + 1); }
+      write(']');
+    } else if (value !== null && typeof value === 'object') {
+      const keys = Object.keys(value);
+      if (keys.length > 512) throw new Error('API argument size limit reached');
+      write('{');
+      for (const [i, key] of keys.sort(compareKeys).entries()) {
+        write((i ? ',' : '') + JSON.stringify(key) + ':');
+        visit(value[key], depth + 1);
       }
-      if (post) write('}');
-    } else if (prop.type === 'array') {
-      if (!Array.isArray(value)) throw new Error(`invalid array argument: ${key}`);
-      if (post) write('[');
-      for (const [i, item] of value.entries()) {
-        if (post && i) write(',');
-        visit(item, prop.items, key);
-      }
-      if (post) write(']');
+      write('}');
     } else {
-      if (!scalarMatches(prop.type, value) || (prop.enum && !prop.enum.includes(value))) throw new Error(`invalid argument: ${key}`);
-      if (typeof value === 'string' && (inputChars += value.length) > maxBody) throw new Error('API argument size limit reached');
-      if (post) {
-        const scalar = typeof value === 'string' ? value.toWellFormed() : value;
-        write(Object.is(scalar, -0) ? '-0' : JSON.stringify(scalar));
-      }
+      write(Object.is(value, -0) ? '-0' : JSON.stringify(typeof value === 'string' ? value.toWellFormed() : value));
     }
   }
-  visit(values, { type: 'object', properties: args, required }, 'API arguments');
-  if (post) {
-    const json = parts.join('').replace(/[<>&\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-    if (encoder.encode(json).length > maxBody) throw new Error('API request body too large');
-    return json;
-  }
+  visit(values, 0);
+  const json = parts.join('').replace(/[<>&\u2028\u2029]/g, escaped);
+  if (encoder.encode(json).length > maxBody) throw new Error('API request body too large');
+  return json;
 }
 
-function scalarMatches(type, value) {
-  return type === 'integer' ? Number.isSafeInteger(value) : type === 'number' ? Number.isFinite(value) : typeof value === type;
+// Go's URL.EscapedPath keeps valid raw escapes, but re-escapes the whole decoded path otherwise.
+function apiURL(raw, template, origin) {
+  // Never echo env-expanded values, or input rejected by the browser's authority checks.
+  const publicURL = !/\$\{\s*env\./.test(template) && !/^[^:]+:\/\/[^/?#]*@/.test(raw);
+  const beforeHash = raw.split('#', 1)[0];
+  if (publicURL && /[\x00-\x1f\x7f]/.test(beforeHash)) {
+    throw new Error(`Error calling tool: failed to create request: parse ${goQuote(beforeHash)}: net/url: invalid control character in URL`);
+  }
+  const url = webURL(raw);
+  if (url.origin !== origin) throw new Error('endpoint expansion must not change origin');
+  const [, authority, path, query = '', fragment = ''] = /^(https?:\/\/[^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/is.exec(raw);
+  for (const [part, source] of [[path, authority + path + query], [fragment, raw]]) {
+    const bad = /%(?![\da-f]{2})/i.exec(part);
+    if (!bad) continue;
+    if (!publicURL) throw new Error('invalid URL escape in expanded endpoint');
+    const bytes = encoder.encode(part.slice(bad.index, bad.index + 3)).subarray(0, 3);
+    let escape;
+    try { escape = goQuote(new TextDecoder('utf-8', {fatal: true}).decode(bytes)); }
+    catch { escape = '"' + Array.from(bytes, b => b < 128 ? goQuote(String.fromCharCode(b)).slice(1, -1) : `\\x${b.toString(16)}`).join('') + '"'; }
+    throw new Error(`Error calling tool: failed to create request: parse ${goQuote(source)}: invalid URL escape ${escape}`);
+  }
+  if (!/[^\w.~/!$&'()*+,;=:@%\[\]-]/.test(path)) return url;
+  const escaped = path.replace(/%([\da-fA-F]{2})|[^\w.~/$&+,;=:@-]/gu, (ch, hex) => {
+    const bytes = hex ? [parseInt(hex, 16)] : encoder.encode(ch);
+    return Array.from(bytes, b => {
+      const c = String.fromCharCode(b);
+      return /[\w.~/$&+,;=:@-]/.test(c) ? c : '%' + b.toString(16).toUpperCase().padStart(2, '0');
+    }).join('');
+  });
+  return webURL(authority + escaped + query + fragment);
 }
 
 function apiTool(config, env, policy, seconds) {
@@ -506,17 +527,25 @@ function apiTool(config, env, policy, seconds) {
   const authority = endpoint.slice(endpoint.indexOf('://') + 3).split(/[/?#]/, 1)[0];
   if (authority.includes('${')) throw new Error('api_config.endpoint must have a fixed origin');
   const origin = webURL(endpoint).origin;
-  const parameters = apiParameters(args, required, method), makeHeaders = toolHeaders(config.headers);
+  const parameters = apiParameters(args, required), makeHeaders = toolHeaders(config.headers);
   return {
     name, description: instruction, instructions: instruction, parameters,
-    async run(values, signal) {
-      const body = apiArguments(values, args, required, method === 'POST');
-      let url = expand(endpoint, env);
+    async run(raw, signal) {
+      if (typeof raw === 'string' && raw.length > maxBody) throw new Error('API argument size limit reached');
+      let body, url = expand(endpoint, env);
       const headers = makeHeaders(env);
-      // Like Go, other verbs have neither argument interpolation nor a JSON body.
-      if (method === 'GET') url = expand(url, env, values);
-      else if (method === 'POST') headers.set('Content-Type', 'application/json');
-      const target = webURL(url);
+      if (method === 'GET' && raw !== '') {
+        const values = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (values && Object.keys(values).length > 512) throw new Error('API argument size limit reached');
+        if (values != null && (typeof values !== 'object' || Array.isArray(values) || Object.values(values).some(v => typeof v !== 'string' && v !== null))) {
+          throw new Error('expected decoded API string arguments');
+        }
+        url = expand(url, env, values ?? {});
+      } else if (method === 'POST') {
+        body = postBody(typeof raw === 'string' ? raw : JSON.stringify(raw));
+        headers.set('Content-Type', 'application/json');
+      }
+      const target = method === 'GET' ? apiURL(url, endpoint, origin) : webURL(url);
       if (target.origin !== origin) throw new Error('endpoint expansion must not change origin');
       const res = await request(target, { method, headers, body }, policy, deadline(seconds, signal));
       const limit = 30000, bytes = await readBytes(res, limit + 1);
@@ -552,9 +581,7 @@ export function httpTools(toolset, env = {}, toolProxy) {
       try {
         signal?.throwIfAborted();
         if (called !== name) throw new Error('unknown HTTP tool');
-        if (ts.type === 'api' && typeof rawArgs === 'string' && rawArgs.length > maxBody) throw new Error('API argument size limit reached');
-        const args = typeof rawArgs === 'string' ? JSON.parse(rawArgs || '{}') : rawArgs;
-        return { output: await tool.run(args ?? {}, signal), is_error: false };
+        return { output: await tool.run(rawArgs, signal), is_error: false };
       } catch (e) { return { output: e.message ?? 'request failed', is_error: true }; }
     },
   };

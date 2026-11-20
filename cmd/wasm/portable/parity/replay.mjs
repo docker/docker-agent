@@ -1103,6 +1103,16 @@ agents:`)
   const routed = config.replace('model: local/test', 'model: local/test, sub_agents: [helper], handoffs: [helper]')
     + '  helper: {model: local/worker, description: Helps, instruction: Be precise}\n';
   const greeter = apiTool.replace('endpoint: "https://tool.invalid/greet"', 'endpoint: "https://tool.invalid/greet", args: {who: {type: string}}');
+  const typedAPI = method => httpConfig({type: 'api', api_config: {name: 'greet', method,
+    endpoint: fixture + '/${who}?extra=${extra}', headers: {'X-Note': '${env.WHO}'},
+    args: {who: {type: 'string', enum: ['friend']}, flag: {type: 'boolean'}, count: {type: 'number', enum: [1, 2.5, 'other', false]}},
+    required: ['flag', 'missing']}});
+  const echoAPI = async req => new Response(JSON.stringify([req.method, req.url, req.headers.get('X-Note'), req.headers.get('Content-Type'), await req.text()]));
+  const apiCases = {empty: '', missing: '{}', null: 'null', array: '[1]', scalar: 'false', malformed: '{"who":oops}',
+    caseExtra: '{"Who":"upper","extra":"used","unused":"ignored"}', outsideEnum: '{"who":"stranger"}',
+    duplicate: '{"who":"first","who":"last"}', duplicateNull: '{"who":"first","who":null}', duplicateBad: '{"who":3,"who":"last"}',
+    bool: '{"flag":true}', number: '{"count":1}', unknownNumber: '{"unused":1}', object: '{"who":{}}', unknownArray: '{"unused":[]}',
+    surrogate: '{"who":"\\ud800"}', escaped: '{"who":"a%2Fb (*) 🌍","extra":"a b/+&?"}'};
   for (const [name, yaml, toolName, cases, extra = [], drive = approve, service] of [
     ['think', thinks, 'think', {
       badValue: '{"thought": oops', trailingComma: '{"thought":"x",}', singleQuotes: "{'thought':'x'}", openSecret: `{"thought":"${secret}`,
@@ -1141,6 +1151,16 @@ agents:`)
     ['datetime', local(['datetime']), 'get_datetime', {bad: '{"format": "x', wrongType: '{"format":3}', array: '[1]'}],
     ['random', local(['random']), 'random_int', {bad: '{"min": 1', wrongType: '{"min":"a","max":2}', array: '[1]'}],
     ['api', greeter, 'greet', {bad: '{"who": "x'}, [], approve, greet],
+    ['apiGet', typedAPI('GET'), 'greet', {...apiCases, badPercent: '{"who":"10%"}', numericKey: '{"x.2":false}',
+      escapedKey: '{"a/b~c":3}', firstError: '{"z":true,"a":2}'}, [], approve, echoAPI],
+    ['apiPost', typedAPI('POST'), 'greet', {...apiCases,
+      redactedNumbers: `{"who":"${secret}","n":[1.0,9007199254740993,1e20,1e21,1e-6,1e-7,-0]}`,
+      numbers: '{"int":9007199254740993,"exp":1e21,"tiny":1e-7,"decimal":1e-6,"one":1.0,"zero":-0.0}',
+      nested: '{"2":2,"10":{"b":true,"a":[{"<>&":"\\u2028\\u2029"},null]},"__proto__":"x"}',
+      surrogateKeys: '{"\\udfff":1,"�":2,"😀":3}', overflow: '{"foo":[{"a/b":1e400}]}', duplicateOverflow: '{"foo":1e400,"foo":1}'}, [], approve, echoAPI],
+    ['apiGetContainers', httpConfig({type: 'api', api_config: {name: 'greet', method: 'GET', endpoint: fixture + '/${rows}',
+      args: postArgs}}), 'greet', {stringValue: '{"rows":"still a string"}'}, [], approve, echoAPI],
+    ['apiIgnored', typedAPI('PUT'), 'greet', {malformed: '{oops'}, [], approve, echoAPI],
     ['fetch', local(['fetch']), 'fetch', {bad: '{"urls": ["https://x', missing: '{}', null: 'null', array: '[1]', emptyList: '{"urls":[]}',
       wrongType: '{"urls":3}', elementType: '{"urls":["https://tool.invalid/a",3]}', formatType: '{"urls":["https://tool.invalid/a"],"format":3}',
       timeoutType: '{"urls":["https://tool.invalid/a"],"timeout":"x"}', timeoutFraction: '{"URLS":["https://tool.invalid/a"],"timeout":1.5}'}],

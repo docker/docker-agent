@@ -172,11 +172,31 @@ impl Hooks {
             return Ok(false);
         }
         // Like encoding/json, read an unpaired surrogate escape as U+FFFD.
-        let mut input: Value = serde_json::from_str(&crate::go_json::normalize_json(args)?)
-            .map_err(|_| "cannot redact invalid tool input")?;
+        let normalized = crate::go_json::normalize_json(args)?;
+        let mut input: Value = match serde_json::from_str(&normalized) {
+            Ok(value) => value,
+            Err(e) if e.to_string().starts_with("number out of range") => {
+                // Go's hook gets a nil map on overflow. Only pass through input we can prove is secret-free.
+                let mut rest = normalized.as_ref();
+                while let Some(i) = rest.find('"') {
+                    let mut tokens =
+                        serde_json::Deserializer::from_str(&rest[i..]).into_iter::<String>();
+                    let text = tokens
+                        .next()
+                        .unwrap()
+                        .map_err(|_| "cannot redact invalid tool input")?;
+                    rest = &rest[i + tokens.byte_offset()..];
+                    if redact(&text)?.is_some() {
+                        return Err("cannot redact out-of-range tool input".into());
+                    }
+                }
+                return Ok(false);
+            }
+            Err(_) => return Err("cannot redact invalid tool input".into()),
+        };
         let changed = redact_values(&mut input)?;
         if changed {
-            *args = crate::wire::encode(input);
+            *args = crate::go_json::encode_decoded(&input);
         }
         Ok(changed)
     }
@@ -373,6 +393,15 @@ mod tests {
         let mut messages = [json!({"content":secret})];
         cfg.rewrite_messages(&mut messages).unwrap();
         assert_eq!(messages[0]["content"], secret);
+    }
+
+    #[test]
+    fn numeric_overflow_only_passes_if_every_string_is_safe() {
+        let hooks = Hooks::default().with_defaults(true, false, false);
+        let mut safe = r#"{"a":1e400,"b":["escaped\"quote"]}"#.to_owned();
+        assert!(!hooks.rewrite_input("lookup", &mut safe).unwrap());
+        let mut unsafe_args = format!(r#"{{"a":1e400,"b":["dckr_p\u0061t_{}"]}}"#, "A".repeat(27));
+        assert!(hooks.rewrite_input("lookup", &mut unsafe_args).is_err());
     }
 
     #[test]
