@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	handoff "github.com/docker/docker-agent/pkg/tools/builtin/handoff/types"
 	transfertask "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
@@ -39,6 +40,7 @@ func TestAppendAndRender(t *testing.T) {
 	out := tr.Render(80)
 	assert.Contains(t, out, "hello")
 	assert.Contains(t, out, "hi there")
+	assert.NotContains(t, ansi.Strip(out), testAgent)
 	// One blank separator line between the two messages.
 	assert.Contains(t, out, "\n\n")
 }
@@ -78,6 +80,74 @@ func TestAppendToLastMessageNewMessagePerSender(t *testing.T) {
 	require.Len(t, tr.msgs, 2)
 	assert.Equal(t, "from a", tr.msgs[0].Content)
 	assert.Equal(t, "from b", tr.msgs[1].Content)
+}
+
+func TestAgentAttribution(t *testing.T) {
+	t.Parallel()
+
+	tr := newTestTranscript()
+	t.Cleanup(tr.StopAnimations)
+	_ = tr.Append(types.User("Find the facts."))
+	_ = tr.Append(types.Agent(types.MessageTypeAssistant, "root", "Here are the facts."))
+	_ = tr.AppendToLastMessage("reviewer", " ")
+	assert.NotContains(t, ansi.Strip(tr.Render(80)), "reviewer", "whitespace is not a reply")
+	_ = tr.AppendToLastMessage("reviewer", "Reviewing")
+	_ = tr.AppendToLastMessage("reviewer", " the facts.")
+	_ = tr.Append(types.AgentReturn("reviewer", "root"))
+	_ = tr.Append(types.Agent(types.MessageTypeAssistant, "root", "Ready to proceed."))
+	_ = tr.Append(types.User("Start over."))
+	_ = tr.AppendToLastMessage("reviewer", "Starting over.")
+
+	out := ansi.Strip(tr.Render(80))
+	assert.Regexp(t, `(?s)Here are the facts\..*root\s*→\s*reviewer.*Reviewing the facts\..*reviewer\s+returned control to\s+root.*Ready to proceed\..*Starting over\.`, out)
+	assert.Equal(t, 1, strings.Count(out, "→"))
+	assert.Equal(t, 2, strings.Count(out, "reviewer"))
+	assert.Equal(t, 2, strings.Count(out, "root"))
+	require.Len(t, tr.Messages(), 7, "inferred cues are render-only")
+	_ = tr.Rebuild()
+	assert.Equal(t, out, ansi.Strip(tr.Render(80)))
+}
+
+func TestToolTransitionAttribution(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, tool, next, row, inferred string
+		status                          types.ToolStatus
+		finalize                        bool
+	}{
+		{"explicit handoff", handoff.ToolNameHandoff, "reviewer", `root\s*─►\s*reviewer`, "", types.ToolStatusCompleted, false},
+		{"failed handoff", handoff.ToolNameHandoff, "summarizer", `✗\s+root\s+handoff to\s+reviewer`, `root\s*→\s*summarizer`, types.ToolStatusError, false},
+		{"failed transfer", transfertask.ToolNameTransferTask, "root", `root\s+calls\s+reviewer`, "", types.ToolStatusError, false},
+		{"silent transfer", transfertask.ToolNameTransferTask, "root", `root\s+calls\s+reviewer`, "", types.ToolStatusCompleted, false},
+		{"interrupted transfer with reply", transfertask.ToolNameTransferTask, "reviewer", `root\s+calls\s+reviewer`, "", types.ToolStatusRunning, true},
+		{"interrupted transfer after a silent switch", transfertask.ToolNameTransferTask, "summarizer", `root\s+calls\s+reviewer`, `reviewer\s*→\s*summarizer`, types.ToolStatusRunning, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newTestTranscript()
+			t.Cleanup(tr.StopAnimations)
+			_ = tr.AppendToLastMessage("root", "Here are the facts.")
+			call := tools.ToolCall{ID: "transition", Function: tools.FunctionCall{Name: tc.tool, Arguments: `{"agent":"reviewer","task":"Check the facts."}`}}
+			_ = tr.AddOrUpdateToolCall("root", call, tools.Tool{Name: tc.tool}, tc.status)
+			_ = tr.AppendToLastMessage(tc.next, "Continuing the work.")
+			if tc.finalize {
+				tr.FinalizeToolCalls(types.ToolStatusError)
+				assert.False(t, tr.ar.HasActive())
+			}
+			out := ansi.Strip(tr.Render(80))
+			assert.Regexp(t, `(?s)Here are the facts\..*`+tc.row+`.*`+tc.inferred+`.*Continuing the work\.`, out)
+			if tc.inferred == "" {
+				assert.NotContains(t, out, "→")
+			} else {
+				assert.Equal(t, 1, strings.Count(out, "→"))
+			}
+			if tc.tool == transfertask.ToolNameTransferTask {
+				assert.Equal(t, 1, strings.Count(out, "calls"))
+			}
+			_ = tr.Rebuild()
+			assert.Equal(t, out, ansi.Strip(tr.Render(80)))
+		})
+	}
 }
 
 func TestAddOrUpdateToolCall(t *testing.T) {

@@ -65,3 +65,26 @@ func TestReasoningResetRemovesPureBlocksAndAcceptsNewDeltas(t *testing.T) {
 	require.Equal(t, "FALLBACK", m.messages[0].Content)
 	require.Equal(t, "FALLBACK", m.views[0].(*reasoningblock.Model).Reasoning())
 }
+
+func TestReasoningResetDropsUnsubstantiatedTailTransition(t *testing.T) {
+	t.Parallel()
+
+	for _, keepReply := range []bool{false, true} {
+		m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+		m.AppendAssistantContent("s", "facts", "root", "Here are the facts.")
+		m.AppendReasoningContent("s", "summary", "summarizer", "Discarded thinking.")
+		if keepReply {
+			m.AppendAssistantContent("s", "summary", "summarizer", "Here is the summary.")
+		}
+		require.Contains(t, ansi.Strip(m.View()), "→")
+		m.ResetReasoningContent("s", "summary", "summarizer")
+		if keepReply {
+			assertInOrder(t, ansi.Strip(m.View()), "→", "Here is the summary.")
+		} else {
+			require.NotContains(t, ansi.Strip(m.View()), "→")
+			m.AppendAssistantContent("s", "summary", "summarizer", "Here is the replacement summary.")
+			assertInOrder(t, ansi.Strip(m.View()), "→", "Here is the replacement summary.")
+		}
+		require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAgentTransition))
+	}
+}

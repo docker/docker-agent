@@ -60,8 +60,7 @@ type AssistantSegments struct {
 
 // messageModel implements Model
 type messageModel struct {
-	message  *types.Message
-	previous *types.Message
+	message *types.Message
 
 	width    int
 	height   int
@@ -131,21 +130,20 @@ type markdownImagePlaceholder struct {
 // can change its output. The key is small enough (a string and a few flags)
 // that comparing it is much cheaper than rendering markdown.
 type renderCache struct {
-	valid     bool
-	content   string
-	msgType   types.MessageType
-	width     int
-	selected  bool
-	hovered   bool
-	expanded  bool
-	editable  bool
-	sameAgent bool
-	result    string
-	imageID   int
+	valid    bool
+	content  string
+	msgType  types.MessageType
+	width    int
+	selected bool
+	hovered  bool
+	expanded bool
+	editable bool
+	result   string
+	imageID  int
 }
 
 // New creates a new message view
-func New(ar *animation.Runtime, msg, previous *types.Message) *messageModel {
+func New(ar *animation.Runtime, msg, _ *types.Message) *messageModel {
 	imageScanOffset := -1
 	if msg != nil && msg.Type == types.MessageTypeAssistant {
 		refs := tuiimage.MarkdownReferences(msg.Content)
@@ -153,7 +151,6 @@ func New(ar *animation.Runtime, msg, previous *types.Message) *messageModel {
 	}
 	return &messageModel{
 		message:         msg,
-		previous:        previous,
 		width:           80, // Default width
 		height:          1,  // Will be calculated
 		focused:         false,
@@ -392,18 +389,9 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 		cache.stable = parts.StablePrefix
 	}
 	header := actionRow(innerWidth, mv.hovered, types.MessageCopyLabel)
-	prefix := ""
-	if !mv.sameAgentAsPrevious(msg) {
-		prefix = mv.senderPrefix(msg.Sender)
-	}
-	headerKey := prefix + header
-	if cache.headerKey != headerKey || widthChanged {
-		cache.headerKey = headerKey
-		cache.headerLines = nil
-		if prefix != "" {
-			cache.headerLines = append(cache.headerLines, strings.Split(strings.TrimSuffix(prefix, "\n"), "\n")...)
-		}
-		cache.headerLines = append(cache.headerLines, styledAssistantLines(messageStyle, width, header)...)
+	if cache.headerKey != header || widthChanged {
+		cache.headerKey = header
+		cache.headerLines = styledAssistantLines(messageStyle, width, header)
 	}
 	tailLines := styledAssistantLines(messageStyle, width, parts.MutableTail)
 	if parts.MutableTail != "" && parts.StablePrefix != "" {
@@ -456,7 +444,6 @@ func (mv *messageModel) Render(width int) string {
 			c.expanded == mv.expanded &&
 			c.editable == (msg.SessionPosition != nil) &&
 			c.content == msg.Content &&
-			c.sameAgent == mv.sameAgentAsPrevious(msg) &&
 			c.imageID == mv.markdownImageID {
 			return c.result
 		}
@@ -466,17 +453,16 @@ func (mv *messageModel) Render(width int) string {
 
 	if cacheable {
 		mv.renderCache = renderCache{
-			valid:     true,
-			content:   msg.Content,
-			msgType:   msg.Type,
-			width:     width,
-			selected:  mv.selected,
-			hovered:   mv.hovered,
-			expanded:  mv.expanded,
-			editable:  msg.SessionPosition != nil,
-			sameAgent: mv.sameAgentAsPrevious(msg),
-			result:    result,
-			imageID:   mv.markdownImageID,
+			valid:    true,
+			content:  msg.Content,
+			msgType:  msg.Type,
+			width:    width,
+			selected: mv.selected,
+			hovered:  mv.hovered,
+			expanded: mv.expanded,
+			editable: msg.SessionPosition != nil,
+			result:   result,
+			imageID:  mv.markdownImageID,
 		}
 	}
 	return result
@@ -568,11 +554,6 @@ func (mv *messageModel) render(width int) string {
 		rendered, codeBlocks = replaceMarkdownImagePlaceholders(rendered, codeBlocks, imagePlaceholders)
 		rendered = appendAssistantMediaLines(rendered, msg.AssistantMedia, innerRenderWidth)
 
-		var prefix string
-		if !mv.sameAgentAsPrevious(msg) {
-			prefix = mv.senderPrefix(msg.Sender)
-		}
-
 		// Always reserve a top row to avoid layout shifts when the copy label
 		// appears on hover. When not hovered, the row is filled with spaces
 		// (invisible). AssistantMessageStyle has PaddingTop=0, so this extra
@@ -580,28 +561,20 @@ func (mv *messageModel) render(width int) string {
 		innerWidth := width - messageStyle.GetHorizontalFrameSize()
 		topRow := actionRow(innerWidth, mv.hovered || mv.selected, types.MessageCopyLabel)
 
-		// Translate the markdown-relative line indices into messageModel View()
-		// coordinates. The rendered markdown is preceded by the sender prefix
-		// (when shown) and the always-present topRow line inside the styled
-		// envelope, so the first line of `rendered` lands at this offset.
-		prefixLines := 0
-		if prefix != "" {
-			prefixLines = strings.Count(prefix, "\n")
-		}
-		lineOffset := prefixLines + 1 // +1 for topRow
+		// The action row precedes the rendered markdown in View().
 		if len(codeBlocks) > 0 {
 			mv.codeBlocks = make([]markdown.CodeBlock, len(codeBlocks))
 			for i, cb := range codeBlocks {
 				mv.codeBlocks[i] = markdown.CodeBlock{
 					Content: cb.Content,
-					Line:    cb.Line + lineOffset,
+					Line:    cb.Line + 1,
 				}
 			}
 		} else {
 			mv.codeBlocks = nil
 		}
 
-		return prefix + messageStyle.Width(width).Render(topRow+"\n"+rendered)
+		return messageStyle.Width(width).Render(topRow + "\n" + rendered)
 	case types.MessageTypeShellOutput:
 		if rendered, blocks, err := markdown.NewFastRenderer(width).RenderWithCodeBlocks(fmt.Sprintf("```console\n%s\n```", msg.Content)); err == nil {
 			// The view has no envelope, so block lines map 1:1 to View() lines,
@@ -613,8 +586,8 @@ func (mv *messageModel) render(width int) string {
 		return msg.Content
 	case types.MessageTypeCancelled:
 		return styles.WarningStyle.Render("⚠ stream cancelled ⚠")
-	case types.MessageTypeAgentReturn:
-		return renderAgentReturn(msg.Sender, msg.Content, width)
+	case types.MessageTypeAgentReturn, types.MessageTypeAgentTransition:
+		return RenderAgentTransition(msg, width)
 	case types.MessageTypeWelcome:
 		messageStyle := styles.WelcomeMessageStyle
 		// Convert explicit newlines to markdown hard line breaks (two trailing spaces)
@@ -827,23 +800,15 @@ func actionRow(innerWidth int, show bool, labels ...string) string {
 	return strings.Repeat(" ", padding) + styles.MutedStyle.Render(joined)
 }
 
-func (mv *messageModel) senderPrefix(sender string) string {
-	if sender == "" {
-		return ""
+// RenderAgentTransition wraps and caps the row so it cannot overflow narrow chat columns.
+func RenderAgentTransition(msg *types.Message, width int) string {
+	connector := "→"
+	if msg.Type == types.MessageTypeAgentReturn {
+		connector = types.AgentReturnLabel
 	}
-	return styles.AgentBadgeStyleFor(sender).MarginLeft(2).Render(sender) + "\n\n"
-}
-
-// renderAgentReturn renders the delegation-return transition: the returning
-// child's badge, a muted "returned control to" connector, and the parent's
-// badge — the same visual language as the transfer_task/handoff headers, kept
-// visually light. The line is word-wrapped to the width and each wrapped line
-// hard-capped, so narrow chat columns never overflow (the cap only ever trims
-// trailing wrap spaces).
-func renderAgentReturn(fromAgent, toAgent string, width int) string {
-	line := styles.AgentBadgeStyleFor(fromAgent).MarginLeft(2).Render(fromAgent) +
-		styles.MutedStyle.Render(" "+types.AgentReturnLabel+" ") +
-		styles.AgentBadgeStyleFor(toAgent).Render(toAgent)
+	line := styles.AgentBadgeStyleFor(msg.Sender).MarginLeft(2).Render(msg.Sender) +
+		styles.MutedStyle.Render(" "+connector+" ") +
+		styles.AgentBadgeStyleFor(msg.Content).Render(msg.Content)
 	if width <= 0 {
 		return line
 	}
@@ -852,22 +817,6 @@ func renderAgentReturn(fromAgent, toAgent string, width int) string {
 		lines[i] = ansi.Truncate(l, width, "")
 	}
 	return strings.Join(lines, "\n")
-}
-
-// sameAgentAsPrevious returns true if the previous message was from the same agent
-func (mv *messageModel) sameAgentAsPrevious(msg *types.Message) bool {
-	if mv.previous == nil || mv.previous.Sender != msg.Sender {
-		return false
-	}
-	switch mv.previous.Type {
-	case types.MessageTypeAssistant,
-		types.MessageTypeAssistantReasoningBlock,
-		types.MessageTypeToolCall,
-		types.MessageTypeToolResult:
-		return true
-	default:
-		return false
-	}
 }
 
 // Height calculates the height needed for this message view. Render() is

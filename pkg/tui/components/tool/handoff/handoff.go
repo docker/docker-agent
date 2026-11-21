@@ -25,5 +25,10 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 		return toolcommon.RenderTool(msg, s, "", "", width, hideResults)
 	}
 
-	return styles.AgentBadgeStyleFor(msg.Sender).MarginLeft(2).Render(msg.Sender) + " ─► " + styles.AgentBadgeStyleFor(params.Agent).Render(params.Agent)
+	from := styles.AgentBadgeStyleFor(msg.Sender)
+	to := styles.AgentBadgeStyleFor(params.Agent).Render(params.Agent)
+	if msg.ToolStatus != types.ToolStatusCompleted {
+		return toolcommon.Icon(msg, s) + " " + from.Render(msg.Sender) + " handoff to " + to
+	}
+	return from.MarginLeft(2).Render(msg.Sender) + " ─► " + to
 }

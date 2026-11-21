@@ -52,6 +52,33 @@ func TestForkSkillReplyDoesNotMergeWithParent(t *testing.T) {
 	})
 }
 
+func TestForkSkillAttributesVisibleSpeakerChanges(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		sess := session.New()
+		call := tools.ToolCall{ID: "skill", Function: tools.FunctionCall{Name: "run_skill"}}
+		tool := tools.Tool{Name: call.Function.Name}
+		p := renderAppEventBatches(t, sess, [][]runtime.Event{{
+			runtime.StreamStarted(sess.ID, "root"),
+			runtime.AgentChoice("root", sess.ID, "I will gather facts."),
+			runtime.ToolCall(call, tool, "root"),
+			runtime.StreamStarted("skill-session", "researcher"),
+			runtime.AgentChoice("researcher", "skill-session", "Here are the facts."),
+			runtime.StreamStopped("skill-session", "researcher", "normal"),
+			runtime.ToolCallResponse(call.ID, tool, tools.ResultSuccess("Facts gathered."), "Facts gathered.", "root"),
+			runtime.AgentChoice("root", sess.ID, "Here is "),
+			runtime.AgentChoice("root", sess.ID, "my summary."),
+			runtime.StreamStopped(sess.ID, "root", "normal"),
+		}})
+
+		view := ansi.Strip(p.messages.View())
+		require.Regexp(t, `(?s)I will gather facts\..*root\s+→\s+researcher.*Here are the facts\..*researcher\s+→\s+root.*Here is my summary\.`, view)
+		require.Equal(t, 2, strings.Count(view, "→"))
+		require.Equal(t, 3, p.messages.MessageTypeCount(types.MessageTypeAssistant))
+	})
+}
+
 func TestSameAgentContentSessionBoundaries(t *testing.T) {
 	t.Parallel()
 

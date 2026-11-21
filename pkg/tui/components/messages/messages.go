@@ -18,8 +18,8 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
-	transfertask "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/agentattribution"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
 	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
@@ -337,15 +337,10 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
-	case *runtime.SessionRecoveredEvent:
+	case *runtime.SessionRecoveredEvent, messages.StreamCancelledMsg:
 		finalizeCmd := m.FinalizeStream()
 		m.removeSpinner()
-		m.removePendingToolCallMessages()
-		m.stopReasoningBlockAnimations()
-		return m, finalizeCmd
-	case messages.StreamCancelledMsg:
-		finalizeCmd := m.FinalizeStream()
-		m.removeSpinner()
+		m.keepInterruptedTransferCues()
 		m.removePendingToolCallMessages()
 		m.stopReasoningBlockAnimations()
 		return m, finalizeCmd
@@ -1514,8 +1509,8 @@ func (m *model) needsSeparator(index int) bool {
 	currentIsToolCall := m.messages[index].Type == types.MessageTypeToolCall
 	nextIsToolCall := m.messages[index+1].Type == types.MessageTypeToolCall
 
-	// Always add a separator before transfer_task, even between consecutive tool calls
-	if nextIsToolCall && m.messages[index+1].ToolCall.Function.Name == transfertask.ToolNameTransferTask {
+	// Keep agent transitions distinct from the preceding tool call.
+	if nextIsToolCall && agentattribution.IsTransitionTool(m.messages[index+1].ToolCall.Function.Name) {
 		return true
 	}
 
@@ -1810,6 +1805,13 @@ func (m *model) AddWelcomeMessage(content string) tea.Cmd {
 	return view.Init()
 }
 
+func (m *model) addAssistantReply(msg *types.Message) tea.Cmd {
+	if boundary := agentattribution.Boundary(m.messages, msg.Sender); boundary != nil {
+		return tea.Batch(m.addMessage(boundary), m.addMessage(msg))
+	}
+	return m.addMessage(msg)
+}
+
 func (m *model) addMessage(msg *types.Message) tea.Cmd {
 	m.clearSelection()
 	shouldAutoScroll := !m.userHasScrolled
@@ -1859,12 +1861,12 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 
 		// Create new reasoning block
 		block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, reasoningblock.WithToolRenderers(m.toolRenderers))
-		block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 		block.SetSize(m.contentWidth(), 0)
 
 		blockMsg := &types.Message{
-			Type:   types.MessageTypeAssistantReasoningBlock,
-			Sender: agentName,
+			Type:      types.MessageTypeAssistantReasoningBlock,
+			Sender:    agentName,
+			SessionID: sess.ID,
 		}
 		appendSessionMessage(blockMsg, block)
 		return block
@@ -1872,6 +1874,9 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 
 	// addStandaloneToolCall adds a tool call as a standalone message (not in a reasoning block)
 	addStandaloneToolCall := func(agentName string, tc tools.ToolCall, toolDef tools.Tool, toolResults map[string]*tools.ToolCallResult) {
+		if toolDef.Name == "" && agentattribution.IsTransitionTool(tc.Function.Name) {
+			toolDef.Name = tc.Function.Name
+		}
 		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusCompleted)
 		// Apply tool result if available
 		if result, ok := toolResults[tc.ID]; ok {
@@ -1880,6 +1885,10 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 			if result.IsError {
 				toolMsg.ToolStatus = types.ToolStatusError
 			}
+		} else if agentattribution.IsTransitionTool(tc.Function.Name) {
+			// A saved call without a result does not prove that it succeeded.
+			toolMsg.ToolStatus = types.ToolStatusPending
+			toolMsg.HideToolProgress = true
 		}
 		view := m.createToolCallView(toolMsg)
 		appendSessionMessage(toolMsg, view)
@@ -1945,6 +1954,9 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 
 			// Step 1: Handle reasoning content - only create/extend a reasoning block if there's actual reasoning
 			if hasReasoning {
+				if boundary := agentattribution.Boundary(m.messages, smsg.AgentName); boundary != nil {
+					appendSessionMessage(boundary, m.createMessageView(boundary))
+				}
 				reasoningBlock = getOrCreateReasoningBlock(smsg.AgentName)
 				reasoningBlock.AppendReasoning(smsg.Message.ReasoningContent)
 				// Update the message content for copying
@@ -1964,6 +1976,9 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 				msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, visibleContent)
 				msg.SessionID, msg.MessageID = sess.ID, smsg.Message.MessageID
 				msg.AssistantMedia = restoredMedia
+				if boundary := agentattribution.Boundary(m.messages, msg.Sender); boundary != nil {
+					appendSessionMessage(boundary, m.createMessageView(boundary))
+				}
 				appendSessionMessage(msg, m.createMessageView(msg))
 			}
 
@@ -1977,7 +1992,7 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 						toolDef = smsg.Message.ToolDefinitions[i]
 					}
 
-					if attachToReasoning {
+					if attachToReasoning && !agentattribution.IsTransitionTool(tc.Function.Name) {
 						toolMsg := types.ToolCallMessage(smsg.AgentName, tc, toolDef, types.ToolStatusCompleted)
 						reasoningBlock.AddToolCall(toolMsg)
 						if result, ok := toolResults[tc.ID]; ok {
@@ -2049,12 +2064,18 @@ func (m *model) AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, t
 
 	m.removeSpinner()
 
-	// If there's an active reasoning block, add the tool call to it
-	if block, blockIdx := m.getActiveReasoningBlock(agentName); block != nil {
-		msg := types.ToolCallMessage(agentName, toolCall, toolDef, status)
-		cmd := block.AddToolCall(msg)
-		m.invalidateItem(blockIdx)
-		return cmd
+	// Transition rows must outlive the disclosure and fade of the thinking block.
+	if agentattribution.IsTransitionTool(toolCall.Function.Name) {
+		if toolDef.Name == "" {
+			toolDef.Name = toolCall.Function.Name
+		}
+	} else {
+		if block, blockIdx := m.getActiveReasoningBlock(agentName); block != nil {
+			msg := types.ToolCallMessage(agentName, toolCall, toolDef, status)
+			cmd := block.AddToolCall(msg)
+			m.invalidateItem(blockIdx)
+			return cmd
+		}
 	}
 
 	// Otherwise create a standalone tool call message
@@ -2140,13 +2161,22 @@ func (m *model) BreakMessageGroup() {
 }
 
 func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
+	return m.appendToLastMessage("", agentName, content)
+}
+
+func (m *model) appendToLastMessage(sessionID, agentName, content string) tea.Cmd {
 	m.removeSpinner()
+	addReply := func() tea.Cmd {
+		msg := types.Agent(types.MessageTypeAssistant, agentName, content)
+		msg.SessionID = sessionID
+		return m.addAssistantReply(msg)
+	}
 
 	// The first assistant chunk replaces the pending-response spinner. After
 	// removal the transcript can legitimately be empty; create the streaming
 	// message rather than dropping the first and every later chunk.
 	if len(m.messages) == 0 {
-		return m.addMessage(types.Agent(types.MessageTypeAssistant, agentName, content))
+		return addReply()
 	}
 
 	lastIdx := len(m.messages) - 1
@@ -2178,7 +2208,7 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 		return tea.Batch(materializeCmd, cmd)
 	}
 
-	return m.addMessage(types.Agent(types.MessageTypeAssistant, agentName, content))
+	return addReply()
 }
 
 // AppendAssistantMedia mirrors AppendToLastMessage for generated media: it
@@ -2186,6 +2216,10 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 // message so the media renders inside the same turn as the streamed text,
 // or starts a media-only assistant message when there is none.
 func (m *model) AppendAssistantMedia(agentName string, media []types.AssistantMedia) tea.Cmd {
+	return m.appendAssistantMedia("", agentName, media)
+}
+
+func (m *model) appendAssistantMedia(sessionID, agentName string, media []types.AssistantMedia) tea.Cmd {
 	if len(media) == 0 {
 		return nil
 	}
@@ -2203,8 +2237,9 @@ func (m *model) AppendAssistantMedia(agentName string, media []types.AssistantMe
 	}
 
 	msg := types.Agent(types.MessageTypeAssistant, agentName, "")
+	msg.SessionID = sessionID
 	msg.AssistantMedia = media
-	return m.addMessage(msg)
+	return m.addAssistantReply(msg)
 }
 
 // UpdateAssistantMedia replaces attached media items in place by ID. See
@@ -2247,10 +2282,14 @@ func (m *model) UpdateAssistantMedia(media []types.AssistantMedia) tea.Cmd {
 }
 
 func (m *model) AppendReasoning(agentName, content string) tea.Cmd {
+	return m.appendReasoning("", agentName, content)
+}
+
+func (m *model) appendReasoning(sessionID, agentName, content string) tea.Cmd {
 	m.removeSpinner()
 
 	if len(m.messages) == 0 {
-		return m.addReasoningBlock(agentName, content)
+		return m.addReasoningBlock(sessionID, agentName, content)
 	}
 
 	lastIdx := len(m.messages) - 1
@@ -2267,7 +2306,7 @@ func (m *model) AppendReasoning(agentName, content string) tea.Cmd {
 	}
 
 	// Create a new reasoning block
-	return m.addReasoningBlock(agentName, content)
+	return m.addReasoningBlock(sessionID, agentName, content)
 }
 
 // lastMessage returns the most recently appended message, or nil when empty.
@@ -2276,27 +2315,6 @@ func (m *model) lastMessage() *types.Message {
 		return nil
 	}
 	return m.messages[len(m.messages)-1]
-}
-
-// showReasoningAgentBadge reports whether a new reasoning block for agentName
-// should render its agent badge. Mirrors message.sameAgentAsPrevious: the
-// badge is hidden only when the block visually continues content from the
-// same agent (assistant text, reasoning, or tool activity). In particular, a
-// transfer_task tool call is sent by the parent agent, so reasoning from the
-// sub-agent that follows it shows the sub-agent's badge.
-func showReasoningAgentBadge(previous *types.Message, agentName string) bool {
-	if previous == nil || previous.Sender != agentName {
-		return true
-	}
-	switch previous.Type {
-	case types.MessageTypeAssistant,
-		types.MessageTypeAssistantReasoningBlock,
-		types.MessageTypeToolCall,
-		types.MessageTypeToolResult:
-		return false
-	default:
-		return true
-	}
 }
 
 // addReasoningBlock creates a new reasoning block message.
@@ -2308,18 +2326,25 @@ func showReasoningAgentBadge(previous *types.Message, agentName string) bool {
 // to rebuild them from scratch via the transient renderer path. The next
 // non-reasoning entry (user message, tool call, error) will finalize via
 // addMessage when the streaming turn actually ends.
-func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
+func (m *model) addReasoningBlock(sessionID, agentName, content string) tea.Cmd {
 	m.clearSelection()
 	shouldAutoScroll := !m.userHasScrolled
 
+	var cmds []tea.Cmd
+	if content != "" {
+		if boundary := agentattribution.Boundary(m.messages, agentName); boundary != nil {
+			cmds = append(cmds, m.addMessage(boundary))
+		}
+	}
+
 	msg := &types.Message{
-		Type:    types.MessageTypeAssistantReasoningBlock,
-		Sender:  agentName,
-		Content: content,
+		Type:      types.MessageTypeAssistantReasoningBlock,
+		Sender:    agentName,
+		Content:   content,
+		SessionID: sessionID,
 	}
 
 	block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, reasoningblock.WithToolRenderers(m.toolRenderers))
-	block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 	block.SetReasoning(content)
 	block.SetSize(m.contentWidth(), 0)
 
@@ -2328,7 +2353,6 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	m.sessionState.SetPreviousMessage(msg)
 	m.renderDirty = true
 
-	var cmds []tea.Cmd
 	if initCmd := block.Init(); initCmd != nil {
 		cmds = append(cmds, initCmd)
 	}
@@ -2341,22 +2365,22 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// getActiveReasoningBlock returns the active reasoning block for the given agent,
-// or nil if the last message is not a reasoning block for that agent.
+// getActiveReasoningBlock finds the caller's block for ordinary tools, even
+// when a transition from the same batch was rendered as a standalone row.
 func (m *model) getActiveReasoningBlock(agentName string) (*reasoningblock.Model, int) {
-	if len(m.messages) == 0 {
-		return nil, -1
-	}
-
-	lastIdx := len(m.messages) - 1
-	lastMsg := m.messages[lastIdx]
-
-	if lastIdx >= m.groupStart && lastMsg.Type == types.MessageTypeAssistantReasoningBlock && lastMsg.Sender == agentName {
-		if block, ok := m.views[lastIdx].(*reasoningblock.Model); ok {
-			return block, lastIdx
+	for i := len(m.messages) - 1; i >= m.groupStart; i-- {
+		msg := m.messages[i]
+		if msg.Sender != agentName {
+			break
 		}
+		if msg.Type == types.MessageTypeToolCall && agentattribution.IsTransitionTool(msg.ToolCall.Function.Name) {
+			continue
+		}
+		if block, ok := m.views[i].(*reasoningblock.Model); ok {
+			return block, i
+		}
+		break
 	}
-
 	return nil, -1
 }
 
@@ -2391,7 +2415,7 @@ func (m *model) createToolCallView(msg *types.Message) layout.Model {
 }
 
 func (m *model) createMessageView(msg *types.Message) layout.Model {
-	view := message.New(m.ar, msg, m.sessionState.PreviousMessage())
+	view := message.New(m.ar, msg, nil)
 	view.SetSize(m.contentWidth(), 0)
 	return view
 }
@@ -2445,7 +2469,7 @@ func (m *model) removeSpinner() {
 
 func (m *model) removePendingToolCallMessages() {
 	m.removeToolCallMessages(func(msg *types.Message) bool {
-		return msg.ToolStatus == types.ToolStatusPending || msg.ToolStatus == types.ToolStatusRunning
+		return !msg.HideToolProgress && (msg.ToolStatus == types.ToolStatusPending || msg.ToolStatus == types.ToolStatusRunning)
 	})
 }
 
@@ -2731,8 +2755,8 @@ func (m *model) hasAnimatedContent() bool {
 			return true
 		case types.MessageTypeToolCall:
 			// Tool calls with pending/running status have spinners
-			if msg.ToolStatus == types.ToolStatusPending ||
-				msg.ToolStatus == types.ToolStatusRunning {
+			if !msg.HideToolProgress && (msg.ToolStatus == types.ToolStatusPending ||
+				msg.ToolStatus == types.ToolStatusRunning) {
 				return true
 			}
 		case types.MessageTypeAssistantReasoningBlock:

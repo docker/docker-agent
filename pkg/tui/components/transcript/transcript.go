@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	transfertask "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/agentattribution"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -35,6 +36,7 @@ type Transcript struct {
 	ar            *animation.Runtime
 	state         service.SessionStateReader
 	msgs          []*types.Message
+	boundaries    map[int]*types.Message // inferred cues are not host messages
 	views         []layout.Model
 	width         int
 }
@@ -63,30 +65,36 @@ func New(ar *animation.Runtime, state service.SessionStateReader, opts ...Option
 // Append adds a message and returns the new view's Init command (spinner
 // and running-tool views use it to start the animation tick stream).
 func (t *Transcript) Append(msg *types.Message) tea.Cmd {
-	v := t.newView(msg, t.lastMsg())
+	t.attributeReply(t.msgs, msg)
+	v := t.newView(msg)
 	t.msgs = append(t.msgs, msg)
 	t.views = append(t.views, v)
 	return v.Init()
 }
 
+func (t *Transcript) attributeReply(history []*types.Message, msg *types.Message) {
+	if !agentattribution.HasVisibleReply(msg) {
+		return
+	}
+	if cue := agentattribution.Boundary(history, msg.Sender); cue != nil {
+		if t.boundaries == nil {
+			t.boundaries = make(map[int]*types.Message)
+		}
+		t.boundaries[len(history)] = cue
+	}
+}
+
 // newView creates the right view for a message, like the message list's
 // createToolCallView / createMessageView helpers.
-func (t *Transcript) newView(msg, prev *types.Message) layout.Model {
+func (t *Transcript) newView(msg *types.Message) layout.Model {
 	var v layout.Model
 	if msg.Type == types.MessageTypeToolCall {
 		v = t.toolRenderers.New(t.ar, msg, t.state)
 	} else {
-		v = message.New(t.ar, msg, prev)
+		v = message.New(t.ar, msg, nil)
 	}
 	_ = v.SetSize(t.width, 0)
 	return v
-}
-
-func (t *Transcript) lastMsg() *types.Message {
-	if n := len(t.msgs); n > 0 {
-		return t.msgs[n-1]
-	}
-	return nil
 }
 
 // AppendToLastMessage grows the most recent message with streamed reply
@@ -99,7 +107,11 @@ func (t *Transcript) AppendToLastMessage(agentName, content string) tea.Cmd {
 	t.RemoveLast(types.MessageTypeSpinner)
 	if n := len(t.msgs); n > 0 {
 		if last := t.msgs[n-1]; last.Type == types.MessageTypeAssistant && last.Sender == agentName {
+			wasVisible := agentattribution.HasVisibleReply(last)
 			last.Content += content
+			if !wasVisible {
+				t.attributeReply(t.msgs[:n-1], last)
+			}
 			if v, ok := t.views[n-1].(message.Model); ok {
 				return v.SetMessage(last)
 			}
@@ -170,11 +182,7 @@ func (t *Transcript) refreshToolView(i int, status types.ToolStatus) tea.Cmd {
 	msg := t.msgs[i]
 	msg.SetToolStatus(status)
 	animation.StopView(t.views[i])
-	var prev *types.Message
-	if i > 0 {
-		prev = t.msgs[i-1]
-	}
-	t.views[i] = t.newView(msg, prev)
+	t.views[i] = t.newView(msg)
 	return t.views[i].Init()
 }
 
@@ -193,6 +201,7 @@ func (t *Transcript) RemoveLast(typ types.MessageType) {
 		return
 	}
 	animation.StopView(t.views[n-1])
+	delete(t.boundaries, n-1)
 	t.msgs, t.views = t.msgs[:n-1], t.views[:n-1]
 }
 
@@ -216,15 +225,20 @@ func (t *Transcript) Update(msg tea.Msg) tea.Cmd {
 func (t *Transcript) Render(width int) string {
 	t.setWidth(width)
 	var lines []string
-	for i, v := range t.views {
-		rendered := v.View()
+	appendView := func(rendered string, grouped bool) {
 		if rendered == "" {
-			continue
+			return
 		}
-		if len(lines) > 0 && !t.groupsWithPrevious(i) {
+		if len(lines) > 0 && !grouped {
 			lines = append(lines, "")
 		}
 		lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+	}
+	for i, v := range t.views {
+		if cue := t.boundaries[i]; cue != nil {
+			appendView(message.RenderAgentTransition(cue, width), false)
+		}
+		appendView(v.View(), t.groupsWithPrevious(i))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -257,14 +271,12 @@ func (t *Transcript) setWidth(width int) {
 func (t *Transcript) Rebuild() tea.Cmd {
 	t.StopAnimations()
 	var cmds []tea.Cmd
-	var prev *types.Message
 	for i, msg := range t.msgs {
-		v := t.newView(msg, prev)
+		v := t.newView(msg)
 		t.views[i] = v
 		if cmd := v.Init(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		prev = msg
 	}
 	return tea.Batch(cmds...)
 }

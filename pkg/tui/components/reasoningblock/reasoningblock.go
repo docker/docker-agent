@@ -111,7 +111,6 @@ type Model struct {
 	ar               *animation.Runtime
 	id               string
 	agentName        string
-	showAgentBadge   bool          // render the agent badge above the header
 	contentItems     []contentItem // Ordered sequence of reasoning and tool calls
 	toolEntries      []toolEntry   // All tool entries (referenced by contentItems)
 	expanded         bool
@@ -166,15 +165,6 @@ func (m *Model) ID() string {
 // AgentName returns the agent name for this block.
 func (m *Model) AgentName() string {
 	return m.agentName
-}
-
-// SetShowAgentBadge controls whether the block renders the agent badge above
-// the Thinking header. The messages list enables it when the block does not
-// visually continue content from the same agent (e.g. reasoning that starts a
-// sub-agent's turn right after a transfer_task), mirroring the sender prefix
-// on standard assistant messages.
-func (m *Model) SetShowAgentBadge(show bool) {
-	m.showAgentBadge = show
 }
 
 // SetReasoning sets reasoning content (replaces all content items with a single reasoning item).
@@ -248,6 +238,7 @@ func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
 	toolIndex := len(m.toolEntries)
 	m.toolEntries = append(m.toolEntries, toolEntry{msg: msg, view: view})
 	m.contentItems = append(m.contentItems, contentItem{kind: contentItemTool, toolIndex: toolIndex})
+	m.cache = nil // A new tool can make the block expandable after its first render.
 	return view.Init()
 }
 
@@ -531,30 +522,10 @@ func (m *Model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 // View renders the block.
 func (m *Model) View() string {
-	var content string
 	if m.expanded {
-		content = m.renderExpanded()
-	} else {
-		content = m.renderCollapsed()
+		return m.renderExpanded()
 	}
-	return m.agentBadgePrefix() + content
-}
-
-// rendersAgentBadge reports whether the agent badge actually renders: it
-// must be enabled and the agent name non-empty. Both rendering
-// (agentBadgePrefix) and hit-testing (headerLineIndex) rely on this single
-// condition so they can never diverge.
-func (m *Model) rendersAgentBadge() bool {
-	return m.showAgentBadge && m.agentName != ""
-}
-
-// agentBadgePrefix returns the agent badge line plus a blank separator when
-// enabled, using the same style and spacing as standard assistant messages.
-func (m *Model) agentBadgePrefix() string {
-	if !m.rendersAgentBadge() {
-		return ""
-	}
-	return styles.AgentBadgeStyleFor(m.agentName).MarginLeft(2).Render(m.agentName) + "\n\n"
+	return m.renderCollapsed()
 }
 
 // SetSize sets the component dimensions.
@@ -706,25 +677,20 @@ func (m *Model) renderCollapsed() string {
 	return strings.Join(parts, "\n")
 }
 
-// getVisibleToolsCollapsed returns tool entries that should be visible in collapsed view.
-// This includes in-progress tools (pending/running) and recently completed tools that haven't fully faded.
-// Must use the same logic as hasFadingTools to avoid unregistering animation while tools are still visible.
+// getVisibleToolsCollapsed returns the in-progress or not-yet-faded tools.
 func (m *Model) getVisibleToolsCollapsed() []toolEntry {
 	var visible []toolEntry
 	for _, entry := range m.toolEntries {
-		// Show in-progress tools
-		if entry.msg.ToolStatus == types.ToolStatusPending ||
-			entry.msg.ToolStatus == types.ToolStatusRunning {
-			visible = append(visible, entry)
-			continue
-		}
-		// For completed tools: visible if fade hasn't completed
-		// This matches hasFadingTools() to ensure consistency
-		if !entry.collapsedVisibleUntil.IsZero() && entry.fadeProgress < 1.0 {
+		if visibleToolCollapsed(entry) {
 			visible = append(visible, entry)
 		}
 	}
 	return visible
+}
+
+func visibleToolCollapsed(entry toolEntry) bool {
+	return entry.msg.ToolStatus == types.ToolStatusPending || entry.msg.ToolStatus == types.ToolStatusRunning ||
+		(!entry.collapsedVisibleUntil.IsZero() && entry.fadeProgress < 1.0)
 }
 
 // hasExtraContent returns true if there's content that would be shown when expanded
@@ -826,18 +792,9 @@ func (m *Model) StopAnimation() {
 	}
 }
 
-// headerLineIndex returns the view line index of the Thinking header. The
-// agent badge, when shown, occupies two lines (badge + blank) above it.
-func (m *Model) headerLineIndex() int {
-	if m.rendersAgentBadge() {
-		return 2
-	}
-	return 0
-}
-
 // IsHeaderLine returns true if the given line index is the header line.
 func (m *Model) IsHeaderLine(lineIdx int) bool {
-	return lineIdx == m.headerLineIndex()
+	return lineIdx == 0
 }
 
 // IsToggleLine returns true if clicking this line should toggle the block.

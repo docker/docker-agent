@@ -28,6 +28,9 @@ const (
 	// for the AgentSwitching runtime event, which is not persisted to the
 	// session, so it never reappears when a session is reloaded.
 	MessageTypeAgentReturn
+	// MessageTypeAgentTransition attributes adjacent replies when no visible
+	// handoff already names their authors.
+	MessageTypeAgentTransition
 )
 
 const (

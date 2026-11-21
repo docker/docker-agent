@@ -3,17 +3,14 @@ package defaults
 
 import (
 	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
-	handofftool "github.com/docker/docker-agent/pkg/tools/builtin/handoff/types"
 	plan "github.com/docker/docker-agent/pkg/tools/builtin/plan/types"
 	shelltool "github.com/docker/docker-agent/pkg/tools/builtin/shell/types"
 	todo "github.com/docker/docker-agent/pkg/tools/builtin/todo/types"
-	transfertasktool "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	userpromptool "github.com/docker/docker-agent/pkg/tools/builtin/userprompt/types"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/codemode"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/directorytree"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
-	"github.com/docker/docker-agent/pkg/tui/components/tool/handoff"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/listdirectory"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/plantool"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/readfile"
@@ -21,7 +18,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool/searchfilescontent"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/shell"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/todotool"
-	"github.com/docker/docker-agent/pkg/tui/components/tool/transfertask"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/userprompt"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/writefile"
 )
@@ -30,8 +26,6 @@ import (
 func NewRegistry() *tool.Registry {
 	builders := map[string]tool.Builder{
 		"run_tools_with_javascript":           codemode.New,
-		transfertasktool.ToolNameTransferTask: transfertask.New,
-		handofftool.ToolNameHandoff:           handoff.New,
 		filesystem.ToolNameEditFile:           editfile.New,
 		filesystem.ToolNameWriteFile:          writefile.New,
 		filesystem.ToolNameReadFile:           readfile.New,

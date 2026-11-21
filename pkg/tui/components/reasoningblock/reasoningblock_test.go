@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -331,38 +330,6 @@ func TestReasoningBlockHeaderFooterLineDetection(t *testing.T) {
 	assert.True(t, block.IsHeaderLine(0))
 	assert.True(t, block.IsToggleLine(0))
 	assert.False(t, block.IsToggleLine(1)) // Body line
-}
-
-func TestReasoningBlockAgentBadge(t *testing.T) {
-	t.Parallel()
-
-	sessionState := &service.SessionState{}
-	block := New(animation.NewRuntime(), "test-badge", "developer", sessionState)
-	block.SetSize(80, 24)
-	block.SetReasoning("Working through the problem.")
-	// Expand so the header is toggleable regardless of extra content;
-	// otherwise IsToggleLine would be false everywhere and prove nothing.
-	block.SetExpanded(true)
-
-	// Badge is off by default: the header sits on line 0 and toggles there.
-	assert.NotContains(t, ansi.Strip(block.View()), "developer")
-	assert.True(t, block.IsHeaderLine(0))
-	assert.True(t, block.IsToggleLine(0))
-
-	block.SetShowAgentBadge(true)
-	stripped := ansi.Strip(block.View())
-	badgeIdx := strings.Index(stripped, "developer")
-	thinkingIdx := strings.Index(stripped, "Thinking")
-	require.GreaterOrEqual(t, badgeIdx, 0, "badge should be rendered")
-	require.GreaterOrEqual(t, thinkingIdx, 0)
-	assert.Less(t, badgeIdx, thinkingIdx, "badge should render before the Thinking header")
-
-	// The badge and its blank separator shift the header down by two lines,
-	// for hit-testing as well as rendering.
-	assert.False(t, block.IsHeaderLine(0))
-	assert.False(t, block.IsToggleLine(0))
-	assert.True(t, block.IsHeaderLine(2))
-	assert.True(t, block.IsToggleLine(2))
 }
 
 func TestReasoningBlockMultipleToolCalls(t *testing.T) {

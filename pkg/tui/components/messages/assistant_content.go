@@ -27,7 +27,7 @@ func (m *model) trackMessageIdentity(sessionID, messageID string) {
 // AppendAssistantContent keeps separate attempts and interleaved sessions distinct.
 func (m *model) AppendAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd {
 	m.trackMessageIdentity(sessionID, messageID)
-	cmd := m.AppendToLastMessage(agentName, content)
+	cmd := m.appendToLastMessage(sessionID, agentName, content)
 	if last := m.lastMessage(); last != nil {
 		last.SessionID, last.MessageID = sessionID, messageID
 	}
@@ -37,7 +37,7 @@ func (m *model) AppendAssistantContent(sessionID, messageID, agentName, content 
 // AppendReasoningContent uses the same logical boundary as assistant content.
 func (m *model) AppendReasoningContent(sessionID, messageID, agentName, content string) tea.Cmd {
 	m.trackMessageIdentity(sessionID, messageID)
-	cmd := m.AppendReasoning(agentName, content)
+	cmd := m.appendReasoning(sessionID, agentName, content)
 	if last := m.lastMessage(); last != nil {
 		last.SessionID, last.MessageID = sessionID, messageID
 	}
@@ -47,7 +47,8 @@ func (m *model) AppendReasoningContent(sessionID, messageID, agentName, content 
 // ResetReasoningContent clears every matching segment, including copyable backing text.
 func (m *model) ResetReasoningContent(sessionID, messageID, agentName string) tea.Cmd {
 	materialize := m.materializeDeferredTail()
-	for i, msg := range slices.Backward(m.messages) {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := m.messages[i]
 		if msg.Type != types.MessageTypeAssistantReasoningBlock || msg.SessionID != sessionID || msg.MessageID != messageID || msg.Sender != agentName {
 			continue
 		}
@@ -56,11 +57,19 @@ func (m *model) ResetReasoningContent(sessionID, messageID, agentName string) te
 		msg.Content = ""
 		if block.ToolCount() == 0 {
 			animation.StopView(block)
-			m.messages = slices.Delete(m.messages, i, i+1)
-			m.views = slices.Delete(m.views, i, i+1)
-			if i < m.groupStart {
-				m.groupStart--
+			first := i
+			// If the removed tail was the only reason for an inferred
+			// switch, let the next visible output establish it afresh.
+			if i == len(m.messages)-1 && i > 0 {
+				prev := m.messages[i-1]
+				if prev.Type == types.MessageTypeAgentTransition && prev.Content == agentName {
+					first--
+				}
 			}
+			m.messages = slices.Delete(m.messages, first, i+1)
+			m.views = slices.Delete(m.views, first, i+1)
+			m.groupStart -= max(0, min(m.groupStart, i+1)-first)
+			i = first
 		}
 	}
 	m.invalidateAllItems()
@@ -140,7 +149,7 @@ func (m *model) AppendAssistantMediaContent(sessionID, messageID, agentName stri
 		return cmd
 	}
 	m.trackMessageIdentity(sessionID, messageID)
-	cmd := m.AppendAssistantMedia(agentName, media)
+	cmd := m.appendAssistantMedia(sessionID, agentName, media)
 	if last := m.lastMessage(); last != nil {
 		last.SessionID, last.MessageID = sessionID, messageID
 	}

@@ -6,9 +6,13 @@ import (
 	"sync"
 
 	fetch "github.com/docker/docker-agent/pkg/tools/builtin/fetch/types"
+	handoff "github.com/docker/docker-agent/pkg/tools/builtin/handoff/types"
+	transfertask "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/api"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/defaulttool"
+	handoffview "github.com/docker/docker-agent/pkg/tui/components/tool/handoff"
+	transfertaskview "github.com/docker/docker-agent/pkg/tui/components/tool/transfertask"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
@@ -27,11 +31,13 @@ type Registry struct {
 	invalidators []func()
 }
 
-// NewRegistry includes only API rendering. Import tool/defaults for the full bundle.
+// NewRegistry includes API and agent transition renderers. Import tool/defaults for the full bundle.
 func NewRegistry() *Registry {
 	return &Registry{builtins: map[string]Builder{
-		fetch.ToolNameFetch: api.New,
-		"category:api":      api.New,
+		fetch.ToolNameFetch:               api.New,
+		"category:api":                    api.New,
+		handoff.ToolNameHandoff:           handoffview.New,
+		transfertask.ToolNameTransferTask: transfertaskview.New,
 	}}
 }
 
@@ -79,7 +85,7 @@ func (r *Registry) resolve(key string) (Builder, bool) {
 	return b, ok
 }
 
-// New returns a generic/API view without the optional builtin bundle.
+// New returns a view without the optional builtin bundle.
 func New(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader) layout.Model {
 	return NewRegistry().New(ar, msg, sessionState)
 }
