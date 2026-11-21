@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -909,7 +910,7 @@ func TestResponseStream_Refusal(t *testing.T) {
 	}
 
 	for name, raw := range map[string][]map[string]any{
-		"streamed deltas":   append(append([]map[string]any{}, deltas...), snapshot, completed),
+		"streamed deltas":   append(slices.Clone(deltas), snapshot, completed),
 		"snapshot only":     {snapshot, completed},
 		"text stays a stop": {{"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": refusal}, completed},
 	} {
