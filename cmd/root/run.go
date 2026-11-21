@@ -561,8 +561,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		return err
 	}
 	// The closure (not the func value) is deferred: startSessionCoordinator may
-	// wrap cleanup with the attach detach callback below.
-	defer func() { cleanup() }()
+	// wrap cleanup with the attach detach callback below, so the deferred call
+	// must read cleanup when it runs.
+	defer func() { cleanup() }() //nolint:gocritic // deferUnlambda would capture cleanup before the detach wrapper is installed
 
 	if !useTUI {
 		// Non-interactive (--exec) runs never clean up the worktree: there
