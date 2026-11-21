@@ -480,7 +480,7 @@ func closingFence(line, fence string) bool {
 	if !ok {
 		return false
 	}
-	return strings.Trim(rest, string(fence[0])+" \t") == ""
+	return strings.TrimSpace(strings.TrimLeft(rest, string(fence[0]))) == ""
 }
 
 // tryCodeBlock checks for fenced code blocks (``` or ~~~)
@@ -703,7 +703,7 @@ func (p *parser) renderBlockquoteContent(lines []string, indent string, availabl
 			// Collect all consecutive nested blockquote lines
 			var nestedLines []string
 			for i < len(lines) {
-				l := strings.TrimLeft(lines[i], " \t")
+				l := strings.TrimLeftFunc(lines[i], unicode.IsSpace)
 				content, found := strings.CutPrefix(l, ">")
 				if !found {
 					break
@@ -1544,6 +1544,9 @@ func indentationWidth(indent string) int {
 
 // A tab crossing the indentation boundary leaves spaces in the code.
 func removeIndentation(line string, width int) string {
+	if width <= 0 {
+		return line
+	}
 	column := 0
 	for i := 0; i < len(line) && column < width; i++ {
 		switch line[i] {
@@ -1629,10 +1632,11 @@ func (p *parser) renderParagraph() {
 // paragraph terminates correctly at the start of the next block.
 func isBlockStart(line string) bool {
 	trimmed := strings.TrimLeft(line, " \t")
+	if fence, _ := openingFence(line); fence != "" {
+		return true
+	}
 	switch {
 	case headingLevel(trimmed) > 0:
-		return true
-	case strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~"):
 		return true
 	case strings.HasPrefix(trimmed, "$$") || strings.HasPrefix(trimmed, `\[`):
 		return true
