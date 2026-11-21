@@ -52,6 +52,8 @@ type ResponseStreamAdapter struct {
 	// which only means some argument bytes were emitted: any later arguments
 	// delta for such an item is stale and must be dropped.
 	itemArgsFinal map[string]bool
+	// sawRefusal records refusal text, which ends the turn as a refusal.
+	sawRefusal bool
 }
 
 func newResponseStreamAdapter(stream responseEventStream, trackUsage bool) *ResponseStreamAdapter {
@@ -119,6 +121,15 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		}
 	case "response.output_text.done":
 		slog.Debug("Output text done", "item_id", event.ItemID)
+	case "response.refusal.delta":
+		// Refusal text is the answer the user should see.
+		if event.Delta != "" {
+			a.sawRefusal = true
+			a.markContentEmitted(event, event.ItemID)
+			response.Choices = []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: event.Delta, Role: "assistant"}}}
+		}
+	case "response.refusal.done":
+		slog.Debug("Refusal done", "item_id", event.ItemID)
 	case "response.created", "response.in_progress", "response.content_part.done":
 		slog.Debug("Ignoring structural response stream event", "type", event.Type, "item_id", event.ItemID)
 	case "response.content_part.added":
@@ -330,10 +341,18 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// event of the same output, so also match on output_index.
 		if event.Item.Type == "message" && !a.hasEmittedContent(event, itemID) {
 			for _, content := range event.Item.Content {
-				if isTextContentPart(content.Type) && content.Text != "" {
+				text := content.Text
+				switch {
+				case content.Type == "refusal" && content.Refusal != "":
+					a.sawRefusal = true
+					text = content.Refusal
+				case !isTextContentPart(content.Type):
+					text = ""
+				}
+				if text != "" {
 					response.Choices = append(response.Choices, chat.MessageStreamChoice{
 						Delta: chat.MessageDelta{
-							Content: content.Text,
+							Content: text,
 							Role:    "assistant",
 						},
 					})
@@ -394,7 +413,10 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			}
 		}
 		finishReason := chat.FinishReasonStop
-		if hasToolCalls {
+		switch {
+		case a.sawRefusal:
+			finishReason = chat.FinishReasonRefusal
+		case hasToolCalls:
 			finishReason = chat.FinishReasonToolCalls
 		}
 		response.Choices = []chat.MessageStreamChoice{

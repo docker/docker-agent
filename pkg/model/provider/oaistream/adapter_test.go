@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3"
@@ -363,4 +364,38 @@ func TestStreamAdapter_HeldFinishReasonNotEmittedOnTransportError(t *testing.T) 
 	require.Error(t, err)
 	require.NotErrorIs(t, err, io.EOF)
 	assert.Empty(t, reasons)
+}
+
+// Chat Completions carries a refusal in delta.refusal with finish_reason
+// "stop". It must be shown as the answer and end the turn as a refusal.
+func TestStreamAdapter_Refusal(t *testing.T) {
+	t.Parallel()
+
+	refusalChunk := `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I can't help."},"finish_reason":null}]}` + "\n\n"
+	for _, trackUsage := range []bool{true, false} {
+		t.Run(fmt.Sprintf("track_usage=%t", trackUsage), func(t *testing.T) {
+			t.Parallel()
+			adapter := NewStreamAdapter(newTestStream(t, refusalChunk+finishChunk("stop")+chunkUsageOnly+chunkDone), trackUsage)
+			defer adapter.Close()
+
+			var content strings.Builder
+			var reasons []string
+			for {
+				resp, err := adapter.Recv()
+				if err != nil {
+					require.ErrorIs(t, err, io.EOF)
+					break
+				}
+				for _, c := range resp.Choices {
+					content.WriteString(c.Delta.Content)
+					if c.FinishReason != "" {
+						reasons = append(reasons, string(c.FinishReason))
+					}
+				}
+			}
+			assert.Equal(t, "I can't help.", content.String())
+			require.NotEmpty(t, reasons)
+			assert.Equal(t, "refusal", reasons[0])
+		})
+	}
 }
