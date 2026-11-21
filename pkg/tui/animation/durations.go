@@ -37,6 +37,18 @@ const (
 	// indicators.
 	WaitingSpinnerFrameDuration = 100 * time.Millisecond
 
+	// BoardSpinnerFrameDuration is the cadence for busy board cards.
+	BoardSpinnerFrameDuration = 120 * time.Millisecond
+
+	// TransferRailStepDuration is the dwell on each cell of the agent-transfer rail.
+	TransferRailStepDuration = 2 * (time.Second / 14)
+
+	// TranscriptSlackRowDuration is the time to remove one blank row at the tail.
+	TranscriptSlackRowDuration = time.Second / 14
+
+	// RecordingDotsStepDuration is the cadence for voice recording indicator dots.
+	RecordingDotsStepDuration = 400 * time.Millisecond
+
 	// SpinnerLightStepDuration is the default cadence for the loading text
 	// highlight sweep in the reusable spinner component.
 	SpinnerLightStepDuration = 100 * time.Millisecond

@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"os"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/board"
 	"github.com/docker/docker-agent/pkg/shellpath"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -35,7 +37,8 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	p := tea.NewProgram(newModel(app, refresh), tea.WithContext(ctx))
+	m := newModel(app, refresh)
+	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithFilter(m.beforeTerminalSuspend))
 	_, err = p.Run()
 	return err
 }
@@ -44,8 +47,6 @@ func Run(ctx context.Context) error {
 type (
 	// refreshMsg means the engine changed: re-snapshot the cards.
 	refreshMsg struct{}
-	// tickMsg advances the spinner animation.
-	tickMsg struct{}
 	// flashMsg shows a transient message in the footer.
 	flashMsg struct {
 		text  string
@@ -61,6 +62,8 @@ type (
 	attachFailedMsg struct{ err error }
 	// attachDoneMsg means the user detached from a card's tmux session.
 	attachDoneMsg struct{ err error }
+	// shellDoneMsg reports that the shell returned the terminal to the board.
+	shellDoneMsg struct{ err error }
 	// diffLoadedMsg carries a card's worktree diff.
 	diffLoadedMsg struct {
 		cardID string
@@ -230,8 +233,9 @@ type model struct {
 	projStartX, projEndX int
 	wtStartX, wtEndX     int
 
-	frame  int  // spinner animation frame
-	ticker bool // whether a tick is scheduled
+	animationRuntime *animation.Runtime
+	spinnerAnimation animation.Subscription
+	terminalHandoffs int // handoffs can overlap while their Bubble Tea messages are pending
 
 	flash   string
 	flashID int
@@ -356,7 +360,7 @@ func (m *model) cardByID(id string) *board.Card {
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.waitRefresh(), m.scheduleTick())
+	return tea.Batch(m.waitRefresh(), m.syncSpinner())
 }
 
 // waitRefresh turns engine change notifications into refresh messages.
@@ -379,30 +383,85 @@ func (m *model) anyBusy() bool {
 	return false
 }
 
-// scheduleTick keeps the spinner animation running only while needed.
-func (m *model) scheduleTick() tea.Cmd {
-	if m.ticker || !m.anyBusy() {
+// syncSpinner keeps the clock running only while a busy card can render it.
+func (m *model) syncSpinner() tea.Cmd {
+	if !m.anyBusy() {
+		m.spinnerAnimation.Stop()
 		return nil
 	}
-	m.ticker = true
-	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
+	if m.animationRuntime == nil {
+		m.animationRuntime = animation.NewRuntime()
+		m.spinnerAnimation = m.animationRuntime.Subscribe()
+		if m.terminalHandoffs > 0 {
+			m.animationRuntime.Pause()
+		}
+	}
+	return m.spinnerAnimation.Start()
+}
+
+// Bubble Tea handles SuspendMsg between the filter and Update. The Windows
+// implementation does not suspend; its clock must keep running uninterrupted.
+func (m *model) beforeTerminalSuspend(_ tea.Model, msg tea.Msg) tea.Msg {
+	if _, ok := msg.(tea.SuspendMsg); ok && runtime.GOOS != "windows" {
+		m.pauseSpinner()
+	}
+	return msg
+}
+
+func (m *model) pauseSpinner() {
+	m.terminalHandoffs++
+	if m.terminalHandoffs == 1 && m.animationRuntime != nil {
+		m.animationRuntime.Pause()
+	}
+}
+
+func (m *model) resumeSpinner() tea.Cmd {
+	if m.terminalHandoffs == 0 {
+		return nil
+	}
+	m.terminalHandoffs--
+	if m.terminalHandoffs == 0 && m.animationRuntime != nil {
+		return m.animationRuntime.Resume()
+	}
+	return nil
+}
+
+func (m *model) spinnerGlyph() string {
+	var elapsed time.Duration
+	if m.animationRuntime != nil {
+		elapsed = m.animationRuntime.Now()
+	}
+	return animation.Chat.FrameEveryAt(elapsed, animation.BoardSpinnerFrameDuration)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.SuspendMsg:
+		// Bubble Tea has returned from suspend (even if releasing the terminal
+		// failed and it will not send a ResumeMsg).
+		if runtime.GOOS != "windows" {
+			cmd := m.resumeSpinner()
+			return m, cmd
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 
 	case refreshMsg:
 		m.reload()
-		return m, tea.Batch(m.waitRefresh(), m.scheduleTick())
+		return m, tea.Batch(m.waitRefresh(), m.syncSpinner())
 
-	case tickMsg:
-		m.ticker = false
-		m.frame++
-		cmd := m.scheduleTick()
-		return m, cmd
+	case animation.TickMsg:
+		if m.animationRuntime == nil || !m.anyBusy() {
+			m.spinnerAnimation.Stop()
+			return m, nil
+		}
+		if _, ok := m.animationRuntime.Accept(msg); !ok {
+			return m, nil
+		}
+		return m, m.animationRuntime.Continue()
 
 	case flashMsg:
 		cmd := m.setFlash(msg.text, msg.isErr)
@@ -420,7 +479,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reload()
 		m.selCol = 0
 		m.selRow = max(len(m.selectedColumnCards())-1, 0)
-		cmd := m.scheduleTick()
+		cmd := m.syncSpinner()
 		return m, cmd
 
 	case cardMovedMsg:
@@ -428,13 +487,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reload()
 		m.selCol = clamp(msg.colIdx, 0, max(len(m.columns)-1, 0))
 		m.selRow = max(len(m.selectedColumnCards())-1, 0)
-		cmd := m.scheduleTick()
+		cmd := m.syncSpinner()
 		return m, cmd
 
 	case attachReadyMsg:
 		// tea.ExecProcess leaves mouse mode: a drag in flight loses its
 		// release and must not leak into the gestures after detach.
 		m.resetDrag()
+		m.pauseSpinner()
 		return m, tea.ExecProcess(msg.cmd, func(err error) tea.Msg { return attachDoneMsg{err: err} })
 
 	case attachFailedMsg:
@@ -444,11 +504,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case attachDoneMsg:
 		m.attaching = false
+		resume := m.resumeSpinner()
 		if msg.err != nil {
-			cmd := m.setFlash("attach: "+msg.err.Error(), true)
-			return m, cmd
+			return m, tea.Batch(resume, m.setFlash("attach: "+msg.err.Error(), true))
 		}
-		return m, nil
+		return m, resume
+
+	case shellDoneMsg:
+		resume := m.resumeSpinner()
+		if msg.err != nil {
+			return m, tea.Batch(resume, m.setFlash("shell: "+msg.err.Error(), true))
+		}
+		return m, resume
 
 	case diffLoadedMsg:
 		cmd := m.openDialog(newDiffDialog(msg.cardID, msg.title, msg.diff, msg.offset))
@@ -730,12 +797,8 @@ func (m *model) openShell(card *board.Card) tea.Cmd {
 	}
 	cmd := shellpath.InteractiveShellCmd("Type 'exit' to return to the board")
 	cmd.Dir = card.Worktree
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		if err != nil {
-			return flashMsg{text: "shell: " + err.Error(), isErr: true}
-		}
-		return nil
-	})
+	m.pauseSpinner()
+	return tea.ExecProcess(cmd, func(err error) tea.Msg { return shellDoneMsg{err: err} })
 }
 
 // openNewCard opens the new-card dialog, or the projects dialog first when

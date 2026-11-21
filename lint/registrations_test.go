@@ -11,7 +11,7 @@ import (
 func TestCopRegistrations(t *testing.T) {
 	t.Parallel()
 	require.Len(t, cops, 30)
-	require.Len(t, programCops, 36)
+	require.Len(t, programCops, 37)
 	counts := make(map[string]int)
 	for _, c := range cops {
 		counts[c.Name()]++
@@ -19,7 +19,7 @@ func TestCopRegistrations(t *testing.T) {
 	for _, c := range programCops {
 		counts[c.Name()]++
 	}
-	assert.Len(t, counts, 66)
+	assert.Len(t, counts, 67)
 	for _, name := range []string{"Lint/ContextFirstParameter", "Lint/NoContextField", "Lint/SplitGoroutineLifetime"} {
 		assert.NotContains(t, counts, name)
 	}
@@ -38,7 +38,7 @@ func TestCopRegistrations(t *testing.T) {
 		"BenchmarkLoop", "SplitTrimJoin", "FieldsSeq", "StreamCloseSafety", "SlicesClone",
 		"CutPrefix", "CutSuffix", "FieldsSeqLookup", "SortStableFunc",
 		"ErrorsAsType", "MapsCopy", "MapsClone", "SlicesContains", "SlicesEqual",
-		"SplitSeq", "SortedMapKeys", "WaitGroupGo", "HTTPTestRequestWithContext",
+		"SplitSeq", "SortedMapKeys", "WaitGroupGo", "HTTPTestRequestWithContext", "TUIAnimationDuration",
 	} {
 		registeredCop(t, programCops, "Lint/"+name)
 	}

@@ -2,7 +2,6 @@ package reasoningblock
 
 import (
 	"fmt"
-	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -386,14 +385,7 @@ func (m *Model) computeFadeProgressAt(now time.Time) {
 		}
 		// Compute when fade should start
 		fadeStartTime := entry.collapsedVisibleUntil.Add(-completedToolFadeDuration)
-		if now.Before(fadeStartTime) {
-			m.toolEntries[i].fadeProgress = 0 // Not time to fade yet
-			continue
-		}
-		// Compute fade progress as a fraction of the fade duration (0.0 to 1.0)
-		elapsed := now.Sub(fadeStartTime)
-		progress := float64(elapsed) / float64(completedToolFadeDuration)
-		m.toolEntries[i].fadeProgress = math.Min(progress, 1.0)
+		m.toolEntries[i].fadeProgress = animation.ProgressAt(now.Sub(fadeStartTime), completedToolFadeDuration, nil)
 	}
 }
 

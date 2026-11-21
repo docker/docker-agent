@@ -1,8 +1,11 @@
 package spinner
 
 import (
+	"math"
 	"math/rand/v2"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -36,12 +39,7 @@ type spinner struct {
 	styledSpinnerFrames []string // pre-rendered spinner frames
 	mode                Mode
 	currentMessage      string
-	lightPosition       int
-	direction           int // 1 for forward, -1 for backward
-	pauseStepsRemaining int
-	lastLightStep       int
-	lightStepInit       bool
-	lightPauseSteps     int
+	lightStartedAt      time.Duration
 }
 
 const (
@@ -120,9 +118,6 @@ func NewWithAnimation(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style
 		styledSpinnerFrames: styledFrames,
 		mode:                mode,
 		currentMessage:      defaultMessages[rand.IntN(len(defaultMessages))],
-		lightPosition:       -3,
-		direction:           1,
-		lightPauseSteps:     max(1, int(lightPauseDuration/lightStepDuration)),
 	}
 }
 
@@ -133,27 +128,25 @@ func (s *spinner) Reset() Spinner {
 // SetMessage replaces the current spinner text.
 func (s *spinner) SetMessage(msg string) {
 	s.currentMessage = msg
-	s.lightPosition = -3
-	s.direction = 1
-	s.pauseStepsRemaining = 0
-	s.lastLightStep = animation.TimedStep(s.ar.Now(), lightStepDuration)
-	s.lightStepInit = true
+	s.lightStartedAt = s.ar.Now()
 }
 
-func (s *spinner) advanceLightStep() {
-	if s.pauseStepsRemaining > 0 {
-		s.pauseStepsRemaining--
-		if s.pauseStepsRemaining == 0 {
-			s.direction = -1
-		}
-		return
-	}
-
-	s.lightPosition += s.direction
-	if s.direction == 1 && s.lightPosition > len([]rune(s.currentMessage))+2 {
-		s.pauseStepsRemaining = s.lightPauseSteps
-	} else if s.direction == -1 && s.lightPosition < -3 {
-		s.direction = 1
+func (s *spinner) lightPositionAt(elapsed time.Duration) int {
+	const left = -3
+	const turn = left - 1
+	right := utf8.RuneCountInString(s.currentMessage) + 3
+	outbound := time.Duration(right-left) * lightStepDuration
+	back := time.Duration(right-turn) * lightStepDuration
+	phase := max(0, elapsed-s.lightStartedAt) % (outbound + lightPauseDuration + back + lightStepDuration)
+	switch {
+	case phase < outbound:
+		progress := animation.ProgressAt(phase, outbound, nil)
+		return left + int(math.Floor(math.Nextafter(progress*float64(right-left), math.Inf(1))))
+	case phase < outbound+lightPauseDuration:
+		return right
+	default:
+		progress := animation.ProgressAt(phase-outbound-lightPauseDuration, back, nil)
+		return right - int(math.Floor(math.Nextafter(progress*float64(right-turn), math.Inf(1))))
 	}
 }
 
@@ -163,24 +156,8 @@ func (s *spinner) Update(message tea.Msg) (layout.Model, tea.Cmd) {
 		if s.spinnerAnim.FrameIndexAt(before) != s.spinnerAnim.FrameIndexAt(after) {
 			tick.MarkDirty()
 		}
-		if s.mode == ModeBoth {
-			targetStep := animation.TimedStep(s.ar.Now(), lightStepDuration)
-			beforeStep := animation.TimedStep(before, lightStepDuration)
-			if beforeStep != targetStep {
-				tick.MarkDirty()
-			}
-			if !s.lightStepInit {
-				s.lastLightStep = targetStep
-				s.lightStepInit = true
-			} else {
-				for s.lastLightStep < targetStep {
-					s.lastLightStep++
-					s.advanceLightStep()
-				}
-				if targetStep < s.lastLightStep {
-					s.lastLightStep = targetStep
-				}
-			}
+		if s.mode == ModeBoth && s.lightPositionAt(before) != s.lightPositionAt(after) {
+			tick.MarkDirty()
 		}
 	}
 	return s, nil
@@ -204,6 +181,9 @@ func (s *spinner) SetSize(_, _ int) tea.Cmd { return nil }
 // Init registers the spinner with the animation coordinator.
 // If this is the first active animation, it starts the global tick.
 func (s *spinner) Init() tea.Cmd {
+	if !s.animSub.IsActive() {
+		s.lightStartedAt = s.ar.Now()
+	}
 	return s.animSub.Start()
 }
 
@@ -223,8 +203,9 @@ var lightStyles = []lipgloss.Style{
 
 func (s *spinner) renderMessage() string {
 	var out strings.Builder
+	position := s.lightPositionAt(s.ar.Now())
 	for i, char := range s.currentMessage {
-		dist := min(max(i-s.lightPosition, s.lightPosition-i), len(lightStyles)-1)
+		dist := min(max(i-position, position-i), len(lightStyles)-1)
 		out.WriteString(lightStyles[dist].Render(string(char)))
 	}
 	return out.String()

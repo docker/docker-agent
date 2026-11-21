@@ -383,13 +383,22 @@ func TestTransferAnimationAdvancesAcrossTicks(t *testing.T) {
 	first := snapshot()
 	width := lipgloss.Width(first)
 	positions := map[string]bool{first: true}
-	for frame := 1; frame <= 2*transferFramesPerStep*transferRailCells; frame++ {
-		_, _ = m.Update(animation.TickMsg{})
+	for range 4 * transferRailCells {
+		tickTransferRail(t, m)
 		relation := snapshot()
 		assert.Equal(t, width, lipgloss.Width(relation), "the width is constant across frames")
 		positions[relation] = true
 	}
 	assert.GreaterOrEqual(t, len(positions), 3, "the dot visits at least three distinct positions")
+}
+
+func tickTransferRail(t *testing.T, m *model) {
+	t.Helper()
+	cmd := m.ar.EnsureRunning()
+	require.NotNil(t, cmd)
+	tick, ok := m.ar.Accept(cmd().(animation.TickMsg))
+	require.True(t, ok)
+	_, _ = m.Update(tick)
 }
 
 // TestTransferAnimationTickKeepsLayoutClean verifies an animation tick takes
@@ -405,8 +414,8 @@ func TestTransferAnimationTickKeepsLayoutClean(t *testing.T) {
 	require.False(t, m.layoutDirty)
 	linesBefore := len(m.cachedLines)
 
-	for range transferFramesPerStep {
-		_, _ = m.Update(animation.TickMsg{})
+	for range 2 {
+		tickTransferRail(t, m)
 	}
 	assert.True(t, m.cacheDirty, "a rendered phase boundary refreshes the frame")
 	assert.False(t, m.layoutDirty, "a tick is animation-only and keeps the layout clean")
@@ -430,22 +439,22 @@ func TestTransferStackNestedRestore(t *testing.T) {
 	)
 
 	m.SetAgentSwitching(true, "A", "B")
-	for frame := 1; frame <= transferFramesPerStep; frame++ {
-		_, _ = m.Update(animation.TickMsg{})
+	for range 2 {
+		tickTransferRail(t, m)
 	}
-	require.NotZero(t, m.transferAnimationFrame)
+	require.NotZero(t, m.transferPhase())
 
 	m.SetAgentSwitching(true, "B", "C")
-	assert.Zero(t, m.transferAnimationFrame, "a nested hop restarts the dot on the left")
+	assert.Zero(t, m.transferPhase(), "a nested hop restarts the dot on the left")
 	idx := transferRelationIndex(m)
 	require.GreaterOrEqual(t, idx, 0)
 	assert.Contains(t, agentBody(m)[idx], "B ●──► C", "the innermost hop is shown, dot on the left")
 
-	for frame := 1; frame <= transferFramesPerStep; frame++ {
-		_, _ = m.Update(animation.TickMsg{})
+	for range 2 {
+		tickTransferRail(t, m)
 	}
 	m.SetAgentSwitching(false, "C", "B") // stop of B→C carries the inverse pair
-	assert.Zero(t, m.transferAnimationFrame, "the Return restarts the dot on the left")
+	assert.Zero(t, m.transferPhase(), "the Return restarts the dot on the left")
 	assert.True(t, m.transferAnimation.IsActive(), "the animation keeps running for the Return")
 	assert.Equal(t, transferReturnBoxTitle, visibleBoxTitle(m), "the stop presents a Return box first")
 	idx = transferRelationIndex(m)
@@ -517,7 +526,7 @@ func TestTransferStopFallbackPop(t *testing.T) {
 	assert.Empty(t, m.agentTransfers, "a nameless stop pops the innermost hop")
 	assert.Nil(t, m.agentReturn, "a nameless stop presents no Return")
 	assert.False(t, m.transferAnimation.IsActive(), "an emptied stack stops the animation")
-	assert.Zero(t, m.transferAnimationFrame)
+	assert.Zero(t, m.transferPhase())
 
 	res = m.SetAgentSwitching(false, "Coder", "Scout")
 	assert.False(t, res.Accepted)
@@ -629,7 +638,7 @@ func TestTransferClearedOnCancelResetAndLoad(t *testing.T) {
 		assert.Nil(t, m.agentReturn, context)
 		assert.Equal(t, -1, transferRelationIndex(m), context)
 		assert.False(t, m.transferAnimation.IsActive(), context)
-		assert.Zero(t, m.transferAnimationFrame, context)
+		assert.Zero(t, m.transferPhase(), context)
 	}
 
 	// The timers armed before each clear must be stale afterwards.

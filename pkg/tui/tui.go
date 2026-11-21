@@ -756,6 +756,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 // editorOpts returns the editor.Option slice derived from the current appModel.
 func (m *appModel) editorOpts() []editor.Option {
 	opts := []editor.Option{
+		editor.WithAnimationRuntime(m.ar),
 		editor.WithCompletions(
 			completions.NewCommandCompletion(m.commandCategories()),
 			completions.NewFileCompletion(m.ctx()),
@@ -1027,6 +1028,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		msg = accepted
 		cmds := []tea.Cmd{m.updateChatCmd(msg)}
+		if m.activeTab.editor != nil && m.activeTab.editor.IsRecording() {
+			cmds = append(cmds, m.updateEditorCmd(msg))
+		}
 		// Update working spinner
 		if m.activeTab.chatPage.IsWorking() {
 			model, cmd := m.workingSpinner.Update(msg)
