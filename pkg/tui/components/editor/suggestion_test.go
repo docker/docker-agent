@@ -459,8 +459,8 @@ func TestExtractLineText(t *testing.T) {
 	}
 }
 
-// TestMultiLineSuggestionWithSmallEditor verifies that multi-line suggestions
-// render correctly even when the editor view is smaller than the suggestion.
+// TestMultiLineSuggestionWithSmallEditor verifies that the preview stays within
+// the visible textarea rows.
 func TestMultiLineSuggestionWithSmallEditor(t *testing.T) {
 	t.Parallel()
 
@@ -480,17 +480,9 @@ func TestMultiLineSuggestionWithSmallEditor(t *testing.T) {
 	baseView := e.textarea.View()
 	result := e.applySuggestionOverlay(baseView)
 
-	// The result should contain all suggestion lines
 	resultLines := strings.Split(result, "\n")
-
-	// With height=1, base view has 1 line, but result should have 3 lines
-	// because lipgloss canvas extends the output for overlay content
-	require.GreaterOrEqual(t, len(resultLines), 3, "result should have at least 3 lines for multi-line suggestion")
-
-	// Check that each suggestion line is present
-	assert.Contains(t, stripANSI(resultLines[0]), "Anything", "first line should contain merged text")
-	assert.Contains(t, stripANSI(resultLines[1]), "line2", "second line should contain line2")
-	assert.Contains(t, stripANSI(resultLines[2]), "line3", "third line should contain line3")
+	require.Len(t, resultLines, 1)
+	assert.Contains(t, stripANSI(resultLines[0]), "Anything")
 }
 
 // TestLongSuggestionWrapping verifies that long suggestions (without newlines)

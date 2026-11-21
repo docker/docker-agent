@@ -325,7 +325,7 @@ func (e *editor) computeWrappedLines(text string, startOffset int) []string {
 // applySuggestionOverlay draws the inline suggestion on top of the textarea
 // view using the configured ghost style. The first character appears with
 // cursor styling (reverse video) so it's visible inside the cursor block.
-// Multi-line suggestions are rendered across multiple visual lines.
+// The preview is clipped to the visible textarea rows.
 func (e *editor) applySuggestionOverlay(view string) string {
 	lines := strings.Split(view, "\n")
 	value := e.textarea.Value()
@@ -418,15 +418,14 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	var overlays []overlay
 
 	for i, suggLine := range wrappedLines {
+		currentY := targetLine + i
+		if currentY >= len(lines) {
+			break
+		}
 		if suggLine == "" && i > 0 {
 			// Empty line in middle of suggestion - skip but keep line count
 			continue
 		}
-
-		currentY := targetLine + i
-		// Note: We intentionally don't skip lines beyond the view; the
-		// output is extended to accommodate overlays positioned beyond
-		// the base view's boundaries.
 
 		var xOffset int
 		if i == 0 {
@@ -468,14 +467,10 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	// the editor does not depend on canvas/compositor APIs that differ
 	// across lipgloss v2 pre-releases (it keeps the editor embeddable by
 	// consumers pinned to other lipgloss snapshots, e.g. Docker Sandboxes).
-	outLines := strings.Split(view, "\n")
 	for _, ov := range overlays {
-		for len(outLines) <= ov.y {
-			outLines = append(outLines, "")
-		}
-		outLines[ov.y] = spliceLine(outLines[ov.y], ov.content, ov.x)
+		lines[ov.y] = spliceLine(lines[ov.y], ov.content, ov.x)
 	}
-	return strings.Join(outLines, "\n")
+	return strings.Join(lines, "\n")
 }
 
 // spliceLine overwrites line content at column x with overlay, preserving
