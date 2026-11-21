@@ -121,11 +121,12 @@ type historySearchState struct {
 
 // editor implements [Editor]
 type editor struct {
-	textarea textarea.Model
-	hist     *history.History
-	width    int
-	height   int
-	working  bool
+	textarea  textarea.Model
+	occupancy textOccupancyCache
+	hist      *history.History
+	width     int
+	height    int
+	working   bool
 	// completions are the available completions
 	completions []completions.Completion
 

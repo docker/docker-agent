@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -141,14 +142,20 @@ type Manager struct {
 	// (or zero) value so their auto-hide timers resolve promptly without
 	// mutating shared state, keeping them parallel-safe.
 	autoHideDuration time.Duration
+	avoidance        avoidance
+	layout           stackLayout
+	mouseX, mouseY   int
+	mouseKnown       bool
 }
 
 func New() Manager { return Manager{autoHideDuration: defaultDuration} }
 
 // SetSize records the screen size used to position notifications.
 func (n *Manager) SetSize(width, height int) {
-	n.width = width
-	n.height = height
+	if n.width != width || n.height != height {
+		n.width, n.height = width, height
+		n.layout.theme = nil
+	}
 }
 
 func makeTimerCmd(id, gen uint64, duration time.Duration) tea.Cmd {
@@ -158,29 +165,33 @@ func makeTimerCmd(id, gen uint64, duration time.Duration) tea.Cmd {
 }
 
 func (n *Manager) Update(msg tea.Msg) (Manager, tea.Cmd) {
+	count := len(n.items)
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		n.width = msg.Width
-		n.height = msg.Height
-		return *n, nil
-
+		n.SetSize(msg.Width, msg.Height)
 	case ShowMsg:
-		return n.handleShow(msg)
-
+		cmd = n.handleShow(msg)
 	case AutoHideMsg:
-		return n.handleAutoHide(msg)
-
+		n.handleAutoHide(msg)
 	case HideMsg:
-		return n.handleHide(msg)
-
+		n.handleHide(msg)
 	case DismissMsg:
-		return n.removeByID(msg.ID)
+		n.removeByID(msg.ID)
+	case animation.TickMsg:
+		cmd = n.tickAvoidance(msg)
 	}
-
-	return *n, nil
+	if len(n.items) != count {
+		n.layout.theme = nil
+		if !n.Open() {
+			n.layout.bounds = nil
+			n.ResetAvoidance()
+		}
+	}
+	return *n, cmd
 }
 
-func (n *Manager) handleShow(msg ShowMsg) (Manager, tea.Cmd) {
+func (n *Manager) handleShow(msg ShowMsg) tea.Cmd {
 	id := nextID.Add(1)
 	notifType := msg.Type
 	// Auto-detect error type for backward compatibility when Type is not set.
@@ -194,10 +205,10 @@ func (n *Manager) handleShow(msg ShowMsg) (Manager, tea.Cmd) {
 	item := notificationItem{ID: id, Text: msg.Text, Type: notifType}
 	n.items = append([]notificationItem{item}, n.items...)
 
-	return *n, makeTimerCmd(id, item.timerGen, n.autoHideDuration)
+	return makeTimerCmd(id, item.timerGen, n.autoHideDuration)
 }
 
-func (n *Manager) handleAutoHide(msg AutoHideMsg) (Manager, tea.Cmd) {
+func (n *Manager) handleAutoHide(msg AutoHideMsg) {
 	id := msg.ID
 	gen := msg.Generation
 	newItems := make([]notificationItem, 0, len(n.items))
@@ -209,25 +220,23 @@ func (n *Manager) handleAutoHide(msg AutoHideMsg) (Manager, tea.Cmd) {
 		newItems = append(newItems, item)
 	}
 	n.items = newItems
-	return *n, nil
 }
 
-func (n *Manager) handleHide(msg HideMsg) (Manager, tea.Cmd) {
+func (n *Manager) handleHide(msg HideMsg) {
 	if msg.ID == 0 {
 		n.items = nil
 		n.clearAllState()
-		return *n, nil
+		return
 	}
 
-	return n.removeByID(msg.ID)
+	n.removeByID(msg.ID)
 }
 
-func (n *Manager) removeByID(id uint64) (Manager, tea.Cmd) {
+func (n *Manager) removeByID(id uint64) {
 	if i := n.findItemIndex(id); i >= 0 {
 		n.clearItemState(id)
 		n.items = slices.Delete(n.items, i, i+1)
 	}
-	return *n, nil
 }
 
 func (n *Manager) clearAllState() {
@@ -280,15 +289,38 @@ func (n *Manager) View() string {
 	return lipgloss.JoinVertical(lipgloss.Right, views...)
 }
 
+// GetLayer groups the items for the compositor without painting blank
+// alignment space beside shorter notifications.
 func (n *Manager) GetLayer() *lipgloss.Layer {
-	if len(n.items) == 0 {
+	if !n.Open() {
 		return nil
 	}
-
-	view := n.View()
+	bounds := n.itemBounds()
 	row, col := n.position()
-
-	return lipgloss.NewLayer(view).X(col).Y(row)
+	if len(bounds) == 0 {
+		return lipgloss.NewLayer(n.View()).X(col).Y(row)
+	}
+	layers := make([]*lipgloss.Layer, 0, len(bounds))
+	bottom, clip := n.clipOverflow()
+	for i, b := range bounds {
+		if clip && b.row >= bottom {
+			break
+		}
+		item := n.items[len(n.items)-1-i]
+		view := b.view
+		if n.closeHoveredID == item.ID || n.hoveredID == item.ID || n.copiedID == item.ID {
+			view = item.render(n.maxWidth(), n.closeHoveredID == item.ID, n.hoveredID == item.ID, n.copiedID == item.ID)
+		}
+		if clip && b.row+b.height > bottom {
+			rows := bottom - b.row
+			view = strings.Join(strings.SplitN(view, "\n", rows+1)[:rows], "\n")
+		}
+		layers = append(layers, lipgloss.NewLayer(view).X(b.col-col).Y(b.row-row))
+	}
+	if len(layers) == 0 {
+		return nil
+	}
+	return lipgloss.NewLayer("", layers...).X(col).Y(row)
 }
 
 func (n *Manager) position() (row, col int) {
@@ -319,37 +351,58 @@ type notifBounds struct {
 	height int
 	text   string
 	style  lipgloss.Style
+	view   string
 }
 
-// itemBounds computes screen-space bounds in the same order notifications render.
+type stackLayout struct {
+	theme    *styles.Theme
+	bounds   []notifBounds
+	lift     int
+	top      int
+	revision uint64
+}
+
+// itemBounds returns the same screen-space rectangles used by rendering and
+// mouse routing. Scrolling the stack only moves the cached rectangles.
 func (n *Manager) itemBounds() []notifBounds {
-	if len(n.items) == 0 || n.width == 0 {
+	if !n.Open() || n.width <= 0 {
 		return nil
 	}
-
-	mw := n.maxWidth()
-	totalHeight := 0
-	for _, item := range n.items {
-		totalHeight += lipgloss.Height(item.render(mw, false, false, false))
+	if n.layout.theme != styles.CurrentTheme() {
+		n.layoutStack()
 	}
+	lift := min(n.avoidance.lift, n.layout.top)
+	if lift != n.layout.lift {
+		for i := range n.layout.bounds {
+			n.layout.bounds[i].row += n.layout.lift - lift
+		}
+		n.layout.lift = lift
+	}
+	return n.layout.bounds
+}
 
-	row := max(0, n.height-totalHeight-notificationPadding)
+func (n *Manager) layoutStack() {
+	mw := n.maxWidth()
+	totalHeight, viewWidth := 0, 0
 	bounds := make([]notifBounds, 0, len(n.items))
 	for _, item := range slices.Backward(n.items) {
 		view := item.render(mw, false, false, false)
-		w := lipgloss.Width(view)
+		w, h := lipgloss.Size(view)
 		bounds = append(bounds, notifBounds{
-			id:     item.ID,
-			row:    row,
-			col:    max(0, n.width-w-notificationPadding),
-			width:  w,
-			height: lipgloss.Height(view),
-			text:   item.Text,
-			style:  item.Type.style(),
+			id: item.ID, row: totalHeight, width: w, height: h,
+			text: item.Text, style: item.Type.style(), view: view,
 		})
-		row += lipgloss.Height(view)
+		totalHeight += h
+		viewWidth = max(viewWidth, w)
 	}
-	return bounds
+
+	row := max(0, n.height-totalHeight-notificationPadding)
+	col := max(0, n.width-viewWidth-notificationPadding)
+	for i := range bounds {
+		bounds[i].row += row
+		bounds[i].col = col + viewWidth - bounds[i].width
+	}
+	n.layout = stackLayout{theme: styles.CurrentTheme(), bounds: bounds, top: row, revision: n.layout.revision + 1}
 }
 
 func closeButtonPosition(b notifBounds) (x, y int) {
@@ -358,6 +411,9 @@ func closeButtonPosition(b notifBounds) (x, y int) {
 
 // CloseButtonHit checks if the given screen coordinates hit a notification close glyph.
 func (n *Manager) CloseButtonHit(x, y int) (uint64, bool) {
+	if !n.onScreen(x, y) {
+		return 0, false
+	}
 	for _, b := range n.itemBounds() {
 		closeX, closeY := closeButtonPosition(b)
 		if x == closeX && y == closeY {
@@ -371,6 +427,9 @@ func (n *Manager) CloseButtonHit(x, y int) (uint64, bool) {
 // returns its ID and text. The close button is excluded so dismiss priority can
 // stay separate from click-to-copy behavior.
 func (n *Manager) BodyHit(x, y int) (uint64, string, bool) {
+	if !n.onScreen(x, y) {
+		return 0, "", false
+	}
 	for _, b := range n.itemBounds() {
 		if x < b.col || x >= b.col+b.width || y < b.row || y >= b.row+b.height {
 			continue
@@ -406,7 +465,15 @@ func (n *Manager) HandleClick(x, y int) tea.Cmd {
 	return cmd(DismissMsg{ID: id})
 }
 
+func (n *Manager) onScreen(x, y int) bool {
+	bottom, clip := n.clipOverflow()
+	return x >= 0 && x < n.width && y >= 0 && y < n.height && (!clip || y < bottom)
+}
+
 func (n *Manager) hitTestNotification(x, y int) uint64 {
+	if !n.onScreen(x, y) {
+		return 0
+	}
 	for _, b := range n.itemBounds() {
 		if x >= b.col && x < b.col+b.width && y >= b.row && y < b.row+b.height {
 			return b.id
@@ -427,6 +494,7 @@ func (n *Manager) findItemIndex(id uint64) int {
 // HandleMouseMotion updates hover state. Entering an auto-hide notification
 // invalidates its pending timer; leaving restarts a generation-safe timer.
 func (n *Manager) HandleMouseMotion(x, y int) (Manager, tea.Cmd) {
+	n.mouseX, n.mouseY, n.mouseKnown = x, y, true
 	newHoveredID := n.hitTestNotification(x, y)
 	newCloseHoveredID, _ := n.CloseButtonHit(x, y)
 
