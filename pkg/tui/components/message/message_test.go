@@ -22,10 +22,45 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func TestThemeChangedRestylesCachedAssistantMarkdown(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	styles.ApplyTheme(styles.DefaultTheme())
+
+	const width = 80
+	newMessage := func() *messageModel {
+		msg := types.Agent(types.MessageTypeAssistant, "root", "# Stable heading\n\nTail with **bold** text.")
+		return New(animation.NewRuntime(), msg)
+	}
+	existing := newMessage()
+	before := existing.Render(width)
+	beforeSegments, ok := existing.RenderedSegments(width)
+	require.True(t, ok)
+	require.NotEmpty(t, beforeSegments.Stable)
+
+	theme := styles.DefaultTheme()
+	theme.Markdown.Heading = "#123456"
+	theme.Colors.TextPrimary = "#316497"
+	styles.ApplyTheme(theme)
+	fresh := newMessage()
+	want := fresh.Render(width)
+	wantSegments, ok := fresh.RenderedSegments(width)
+	require.True(t, ok)
+	require.NotEqual(t, wantSegments.Stable, beforeSegments.Stable)
+	require.Equal(t, ansi.Strip(before), ansi.Strip(want), "only styles should change")
+
+	_, _ = existing.Update(messages.ThemeChangedMsg{})
+	assert.Equal(t, want, existing.Render(width))
+	gotSegments, ok := existing.RenderedSegments(width)
+	require.True(t, ok)
+	assert.Equal(t, wantSegments, gotSegments)
+}
 
 func TestAssistantRenderedSegmentsMatchViewAtEveryMarkdownBoundary(t *testing.T) {
 	const input = "Thinking… λ界\n\n# Heading\n\nParagraph with **bold**, `more`, and [link](https://example.com).\n\n- one\n- two\n\n```console\nroot\nmore\n```\n\n## Result\n\nDone."

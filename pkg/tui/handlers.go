@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
@@ -888,10 +889,26 @@ func (m *appModel) applyThemeChanged() (tea.Model, tea.Cmd) {
 	// Re-target the file watcher: theme changes (picker selection, preview,
 	// hot reload) can move the active theme to a different backing file.
 	m.watchCurrentTheme()
-	return m, tea.Batch(
-		m.updateDialogCmd(messages.ThemeChangedMsg{}),
-		m.updateChatCmd(messages.ThemeChangedMsg{}),
-	)
+	msg := messages.ThemeChangedMsg{}
+	cmds := []tea.Cmd{m.updateDialogCmd(msg)}
+	for _, tab := range m.tabs {
+		if tab.chatPage != nil {
+			updated, effects := tab.chatPage.UpdateEffects(msg)
+			tab.chatPage = updated
+			cmds = append(cmds, effects.Cmd(tab == m.activeTab))
+		}
+		if tab.editor != nil {
+			updated, cmd := tab.editor.Update(msg)
+			tab.editor = updated.(editor.Editor)
+			cmds = append(cmds, cmd)
+		}
+		for event, parked := range tab.attentionDialogs {
+			updated, cmd := parked.Update(msg)
+			tab.attentionDialogs[event] = updated.(dialog.Dialog)
+			cmds = append(cmds, cmd)
+		}
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // handleThemeFileChanged hot-reloads a theme that was modified on disk.

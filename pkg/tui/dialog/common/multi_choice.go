@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -283,6 +284,10 @@ func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
+
+	case messages.ThemeChangedMsg:
+		d.customInput.SetStyles(styles.DialogInputStyle)
+		return d, nil
 
 	case tea.PasteMsg:
 		// Forward paste to custom text input if custom is selected or allowed

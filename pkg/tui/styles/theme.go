@@ -1017,6 +1017,14 @@ func mergeMarkdownTheme(base, override MarkdownTheme) MarkdownTheme {
 // currentTheme stores the currently applied theme for reference.
 var currentTheme atomic.Pointer[Theme]
 
+var spinnerPalette atomic.Pointer[[4]lipgloss.Style]
+
+// CurrentSpinnerPalette returns the spinner label styles in descending brightness.
+// The returned palette is read-only, and its identity changes on each theme application.
+func CurrentSpinnerPalette() *[4]lipgloss.Style {
+	return spinnerPalette.Load()
+}
+
 // CurrentTheme returns the currently applied theme, or the default if none applied.
 func CurrentTheme() *Theme {
 	t := currentTheme.Load()
@@ -1386,6 +1394,12 @@ func rebuildStyles() {
 	SpinnerTextBrightStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SpinnerBright))
 	SpinnerTextDimStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SpinnerDim))
 	SpinnerTextDimmestStyle = BaseStyle.Foreground(Accent)
+	spinnerPalette.Store(&[4]lipgloss.Style{
+		SpinnerTextBrightestStyle,
+		SpinnerTextBrightStyle,
+		SpinnerTextDimStyle,
+		SpinnerTextDimmestStyle,
+	})
 }
 
 // init applies the default theme at package initialization time.

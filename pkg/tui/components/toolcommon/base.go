@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -39,12 +40,14 @@ type Base struct {
 	lastCollapsedHeight int
 }
 
+func accentSpinnerDots() lipgloss.Style { return styles.SpinnerDotsAccentStyle }
+
 // NewBase creates a new base tool component with the given renderer.
 // Accepts SessionStateReader for read-only access (also accepts *SessionState which implements it).
 func NewBase(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, render Renderer) *Base {
 	return &Base{
 		message:      msg,
-		spinner:      spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsAccentStyle),
+		spinner:      spinner.NewThemed(ar, spinner.ModeSpinnerOnly, accentSpinnerDots),
 		width:        80,
 		height:       1,
 		sessionState: sessionState,
@@ -57,7 +60,7 @@ func NewBase(ar *animation.Runtime, msg *types.Message, sessionState service.Ses
 func NewBaseWithCollapsed(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, render Renderer, collapsedRender CollapsedRenderer) *Base {
 	return &Base{
 		message:           msg,
-		spinner:           spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsAccentStyle),
+		spinner:           spinner.NewThemed(ar, spinner.ModeSpinnerOnly, accentSpinnerDots),
 		width:             80,
 		height:            1,
 		sessionState:      sessionState,

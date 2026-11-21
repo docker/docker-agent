@@ -567,7 +567,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		dialogMgr:                     dialog.NewWithAnimation(ar),
 		completions:                   completion.New(),
 		tour:                          tour.New(),
-		workingSpinner:                spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
+		workingSpinner:                newWorkingSpinner(ar),
 		focusedPanel:                  PanelEditor,
 		editorLines:                   minEditorLines,
 		layoutSettings:                layoutSettingsFromConfig(userSettings.GetLayout()),
@@ -2160,7 +2160,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	// Sync editor working state and reset working spinner.
 	m.activeTab.editor.SetWorking(m.activeTab.chatPage.IsWorking())
 	m.workingSpinner.Stop()
-	m.workingSpinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)
+	m.workingSpinner = newWorkingSpinner(m.ar)
 
 	var cmds []tea.Cmd
 
@@ -3086,6 +3086,10 @@ func (m *appModel) handleEditorResize(y int) tea.Cmd {
 		return m.resizeAll()
 	}
 	return nil
+}
+
+func newWorkingSpinner(ar *animation.Runtime) spinner.Spinner {
+	return spinner.NewThemed(ar, spinner.ModeSpinnerOnly, func() lipgloss.Style { return styles.SpinnerDotsHighlightStyle })
 }
 
 // renderLeanWorkingIndicator renders a single-line working/pause indicator for
