@@ -20,26 +20,6 @@ func (s *sentinelTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return s.base.RoundTrip(req)
 }
 
-func TestWithHTTPTransportWrapper_SetAndGet(t *testing.T) {
-	t.Parallel()
-	var called bool
-	wrapFn := func(base http.RoundTripper) http.RoundTripper {
-		called = true
-		return &sentinelTransport{base: base}
-	}
-
-	var opts ModelOptions
-	WithHTTPTransportWrapper(wrapFn)(&opts)
-
-	got := opts.TransportWrapper()
-	require.NotNil(t, got)
-
-	// Verify invoking the returned wrapper marks called=true and returns a non-nil transport.
-	result := got(http.DefaultTransport)
-	assert.True(t, called)
-	assert.NotNil(t, result)
-}
-
 func TestTransportWrapper_NilByDefault(t *testing.T) {
 	t.Parallel()
 	var opts ModelOptions

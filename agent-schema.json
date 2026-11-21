@@ -224,7 +224,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "The underlying provider type. Defaults to \"openai\" when not set. Supported values: openai, anthropic, google, amazon-bedrock, dmr, and any built-in alias (requesty, openrouter, opper, runcrate, api-route, lunaroute, orcarouter, atlascloud, cloudgpu, obscurify, hopbase, azure, xai, ollama, mistral, baseten, daoxe, ovhcloud, groq, fireworks-ai, deepseek, cerebras, togetherai, huggingface, moonshotai, vercel, cloudflare-workers-ai, cloudflare-ai-gateway, nvidia, github-copilot, chatgpt, opencode, opencode-go, etc.).",
+          "description": "The underlying provider type. Defaults to \"openai\" when not set. Supported values: openai, anthropic, google, amazon-bedrock, dmr, and any built-in alias (requesty, openrouter, opper, runcrate, api-route, lunaroute, orcarouter, atlascloud, popnow, cloudgpu, obscurify, hopbase, azure, xai, ollama, mistral, baseten, daoxe, ovhcloud, groq, fireworks-ai, deepseek, cerebras, togetherai, huggingface, moonshotai, vercel, cloudflare-workers-ai, cloudflare-ai-gateway, nvidia, github-copilot, chatgpt, opencode, opencode-go, etc.).",
           "examples": [
             "openai",
             "anthropic",
@@ -1704,7 +1704,7 @@
         },
         "max_tokens": {
           "type": "integer",
-          "description": "Maximum output tokens per response (the completion budget), NOT the context window. OpenAI-compatible servers require prompt_tokens + max_tokens to fit the context window, so a value close to the window leaves no room for the prompt. Set provider_opts.context_size to declare the window.",
+          "description": "Maximum output tokens per response (the completion budget), NOT the context window. OpenAI-compatible servers require prompt_tokens + max_tokens to fit the context window, so a value close to the window leaves no room for the prompt. Set context_window on the model to declare the window.",
           "minimum": 1
         },
         "top_p": {
@@ -1907,6 +1907,15 @@
         "cost": {
           "$ref": "#/definitions/CostConfig",
           "description": "Explicit token pricing (USD per 1M tokens), overriding the models.dev catalogue. Used for per-turn cost computation, session cost tracking, the /model picker, and the after_llm_call hook's cost field. Makes an uncatalogued model (custom base_url provider, local or private deployment) 'priced' instead of billing $0. Prices must not be negative; an all-zero table means 'priced, free'. Cannot be combined with first_available."
+        },
+        "context_window": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Context window of this model in tokens. Metadata only: it drives context accounting, compaction thresholds (including a dedicated compaction_model) and max_tokens clamping for models the models.dev catalogue does not describe (custom openai_responses or openai_chatcompletions endpoints, self-hosted models). It is never sent as a request parameter and never configures the Docker Model Runner engine; use provider_opts.context_size for that. This is the only context-window setting for non-DMR providers; provider_opts.context_size is accepted only by the dmr provider, where it also sizes the engine and must equal this value when both are set. Otherwise the runtime-discovered window applies, then models.dev. It must not exceed the context window the models.dev catalogue declares for the model, when it declares one (the error names the catalogue maximum); models the catalogue does not describe accept any positive value. Cannot be combined with first_available (set it on the candidate models instead).",
+          "examples": [
+            32768,
+            200000
+          ]
         }
       },
       "additionalProperties": false

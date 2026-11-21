@@ -122,6 +122,7 @@ jobs:
         run: |
           shellcheck scripts/*.sh
           ./scripts/ci-report-failures-test.sh
+          ./scripts/test-race-ci-test.sh
           ./scripts/models-delta-test.sh
 
       - name: GitHub Actions
@@ -346,7 +347,7 @@ jobs:
       - uses: $/.github/actions/setup-go
 
       - name: Test with the race detector
-        run: task test-race
+        run: task test-race-ci
 
   # Non-blocking triage for test failures on the canonical repository's main
   # branch. cross-compile orders this after all test jobs but is not reported.

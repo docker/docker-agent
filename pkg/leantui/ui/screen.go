@@ -14,6 +14,7 @@ type Screen struct {
 	Autocomplete *Autocomplete
 	Status       StatusModel
 	Confirm      *ConfirmModel
+	Elicitation  *ElicitationModel
 	Settings     *SettingsModel
 }
 
@@ -42,6 +43,10 @@ func (s *Screen) Frame(width, _, spinnerFrame int, busy bool, sessionState servi
 		if len(confirmLines) > 0 {
 			cursorCol = min(DisplayWidth(confirmLines[len(confirmLines)-1]), max(width-1, 0))
 		}
+	case s.Elicitation != nil:
+		elicitationLines, row, col := s.Elicitation.Render(width)
+		lines = append(lines, elicitationLines...)
+		cursorLine, cursorCol = inputStart+row, col
 	case s.Settings != nil:
 		settingsLines := s.Settings.Render(width)
 		lines = append(lines, settingsLines...)

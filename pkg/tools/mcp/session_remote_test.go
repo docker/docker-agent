@@ -112,7 +112,7 @@ func TestSessionRemoteCancelsSetup(t *testing.T) {
 					}
 					if request.Method == "server/discover" {
 						w.Header().Set("Content-Type", "application/json")
-						_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}}`, request.ID)
+						_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":true}}}}`, request.ID)
 						return
 					}
 					assert.Equal(t, "subscriptions/listen", request.Method)
@@ -366,7 +366,7 @@ func TestSessionRemoteFailedSubscriptionCleanup(t *testing.T) {
 		}
 		if req.Method == "server/discover" {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}}`, req.ID)
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":true}}}}`, req.ID)
 			return
 		}
 		if req.Method == "subscriptions/listen" {

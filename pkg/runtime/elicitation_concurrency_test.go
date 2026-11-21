@@ -645,3 +645,30 @@ func TestConcurrentBackgroundElicitations_AllSurfaceAndRouteToCorrectWaiter(t *t
 			"worker2 must receive its own response, not worker1's (no swap)")
 	})
 }
+
+func TestCancelElicitations_ReleasesEveryWaiter(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		rt := newElicitationTestRuntime(t)
+		received := make(chan Event, 2)
+		rt.OnElicitationRequest(func(ev Event) { received <- ev })
+
+		results := make(chan tools.ElicitationResult, 2)
+		for range 2 {
+			go func() {
+				result, _ := rt.elicitationHandler(t.Context(), &mcp.ElicitParams{Message: "confirm?"})
+				results <- result
+			}()
+		}
+		<-received
+		<-received
+
+		rt.CancelElicitations()
+
+		for range 2 {
+			assert.Equal(t, tools.ElicitationActionCancel, (<-results).Action)
+		}
+		assert.Zero(t, rt.elicitationWaiters.count())
+	})
+}

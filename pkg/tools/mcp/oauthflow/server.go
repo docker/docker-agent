@@ -13,8 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // CallbackAddress describes the bound loopback endpoint for one authorization.
@@ -94,7 +92,7 @@ func requestAuthorizationCode(ctx context.Context, port int, prepare PrepareAuth
 	handler := &callbackHandler{result: make(chan callbackResult, 1)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", handler.handleCallback)
-	traced := otelhttp.NewHandler(mux, "oauth.callback")
+	traced := traceCallback(mux)
 	var requests sync.WaitGroup
 	var gate sync.Mutex
 	closing := false

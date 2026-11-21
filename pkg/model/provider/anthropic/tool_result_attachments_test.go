@@ -77,6 +77,28 @@ func TestParallelToolAttachmentsStayInNativeResults(t *testing.T) {
 	}
 }
 
+func TestBetaDocumentPartsInMessagesAndToolResults(t *testing.T) {
+	t.Parallel()
+	client := testAttachmentClient()
+	parts := []chat.MessagePart{
+		{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "note", MimeType: "text/plain", Source: chat.DocumentSource{InlineText: "hi"}}},
+		{Type: chat.MessagePartTypeDocument, Document: &chat.Document{MimeType: "image/png", Source: chat.DocumentSource{InlineData: []byte{1}}}},
+		{Type: chat.MessagePartTypeDocument, Document: &chat.Document{MimeType: "application/pdf", Source: chat.DocumentSource{InlineData: []byte{2}}}},
+	}
+	userBlocks, err := client.convertBetaUserMultiContent(t.Context(), parts)
+	require.NoError(t, err)
+	result, err := client.convertBetaToolResultBlockWithDeferred(t.Context(), &chat.Message{MultiContent: parts}, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result.OfToolResult)
+	const want = `[
+		{"type":"text","text":"<document-note-text-plain>\nhi\n</document-note-text-plain>"},
+		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQ=="}},
+		{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"Ag=="}}
+	]`
+	assert.JSONEq(t, want, rawJSON(t, userBlocks))
+	assert.JSONEq(t, want, rawJSON(t, result.OfToolResult.Content))
+}
+
 func TestConvertToolResultBlockUsesClaudeCapabilityFallback(t *testing.T) {
 	t.Parallel()
 	client := testAttachmentClientWithStore(nil)

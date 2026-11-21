@@ -64,7 +64,8 @@ func TestCloneFailuresReachRuntimeCallers(t *testing.T) {
 			var requests atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { requests.Add(1); w.WriteHeader(http.StatusOK) }))
 			defer server.Close()
-			p := &cloneFailureProvider{Config: base.Config{ModelConfig: latest.ModelConfig{Provider: "test", Model: "base", ProviderOpts: map[string]any{"context_size": 100_000}}, RebuildProvider: tt.rebuild}, endpoint: server.URL}
+			window := int64(100_000)
+			p := &cloneFailureProvider{Config: base.Config{ModelConfig: latest.ModelConfig{Provider: "test", Model: "base", ContextWindow: &window}, RebuildProvider: tt.rebuild}, endpoint: server.URL}
 			a := agent.New("root", "test", agent.WithModel(p), agent.WithCompactionModel(p))
 			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(a)), WithCurrentAgent("root"), WithModelStore(mockModelStoreWithLimit{limit: 100_000}))
 			require.NoError(t, err)

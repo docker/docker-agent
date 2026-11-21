@@ -16,10 +16,10 @@ import (
 
 type fakeSessions struct{}
 
-func (fakeSessions) NewSession(_, _, _, _, _, _, _, _ string) error { return nil }
-func (fakeSessions) KillSession(string) error                       { return nil }
-func (fakeSessions) Alive(string) (bool, error)                     { return true, nil }
-func (fakeSessions) Exists(string) (bool, error)                    { return true, nil }
+func (fakeSessions) NewSession(sessionLaunch) error { return nil }
+func (fakeSessions) KillSession(string) error       { return nil }
+func (fakeSessions) Alive(string) (bool, error)     { return true, nil }
+func (fakeSessions) Exists(string) (bool, error)    { return true, nil }
 
 // fakeClient replays a scripted event stream, then blocks like a live
 // connection until the watcher is cancelled.
@@ -254,7 +254,7 @@ type recordingSessions struct {
 	newSessions int
 }
 
-func (r *recordingSessions) NewSession(_, _, _, _, _, _, _, _ string) error {
+func (r *recordingSessions) NewSession(sessionLaunch) error {
 	r.newSessions++
 	return nil
 }
@@ -331,7 +331,7 @@ type crashingSessions struct {
 	newSessions atomic.Int32
 }
 
-func (s *crashingSessions) NewSession(_, _, _, _, _, _, _, _ string) error {
+func (s *crashingSessions) NewSession(sessionLaunch) error {
 	s.newSessions.Add(1)
 	return s.newErr
 }
@@ -502,11 +502,11 @@ func TestRelaunchWithPromptResetsCrashCap(t *testing.T) {
 
 // argSessions records the arguments of the last NewSession call.
 type argSessions struct {
-	workDir, worktreeName, worktreeBase string
+	launch sessionLaunch
 }
 
-func (s *argSessions) NewSession(_, workDir, _, _, _, worktreeName, worktreeBase, _ string) error {
-	s.workDir, s.worktreeName, s.worktreeBase = workDir, worktreeName, worktreeBase
+func (s *argSessions) NewSession(launch sessionLaunch) error {
+	s.launch = launch
 	return nil
 }
 func (s *argSessions) KillSession(string) error    { return nil }
@@ -530,9 +530,9 @@ func TestRelaunchRecreatesMissingWorktree(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, c.relaunch(card, ""))
-	assert.Equal(t, repo, sessions.workDir)
-	assert.Equal(t, "board-abc", sessions.worktreeName)
-	assert.NotEmpty(t, sessions.worktreeBase)
+	assert.Equal(t, repo, sessions.launch.workDir)
+	assert.Equal(t, "board-abc", sessions.launch.worktreeName)
+	assert.NotEmpty(t, sessions.launch.worktreeBase)
 }
 
 func TestRelaunchResumesFromExistingWorktree(t *testing.T) {
@@ -548,8 +548,8 @@ func TestRelaunchResumesFromExistingWorktree(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, c.relaunch(card, ""))
-	assert.Equal(t, wt, sessions.workDir)
-	assert.Empty(t, sessions.worktreeName)
+	assert.Equal(t, wt, sessions.launch.workDir)
+	assert.Empty(t, sessions.launch.worktreeName)
 }
 
 func TestTeardownForgetsControllerState(t *testing.T) {

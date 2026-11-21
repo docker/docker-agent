@@ -93,6 +93,9 @@ func (r *IncrementalRenderer) renderParts(input string) (string, string, []CodeB
 		r.Reset()
 		return "", "", nil, nil
 	}
+	// Sanitize before choosing boundaries: a control string can span a blank
+	// line, and fragments sanitized separately would expose its payload.
+	input = sanitizeForTerminal(input)
 
 	// If the new input no longer starts with our cached prefix, the user (or a
 	// retry) replaced earlier content; fall back to a full render.

@@ -142,13 +142,14 @@ func TestSessionOriginRoundTripAndLookup(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store := newStore()
 			runSession := New(WithID("run-session"))
-			a2aSession := New(WithID("a2a-session"), WithOrigin("a2a"))
+			a2aSession := New(WithID("a2a-session"), WithOrigin("a2a"), WithUserMessage("hello"))
 			require.NoError(t, store.AddSession(ctx, runSession))
 			require.NoError(t, store.AddSession(ctx, a2aSession))
 
 			got, err := store.GetSessionByOrigin(ctx, a2aSession.ID, "a2a")
 			require.NoError(t, err)
 			assert.Equal(t, "a2a", got.Origin)
+			assert.Equal(t, a2aSession.GetAllMessages(), got.GetAllMessages())
 
 			_, err = store.GetSessionByOrigin(ctx, runSession.ID, "a2a")
 			require.ErrorIs(t, err, ErrNotFound)

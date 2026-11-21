@@ -41,13 +41,7 @@ func (r *Catalog) buildGatewayChoices(ctx context.Context) ([]ModelChoice, bool)
 		return nil, false
 	}
 
-	existingRefs := make(map[string]bool, len(r.Config.Models)*2)
-	for name, cfg := range r.Config.Models {
-		existingRefs[name] = true
-		if cfg.Provider != "" && cfg.Model != "" {
-			existingRefs[cfg.Provider+"/"+cfg.Model] = true
-		}
-	}
+	existingRefs := configuredModelRefs(r.Config.Models)
 
 	// The metadata callback memoizes full catalog entries so the display
 	// name/pricing enrichment below reuses the lookup NormalizeIDs already

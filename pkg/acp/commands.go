@@ -171,7 +171,8 @@ func (a *Agent) compactSession(ctx context.Context, s *Session, instruction stri
 		if resultErr != nil || compactCtx.Err() != nil {
 			return
 		}
-		if scoped, ok := event.(runtime.SessionScoped); ok && scoped.GetSessionID() != s.sess.ID {
+		// Untagged events are root-scoped by convention (see app.isRootSessionEvent).
+		if scoped, ok := event.(runtime.SessionScoped); ok && scoped.GetSessionID() != "" && scoped.GetSessionID() != s.sess.ID {
 			return
 		}
 		switch e := event.(type) {

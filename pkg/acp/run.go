@@ -32,7 +32,6 @@ func Run(ctx context.Context, agentFilename string, stdin io.Reader, stdout io.W
 
 	acpAgent := NewAgent(agentSource, runConfig, sessStore)
 	conn := acpAgent.NewConnection(stdout, stdin)
-	conn.SetLogger(slog.Default())
 	defer func() { retErr = errors.Join(retErr, acpAgent.Stop(ctx)) }()
 
 	slog.DebugContext(ctx, "acp started, waiting for conn")

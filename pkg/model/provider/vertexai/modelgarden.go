@@ -43,6 +43,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/internal/deepcopy"
 	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
 // cloudPlatformScope is the OAuth2 scope required for Vertex AI API access.
@@ -173,15 +174,7 @@ func withModelsDevProvider(cfg *latest.ModelConfig) (*latest.ModelConfig, error)
 // produce double-prefixed IDs like `meta/meta/llama-4-...` that do not exist
 // in models.dev.
 func modelsDevProvider(cfg *latest.ModelConfig) string {
-	p := strings.ToLower(strings.TrimSpace(publisher(cfg)))
-	switch p {
-	case "":
-		return ""
-	case "anthropic":
-		return "anthropic"
-	default:
-		return "google-vertex"
-	}
+	return modelinfo.VertexModelsDevProvider(publisher(cfg))
 }
 
 // publisher returns the provider_opts.publisher string, or "" if unset.

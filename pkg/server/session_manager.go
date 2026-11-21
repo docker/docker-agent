@@ -584,6 +584,14 @@ func (sm *SessionManager) GetSessionStatus(ctx context.Context, id string) (*api
 	}, nil
 }
 
+func (sm *SessionManager) sessionQueueStatus(id string) (runtime.QueueStatus, bool) {
+	rs, ok := sm.runtimeSessions.Load(id)
+	if !ok {
+		return runtime.QueueStatus{}, false
+	}
+	return rs.runtime.QueueStatus(), true
+}
+
 // GetSessionSnapshot returns the full, self-contained state of a session: its
 // stored fields plus, when an active runtime is attached, its live runtime
 // state (streaming, current agent) and the sequence number of the most recent

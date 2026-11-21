@@ -284,6 +284,17 @@ func (w *elicitationWaiters) resolveSingle(result ElicitationResult) bool {
 	return wt.tryResolve(result)
 }
 
+// resolveAll delivers result to every pending waiter.
+func (w *elicitationWaiters) resolveAll(result ElicitationResult) {
+	w.mu.Lock()
+	pending := w.pending
+	w.pending = nil
+	w.mu.Unlock()
+	for _, wt := range pending {
+		wt.tryResolve(result)
+	}
+}
+
 // count reports the number of elicitations currently awaiting a response.
 func (w *elicitationWaiters) count() int {
 	w.mu.Lock()
@@ -339,6 +350,12 @@ func (r *LocalRuntime) ResumeElicitation(ctx context.Context, action tools.Elici
 	}
 	slog.DebugContext(ctx, "Elicitation response sent successfully", "action", action)
 	return nil
+}
+
+// CancelElicitations cancels every outstanding request. Called when the
+// conversation that raised them is retired and nothing can answer them.
+func (r *LocalRuntime) CancelElicitations() {
+	r.elicitationWaiters.resolveAll(ElicitationResult{Action: tools.ElicitationActionCancel})
 }
 
 // OnElicitationRequest registers a handler invoked whenever an MCP toolset

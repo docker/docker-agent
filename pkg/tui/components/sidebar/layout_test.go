@@ -1,12 +1,9 @@
 package sidebar
 
 import (
-	"strings"
 	"testing"
 
-	"charm.land/lipgloss/v2"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -113,37 +110,6 @@ func TestMetricsAccessors(t *testing.T) {
 	assert.Equal(t, 3, metrics.PaddingLeft())
 	assert.Equal(t, 2, metrics.PaddingRight())
 	assert.Equal(t, 2, metrics.ScrollbarGap())
-}
-
-func TestScrollbarGapInOutput(t *testing.T) {
-	t.Parallel()
-
-	// This test verifies that when a scrollbar is rendered,
-	// there's a visible gap between the content and the scrollbar.
-	cfg := DefaultLayoutConfig()
-	require.Equal(t, 1, cfg.ScrollbarGap, "test requires ScrollbarGap of 1")
-
-	// Simulate what verticalView does when scrollbar is visible
-	contentWidth := cfg.Compute(40, true).ContentWidth
-	gap := strings.Repeat(" ", cfg.ScrollbarGap)
-	scrollbarView := "│" // Simplified scrollbar representation
-
-	// Create a sample content line
-	contentLine := strings.Repeat("x", contentWidth)
-
-	// Join them as the sidebar does
-	combined := contentLine + gap + scrollbarView
-
-	// Verify the total width matches expected
-	expectedWidth := contentWidth + cfg.ScrollbarGap + scrollbar.Width
-	actualWidth := lipgloss.Width(combined)
-
-	assert.Equal(t, expectedWidth, actualWidth,
-		"combined line should have content + gap + scrollbar width")
-
-	// Verify there's actually a space between content and scrollbar
-	assert.Contains(t, combined, " │",
-		"there should be a space (gap) before the scrollbar")
 }
 
 // BenchmarkSidebarVerticalView_Scroll benchmarks the verticalView() method during scrolling.

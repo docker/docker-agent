@@ -862,11 +862,14 @@ func marshalToMap(v any) (map[string]any, bool) {
 	return m, true
 }
 
-// contextLimit returns the context window for this client's model, sourced
-// from models.dev (including the embedded snapshot) when available, and
-// falling back to the conservative 200k Claude floor only when no catalogue
-// entry exists.
+// contextLimit returns the context window for this client's model: the declared
+// model-level context_window when set, otherwise the models.dev catalogue
+// (including the embedded snapshot), falling back to the conservative 200k
+// Claude floor only when no catalogue entry exists.
 func (c *Client) contextLimit(ctx context.Context) int64 {
+	if n := c.ModelConfig.DeclaredContextWindow(); n > 0 {
+		return n
+	}
 	return modelinfo.ContextLimit(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), modelinfo.DefaultAnthropicContextLimit)
 }
 

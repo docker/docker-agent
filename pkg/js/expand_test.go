@@ -1,3 +1,5 @@
+//go:build !docker_agent_no_js_expansion
+
 package js
 
 import (

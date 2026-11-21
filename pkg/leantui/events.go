@@ -125,6 +125,12 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			Tool: toolDef.Name,
 			View: *ui.NewToolView(e.GetAgentName(), e.ToolCall, toolDef, tuitypes.ToolStatusConfirmation),
 		}
+	case *runtime.ElicitationRequestEvent:
+		m.enqueueElicitation(e)
+	case *runtime.ElicitationClosedEvent:
+		m.retireElicitation(e.ElicitationID)
+	case *runtime.AuthorizationEvent:
+		m.handleAuthorization(e)
 	case *runtime.TokenUsageEvent:
 		m.setTokenUsage(e.SessionID, e.Usage)
 	case *runtime.AgentInfoEvent:

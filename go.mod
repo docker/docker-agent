@@ -1,14 +1,12 @@
 module github.com/docker/docker-agent
 
-go 1.27
-
-toolchain go1.27.4
+go 1.27.4
 
 require (
 	charm.land/bubbles/v2 v2.2.1
 	charm.land/bubbletea/v2 v2.0.10
 	charm.land/glamour/v2 v2.0.1
-	charm.land/lipgloss/v2 v2.1.0
+	charm.land/lipgloss/v2 v2.1.1
 	github.com/99designs/keyring v1.2.2
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
 	github.com/Masterminds/semver/v3 v3.5.0
@@ -19,25 +17,26 @@ require (
 	github.com/alpkeskin/gotoon v0.1.1
 	github.com/anthropics/anthropic-sdk-go v1.84.0
 	github.com/atotto/clipboard v0.1.4
-	github.com/aws/aws-sdk-go-v2 v1.47.8
-	github.com/aws/aws-sdk-go-v2/config v1.33.16
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.16
-	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.63.12
-	github.com/aws/aws-sdk-go-v2/service/sts v1.51.9
-	github.com/aws/smithy-go v1.28.8
-	github.com/aymanbagabas/go-udiff v0.4.1
+	github.com/aws/aws-sdk-go-v2 v1.48.0
+	github.com/aws/aws-sdk-go-v2/config v1.33.20
+	github.com/aws/aws-sdk-go-v2/credentials v1.21.2
+	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.63.13
+	github.com/aws/aws-sdk-go-v2/service/sts v1.52.0
+	github.com/aws/smithy-go v1.28.9
+	github.com/aymanbagabas/go-udiff v0.4.2
 	github.com/bmatcuk/doublestar/v4 v4.10.4
+	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/ultraviolet v0.0.0-20260812204455-68fa937c71be
-	github.com/charmbracelet/x/ansi v0.11.9
+	github.com/charmbracelet/x/ansi v0.11.10
 	github.com/clipperhouse/displaywidth v0.11.0
 	github.com/clipperhouse/uax29/v2 v2.7.0
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/creack/pty v1.1.24
-	github.com/dgageot/rubocop-go v1.2.0
+	github.com/dgageot/rubocop-go v1.4.0
 	github.com/docker/aijson v0.1.0
-	github.com/docker/cli v29.9.3+incompatible
+	github.com/docker/cli v29.10.0+incompatible
 	github.com/docker/go-units v0.5.0
-	github.com/docker/portcullis v1.1.4
+	github.com/docker/portcullis v1.1.5
 	github.com/docker/secrets-engine/client v0.2.2
 	github.com/docker/secrets-engine/x v0.8.5
 	github.com/dop251/goja v0.0.0-20261031103838-cf2ff0ec0b31
@@ -55,14 +54,14 @@ require (
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/junegunn/fzf v0.75.0
 	github.com/k3a/html2text v1.5.1
-	github.com/labstack/echo/v4 v4.16.3
+	github.com/labstack/echo/v4 v4.16.5
 	github.com/mattn/go-isatty v0.0.24
 	github.com/mattn/go-runewidth v0.0.31
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/muesli/cancelreader v0.2.2
 	github.com/natefinch/atomic v1.0.1
 	github.com/openai/openai-go/v3 v3.61.0
-	github.com/pb33f/libopenapi v0.42.4
+	github.com/pb33f/libopenapi v0.43.1
 	github.com/rivo/uniseg v0.4.7
 	github.com/rumpl/harness v0.0.0-20261013122321-04282da16ab5
 	github.com/rumpl/keepawake v0.1.0
@@ -87,18 +86,18 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	go.opentelemetry.io/proto/otlp v1.11.1
-	golang.org/x/crypto v0.58.0
-	golang.org/x/image v0.47.0
-	golang.org/x/net v0.62.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/image v0.48.0
+	golang.org/x/net v0.63.0
 	golang.org/x/oauth2 v0.38.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
-	golang.org/x/tools v0.52.0
+	golang.org/x/tools v0.53.0
 	google.golang.org/adk/v2 v2.4.0
-	google.golang.org/genai v1.77.0
+	google.golang.org/genai v1.79.1
 	google.golang.org/protobuf v1.36.12
-	gopkg.in/dnaeon/go-vcr.v4 v4.0.7
+	gopkg.in/dnaeon/go-vcr.v4 v4.0.8
 	gotest.tools/v3 v3.5.2
 	modernc.org/sqlite v1.62.0
 )
@@ -117,22 +116,21 @@ require (
 	github.com/agext/levenshtein v1.2.1 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/apparentlymart/go-textseg/v17 v17.0.1 // indirect
-	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.26 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.8 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.11 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.11 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.11 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.24 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.11 // indirect
-	github.com/aws/aws-sdk-go-v2/service/signin v1.12.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sso v1.39.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.4 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.27 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.9 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.12 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.12 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.12 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.25 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.12 // indirect
+	github.com/aws/aws-sdk-go-v2/service/signin v1.14.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.39.5 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.5 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/x/exp/slice v0.0.0-20251113172435-cef867b85f6a // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
@@ -225,9 +223,9 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.40.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
-	golang.org/x/mod v0.42.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	go.yaml.in/yaml/v4 v4.0.0 // indirect
+	golang.org/x/mod v0.43.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/api v0.295.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc // indirect
@@ -245,10 +243,3 @@ require (
 replace github.com/charmbracelet/ultraviolet => github.com/dgageot/ultraviolet v0.0.0-20260313154905-9451997d56b6
 
 replace github.com/cyphar/filepath-securejoin => github.com/cyphar/filepath-securejoin v0.4.1
-
-// TODO(docker/docker-agent#4068): pin the commit that merged
-// https://github.com/modelcontextprotocol/go-sdk/pull/1193 so the client
-// tolerates GitHub's subscriptions/listen rejection while keeping the MCP
-// 2026-07-28 APIs. Keep require v1.7.0 for ADK/MVS; drop the replace once a
-// tagged release containing #1193 ships.
-replace github.com/modelcontextprotocol/go-sdk => github.com/modelcontextprotocol/go-sdk v1.7.1-0.20260825122737-c68ad9a4e6e1

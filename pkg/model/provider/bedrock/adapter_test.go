@@ -195,6 +195,48 @@ func TestStreamAdapter_SparseIndexes(t *testing.T) {
 	}, decodeBlocks(t, finalState(deltas)))
 }
 
+func TestStreamAdapter_Usage(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		usage types.TokenUsage
+		want  chat.Usage
+	}{
+		{
+			name: "token counts",
+			usage: types.TokenUsage{
+				InputTokens:           new(int32(1500)),
+				OutputTokens:          new(int32(500)),
+				CacheReadInputTokens:  new(int32(100)),
+				CacheWriteInputTokens: new(int32(50)),
+			},
+			want: chat.Usage{InputTokens: 1500, OutputTokens: 500, CachedInputTokens: 100, CacheWriteTokens: 50},
+		},
+		{name: "omitted counts"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			a := scriptedAdapter(nil, messageStop(types.StopReasonEndTurn), &types.ConverseStreamOutputMemberMetadata{
+				Value: types.ConverseStreamMetadataEvent{Usage: &tt.usage},
+			})
+			var got []chat.Usage
+			for {
+				resp, err := a.Recv()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				require.NoError(t, err)
+				if resp.Usage != nil {
+					got = append(got, *resp.Usage)
+				}
+			}
+			assert.Equal(t, []chat.Usage{tt.want}, got)
+		})
+	}
+}
+
 func TestStreamAdapter_FinishReason(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

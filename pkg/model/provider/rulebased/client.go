@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -58,7 +59,24 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, models map[string]l
 
 	// Create fallback provider from the model's provider/model fields.
 	fallbackSpec := cfg.Provider + "/" + cfg.Model
-	fallback, err := providerFactory(ctx, fallbackSpec, models, env, routeOpts...)
+	fallbackModels := models
+	if _, named := models[fallbackSpec]; !named && cfg.ContextWindow != nil {
+		// Only the inline self fallback inherits the router's declaration.
+		// Keep named models and routing targets independent, even at the same endpoint.
+		fallbackModels = make(map[string]latest.ModelConfig, len(models)+1)
+		maps.Copy(fallbackModels, models)
+		fallbackCfg := latest.ModelConfig{
+			Provider: cfg.Provider, Model: cfg.Model,
+			ContextWindow: cfg.ContextWindow, DisplayModel: cfg.DisplayModel,
+		}
+		// A DMR model-level engine size may override provider defaults. Preserve
+		// it alongside the declaration so construction checks the same capacity.
+		if size, ok := cfg.ProviderOpts["context_size"]; ok {
+			fallbackCfg.ProviderOpts = map[string]any{"context_size": size}
+		}
+		fallbackModels[fallbackSpec] = fallbackCfg
+	}
+	fallback, err := providerFactory(ctx, fallbackSpec, fallbackModels, env, routeOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating fallback provider %q: %w", fallbackSpec, err)
 	}

@@ -12,7 +12,7 @@ _Docker Agent is open source. Here's how to set up your development environment 
 
 ### Prerequisites
 
-- [Go 1.27](https://go.dev/dl/) or higher
+- [Go 1.27.4](https://go.dev/dl/) or higher
 - API key(s) for your chosen AI provider
 - [Task](https://taskfile.dev/installation/)
 - [golangci-lint 2.14.0](https://golangci-lint.run/docs/welcome/install/local/) or higher

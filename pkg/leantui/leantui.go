@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/programstatus"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/sound"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
@@ -293,6 +294,7 @@ type model struct {
 	programStatusUnsupported bool
 	statusSession            programstatus.Session
 	confirmationEvent        tea.Msg
+	elicitations             []*runtime.ElicitationRequestEvent
 	eventGeneration          atomic.Uint64
 	app                      *app.App
 	term                     *ui.Terminal
@@ -398,14 +400,11 @@ func (m *model) renderFinal() {
 }
 
 func (m *model) commitWelcome() {
-	banner := m.banner
-	if len(banner) == 0 {
-		banner = bannerLines
-	}
-	if m.hideBanner {
-		banner = nil
-	}
 	m.screen.Transcript.AddBlock(func(int) []string {
+		var banner []string
+		if !m.hideBanner {
+			banner = renderBanner(m.banner)
+		}
 		lines := make([]string, 0, bannerTopPadding+len(banner)+2)
 		for range bannerTopPadding {
 			lines = append(lines, "")
@@ -413,7 +412,7 @@ func (m *model) commitWelcome() {
 
 		leftPad := strings.Repeat(" ", bannerLeftPadding)
 		for _, l := range banner {
-			lines = append(lines, ui.StAccent().Render(leftPad+l))
+			lines = append(lines, leftPad+l)
 		}
 		lines = append(lines,
 			"",

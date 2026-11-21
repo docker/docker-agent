@@ -3,6 +3,7 @@ package modelcatalog
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -237,13 +238,7 @@ func (r *Catalog) AvailableModels(ctx context.Context, agentName string) []Model
 			choice.CacheReadCost = cfg.Cost.CacheRead
 			choice.CacheWriteCost = cfg.Cost.CacheWrite
 		}
-		if n := latest.ContextSizeFromProviderOpts(cfg.ProviderOpts); n > 0 {
-			if n > math.MaxInt {
-				choice.ContextLimit = math.MaxInt
-			} else {
-				choice.ContextLimit = int(n)
-			}
-		}
+		r.applyConfiguredContextWindow(&choice, cfg)
 		choices = append(choices, choice)
 	}
 	configuredDuration := time.Since(configuredStart)
@@ -302,6 +297,18 @@ func (r *Catalog) AvailableModels(ctx context.Context, agentName string) []Model
 		"models", len(choices),
 	)
 	return choices
+}
+
+// Gateway and DMR discovery compare literal refs; models.dev uses canonical provider IDs.
+func configuredModelRefs(models map[string]latest.ModelConfig) map[string]bool {
+	refs := make(map[string]bool, len(models)*2)
+	for name, cfg := range models {
+		refs[name] = true
+		if cfg.Provider != "" && cfg.Model != "" {
+			refs[cfg.Provider+"/"+cfg.Model] = true
+		}
+	}
+	return refs
 }
 
 // buildCatalogChoices builds ModelChoice entries from the models.dev catalog,
@@ -499,4 +506,21 @@ func (r *Catalog) getAvailableProviders(ctx context.Context) map[string]bool {
 func modelHasAnthropicAuth(m latest.ModelConfig, providers map[string]latest.ProviderConfig) bool {
 	return latest.EffectiveProviderType(m, providers) == "anthropic" &&
 		latest.EffectiveAuth(m, providers) != nil
+}
+
+func (r *Catalog) applyConfiguredContextWindow(choice *ModelChoice, cfg latest.ModelConfig) {
+	resolved := cfg
+	resolved.Provider = provider.ResolveType(&cfg, r.Config.Providers)
+	resolved.ProviderOpts = maps.Clone(cfg.ProviderOpts)
+	if _, present := resolved.ProviderOpts["context_size"]; !present {
+		if size, inherited := r.Config.Providers[cfg.Provider].ProviderOpts["context_size"]; inherited {
+			if resolved.ProviderOpts == nil {
+				resolved.ProviderOpts = make(map[string]any)
+			}
+			resolved.ProviderOpts["context_size"] = size
+		}
+	}
+	if n := resolved.EffectiveContextWindow(); n > 0 {
+		choice.ContextLimit = int(min(n, math.MaxInt))
+	}
 }

@@ -113,7 +113,7 @@ func (r *sseFilterReader) consumeLine(line []byte) {
 	default:
 		r.pending.Write(line)
 		r.pending.WriteByte('\n')
-		if value, ok := fieldValue(line, "data"); ok {
+		if value, ok := bytes.CutPrefix(line, []byte("data:")); ok {
 			r.hasData = true
 			if r.dropKeepaliveEvents {
 				if payload := bytes.TrimSpace(value); len(payload) > 0 && !bytes.Equal(payload, []byte("{}")) {
@@ -126,17 +126,6 @@ func (r *sseFilterReader) consumeLine(line []byte) {
 			}
 		}
 	}
-}
-
-// fieldValue returns the value of an SSE line whose field name is `name`,
-// with the single optional leading space the SSE grammar allows already
-// removed.
-func fieldValue(line []byte, name string) ([]byte, bool) {
-	value, ok := bytes.CutPrefix(line, []byte(name+":"))
-	if !ok {
-		return nil, false
-	}
-	return bytes.TrimPrefix(value, []byte(" ")), true
 }
 
 func (r *sseFilterReader) Close() error {

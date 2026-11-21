@@ -35,6 +35,15 @@ func (r *Registry) New(ctx context.Context, cfg *latest.ModelConfig, env environ
 func (r *Registry) NewWithModels(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
 	slog.DebugContext(ctx, "Creating model provider", "type", cfg.Provider, "model", cfg.Model)
 	if len(cfg.Routing) > 0 {
+		globalOptions := options.Apply(opts...)
+		if err := ValidateContextWindow(cfg, globalOptions.Providers()); err != nil {
+			return nil, err
+		}
+		if store := globalOptions.ModelsDevStore(); store != nil {
+			if err := ValidateContextWindowCap(ctx, cfg, globalOptions.Providers(), store, env); err != nil {
+				return nil, err
+			}
+		}
 		models, err := copyRoutedModels(cfg, models)
 		if err != nil {
 			return nil, err
@@ -109,6 +118,18 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 		return nil, errors.New("provider registry is required")
 	}
 	globalOptions := options.Apply(opts...)
+	// Every leaf (including inline auxiliary and routing models) passes here.
+	// Keep declaration validation at this boundary as well as config preflight.
+	if err := ValidateContextWindow(cfg, globalOptions.Providers()); err != nil {
+		return nil, err
+	}
+	// RAG and standalone callers may not carry a catalogue. Config preflight
+	// requires one for declarations; construction rechecks caps when available.
+	if store := globalOptions.ModelsDevStore(); store != nil {
+		if err := ValidateContextWindowCap(ctx, cfg, globalOptions.Providers(), store, env); err != nil {
+			return nil, err
+		}
+	}
 	// Capture explicit off before defaults normalize it to nil. Model settings win.
 	budget := cfg.ThinkingBudget
 	if budget == nil {

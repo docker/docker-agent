@@ -1058,15 +1058,10 @@ func (s *Server) getSessionRecoveryData(c echo.Context) error {
 }
 
 func (s *Server) getSessionQueueStatus(c echo.Context) error {
-	sessionID := c.Param("id")
-
-	// Get the session runtime to check queue status
-	sessionRuntime, ok := s.sm.runtimeSessions.Load(sessionID)
+	queueStatus, ok := s.sm.sessionQueueStatus(c.Param("id"))
 	if !ok {
 		return echo.NewHTTPError(http.StatusNotFound, "session not found or not running")
 	}
-
-	queueStatus := sessionRuntime.runtime.QueueStatus()
 
 	resp := api.QueueDepthResponse{}
 	resp.Steer.Depth = queueStatus.SteerDepth

@@ -23,6 +23,8 @@ type Editor struct {
 	cursor int
 
 	placeholder string
+	// mask, when set, is shown in place of every non-newline rune.
+	mask rune
 
 	historyStore *history.History
 	history      []string
@@ -38,6 +40,9 @@ func NewEditor(placeholder string, historyStore ...*history.History) *Editor {
 	e.histIndex = len(e.historyMessages())
 	return e
 }
+
+// SetMask hides typed text behind r; zero shows it verbatim.
+func (e *Editor) SetMask(r rune) { e.mask = r }
 
 func (e *Editor) Text() string { return string(e.value) }
 
@@ -237,7 +242,7 @@ func (e *Editor) Layout(termWidth int) (lines []string, curRow, curCol int) {
 
 	lines = make([]string, len(rows))
 	for i, rs := range rows {
-		content := string(e.value[rs.start:rs.end])
+		content := string(e.display(rs.start, rs.end))
 		if i == 0 {
 			lines[i] = StAccent().Render(PromptText) + content
 		} else {
@@ -256,7 +261,7 @@ func (e *Editor) wrapRows(width int) []rowSpan {
 	var rows []rowSpan
 	start, curWidth, i := 0, 0, 0
 	for i < len(e.value) {
-		r := e.value[i]
+		r := e.cell(i)
 		if r == '\n' {
 			rows = append(rows, rowSpan{start, i})
 			i++
@@ -287,7 +292,7 @@ func (e *Editor) cursorPos(rows []rowSpan) (row, col int) {
 	}
 	rs := rows[row]
 	for i := rs.start; i < e.cursor && i < len(e.value); i++ {
-		col += RuneWidth(e.value[i])
+		col += RuneWidth(e.cell(i))
 	}
 	return row, col
 }
@@ -302,13 +307,31 @@ func (e *Editor) indexAt(rows []rowSpan, row, col int) int {
 	rs := rows[row]
 	w := 0
 	for i := rs.start; i < rs.end; i++ {
-		rw := RuneWidth(e.value[i])
+		rw := RuneWidth(e.cell(i))
 		if w+rw > col {
 			return i
 		}
 		w += rw
 	}
 	return rs.end
+}
+
+func (e *Editor) cell(i int) rune {
+	if e.mask != 0 && e.value[i] != '\n' {
+		return e.mask
+	}
+	return e.value[i]
+}
+
+func (e *Editor) display(start, end int) []rune {
+	if e.mask == 0 {
+		return e.value[start:end]
+	}
+	out := make([]rune, end-start)
+	for i := range out {
+		out[i] = e.cell(start + i)
+	}
+	return out
 }
 
 func contentWidth(termWidth int) int {
