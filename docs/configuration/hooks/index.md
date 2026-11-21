@@ -31,7 +31,7 @@ Docker Agent dispatches the following hook events:
 
 | Event                       | When it fires                                                                     | Can block? |
 | --------------------------- | --------------------------------------------------------------------------------- | ---------- |
-| `pre_tool_use`              | Default lane: approval helper when the safety mode asks; skipped on auto-approved calls                                                       | Yes        |
+| `pre_tool_use`              | Default lane: approval helper when the safety mode asks; also vetoes delegation wrappers in balanced; skipped on other auto-approved calls    | Yes        |
 | `tool_input_transform`     | Before tool guards, permission rules, and safety classification, including auto-approved calls | Yes |
 | `prompt_file_guard` | Before loaded or retained prompt-file instructions enter storage or a model request | Yes |
 | `skill_content_guard` | After reading skill text, before expansion or delivery | Yes |
@@ -528,9 +528,11 @@ Use separate events for operations that must run regardless of approval:
    rewrite arguments.
 3. Existing **`pre_tool_use` with `preempt_yolo: true`** runs next, followed by
    permission rules and the safety-mode decision.
-4. Ordinary **`pre_tool_use`** remains an approval helper: it runs only when the
-   safety mode asks. Auto-approved calls and explicit permission ask rules skip
-   it. Keep expensive LLM judges here unless they must inspect every call.
+4. Ordinary **`pre_tool_use`** remains an approval helper: it runs when the
+   safety mode asks. Delegation wrappers auto-approved by balanced also run it,
+   so an existing deny or ask still applies. Other auto-approved calls and
+   explicit permission ask rules skip it. Keep expensive LLM judges here unless
+   they must inspect every call.
 5. **`permission_request`** and interactive confirmation remain the fallback.
    A mandatory guard's `ask` skips approval helpers and forces confirmation.
 

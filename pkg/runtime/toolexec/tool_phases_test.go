@@ -629,6 +629,34 @@ func TestToolPhases_PreemptYoloFailureBlocks(t *testing.T) {
 	}
 }
 
+// Balanced auto-approves delegation wrappers after the read-only hint was
+// added, but an existing default-lane deny must still veto the launch.
+func TestToolPhases_DelegationBalancedKeepsDefaultPreToolUseVeto(t *testing.T) {
+	t.Parallel()
+
+	hd, rec := newPhaseHooks(t, &hooks.Config{
+		PreToolUse: matchAll(hook(bVerdict, "deny", "delegation blocked")),
+	})
+	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyBalanced))
+	em := &captureEmitter{}
+	tool := tools.Tool{
+		Name:        "run_skill",
+		Delegation:  true,
+		Annotations: tools.ToolAnnotations{ReadOnlyHint: true},
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			panic("tool must not run")
+		},
+	}
+
+	newDispatcher(hd, nil).Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "skill",
+		Function: tools.FunctionCall{Name: "run_skill", Arguments: `{}`},
+	}}, []tools.Tool{tool}, em)
+
+	requireDenied(t, em, hd, toolexec.ApprovalSourcePreToolUseHookDeny, "delegation blocked")
+	assert.Equal(t, 1, rec.count(hooks.EventPreToolUse))
+}
+
 // After a legacy pre_tool_use rewrite the guard, preempt lane and rules
 // are re-evaluated exactly once on the new arguments; the transformer and
 // the default lane are not rerun.

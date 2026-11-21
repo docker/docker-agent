@@ -36,6 +36,7 @@ func TestTaskTool_Tools(t *testing.T) {
 
 	assert.Equal(t, "transfer_task", allTools[0].Name)
 	assert.Equal(t, "transfer", allTools[0].Category)
+	assert.True(t, allTools[0].Delegation)
 	assert.Contains(t, allTools[0].Description, "transfer a task to the selected team member")
 
 	assert.Nil(t, allTools[0].Handler)
