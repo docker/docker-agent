@@ -577,6 +577,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	if err != nil {
 		return err
 	}
+	// Under --listen the initial tab is attached to the serving manager too;
+	// detach it when the tab is closed, like tabs made by createSessionSpawner.
+	tuiCleanup := detachOnCleanup(f.listenSM, sess.ID, cleanup)
 
 	applyTheme(f.theme)
 	opts, err := f.buildAppOpts(args)
@@ -602,7 +605,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 	runErr := func() error {
 		if f.lean {
-			return f.runLeanTUI(ctx, rt, sess, cleanup, args, opts...)
+			return f.runLeanTUI(ctx, rt, sess, tuiCleanup, args, opts...)
 		}
 		if cassettePath != "" {
 			// Record keystrokes and clicks alongside the model traffic so a
@@ -611,9 +614,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 				rec = recorder.New(m)
 				return rec
 			}
-			return runTUIWrapped(ctx, rt, sess, b.Spawner(rt), cleanup, tuiOptions, wrap, opts...)
+			return runTUIWrapped(ctx, rt, sess, b.Spawner(rt), tuiCleanup, tuiOptions, wrap, opts...)
 		}
-		return runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, tuiOptions, opts...)
+		return runTUI(ctx, rt, sess, b.Spawner(rt), tuiCleanup, tuiOptions, opts...)
 	}()
 	if rec != nil && rec.HasInput() {
 		writeGeneratedTUITest(ctx, out, rec, cassettePath, agentFileName)

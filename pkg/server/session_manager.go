@@ -341,6 +341,19 @@ func (sm *SessionManager) dropEventLog(sessionID string) {
 	}
 }
 
+// releaseEventLog tears down sessionID's event log, if any, without
+// tombstoning the ID: unlike dropEventLog it is for a session that merely
+// stops being attached (see DetachRuntime), so the same ID can be attached
+// again and register a fresh event source.
+func (sm *SessionManager) releaseEventLog(sessionID string) {
+	sm.eventLogsMu.Lock()
+	defer sm.eventLogsMu.Unlock()
+	if pe, ok := sm.eventLogs.Load(sessionID); ok {
+		pe.cancel()
+		sm.eventLogs.Delete(sessionID)
+	}
+}
+
 // appendSessionEvent appends event to sessionID's event log, creating the
 // log on demand (see ensureEventLog) if this is the first out-of-band event
 // the session has ever produced. Events for a deleted session are dropped.
@@ -468,8 +481,8 @@ func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, r
 // persisted session. An embedder calls it when it stops owning the session,
 // e.g. when a TUI tab is closed under --listen; otherwise the runtime and its
 // session would stay reachable (and listed as active) until the process exits.
-// Unlike [SessionManager.DeleteSession], the stored session is kept so it can
-// still be resumed later. It is a no-op for unknown sessions.
+// Unlike [SessionManager.DeleteSession], the stored session is kept and the
+// session ID is not tombstoned, so it can be attached again (e.g. a reopened tab). It is a no-op for unknown sessions.
 func (sm *SessionManager) DetachRuntime(sessionID string) {
 	sm.mux.Lock()
 	defer sm.mux.Unlock()
@@ -481,7 +494,13 @@ func (sm *SessionManager) DetachRuntime(sessionID string) {
 		rs.cancel()
 	}
 	sm.runtimeSessions.Delete(sessionID)
-	sm.dropEventLog(sessionID)
+	// Undo the recall handler installed by AttachRuntime so a runtime kept by
+	// the embedder falls back to its own steer queue instead of routing idle
+	// recalls to a session this manager no longer owns.
+	if setter, ok := rs.runtime.(recallHandlerSetter); ok {
+		setter.SetRecallHandler(nil)
+	}
+	sm.releaseEventLog(sessionID)
 	sm.followUpInjectors.Delete(sessionID)
 	sm.followUpKeys.Delete(sessionID)
 	sm.pendingSafetyDefaults.Delete(sessionID)

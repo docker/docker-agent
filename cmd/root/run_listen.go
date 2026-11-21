@@ -119,3 +119,15 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 		sm.RegisterFollowUpInjector(sess.ID, a.InjectUserMessage)
 	}, nil
 }
+
+// detachOnCleanup wraps cleanup so the session is also detached from the
+// --listen session manager sm (nil when not listening) before it runs.
+func detachOnCleanup(sm *server.SessionManager, sessionID string, cleanup func()) func() {
+	if sm == nil {
+		return cleanup
+	}
+	return func() {
+		sm.DetachRuntime(sessionID)
+		cleanup()
+	}
+}
