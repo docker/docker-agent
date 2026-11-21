@@ -361,7 +361,8 @@ type nativeCommandCompactor struct {
 }
 
 func (p *nativeCommandCompactor) BaseConfig() base.Config {
-	return base.Config{ModelConfig: latest.ModelConfig{ProviderOpts: map[string]any{"native_compaction": true, "context_size": 1000}}}
+	window := int64(1000)
+	return base.Config{ModelConfig: latest.ModelConfig{ProviderOpts: map[string]any{"native_compaction": true}, ContextWindow: &window}}
 }
 
 func (p *nativeCommandCompactor) CompactConversation(ctx context.Context, messages []chat.Message, _ []tools.Tool, instructions string) (*chat.CompactionResult, error) {

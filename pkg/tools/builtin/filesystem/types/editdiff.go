@@ -27,12 +27,33 @@ func ApplyEdits(content string, edits []Edit) (string, error) {
 		if edit.OldText == "" {
 			return "", fmt.Errorf("Edit %d failed: oldText must not be empty", i+1)
 		}
-		if !strings.Contains(content, edit.OldText) {
-			return "", fmt.Errorf("Edit %d failed: old text not found", i+1)
+		oldText, newText := edit.OldText, edit.NewText
+		if !strings.Contains(content, oldText) {
+			// Models usually send LF-only text even when the file uses CRLF
+			// (e.g. a Windows checkout with core.autocrlf). Retry with the
+			// file's line endings so the edit applies and CRLF is preserved.
+			crlfOld, crlfNew, ok := toCRLF(content, oldText, newText)
+			if !ok || !strings.Contains(content, crlfOld) {
+				return "", fmt.Errorf("Edit %d failed: old text not found", i+1)
+			}
+			oldText, newText = crlfOld, crlfNew
 		}
-		content = strings.Replace(content, edit.OldText, edit.NewText, 1)
+		content = strings.Replace(content, oldText, newText, 1)
 	}
 	return content, nil
+}
+
+// toCRLF converts LF-only oldText and newText to CRLF when the file uses
+// CRLF line endings. It reports false when the conversion doesn't apply:
+// the file has no CRLF, or oldText has no newline or already contains CR.
+func toCRLF(content, oldText, newText string) (string, string, bool) {
+	if !strings.Contains(content, "\r\n") || !strings.Contains(oldText, "\n") || strings.Contains(oldText, "\r") {
+		return "", "", false
+	}
+	lfToCRLF := func(s string) string {
+		return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\n", "\r\n")
+	}
+	return lfToCRLF(oldText), lfToCRLF(newText), true
 }
 
 func NewEditFileMeta(path, before, after string) (EditFileMeta, error) {

@@ -437,8 +437,9 @@ func ShellCommandFinished(id, command, output string, err error) Event {
 type WarningEvent struct {
 	AgentContext
 
-	Type    string `json:"type"`
-	Message string `json:"message"`
+	Type      string `json:"type"`
+	Message   string `json:"message"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 func Warning(message, agentName string) Event {
@@ -448,6 +449,21 @@ func Warning(message, agentName string) Event {
 		AgentContext: newAgentContext(agentName),
 	}
 }
+
+// WarningForSession is a [Warning] tagged with the session it concerns, so a
+// sub-session's warning is not presented as the root session's own notice.
+func WarningForSession(sessionID, message, agentName string) Event {
+	return &WarningEvent{
+		Type:         "warning",
+		Message:      message,
+		SessionID:    sessionID,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+// GetSessionID makes WarningEvent satisfy [SessionScoped]. Untagged warnings
+// report "" and are treated as root-scoped.
+func (e *WarningEvent) GetSessionID() string { return e.SessionID }
 
 // ModelFallbackEvent is emitted when the runtime switches to a fallback model
 // after the previous model in the chain fails. This can happen due to:

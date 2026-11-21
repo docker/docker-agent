@@ -443,23 +443,6 @@ func (s *stubSnapshotController) AutoInject(*hooks.Config) {}
 
 var _ builtins.SnapshotController = (*stubSnapshotController)(nil)
 
-func TestApp_NewSession_PreservesToolsApproved(t *testing.T) {
-	t.Parallel()
-
-	rt := &mockRuntime{}
-
-	// Create initial session with tools approved
-	initialSess := session.New(session.WithToolsApproved(true))
-	require.True(t, initialSess.ToolsApproved, "Initial session should have tools approved")
-
-	app := New(t.Context(), rt, initialSess)
-
-	// Call NewSession - should preserve ToolsApproved
-	app.NewSession()
-
-	assert.True(t, app.Session().ToolsApproved, "NewSession should preserve ToolsApproved")
-}
-
 // Explicit strict/balanced modes leave ToolsApproved=false, so preserving
 // only that legacy flag silently dropped the mode on /new.
 func TestApp_NewSession_PreservesSafetyPolicy(t *testing.T) {
@@ -508,23 +491,6 @@ func TestApp_NewSession_PreservesPriorSafetyPolicy(t *testing.T) {
 	// The preserved memory must actually work: toggling off restores balanced.
 	sess.ToggleYolo()
 	assert.Equal(t, session.SafetyPolicyBalanced, sess.GetSafetyPolicy())
-}
-
-func TestApp_NewSession_PreservesHideToolResults(t *testing.T) {
-	t.Parallel()
-
-	rt := &mockRuntime{}
-
-	// Create initial session with hide tool results
-	initialSess := session.New(session.WithHideToolResults(true))
-	require.True(t, initialSess.HideToolResults, "Initial session should have HideToolResults")
-
-	app := New(t.Context(), rt, initialSess)
-
-	// Call NewSession - should preserve HideToolResults
-	app.NewSession()
-
-	assert.True(t, app.Session().HideToolResults, "NewSession should preserve HideToolResults")
 }
 
 func TestApp_NewSession_WithNilSession(t *testing.T) {

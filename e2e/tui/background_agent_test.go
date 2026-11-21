@@ -52,13 +52,13 @@ func (s *scriptedStream) Recv() (chat.MessageStreamResponse, error) {
 func (s *scriptedStream) Close() {}
 
 // scriptedProvider returns one scripted stream per model call, repeating the
-// last script if called more often. contextSize is exposed through
+// last script if called more often. contextWindow is exposed through
 // provider_opts so the runtime resolves a context limit without the
 // models.dev catalogue, which is what makes percentages computable.
 type scriptedProvider struct {
-	id          string
-	contextSize int64
-	scripts     [][]chat.MessageStreamResponse
+	id            string
+	contextWindow int64
+	scripts       [][]chat.MessageStreamResponse
 
 	mu   sync.Mutex
 	call int
@@ -75,9 +75,8 @@ func (p *scriptedProvider) CreateChatCompletionStream(context.Context, []chat.Me
 }
 
 func (p *scriptedProvider) BaseConfig() base.Config {
-	return base.Config{ModelConfig: latest.ModelConfig{
-		ProviderOpts: map[string]any{"context_size": p.contextSize},
-	}}
+	window := p.contextWindow
+	return base.Config{ModelConfig: latest.ModelConfig{ContextWindow: &window}}
 }
 
 // toolCallScript scripts one turn that calls a single tool and stops with the
@@ -128,8 +127,8 @@ func newBackgroundAgentTUI(t *testing.T, width, height int) *tuitest.Driver {
 	isolateState(t)
 
 	rootProv := &scriptedProvider{
-		id:          "test/fake-root",
-		contextSize: 1000,
+		id:            "test/fake-root",
+		contextWindow: 1000,
 		scripts: [][]chat.MessageStreamResponse{
 			toolCallScript("call-1", agenttool.ToolNameRunBackgroundAgent,
 				`{"agent":"worker","task":"count the files"}`, 40, 10),
@@ -139,8 +138,8 @@ func newBackgroundAgentTUI(t *testing.T, width, height int) *tuitest.Driver {
 		},
 	}
 	workerProv := &scriptedProvider{
-		id:          "test/fake-worker",
-		contextSize: 1000,
+		id:            "test/fake-worker",
+		contextWindow: 1000,
 		scripts: [][]chat.MessageStreamResponse{
 			contentScript("worker finished the count", 300, 150),
 		},

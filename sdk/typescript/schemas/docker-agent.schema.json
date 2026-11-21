@@ -4393,6 +4393,9 @@
         },
         "cost": {
           "$ref": "#/$defs/CostConfig"
+        },
+        "context_window": {
+          "type": "integer"
         }
       },
       "$comment": "pkg/config/latest/types.go ModelConfig"
@@ -7814,6 +7817,9 @@
           "const": "warning"
         },
         "message": {
+          "type": "string"
+        },
+        "session_id": {
           "type": "string"
         }
       },

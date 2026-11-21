@@ -1,11 +1,9 @@
 <footer class="site-footer" role="contentinfo">
   <div class="site-footer-inner">
     <div class="site-footer-brand">
-      <img src="{{ "assets/docker-mark.svg" | relURL }}" alt="" width="28" height="22">
-      <div>
-        <div class="site-footer-product">Docker Agent</div>
-        <div class="site-footer-tagline">{{ site.Params.tagline }}</div>
-      </div>
+      <img class="docker-logo theme-dark-only" src="{{ "assets/docker-agent-logo-white.svg" | relURL }}" alt="Docker Agent" width="152" height="18">
+      <img class="docker-logo theme-light-only" src="{{ "assets/docker-agent-logo-black.svg" | relURL }}" alt="Docker Agent" width="152" height="18">
+      <div class="site-footer-tagline">{{ site.Params.tagline }}</div>
     </div>
 
     <div class="site-footer-cols">

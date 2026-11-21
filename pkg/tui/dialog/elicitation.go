@@ -2,9 +2,7 @@ package dialog
 
 import (
 	"cmp"
-	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
 
@@ -17,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/elicitform"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -33,30 +32,6 @@ const (
 	elicitationOverhead = 8
 )
 
-// ElicitationField represents a form field extracted from a JSON schema.
-type ElicitationField struct {
-	Name, Title, Type, Description string
-	Required                       bool
-	EnumValues                     []string
-	// EnumTitles and EnumDescriptions parallel EnumValues for titled choices
-	// (oneOf / items.anyOf); EnumTitles are shown instead of the values.
-	EnumTitles, EnumDescriptions []string
-	Default                      any
-	MinLength, MaxLength         int
-	MinItems, MaxItems           int
-	Format, Pattern              string
-	Minimum, Maximum             float64
-	HasMinimum, HasMaximum       bool
-}
-
-// optionLabels returns what the dialog shows for each choice.
-func (f ElicitationField) optionLabels() []string {
-	if len(f.EnumTitles) == len(f.EnumValues) {
-		return f.EnumTitles
-	}
-	return f.EnumValues
-}
-
 // ElicitationDialog implements Dialog for MCP elicitation requests.
 //
 // When a schema is provided, fields are rendered as a form.
@@ -72,7 +47,7 @@ type ElicitationDialog struct {
 	title         string
 	message       string
 	elicitationID string
-	fields        []ElicitationField
+	fields        []elicitform.Field
 	inputs        []textinput.Model
 	boolValues    map[int]bool
 	enumIndexes   map[int]int // selected index for enum fields
@@ -150,7 +125,7 @@ func firstElicitationID(elicitationID []string) string {
 // (see firstElicitationID for the same #3584 precedent); at most the first
 // value is meaningful.
 func NewElicitationDialog(message string, schema any, meta map[string]any, elicitationID ...string) Dialog {
-	fields := parseElicitationSchema(schema)
+	fields := elicitform.ParseSchema(schema)
 	id := firstElicitationID(elicitationID)
 
 	// Determine dialog title from meta, defaulting to "Question"
@@ -325,17 +300,10 @@ func (d *ElicitationDialog) toggleOption(i, j int) {
 func (d *ElicitationDialog) submit() (layout.Model, tea.Cmd) {
 	// Free-form response: no schema fields, just a text input
 	if d.hasFreeFormInput() {
-		val := strings.TrimSpace(d.responseInput.Value())
-		var content map[string]any
-		if val != "" {
-			content = map[string]any{"response": val}
-		}
-		cmd := d.close(tools.ElicitationActionAccept, content)
+		cmd := d.close(tools.ElicitationActionAccept, elicitform.FreeForm(d.responseInput.Value()))
 		return d, cmd
 	}
 
-	// Schema-based form: validate all fields
-	d.fieldErrors = make(map[int]string)
 	content, firstErrorIdx := d.collectAndValidate()
 
 	if firstErrorIdx >= 0 {
@@ -435,8 +403,7 @@ func (d *ElicitationDialog) isTextInputField() bool {
 	if d.currentField >= len(d.fields) || len(d.inputs) == 0 {
 		return false
 	}
-	ft := d.fields[d.currentField].Type
-	return ft != "boolean" && ft != "enum" && ft != "multiselect"
+	return d.fields[d.currentField].IsText()
 }
 
 func (d *ElicitationDialog) close(action tools.ElicitationAction, content map[string]any) tea.Cmd {
@@ -446,111 +413,16 @@ func (d *ElicitationDialog) close(action tools.ElicitationAction, content map[st
 // collectAndValidate validates all fields and returns the collected values.
 // Returns the content map and the index of the first field with an error (-1 if valid).
 func (d *ElicitationDialog) collectAndValidate() (map[string]any, int) {
-	content := make(map[string]any)
-	firstErrorIdx := -1
-
-	for i, field := range d.fields {
-		switch field.Type {
-		case "boolean":
-			content[field.Name] = d.boolValues[i]
-		case "enum":
-			idx := d.enumIndexes[i]
-			if idx < 0 || idx >= len(field.EnumValues) {
-				if field.Required {
-					d.fieldErrors[i] = "Selection required"
-					if firstErrorIdx < 0 {
-						firstErrorIdx = i
-					}
-				}
-				continue
-			}
-			content[field.Name] = field.EnumValues[idx]
-		case "multiselect":
-			selected := []any{}
-			for j, checked := range d.multiChecked[i] {
-				if checked {
-					selected = append(selected, field.EnumValues[j])
-				}
-			}
-			if errMsg := validateSelectionCount(len(selected), field); errMsg != "" {
-				d.fieldErrors[i] = errMsg
-				if firstErrorIdx < 0 {
-					firstErrorIdx = i
-				}
-				continue
-			}
-			content[field.Name] = selected
-		default:
-			raw := d.inputs[i].Value()
-			val := strings.TrimSpace(raw)
-			if val == "" {
-				if field.Required {
-					d.fieldErrors[i] = "This field is required"
-					if firstErrorIdx < 0 {
-						firstErrorIdx = i
-					}
-				}
-				continue
-			}
-			// Secret fields (e.g. a sudo password) may legitimately contain
-			// leading/trailing whitespace; store the raw value. The trimmed
-			// copy above is only used for the required/empty check.
-			if field.Format == "password" {
-				val = raw
-			}
-			parsed, errMsg := d.parseAndValidateField(val, field)
-			if errMsg != "" {
-				d.fieldErrors[i] = errMsg
-				if firstErrorIdx < 0 {
-					firstErrorIdx = i
-				}
-				continue
-			}
-			content[field.Name] = parsed
+	content, errs, first := elicitform.Collect(d.fields, func(i int) elicitform.Answer {
+		return elicitform.Answer{
+			Text:    d.inputs[i].Value(),
+			Bool:    d.boolValues[i],
+			Choice:  d.enumIndexes[i],
+			Checked: d.multiChecked[i],
 		}
-	}
-	return content, firstErrorIdx
-}
-
-// parseAndValidateField parses and validates a field value, returning the parsed value and an error message.
-func (d *ElicitationDialog) parseAndValidateField(val string, field ElicitationField) (any, string) {
-	if val == "" {
-		return nil, ""
-	}
-
-	switch field.Type {
-	case "number":
-		f, err := strconv.ParseFloat(val, 64)
-		if err != nil {
-			return nil, "Must be a valid number"
-		}
-		if errMsg := validateNumberFieldWithMessage(f, field); errMsg != "" {
-			return nil, errMsg
-		}
-		return f, ""
-
-	case "integer":
-		n, err := strconv.ParseInt(val, 10, 64)
-		if err != nil {
-			return nil, "Must be a whole number"
-		}
-		if errMsg := validateNumberFieldWithMessage(float64(n), field); errMsg != "" {
-			return nil, errMsg
-		}
-		return n, ""
-
-	case "enum":
-		if !slices.Contains(field.EnumValues, val) {
-			return nil, "Invalid selection"
-		}
-		return val, ""
-
-	default: // string
-		if errMsg := validateStringFieldWithMessage(val, field); errMsg != "" {
-			return nil, errMsg
-		}
-		return val, ""
-	}
+	})
+	d.fieldErrors = errs
+	return content, first
 }
 
 // elicitationLayout captures the geometry computed once per render. View()
@@ -693,7 +565,7 @@ func (d *ElicitationDialog) helpPairs() []string {
 	if d.hasSelectionFields() {
 		pairs = append(pairs, "↑/↓", "select")
 	}
-	if slices.ContainsFunc(d.fields, func(f ElicitationField) bool { return f.Type == "multiselect" }) {
+	if slices.ContainsFunc(d.fields, func(f elicitform.Field) bool { return f.Type == "multiselect" }) {
 		pairs = append(pairs, "space", "toggle")
 	}
 	if len(d.fields) > 0 {
@@ -716,7 +588,7 @@ func (d *ElicitationDialog) hasSelectionFields() bool {
 	return false
 }
 
-func (d *ElicitationDialog) renderField(content *Content, i int, field ElicitationField, contentWidth int) fieldGeometry {
+func (d *ElicitationDialog) renderField(content *Content, i int, field elicitform.Field, contentWidth int) fieldGeometry {
 	// Use Title if available, otherwise capitalize the property name
 	label := field.Title
 	if label == "" {
@@ -768,8 +640,8 @@ func (d *ElicitationDialog) renderBooleanField(content *Content, geom *fieldGeom
 	d.renderSelectionField(content, geom, []string{"Yes", "No"}, nil, selectedIdx, isFocused, contentWidth)
 }
 
-func (d *ElicitationDialog) renderEnumField(content *Content, geom *fieldGeometry, i int, field ElicitationField, isFocused bool, contentWidth int) {
-	d.renderSelectionField(content, geom, field.optionLabels(), field.EnumDescriptions, d.enumIndexes[i], isFocused, contentWidth)
+func (d *ElicitationDialog) renderEnumField(content *Content, geom *fieldGeometry, i int, field elicitform.Field, isFocused bool, contentWidth int) {
+	d.renderSelectionField(content, geom, field.OptionLabels(), field.EnumDescriptions, d.enumIndexes[i], isFocused, contentWidth)
 }
 
 func (d *ElicitationDialog) renderSelectionField(content *Content, geom *fieldGeometry, options, descriptions []string, selectedIdx int, isFocused bool, contentWidth int) {
@@ -784,9 +656,9 @@ func (d *ElicitationDialog) renderSelectionField(content *Content, geom *fieldGe
 	})
 }
 
-func (d *ElicitationDialog) renderMultiSelectField(content *Content, geom *fieldGeometry, i int, field ElicitationField, isFocused bool, contentWidth int) {
+func (d *ElicitationDialog) renderMultiSelectField(content *Content, geom *fieldGeometry, i int, field elicitform.Field, isFocused bool, contentWidth int) {
 	checked, cursor := d.multiChecked[i], d.multiCursor[i]
-	d.renderOptions(content, geom, field.optionLabels(), field.EnumDescriptions, contentWidth, func(j int) (string, bool) {
+	d.renderOptions(content, geom, field.OptionLabels(), field.EnumDescriptions, contentWidth, func(j int) (string, bool) {
 		lead, box := "  ", "[ ] "
 		if isFocused && j == cursor {
 			lead = "› "
@@ -899,51 +771,34 @@ func (d *ElicitationDialog) initInputs() {
 	}
 }
 
-func (d *ElicitationDialog) createInput(field ElicitationField, idx int) textinput.Model {
+func (d *ElicitationDialog) createInput(field elicitform.Field, idx int) textinput.Model {
 	ti := textinput.New()
 	ti.SetStyles(styles.DialogInputStyle)
 	ti.SetWidth(defaultWidth)
 	ti.Prompt = "" // Remove the "> " prefix
 
-	// Configure based on field type
+	answer := elicitform.DefaultAnswer(field)
 	switch field.Type {
-	case "boolean":
-		d.boolValues[idx], _ = field.Default.(bool)
-		return ti // Boolean fields don't use text input
-
-	case "enum":
-		// Initialize enum selection to first option
-		d.enumIndexes[idx] = 0
-		return ti // Enum fields don't use text input
-
-	case "multiselect":
-		defaults, _ := field.Default.([]any)
-		checked := make([]bool, len(field.EnumValues))
-		for j, value := range field.EnumValues {
-			checked[j] = slices.Contains(defaults, any(value))
-		}
-		d.multiChecked[idx] = checked
+	case elicitform.TypeBoolean:
+		d.boolValues[idx] = answer.Bool
 		return ti
-
-	case "number", "integer":
+	case elicitform.TypeEnum:
+		d.enumIndexes[idx] = answer.Choice
+		return ti
+	case elicitform.TypeMultiSelect:
+		d.multiChecked[idx] = answer.Checked
+		return ti
+	case elicitform.TypeNumber, elicitform.TypeInteger:
 		ti.Placeholder = cmp.Or(field.Description, "Enter a number")
 		ti.CharLimit = numberCharLimit
-
-	default: // string
+	default:
 		ti.Placeholder = cmp.Or(field.Description, "Enter value")
 		ti.CharLimit = cmp.Or(field.MaxLength, defaultCharLimit)
-		// Mask secret fields (JSON Schema "format": "password"), e.g. the sudo
-		// password prompt, so the value is never echoed to the screen.
-		if field.Format == "password" {
+		if field.IsSecret() {
 			ti.EchoMode = textinput.EchoPassword
 		}
 	}
-
-	// Set default value
-	if field.Default != nil {
-		ti.SetValue(fmt.Sprintf("%v", field.Default))
-	}
-
+	ti.SetValue(answer.Text)
 	return ti
 }
 

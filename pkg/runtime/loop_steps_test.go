@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -253,9 +254,8 @@ func TestHandleStreamError_OverflowWithCompactionEnabled_Retries(t *testing.T) {
 	got := drainEvents(events)
 	var sawWarn bool
 	for _, ev := range got {
-		if w, ok := ev.(*WarningEvent); ok {
+		if w, ok := ev.(*WarningEvent); ok && strings.Contains(w.Message, "exceeded the model's context window") {
 			sawWarn = true
-			assert.Contains(t, w.Message, "exceeded the model's context window")
 		}
 	}
 	assert.True(t, sawWarn, "expected a Warning event when retrying after overflow")

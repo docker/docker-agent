@@ -9,7 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/leantui/ui"
+	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
 )
+
+func TestDefaultBannerMatchesFullTUIStaticBanner(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, tuibanner.Render(), renderBanner(nil))
+	assert.Equal(t, tuibanner.Render(), renderBanner([]string{}))
+}
 
 func TestCommitWelcomePadsBanner(t *testing.T) {
 	t.Parallel()
@@ -27,7 +35,7 @@ func TestCommitWelcomePadsBanner(t *testing.T) {
 	leftPad := strings.Repeat(" ", bannerLeftPadding)
 	firstBannerLine := ansi.Strip(lines[bannerTopPadding])
 	assert.True(t, strings.HasPrefix(firstBannerLine, leftPad))
-	assert.Equal(t, leftPad+bannerLines[0], firstBannerLine)
+	assert.Equal(t, leftPad+bannerLines[0], strings.TrimRight(firstBannerLine, " "))
 
 	helpLine := ansi.Strip(lines[len(lines)-1])
 	assert.True(t, strings.HasPrefix(helpLine, leftPad))

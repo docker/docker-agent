@@ -522,10 +522,10 @@ func (c *controller) relaunch(card *Card, prompt string) error {
 		worktreeName = filepath.Base(card.Worktree)
 		worktreeBase = upstreamBase(c.ctx, card.RepoPath)
 	}
-	err := c.sessions.NewSession(
-		card.Session, workDir, card.Agent, card.AgentSession,
-		socket, worktreeName, worktreeBase, prompt,
-	)
+	err := c.sessions.NewSession(sessionLaunch{
+		name: card.Session, workDir: workDir, agent: card.Agent, agentSession: card.AgentSession,
+		listenSocket: socket, worktreeName: worktreeName, worktreeBase: worktreeBase, prompt: prompt,
+	})
 	c.setLaunchError(card.ID, err)
 	if err == nil {
 		// The agent is launching again: show it as starting until its

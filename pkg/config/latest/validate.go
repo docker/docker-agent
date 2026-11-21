@@ -57,6 +57,9 @@ func (t *Config) Validate() error {
 		if err := m.Cost.validate(); err != nil {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
+		if err := m.validateContextWindow(); err != nil {
+			return fmt.Errorf("models.%s: %w", name, err)
+		}
 		if err := m.Auth.Validate(EffectiveProviderType(m, t.Providers)); err != nil {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
@@ -199,6 +202,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	if m.Cost != nil {
 		return errors.New("first_available cannot be combined with cost (set it on the candidate models instead)")
 	}
+	if m.ContextWindow != nil {
+		return errors.New("first_available cannot be combined with context_window (set it on the candidate models instead)")
+	}
 	if m.OutputCapabilities != nil {
 		return errors.New("first_available cannot be combined with output_capabilities (set output_capabilities.image on the candidate models instead)")
 	}
@@ -210,13 +216,22 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	return nil
 }
 
+func (m *ModelConfig) validateContextWindow() error {
+	if m.ContextWindow != nil && *m.ContextWindow <= 0 {
+		return fmt.Errorf("context_window must be greater than 0, got %d", *m.ContextWindow)
+	}
+	return nil
+}
+
 // validateCompactionThreshold rejects a compaction_threshold outside (0, 1].
 // nil (unset) is valid and means "use the default".
 func validateCompactionThreshold(v *float64) error {
 	if v == nil {
 		return nil
 	}
-	if *v <= 0 || *v > 1 {
+	// Spelled positively so NaN — which compares false to both bounds — is
+	// rejected too.
+	if !(*v > 0 && *v <= 1) {
 		return fmt.Errorf("compaction_threshold must be greater than 0 and at most 1, got %v", *v)
 	}
 	return nil

@@ -211,7 +211,13 @@ func (c *Client) convertBetaToolResultBlockWithDeferred(ctx context.Context, msg
 			if err != nil {
 				return anthropic.BetaContentBlockParamUnion{}, fmt.Errorf("failed to convert tool result document %q: %w", part.Document.Name, err)
 			}
-			content = append(content, stdBlocksToBetaToolResultContent(docBlocks)...)
+			for _, block := range docBlocks {
+				if b, ok := betaDocumentBlock(block); ok {
+					content = append(content, anthropic.BetaToolResultBlockParamContentUnion{
+						OfText: b.OfText, OfImage: b.OfImage, OfDocument: b.OfDocument,
+					})
+				}
+			}
 		}
 	}
 	if len(content) == 0 {
@@ -248,40 +254,6 @@ func betaToolResultImageContent(part chat.MessagePart) []anthropic.BetaToolResul
 			},
 		},
 	}}
-}
-
-func stdBlocksToBetaToolResultContent(blocks []anthropic.ContentBlockParamUnion) []anthropic.BetaToolResultBlockParamContentUnion {
-	out := make([]anthropic.BetaToolResultBlockParamContentUnion, 0, len(blocks))
-	for _, b := range blocks {
-		switch {
-		case b.OfText != nil:
-			out = append(out, anthropic.BetaToolResultBlockParamContentUnion{
-				OfText: &anthropic.BetaTextBlockParam{Text: b.OfText.Text},
-			})
-		case b.OfImage != nil && b.OfImage.Source.OfBase64 != nil:
-			out = append(out, anthropic.BetaToolResultBlockParamContentUnion{
-				OfImage: &anthropic.BetaImageBlockParam{
-					Source: anthropic.BetaImageBlockParamSourceUnion{
-						OfBase64: &anthropic.BetaBase64ImageSourceParam{
-							Data:      b.OfImage.Source.OfBase64.Data,
-							MediaType: anthropic.BetaBase64ImageSourceMediaType(b.OfImage.Source.OfBase64.MediaType),
-						},
-					},
-				},
-			})
-		case b.OfDocument != nil && b.OfDocument.Source.OfBase64 != nil:
-			out = append(out, anthropic.BetaToolResultBlockParamContentUnion{
-				OfDocument: &anthropic.BetaRequestDocumentBlockParam{
-					Source: anthropic.BetaRequestDocumentBlockSourceUnionParam{
-						OfBase64: &anthropic.BetaBase64PDFSourceParam{
-							Data: b.OfDocument.Source.OfBase64.Data,
-						},
-					},
-				},
-			})
-		}
-	}
-	return out
 }
 
 func (c *Client) convertBetaUserMultiContent(ctx context.Context, parts []chat.MessagePart) ([]anthropic.BetaContentBlockParamUnion, error) {
@@ -333,7 +305,11 @@ func (c *Client) convertBetaUserMultiContent(ctx context.Context, parts []chat.M
 				if err != nil {
 					return nil, fmt.Errorf("failed to convert document attachment %q: %w", part.Document.Name, err)
 				}
-				contentBlocks = append(contentBlocks, stdBlocksToBeta(stdBlocks)...)
+				for _, block := range stdBlocks {
+					if b, ok := betaDocumentBlock(block); ok {
+						contentBlocks = append(contentBlocks, b)
+					}
+				}
 			}
 		}
 	}
@@ -379,42 +355,19 @@ func convertBetaTools(t []tools.Tool) ([]anthropic.BetaToolUnionParam, error) {
 	return betaTools, nil
 }
 
-// stdBlocksToBeta converts standard Anthropic SDK content blocks to their Beta
-// API equivalents. The beta path (convertBetaUserMultiContent) requires
-// BetaContentBlockParamUnion, but convertDocument produces the standard type.
-// The two types are structurally identical for the block kinds we produce
-// (text, image, document), so we field-map them here.
-func stdBlocksToBeta(blocks []anthropic.ContentBlockParamUnion) []anthropic.BetaContentBlockParamUnion {
-	out := make([]anthropic.BetaContentBlockParamUnion, 0, len(blocks))
-	for _, b := range blocks {
-		switch {
-		case b.OfText != nil:
-			out = append(out, anthropic.BetaContentBlockParamUnion{
-				OfText: &anthropic.BetaTextBlockParam{Text: b.OfText.Text},
-			})
-		case b.OfImage != nil && b.OfImage.Source.OfBase64 != nil:
-			out = append(out, anthropic.BetaContentBlockParamUnion{
-				OfImage: &anthropic.BetaImageBlockParam{
-					Source: anthropic.BetaImageBlockParamSourceUnion{
-						OfBase64: &anthropic.BetaBase64ImageSourceParam{
-							Data:      b.OfImage.Source.OfBase64.Data,
-							MediaType: anthropic.BetaBase64ImageSourceMediaType(b.OfImage.Source.OfBase64.MediaType),
-						},
-					},
-				},
-			})
-		case b.OfDocument != nil && b.OfDocument.Source.OfBase64 != nil:
-			out = append(out, anthropic.BetaContentBlockParamUnion{
-				OfDocument: &anthropic.BetaRequestDocumentBlockParam{
-					Source: anthropic.BetaRequestDocumentBlockSourceUnionParam{
-						OfBase64: &anthropic.BetaBase64PDFSourceParam{
-							Data: b.OfDocument.Source.OfBase64.Data,
-						},
-					},
-				},
-			})
-		}
-		// Unknown block kinds are dropped (should never happen in Phase 1).
+// betaDocumentBlock maps the text, image and PDF blocks produced by convertDoc.
+func betaDocumentBlock(b anthropic.ContentBlockParamUnion) (anthropic.BetaContentBlockParamUnion, bool) {
+	switch {
+	case b.OfText != nil:
+		return anthropic.NewBetaTextBlock(b.OfText.Text), true
+	case b.OfImage != nil && b.OfImage.Source.OfBase64 != nil:
+		src := b.OfImage.Source.OfBase64
+		return anthropic.NewBetaImageBlock(anthropic.BetaBase64ImageSourceParam{
+			Data: src.Data, MediaType: anthropic.BetaBase64ImageSourceMediaType(src.MediaType),
+		}), true
+	case b.OfDocument != nil && b.OfDocument.Source.OfBase64 != nil:
+		return anthropic.NewBetaDocumentBlock(anthropic.BetaBase64PDFSourceParam{Data: b.OfDocument.Source.OfBase64.Data}), true
+	default:
+		return anthropic.BetaContentBlockParamUnion{}, false
 	}
-	return out
 }

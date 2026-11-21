@@ -610,3 +610,49 @@ func diff(a, b map[string]bool) map[string]bool {
 	}
 	return d
 }
+
+// TestJsonSchemaRejectsNonPositiveContextWindow pins that the model-level
+// context_window is a positive integer: a zero or negative window is rejected.
+func TestJsonSchemaRejectsNonPositiveContextWindow(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	const base = `version: "16"
+models:
+  m:
+    provider: openai
+    model: gpt-4o
+    context_window: %s
+agents:
+  root:
+    model: m
+    instruction: hi
+`
+	for _, tt := range []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{"positive is accepted", "32768", true},
+		{"zero is rejected", "0", false},
+		{"negative is rejected", "-1", false},
+		{"string is rejected", `"big"`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Round-trip through JSON: the raw loader does not enforce numeric
+			// bounds on the integer types the YAML decoder produces.
+			var rawJSON any
+			require.NoError(t, yaml.Unmarshal([]byte(fmt.Sprintf(base, tt.value)), &rawJSON))
+			doc, err := json.Marshal(rawJSON)
+			require.NoError(t, err)
+			result, err := schema.Validate(gojsonschema.NewBytesLoader(doc))
+			require.NoError(t, err)
+			assert.Equal(t, tt.valid, result.Valid(), "context_window %s: %v", tt.value, result.Errors())
+		})
+	}
+}

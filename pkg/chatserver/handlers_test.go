@@ -14,8 +14,7 @@ import (
 )
 
 // newTestServer builds a server with a fake policy for tests that don't run
-// the agent loop. Handlers that touch s.team will panic — those code paths
-// are exercised by integration tests, not here.
+// the agent loop.
 func newTestServer(exposed ...string) (*server, *echo.Echo) {
 	if len(exposed) == 0 {
 		exposed = []string{"root"}

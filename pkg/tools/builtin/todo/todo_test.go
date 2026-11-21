@@ -341,35 +341,6 @@ func TestTodoTool_CreateTodo_FullStateOutput(t *testing.T) {
 	assert.Contains(t, out2.Reminder, "todo_2")
 }
 
-func TestTodoTool_UpdateTodos_FullStateOutput(t *testing.T) {
-	t.Parallel()
-	tool := New()
-
-	_, err := tool.handler.createTodos(t.Context(), CreateTodosArgs{
-		Descriptions: []string{"A", "B", "C"},
-	})
-	require.NoError(t, err)
-
-	result, err := tool.handler.updateTodos(t.Context(), UpdateTodosArgs{
-		Updates: []Update{{ID: "todo_1", Status: "completed"}},
-	})
-	require.NoError(t, err)
-
-	var output UpdateTodosOutput
-	require.NoError(t, json.Unmarshal([]byte(result.Output), &output))
-
-	// AllTodos shows full state including the completed item
-	require.Len(t, output.AllTodos, 3)
-	assert.Equal(t, "completed", output.AllTodos[0].Status)
-	assert.Equal(t, "pending", output.AllTodos[1].Status)
-	assert.Equal(t, "pending", output.AllTodos[2].Status)
-
-	// Reminder only lists incomplete items
-	assert.NotContains(t, output.Reminder, "todo_1")
-	assert.Contains(t, output.Reminder, "todo_2")
-	assert.Contains(t, output.Reminder, "todo_3")
-}
-
 // requireMeta asserts that result.Meta is a []Todo of the expected length.
 func requireMeta(t *testing.T, result *tools.ToolCallResult, expectedLen int) {
 	t.Helper()

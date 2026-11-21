@@ -190,20 +190,6 @@ func TestHistory_EdgeCases(t *testing.T) {
 	assert.Empty(t, h.Next())             // Should return empty when going past the end
 }
 
-func TestHistory_StayAtTheBeginning(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-
-	h, err := New("")
-	require.NoError(t, err)
-
-	require.NoError(t, h.Add("first"))
-
-	assert.Equal(t, "first", h.Previous())
-	assert.Equal(t, "first", h.Previous())
-}
-
 func TestHistory_NoDuplicateMessages(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

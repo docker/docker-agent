@@ -198,16 +198,19 @@ body {
   text-decoration: none;
   color: var(--text);
 }
-.header-logo .docker-mark {
-  width: 26px;
-  height: 20px;
+.header-logo .docker-logo {
+  width: 203px;
+  height: 24px;
   flex-shrink: 0;
 }
-.header-logo .product-name {
-  font-weight: 600;
-  font-size: 0.95rem;
-  letter-spacing: -0.015em;
-}
+/* The Docker Agent logo has a white file for the dark theme and a
+   #101010 file for the light theme; show the one for html[data-theme]. */
+.header-logo img.theme-light-only,
+.site-footer-brand img.theme-light-only { display: none; }
+[data-theme="light"] .header-logo img.theme-light-only,
+[data-theme="light"] .site-footer-brand img.theme-light-only { display: block; }
+[data-theme="light"] .header-logo img.theme-dark-only,
+[data-theme="light"] .site-footer-brand img.theme-dark-only { display: none; }
 
 .header-actions {
   display: flex;
@@ -1225,13 +1228,14 @@ details.sidebar-section[open] > summary.sidebar-heading::after { transform: rota
 }
 .site-footer-brand {
   display: flex;
+  flex-direction: column;
   gap: 12px;
   align-items: flex-start;
 }
-.site-footer-product {
-  font-weight: 600;
-  font-size: 0.875rem;
-  color: var(--text);
+.site-footer-brand .docker-logo {
+  width: 152px;
+  height: 18px;
+  flex-shrink: 0;
 }
 .site-footer-tagline {
   font-size: 0.8125rem;

@@ -643,6 +643,7 @@ export interface ModelConfig {
   capabilities?: CapabilitiesConfig;
   output_capabilities?: OutputCapabilitiesConfig;
   cost?: CostConfig;
+  context_window?: number;
 }
 
 /** Go: pkg/config/latest/types.go Toolset */

@@ -134,7 +134,10 @@ type runtimeRunner interface {
 
 // Session owns one embedded runtime and one mutable conversation session.
 type Session struct {
-	cfg Config
+	sessionOptions     []session.Opt
+	eventBuffer        int
+	forwardElicitation bool
+	forwardAllEvents   bool
 
 	rt      runtimeRunner
 	session *session.Session
@@ -204,7 +207,13 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("embeddedchat: create runtime: %w", err)
 	}
 
-	s := &Session{cfg: cfg, rt: rt}
+	s := &Session{
+		rt:                 rt,
+		sessionOptions:     cfg.SessionOptions,
+		eventBuffer:        cfg.EventBuffer,
+		forwardElicitation: cfg.ForwardElicitation,
+		forwardAllEvents:   cfg.ForwardAllEvents,
+	}
 	if !cfg.NonLocal {
 		// Capture the embedder's workspace root once, at initialization: a later
 		// process chdir must not change which workspace owns the conversations.
@@ -283,7 +292,7 @@ func (s *Session) resetConversationLocked() {
 	if s.workingDir != "" {
 		opts = append(opts, session.WithWorkingDir(s.workingDir))
 	}
-	opts = append(opts, s.cfg.SessionOptions...)
+	opts = append(opts, s.sessionOptions...)
 	s.session = session.New(opts...)
 }
 
@@ -322,7 +331,7 @@ func (s *Session) Send(ctx context.Context, prompt string) (<-chan Event, error)
 	events := s.rt.RunStream(runCtx, s.session)
 	s.mu.Unlock()
 
-	out := make(chan Event, eventBufferSize(s.cfg.EventBuffer))
+	out := make(chan Event, eventBufferSize(s.eventBuffer))
 	go s.forwardEvents(runCtx, events, out, cancel, runID)
 	return out, nil
 }
@@ -399,7 +408,7 @@ func (s *Session) forwardEvents(ctx context.Context, events <-chan dagentruntime
 			// Without ForwardElicitation this headless wrapper has no elicitation
 			// UI, so decline rather than let the run hang forever. Forwarded
 			// requests are declined too once the run errored or was cancelled.
-			if errSent || !s.cfg.ForwardElicitation || !emit(Event{RuntimeEvent: event, Elicitation: e}) {
+			if errSent || !s.forwardElicitation || !emit(Event{RuntimeEvent: event, Elicitation: e}) {
 				_ = s.rt.ResumeElicitation(ctx, tools.ElicitationActionDecline, nil, e.ElicitationID)
 			}
 		case *dagentruntime.MaxIterationsReachedEvent:
@@ -417,7 +426,7 @@ func (s *Session) forwardEvents(ctx context.Context, events <-chan dagentruntime
 				continue
 			}
 			translated, ok := TranslateRuntimeEvent(event)
-			if !ok && s.cfg.ForwardAllEvents {
+			if !ok && s.forwardAllEvents {
 				translated, ok = Event{RuntimeEvent: event}, true
 			}
 			if ok && !emit(translated) {

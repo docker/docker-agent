@@ -18,7 +18,8 @@
 //	GOOS=js GOARCH=wasm go build -o web/docker-agent.wasm ./cmd/wasm
 //
 // and loaded by web/index.html via wasm_exec.js. RAG is opt-in with
-// -tags docker_agent_wasm_rag.
+// -tags docker_agent_wasm_rag; -tags docker_agent_wasm_small selects a
+// much smaller profile with fewer features (see README.md).
 //
 // What this entry point does NOT do, by construction: run processes, read
 // or write files, listen on sockets, persist sessions. Configs that need
@@ -88,7 +89,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
-	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 // compatState tracks the chat() call in flight so abort() can cancel it.
@@ -138,7 +138,7 @@ func parseConfigJS(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return throwingError("parseConfig: expected yaml string argument")
 	}
-	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())), config.WithVersions(legacy.Register))
+	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())), config.WithVersions(configVersions))
 	if err != nil {
 		return throwingError(fmt.Sprintf("parseConfig: %v", err))
 	}
@@ -149,7 +149,7 @@ func listAgentsJS(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return throwingError("listAgents: expected yaml string argument")
 	}
-	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())), config.WithVersions(legacy.Register))
+	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())), config.WithVersions(configVersions))
 	if err != nil {
 		return throwingError(fmt.Sprintf("listAgents: %v", err))
 	}

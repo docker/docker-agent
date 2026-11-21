@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -150,4 +151,25 @@ func TestAppendContentImageScanOffsetIsUTF8Safe(t *testing.T) {
 	require.Nil(t, m.AppendContent("[界"))
 	require.Equal(t, len("界"), m.imageScanOffset)
 	require.Equal(t, "![界", m.message.Content[m.imageScanOffset:])
+}
+
+func TestImageLabelsAreSanitized(t *testing.T) {
+	tuiimage.SetRenderingEnabled(true)
+	uri := testImageURI(t, color.RGBA{G: 255, A: 255})
+	msg := types.Agent(types.MessageTypeAssistant, "root", "![\x1bDlabel\x07]("+uri+")")
+	mv := New(animation.NewRuntime(), msg, nil)
+	mv.SetSize(80, 0)
+	cmd := mv.Init()
+	require.NotNil(t, cmd)
+	_, _ = mv.Update(cmd())
+	view := mv.View()
+	require.Contains(t, view, "cagent-image")
+	assert.Contains(t, ansi.Strip(view), "label")
+	assert.NotContains(t, view, "\x1bD")
+	assert.NotContains(t, view, "\x07")
+
+	lines := assistantMediaLines(types.AssistantMedia{Fallback: "file\x1b[2J\x07.png"}, 40)
+	require.Len(t, lines, 1)
+	assert.NotContains(t, lines[0], "\x1b[2J")
+	assert.Contains(t, ansi.Strip(lines[0]), "file.png")
 }

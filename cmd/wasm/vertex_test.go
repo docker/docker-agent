@@ -1,4 +1,4 @@
-//go:build js && wasm
+//go:build js && wasm && !docker_agent_wasm_small
 
 package main
 

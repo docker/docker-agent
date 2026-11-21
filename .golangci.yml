@@ -110,8 +110,6 @@ linters:
       replace-allow-list:
         - github.com/charmbracelet/ultraviolet
         - github.com/cyphar/filepath-securejoin
-        # TODO(docker/docker-agent#4068): drop with the go.mod replace.
-        - github.com/modelcontextprotocol/go-sdk
     gocritic:
       disabled-checks:
         - dupImport

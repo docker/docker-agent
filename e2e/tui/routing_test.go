@@ -51,17 +51,17 @@ func newRoutedTUI(t *testing.T, policy session.SafetyPolicy, specialistScripts .
 
 	judge := &routingJudge{}
 	root := agent.New("root", "Only routes.", agent.WithDescription("Router"),
-		agent.WithModel(&scriptedProvider{id: "test/router", contextSize: 10000, scripts: [][]chat.MessageStreamResponse{contentScript("router must not answer", 1, 1)}}),
+		agent.WithModel(&scriptedProvider{id: "test/router", contextWindow: 10000, scripts: [][]chat.MessageStreamResponse{contentScript("router must not answer", 1, 1)}}),
 		agent.WithRouting(agent.Routing{AllowedAgents: []string{"quick", "specialist"}, DefaultAgent: "quick"}),
 		agent.WithHooks(&latest.HooksConfig{BeforeAgentRun: latest.HookDefinitions{{
 			Type: "evaluator", Evaluator: "task_route",
 			RoutingPolicy: &latest.RoutingPolicy{Routes: map[string]string{"simple": "quick", "complex": "specialist"}, MinProbability: 0.85},
 		}}}))
 	quick := agent.New("quick", "Answer briefly.", agent.WithDescription("Quick answers"),
-		agent.WithModel(&scriptedProvider{id: "test/quick", contextSize: 10000, scripts: [][]chat.MessageStreamResponse{contentScript("Quick answer.", 10, 5)}}))
+		agent.WithModel(&scriptedProvider{id: "test/quick", contextWindow: 10000, scripts: [][]chat.MessageStreamResponse{contentScript("Quick answer.", 10, 5)}}))
 	specialistOpts := []agent.Opt{
 		agent.WithDescription("Specialist"),
-		agent.WithModel(&scriptedProvider{id: "test/specialist", contextSize: 10000, scripts: specialistScripts}),
+		agent.WithModel(&scriptedProvider{id: "test/specialist", contextWindow: 10000, scripts: specialistScripts}),
 	}
 	if len(specialistScripts) > 1 {
 		tool := tools.Tool{
@@ -124,14 +124,14 @@ func TestRouting_CompletionContinuesToReviewer(t *testing.T) {
 
 	judge := &fixedReviewJudge{}
 	drafter := agent.New("drafter", "Draft an answer.", agent.WithDescription("Drafts"),
-		agent.WithModel(&scriptedProvider{id: "test/drafter", contextSize: 10000, scripts: [][]chat.MessageStreamResponse{contentScript("Draft answer.", 10, 5)}}),
+		agent.WithModel(&scriptedProvider{id: "test/drafter", contextWindow: 10000, scripts: [][]chat.MessageStreamResponse{contentScript("Draft answer.", 10, 5)}}),
 		agent.WithRouting(agent.Routing{AllowedAgents: []string{"reviewer"}, DefaultAgent: "reviewer"}),
 		agent.WithHooks(&latest.HooksConfig{AfterAgentComplete: latest.HookDefinitions{{
 			Type: "evaluator", Evaluator: "answer_review",
 			RoutingPolicy: &latest.RoutingPolicy{Routes: map[string]string{"review": "reviewer", "ready": "reviewer"}, MinProbability: 0.85},
 		}}}))
 	reviewer := agent.New("reviewer", "Review the draft.", agent.WithDescription("Reviews"),
-		agent.WithModel(&scriptedProvider{id: "test/reviewer", contextSize: 10000, scripts: [][]chat.MessageStreamResponse{contentScript("Reviewed answer.", 10, 5)}}))
+		agent.WithModel(&scriptedProvider{id: "test/reviewer", contextWindow: 10000, scripts: [][]chat.MessageStreamResponse{contentScript("Reviewed answer.", 10, 5)}}))
 
 	rt, err := runtime.New(t.Context(), team.New(team.WithAgents(drafter, reviewer),
 		team.WithEvaluators(map[string]evaluator.Evaluator{"answer_review": judge})),

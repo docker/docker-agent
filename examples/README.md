@@ -207,6 +207,7 @@ remote MCP endpoints.
 | [`model_env_substitution.yaml`](model_env_substitution.yaml) | `${env.VAR}` substitution in a model's `model` / `base_url`. |
 | [`api-route.yaml`](api-route.yaml) | API Route multi-model gateway provider. |
 | [`atlascloud.yaml`](atlascloud.yaml) | Atlas Cloud open-model host (`atlascloud`). |
+| [`popnow.yaml`](popnow.yaml) | PopNow multi-vendor model API (`popnow`). |
 | [`baseten.yaml`](baseten.yaml) | Baseten cloud provider. |
 | [`daoxe.yaml`](daoxe.yaml) | DaoXE multi-model gateway provider. |
 | [`opper.yaml`](opper.yaml) | Opper multi-model gateway provider. |

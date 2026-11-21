@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -43,6 +45,30 @@ func TestAttachedServer_SteerReachesAttachedRuntime(t *testing.T) {
 	resp := httpDoTCP(t, ctx, http.MethodPost, addr+"/api/sessions/"+sess.ID+"/steer",
 		api.SteerSessionRequest{Messages: []api.Message{{Content: "hello"}}})
 	assert.Contains(t, string(resp), "queued")
+}
+
+func TestAttachedServer_QueueStatus(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	sm := newTestSessionManager(t, sess, &queueStatusRuntime{})
+	srv := NewWithManager(sm, "")
+
+	rec := httptest.NewRecorder()
+	srv.e.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/sessions/"+sess.ID+"/queue", http.NoBody))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"steer":{"depth":1,"capacity":4},"followup":{"depth":2,"capacity":8}}`, rec.Body.String())
+
+	rec = httptest.NewRecorder()
+	srv.e.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/sessions/unknown/queue", http.NoBody))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.JSONEq(t, `{"message":"session not found or not running"}`, rec.Body.String())
+}
+
+type queueStatusRuntime struct{ fakeRuntime }
+
+func (*queueStatusRuntime) QueueStatus() runtime.QueueStatus {
+	return runtime.QueueStatus{SteerDepth: 1, SteerCapacity: 4, FollowupDepth: 2, FollowupCapacity: 8}
 }
 
 func TestAttachedServer_EventStreamEmitsRegisteredEvents(t *testing.T) {

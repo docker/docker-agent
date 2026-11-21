@@ -675,6 +675,8 @@ func (mv *messageModel) markdownImagePlaceholders(content string, width int) (st
 		if name == "" {
 			name = image.Name
 		}
+		// Labels are inserted after rendering, so sanitize them here.
+		name = markdown.StripTerminalControls(name)
 		lines := make([]string, 0, len(markerLines)+1)
 		if name != "" {
 			lines = append(lines, "  "+styles.MutedStyle.Render(name))
@@ -762,16 +764,17 @@ func assistantMediaLines(media types.AssistantMedia, width int) []string {
 	if media.Image != nil {
 		if markers := tuiimage.RenderMarkers(*media.Image, width); len(markers) > 0 {
 			lines := make([]string, 0, len(markers)+1)
-			if media.Image.Name != "" {
-				lines = append(lines, "  "+styles.MutedStyle.Render(media.Image.Name))
+			if name := markdown.StripTerminalControls(media.Image.Name); name != "" {
+				lines = append(lines, "  "+styles.MutedStyle.Render(name))
 			}
 			return append(lines, markers...)
 		}
 	}
-	if media.Fallback == "" {
+	fallback := markdown.StripTerminalControls(media.Fallback)
+	if fallback == "" {
 		return nil
 	}
-	return []string{styles.MutedStyle.Width(width).Render(media.Fallback)}
+	return []string{styles.MutedStyle.Width(width).Render(fallback)}
 }
 
 // renderAssistantMarkdown renders streamed assistant content using a per-message

@@ -491,14 +491,17 @@ func wrapTokens(tokens []chromaToken, maxWidth int) [][]chromaToken {
 				spaceLeft = maxWidth
 			}
 
-			// Find how much of the text fits
+			// Find how much of the text fits. Decode explicitly: `range`
+			// reports an invalid byte as U+FFFD while consuming one source
+			// byte, and utf8.RuneLen(U+FFFD) is 3, which would overrun text.
 			fitLen, fitWidth := 0, 0
-			for _, r := range text {
+			for fitLen < len(text) {
+				r, size := utf8.DecodeRuneInString(text[fitLen:])
 				rw := runewidth.RuneWidth(r)
 				if fitWidth+rw > spaceLeft {
 					break
 				}
-				fitLen += utf8.RuneLen(r)
+				fitLen += size
 				fitWidth += rw
 			}
 

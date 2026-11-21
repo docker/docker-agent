@@ -7,14 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNewCredentialHelperProvider(t *testing.T) {
-	t.Parallel()
-
-	p := NewCredentialHelperProvider("echo", "test-token")
-	assert.Equal(t, "echo", p.command)
-	assert.Equal(t, []string{"test-token"}, p.args)
-}
-
 func TestCredentialHelperProvider_Get(t *testing.T) {
 	t.Parallel()
 

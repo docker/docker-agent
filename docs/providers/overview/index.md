@@ -72,6 +72,7 @@ Use this table to find a built-in provider's config key and authentication metho
 | Lunaroute      | [`lunaroute`](../lunaroute/index.md) | `LUNAROUTE_API_KEY`                |
 | OrcaRouter     | `orcarouter`     | `ORCAROUTER_API_KEY`                |
 | Atlas Cloud    | [`atlascloud`](../atlascloud/index.md) | `ATLASCLOUD_API_KEY`                |
+| PopNow         | [`popnow`](../popnow/index.md) | `POPNOW_API_KEY`                    |
 | Runcrate       | [`runcrate`](../runcrate/index.md) | `RUNCRATE_API_KEY`                  |
 | CloudGPU       | [`cloudgpu`](../cloudgpu/index.md) | `CLOUDGPU_API_KEY`                  |
 | Obscurify.ai   | [`obscurify`](../obscurify/index.md) | `OBSCURIFY_API_KEY`                 |

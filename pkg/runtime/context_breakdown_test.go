@@ -252,8 +252,8 @@ func TestContextBreakdown_NoCompactionModelLeavesAttributionZero(t *testing.T) {
 func TestContextBreakdown_UnresolvableCompactionWindowLeavesAttributionZero(t *testing.T) {
 	t.Parallel()
 
-	// The compaction model has no catalogue entry and no provider_opts
-	// context_size, so its window can't be resolved: the effective limit
+	// The compaction model has no catalogue entry and no
+	// context_window, so its window can't be resolved: the effective limit
 	// must fall back to the primary. The model identity is still reported
 	// (a dedicated model IS configured), but its window is 0.
 	store := mapModelStore{limits: map[string]int{"primary/big": 200_000}}
