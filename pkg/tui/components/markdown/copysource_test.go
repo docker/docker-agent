@@ -15,8 +15,18 @@ func TestLongFencesAndSourceCode(t *testing.T) {
 		{"tildes", "~~~~sh\none\n~~~\ntwo\n~~~~", "one\n~~~\ntwo"},
 		{"quote", "> ````\n> one\n> ```\n> two\n> ````", "one\n```\ntwo"},
 		{"list", "- commands\n  ````\n  one\n  ```\n  two\n  ````", "one\n```\ntwo"},
-		{"control", "```\nfirst\x1b[31msecond\n```", "first\x1b[31msecond"},
 		{"crlf", "```\r\none\r\ntwo\r\n```", "one\r\ntwo"},
+		{"crlf after prose", "some prose\r\n\r\n```sh\r\none\r\ntwo\r\n```", "one\r\ntwo"},
+		{"crlf blank last line", "```\r\none\r\n\r\n```", "one\r\n"},
+		{"crlf quote", "> > ```\r\n> > a  \r\n> > b\r\n> > ```", "a  \r\nb"},
+		{"crlf list", "- step\r\n    ~~~\r\n  echo hello\r\n  echo bye\r\n    ~~~", "echo hello\r\necho bye"},
+		{"crlf unclosed", "```\r\none\r\n", "one\r\n"},
+		{"mixed line endings", "prose\r\n\n```\nfirst\r\nsecond\nthird\r\n```", "first\r\nsecond\nthird"},
+		{"list short indent", "- step\n    ~~~\n  echo hello\n    ~~~", "echo hello"},
+		{"list tabs", "- step\n\t~~~\n\techo hello\n\t~~~", "echo hello"},
+		{"list tab crossing boundary", "- step\n  ~~~\n\techo hello\n  ~~~", "  echo hello"},
+		{"list spaces for tab", "- step\n\t~~~\n    echo hello\n\t~~~", "echo hello"},
+		{"nested quote whitespace", "> > ```\n> >   one  \n> > two\t \n> > ```", "  one  \ntwo\t "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			view, blocks, err := NewFastRenderer(60).RenderWithSourceCodeBlocks(tc.message)
@@ -35,13 +45,38 @@ func TestSourceCopyHidesAmbiguousBlocks(t *testing.T) {
 		"```\nsafe\n```\n\n\x1b]0;\n```\nhidden\n```\x07",
 		"```\necho hi\x1b]0;\rid\r\x07\n```",
 		"```\necho hi\x1bPpayload\x1b\\\n```",
+		"```\nprintf '%s' sa\x1b[31mfe\n```",
 		"```\nfoo\rbar\n```",
+		"```\nfoo\r",
+		"```\nfoo\r\nbar\r",
+		"```\na\n```\n\n```\nb\x1b[0m\n```",
+		"\x1b[31mprose\x1b[0m\n\n```\nsafe\n```",
 	} {
 		view, blocks, err := NewFastRenderer(60).RenderWithSourceCodeBlocks(input)
 		require.NoError(t, err)
 		assert.Empty(t, blocks)
 		assert.NotContains(t, view, CodeBlockCopyIcon)
 		assert.NotContains(t, ansi.Strip(view), "hidden")
+	}
+}
+
+func TestContainsHiddenControl(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, input string
+		want        bool
+	}{
+		{"unicode", "日本語🙂", false},
+		{"crlf", "a\r\nb", false},
+		{"sgr", "a\x1b[31mb", true},
+		{"raw c1", "a\x9bb", true},
+		{"encoded c1", "a\u009bb", true},
+		{"standalone cr", "a\rb", true},
+		{"invalid utf8", "a\xff", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, containsHiddenControl(tc.input))
+		})
 	}
 }
 

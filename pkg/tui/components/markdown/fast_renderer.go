@@ -342,12 +342,26 @@ func (r *FastRenderer) RenderWithSourceCodeBlocks(input string) (string, []CodeB
 	rawOutput := finalizeOutput(p.parse(), r.width)
 	rawBlocks := slices.Clone(p.codeBlocks)
 	parserPool.Put(p)
-	compatible := len(rawBlocks) == len(blocks) && sanitizeForTerminal(rawOutput) == sanitizeForTerminal(out)
+
+	// CRLF must be normalized before rendering, not after it affects padding.
+	normalizedBlocks := rawBlocks
+	if strings.Contains(input, "\r\n") {
+		p = parserPool.Get().(*parser)
+		p.reset(strings.ReplaceAll(input, "\r\n", "\n"), r.width)
+		p.hideCopyIcon = r.hideCopyIcon
+		rawOutput = finalizeOutput(p.parse(), r.width)
+		normalizedBlocks = slices.Clone(p.codeBlocks)
+		parserPool.Put(p)
+	}
+	compatible := len(rawBlocks) == len(blocks) && len(normalizedBlocks) == len(blocks) && sanitizeForTerminal(rawOutput) == sanitizeForTerminal(out)
 	if compatible {
 		for i := range blocks {
-			// The last line separator belongs to the fence, not the code.
-			rawBlocks[i].Content = strings.TrimSuffix(rawBlocks[i].Content, "\r")
-			if blocks[i].Line != rawBlocks[i].Line || blocks[i].Content != sanitizeForTerminal(rawBlocks[i].Content) || containsHiddenControl(rawBlocks[i].Content) {
+			// Remove CR only when the normalized parse identifies it as a line separator.
+			trimmed := strings.TrimSuffix(rawBlocks[i].Content, "\r")
+			if strings.ReplaceAll(trimmed, "\r\n", "\n") == normalizedBlocks[i].Content {
+				rawBlocks[i].Content = trimmed
+			}
+			if strings.ReplaceAll(rawBlocks[i].Content, "\r\n", "\n") != normalizedBlocks[i].Content || blocks[i].Line != normalizedBlocks[i].Line || blocks[i].Content != sanitizeForTerminal(rawBlocks[i].Content) || containsHiddenControl(rawBlocks[i].Content) {
 				compatible = false
 				break
 			}
@@ -364,34 +378,26 @@ func (r *FastRenderer) RenderWithSourceCodeBlocks(input string) (string, []CodeB
 	return out, blocks, nil
 }
 
-// containsHiddenControl permits CRLF and SGR colors but rejects control
-// strings and cursor controls whose invisible payload can alter pasted text.
+// Invisible controls can make pasted code differ from what was displayed.
 func containsHiddenControl(s string) bool {
-	for i := 0; i < len(s); i++ {
+	if !utf8.ValidString(s) || hasEncodedC1(s) {
+		return true
+	}
+	for i := range len(s) {
 		switch s[i] {
 		case '\r':
 			if i+1 >= len(s) || s[i+1] != '\n' {
 				return true
 			}
 		case '\x1b':
-			if i+1 >= len(s) || s[i+1] != '[' {
-				return true
-			}
-			j := i + 2
-			for j < len(s) && ((s[j] >= '0' && s[j] <= '9') || s[j] == ';' || s[j] == ':') {
-				j++
-			}
-			if j >= len(s) || s[j] != 'm' {
-				return true
-			}
-			i = j
+			return true
 		default:
-			if isControlByte(s[i]) || s[i] >= 0x80 && s[i] <= 0x9f && !utf8.ValidString(s) {
+			if isControlByte(s[i]) {
 				return true
 			}
 		}
 	}
-	return hasEncodedC1(s)
+	return false
 }
 
 // parser holds the state for parsing markdown.
@@ -697,7 +703,7 @@ func (p *parser) renderBlockquoteContent(lines []string, indent string, availabl
 			// Collect all consecutive nested blockquote lines
 			var nestedLines []string
 			for i < len(lines) {
-				l := strings.TrimSpace(lines[i])
+				l := strings.TrimLeft(lines[i], " \t")
 				content, found := strings.CutPrefix(l, ">")
 				if !found {
 					break
@@ -1497,6 +1503,7 @@ func (p *parser) renderListCodeBlock(codeIndent, bulletWidth int) {
 
 	line := p.lines[p.lineIdx]
 	ltrimmed := strings.TrimLeft(line, " \t")
+	codeIndent = indentationWidth(line[:codeIndent])
 
 	fence, lang := openingFence(ltrimmed)
 	p.lineIdx++
@@ -1509,12 +1516,7 @@ func (p *parser) renderListCodeBlock(codeIndent, bulletWidth int) {
 			p.lineIdx++
 			break
 		}
-		// Remove the list indentation from code lines
-		if len(codeLine) >= codeIndent {
-			codeLines = append(codeLines, codeLine[codeIndent:])
-		} else {
-			codeLines = append(codeLines, strings.TrimLeft(codeLine, " \t"))
-		}
+		codeLines = append(codeLines, removeIndentation(codeLine, codeIndent))
 		p.lineIdx++
 	}
 
@@ -1526,6 +1528,37 @@ func (p *parser) renderListCodeBlock(codeIndent, bulletWidth int) {
 	indent := spaces(bulletWidth)
 	availableWidth := p.width - bulletWidth
 	p.renderCodeBlockWithIndent(code, lang, indent, availableWidth)
+}
+
+func indentationWidth(indent string) int {
+	column := 0
+	for _, ch := range indent {
+		if ch == '\t' {
+			column += 4 - column%4
+		} else {
+			column++
+		}
+	}
+	return column
+}
+
+// A tab crossing the indentation boundary leaves spaces in the code.
+func removeIndentation(line string, width int) string {
+	column := 0
+	for i := 0; i < len(line) && column < width; i++ {
+		switch line[i] {
+		case ' ':
+			column++
+		case '\t':
+			column += 4 - column%4
+		default:
+			return line[i:]
+		}
+		if column >= width {
+			return strings.Repeat(" ", column-width) + line[i+1:]
+		}
+	}
+	return ""
 }
 
 // renderListBlockquote renders a blockquote within a list context
