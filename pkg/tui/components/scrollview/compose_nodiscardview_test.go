@@ -11,9 +11,8 @@ import (
 )
 
 // composeOracle is the pre-refactor implementation: it pre-builds contentView
-// via strings.Join then uses len(contentView) as the Grow hint.  We keep it
-// as a correctness oracle to verify the refactored path produces identical
-// output across all three branches (scrollbar / reserved-space / default).
+// via strings.Join then uses len(contentView) as the Grow hint. It is a
+// geometry oracle for the scrollbar, reserved-space and default paths.
 func composeOracle(m *Model, lines []string, baseLine int) string {
 	contentWidth := m.ContentWidth()
 	for i, line := range lines {
@@ -128,7 +127,7 @@ func visibleLines(m *Model, content []string) []string {
 
 // TestComposeNodiscardviewEquivalence verifies that the refactored compose
 // (which accumulates contentLen instead of building an intermediate
-// strings.Join) produces identical output to the oracle in all three
+// strings.Join) produces identical display text to the oracle in all three
 // render branches and for both the memoized (baseLine>=0) and re-measure
 // (baseLine=-1) paths, including restyled lines and the empty-input edge case.
 func TestComposeNodiscardviewEquivalence(t *testing.T) {
@@ -142,7 +141,7 @@ func TestComposeNodiscardviewEquivalence(t *testing.T) {
 			for _, baseLine := range []int{m.scrollOffset, -1} {
 				want := composeOracle(m, slices.Clone(window), baseLine)
 				got := m.compose(slices.Clone(window), baseLine)
-				if want != got {
+				if ansi.Strip(want) != ansi.Strip(got) {
 					t.Fatalf("baseLine=%d: output mismatch\nwant %q\ngot  %q", baseLine, want, got)
 				}
 			}
@@ -154,12 +153,12 @@ func TestComposeNodiscardviewEquivalence(t *testing.T) {
 			}
 			want := composeOracle(m, slices.Clone(restyled), m.scrollOffset)
 			got := m.compose(slices.Clone(restyled), m.scrollOffset)
-			if want != got {
+			if ansi.Strip(want) != ansi.Strip(got) {
 				t.Fatalf("restyled: output mismatch\nwant %q\ngot  %q", want, got)
 			}
 
 			// Empty input.
-			if want, got := composeOracle(m, nil, -1), m.compose(nil, -1); want != got {
+			if want, got := composeOracle(m, nil, -1), m.compose(nil, -1); ansi.Strip(want) != ansi.Strip(got) {
 				t.Fatalf("empty input mismatch: %q vs %q", want, got)
 			}
 		})

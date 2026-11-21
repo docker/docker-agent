@@ -40,6 +40,7 @@ var settingsTabLabels = [tabCount]string{"Appearance", "Behavior", "Notification
 
 const (
 	rowTheme = iota
+	rowFadeScrollEdges
 	rowPosition
 	rowSpacing
 	rowInfoMode
@@ -289,6 +290,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			if delta > 0 {
 				return core.CmdHandler(messages.OpenThemePickerMsg{})
 			}
+		case rowFadeScrollEdges:
+			d.current.FadeScrollEdges = !d.current.FadeScrollEdges
 		case rowPosition:
 			d.current.Layout.SidebarPosition = cycleValue(sidebarPositions, d.current.Layout.SidebarPosition, delta)
 		case rowSpacing:
@@ -520,6 +523,7 @@ func (d *settingsDialog) renderAppearanceTab(content *settingsContent, width int
 		theme = styles.DefaultThemeRef
 	}
 	add(rowTheme, d.renderSelectorRow(rowTheme, "Theme", theme, width))
+	toggle(rowFadeScrollEdges, "Fade scroll edges", d.current.FadeScrollEdges)
 	if d.showVisuals {
 		content.addGroup("Sidebar layout", width)
 		add(rowPosition, d.renderSelectorRow(rowPosition, "Sidebar position", positionLabels[d.current.Layout.SidebarPosition], width))

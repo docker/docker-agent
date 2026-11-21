@@ -4,6 +4,7 @@
 │              Appearance   ·   Behavior   ·   Notifications               │
 │                                                                          │
 │  › Theme                                                  ‹ default › │  │
+│    [x] Fade scroll edges                                              │  │
 │                                                                       │  │
 │  ── Sidebar layout ────────────────────────────────────────────────   │  │
 │    Sidebar position                                         ‹ Right › │  │
@@ -17,7 +18,6 @@
 │      [ ] Active agents only                                           │  │
 │    [x] Tools                                                          │  │
 │    [ ] Plans                                                          │  │
-│    [x] Todos                                                          │  │
 │                                                                          │
 │                                                                          │
 │      ↑↓ move  ←→/space change  tab category  enter open  esc cancel      │

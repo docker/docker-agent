@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -929,6 +930,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		HideToolResults:               settings.HideToolResults,
 		RenderImages:                  settings.GetRenderImages(),
 		ShowBanner:                    settings.GetShowBanner(),
+		FadeScrollEdges:               settings.GetFadeScrollEdges(),
 		YOLO:                          settings.YOLO,
 		RestoreTabs:                   settings.GetRestoreTabs(),
 		Snapshot:                      settings.SnapshotsEnabled(),
@@ -957,6 +959,7 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	m.sendMode = messages.ParseSendMode(string(preferences.SendMode))
 	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
 	m.showBanner = preferences.ShowBanner
+	scrollview.SetEdgeFadeEnabled(preferences.FadeScrollEdges)
 	for _, tab := range m.tabs {
 		page := tab.chatPage
 		if page == nil {
@@ -1065,6 +1068,7 @@ func savePreferences(p messages.Preferences) error {
 		s.HideToolResults = p.HideToolResults
 		s.RenderImages = boolPreference(p.RenderImages, true)
 		s.ShowBanner = boolPreference(p.ShowBanner, true)
+		s.FadeScrollEdges = boolPreference(p.FadeScrollEdges, true)
 		s.YOLO = p.YOLO
 		s.Lean = p.Lean
 		s.KeepAwake = p.KeepAwake
@@ -1127,7 +1131,8 @@ func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.Send
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
-		YOLO: settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
+		FadeScrollEdges: settings.GetFadeScrollEdges(),
+		YOLO:            settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
 		BackgroundCompaction:          settings.BackgroundCompaction,
 		BackgroundCompactionThreshold: settings.GetBackgroundCompactionThreshold(),
 		CacheStablePrompts:            settings.CacheStablePromptsEnabled(),
