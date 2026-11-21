@@ -1,9 +1,3 @@
-// Package animation provides centralized animation tick management for the TUI.
-// All animated components (spinners, fades, etc.) share a single tick stream
-// to avoid tick storms and ensure synchronized animations.
-//
-// Thread safety: All exported functions are safe for concurrent use, though the
-// typical usage pattern is single-threaded via Bubble Tea's Update loop.
 package animation
 
 import (
@@ -120,6 +114,7 @@ func (r *Runtime) Unregister() {
 	}
 	if r.active == 0 {
 		r.abandonLeaseLocked()
+		r.lastDeliveredAt = time.Time{}
 	}
 }
 

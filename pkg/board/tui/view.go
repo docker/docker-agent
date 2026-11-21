@@ -53,8 +53,6 @@ func sanitize(s string) string {
 	}, s)
 }
 
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
 // projectColorAt returns the accent color of the i-th configured project.
 // The palette is read lazily: theme colors are only bound after ApplyTheme.
 func projectColorAt(i int) color.Color {
@@ -494,7 +492,7 @@ func (m *model) renderStatus(status board.CardStatus, width int, faded bool) str
 		fg = fade(fg)
 	}
 	style := styles.BaseStyle.Foreground(fg)
-	spinner := spinnerFrames[m.frame%len(spinnerFrames)]
+	spinner := m.spinnerGlyph()
 	switch status {
 	case board.StatusStarting, board.StatusLoading, board.StatusAttaching:
 		return style.Render(toolcommon.TruncateText(spinner+" "+string(status), width))

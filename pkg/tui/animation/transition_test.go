@@ -3,6 +3,7 @@ package animation
 import (
 	"testing"
 	"testing/synctest"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
@@ -221,3 +222,66 @@ func TestTransition_ZeroTicks(t *testing.T) {
 }
 
 func transitionRuntime(tr *Transition) *Runtime { return tr.ar }
+
+type manualScheduler struct{ now time.Time }
+
+func (s *manualScheduler) Now() time.Time { return s.now }
+func (s *manualScheduler) Tick(_ time.Duration, makeMsg func(time.Time) tea.Msg) tea.Cmd {
+	return func() tea.Msg { return makeMsg(s.now) }
+}
+
+func TestTransitionAndSpinnerSampleElapsedTime(t *testing.T) {
+	t.Parallel()
+	const duration = 500 * time.Millisecond
+	for _, samples := range [][]time.Duration{
+		{80 * time.Millisecond, 170 * time.Millisecond},
+		{250 * time.Millisecond},
+	} {
+		clock := &manualScheduler{now: time.Unix(1, 0)}
+		ar := NewRuntimeWithScheduler(clock)
+		tr := ar.Transition()
+		cmd := tr.Start(duration, EaseOutCubic)
+		advance := func(gap time.Duration) {
+			t.Helper()
+			clock.now = clock.now.Add(gap)
+			_, ok := ar.Accept(cmd().(TickMsg))
+			require.True(t, ok)
+			tr.Tick()
+			cmd = ar.Continue()
+		}
+		for _, d := range samples {
+			advance(d)
+		}
+		assert.Equal(t, 88, tr.Lerp(0, 100))
+		assert.Equal(t, 2, Chat.FrameIndexAt(ar.Now()))
+
+		ar.Pause()
+		clock.now = clock.now.Add(time.Hour)
+		assert.Equal(t, 88, tr.Lerp(0, 100))
+		cmd = ar.Resume()
+		advance(50 * time.Millisecond)
+		assert.Equal(t, 3, Chat.FrameIndexAt(ar.Now()), "hidden time must not advance the phase")
+		advance(time.Hour)
+		assert.Equal(t, 100, tr.Lerp(0, 100), "a long stall clamps a completed transition")
+		assert.Equal(t, 3, Chat.FrameIndexAt(ar.Now()), "a long stall samples the elapsed phase directly")
+		assert.Nil(t, cmd)
+	}
+}
+
+func TestRuntimeExcludesIdleTimeBetweenSubscriptions(t *testing.T) {
+	t.Parallel()
+	clock := &manualScheduler{now: time.Unix(1, 0)}
+	ar := NewRuntimeWithScheduler(clock)
+	sub := ar.Subscribe()
+	cmd := sub.Start()
+	clock.now = clock.now.Add(TickRate)
+	_, ok := ar.Accept(cmd().(TickMsg))
+	require.True(t, ok)
+	sub.Stop()
+	clock.now = clock.now.Add(time.Hour)
+	cmd = sub.Start()
+	clock.now = clock.now.Add(TickRate)
+	_, ok = ar.Accept(cmd().(TickMsg))
+	require.True(t, ok)
+	assert.Equal(t, 2*TickRate, ar.Now())
+}

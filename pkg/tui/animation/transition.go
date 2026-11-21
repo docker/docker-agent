@@ -150,17 +150,23 @@ func (tr *Transition) Duration() time.Duration { return tr.duration }
 
 // Progress returns the linear progress in [0, 1].
 func (tr *Transition) Progress() float64 {
-	if tr.duration <= 0 {
+	return ProgressAt(tr.Elapsed(), tr.duration, nil)
+}
+
+// ProgressAt maps elapsed time to clamped progress in [0, 1], optionally
+// applying easing. A nonpositive duration returns 0 (an unconfigured effect).
+func ProgressAt(elapsed, duration time.Duration, ease EasingFunc) float64 {
+	if duration <= 0 || elapsed <= 0 {
 		return 0
 	}
-	linear := float64(tr.Elapsed()) / float64(tr.duration)
-	if linear >= 1 {
+	if elapsed >= duration {
 		return 1
 	}
-	if linear < 0 {
-		return 0
+	progress := float64(elapsed) / float64(duration)
+	if ease != nil {
+		return ease(progress)
 	}
-	return linear
+	return progress
 }
 
 func (tr *Transition) currentElapsed() time.Duration {
@@ -177,11 +183,7 @@ func (tr *Transition) currentElapsed() time.Duration {
 // Value returns the eased progress in [0, 1]. Returns 0 before Start,
 // and 1 after the transition completes.
 func (tr *Transition) Value() float64 {
-	linear := tr.Progress()
-	if tr.easingFn != nil {
-		return tr.easingFn(linear)
-	}
-	return linear
+	return ProgressAt(tr.Elapsed(), tr.duration, tr.easingFn)
 }
 
 // Lerp returns the linearly-interpolated value between from and to at

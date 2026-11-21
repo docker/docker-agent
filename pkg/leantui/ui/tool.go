@@ -69,7 +69,7 @@ func RenderTool(t ToolView, width int) []string {
 }
 
 // RenderToolWithState renders a tool call using session state.
-func RenderToolWithState(t *ToolView, width, frame int, sessionState service.SessionStateReader) []string {
+func RenderToolWithState(t *ToolView, width int, elapsed time.Duration, sessionState service.SessionStateReader) []string {
 	if width < 1 {
 		width = 1
 	}
@@ -83,7 +83,7 @@ func RenderToolWithState(t *ToolView, width, frame int, sessionState service.Ses
 	boxStyle := StToolBox(width)
 	innerWidth := max(width-boxStyle.GetHorizontalFrameSize(), 1)
 
-	ar := animation.NewSnapshotRuntime(time.Duration(frame) * animation.ChatSpinnerFrameDuration)
+	ar := animation.NewSnapshotRuntime(elapsed)
 	if t.renderers == nil {
 		t.renderers = tooldefaults.NewRegistry()
 	}
