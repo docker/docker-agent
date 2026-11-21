@@ -9,10 +9,12 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/push"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -23,7 +25,8 @@ import (
 	adka2a "google.golang.org/adk/v2/server/adka2a/v2"
 	adksession "google.golang.org/adk/v2/session"
 
-	"github.com/docker/docker-agent/pkg/a2a/pushstore"
+	"github.com/docker/docker-agent/pkg/a2a/a2astore"
+	"github.com/docker/docker-agent/pkg/a2a/pushsender"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/httpsec"
@@ -57,9 +60,19 @@ type RunOptions struct {
 	CORSOrigin     string
 	// PushAllowPrivateNetworks disables the SSRF guard on the push-notification
 	// sender so webhooks resolving to loopback/private addresses are allowed.
-	// Off by default (guard on) per A2A spec §13.2; enable only for trusted
-	// internal deployments or local testing.
+	// Off by default (guard on, environment proxies ignored) per A2A spec
+	// §13.2; enable only for trusted internal deployments or local testing.
 	PushAllowPrivateNetworks bool
+}
+
+// pushDrainTimeout bounds how long shutdown waits for queued webhooks.
+const pushDrainTimeout = 5 * time.Second
+
+// taskDeps holds the SDK task and push-notification dependencies.
+type taskDeps struct {
+	tasks       taskstore.Store
+	pushConfigs push.ConfigStore
+	pushSender  push.Sender
 }
 
 func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runConfig *config.RuntimeConfig, ln net.Listener, options RunOptions) error {
@@ -106,16 +119,26 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 		}
 	}()
 
-	// Persist push-notification configs in a sibling database so webhooks
-	// registered via tasks/pushNotificationConfig/set survive a restart.
-	pushDBPath := filepath.Join(filepath.Dir(expandedSessionDB), "a2a-push.db")
-	pushStore, err := pushstore.New(ctx, pushDBPath)
+	// Tasks and their push configs live in a sibling database so webhooks
+	// registered via tasks/pushNotificationConfig/set survive a restart: the
+	// SDK checks the task exists before any push-config operation.
+	a2aStore, err := a2astore.New(ctx, filepath.Join(filepath.Dir(expandedSessionDB), "a2a.db"))
 	if err != nil {
-		return fmt.Errorf("failed to open push notification store: %w", err)
+		return fmt.Errorf("failed to open A2A task store: %w", err)
 	}
 	defer func() {
-		if err := pushStore.Close(); err != nil {
-			slog.ErrorContext(ctx, "Failed to close push notification store", "error", err)
+		if err := a2aStore.Close(); err != nil {
+			slog.ErrorContext(ctx, "Failed to close A2A task store", "error", err)
+		}
+	}()
+
+	pushSender := pushsender.New(pushsender.Config{AllowPrivateNetworks: options.PushAllowPrivateNetworks})
+	// Runs before the stores close (defers are LIFO).
+	defer func() {
+		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pushDrainTimeout)
+		defer cancel()
+		if err := pushSender.Close(drainCtx); err != nil {
+			slog.WarnContext(ctx, "Pending push notifications dropped on shutdown", "error", err)
 		}
 	}()
 
@@ -127,7 +150,11 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 		return err
 	}
 
-	e, err := newServer(t, agentFilename, agentName, sessStore, pushStore, resolvedSafety, workingDir, ln.Addr().String(), options)
+	e, err := newServer(t, agentFilename, agentName, sessStore, taskDeps{
+		tasks:       a2aStore.Tasks(a2asrv.NewTaskStoreAuthenticator()),
+		pushConfigs: a2aStore,
+		pushSender:  pushSender,
+	}, resolvedSafety, workingDir, ln.Addr().String(), options)
 	if err != nil {
 		return fmt.Errorf("failed to create A2A server: %w", err)
 	}
@@ -147,7 +174,7 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	return nil
 }
 
-func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, pushStore push.ConfigStore, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
+func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, deps taskDeps, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
 	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir)
 	if err != nil {
 		return nil, err
@@ -214,16 +241,12 @@ func newServer(t *team.Team, agentFilename, agentName string, sessStore session.
 		"a2a.agent_card",
 	)
 	// Push notifications let clients register a webhook (via
-	// tasks/pushNotificationConfig/set) that the SDK's processor POSTs task
-	// status/artifact updates to as the agent runs. The HTTP sender is
-	// SSRF-hardened by default (rejects loopback/private/metadata targets);
-	// PushAllowPrivateNetworks opts out for trusted or local deployments.
-	pushSender := push.NewHTTPPushSender(&push.HTTPSenderConfig{
-		AllowPrivateNetworks: options.PushAllowPrivateNetworks,
-	})
+	// tasks/pushNotificationConfig/set or the message config) that receives
+	// task status/artifact updates as the agent runs.
 	jsonrpcHandler := otelhttp.NewHandler(
 		a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor,
-			a2asrv.WithPushNotifications(pushStore, pushSender),
+			a2asrv.WithTaskStore(deps.tasks),
+			a2asrv.WithPushNotifications(deps.pushConfigs, deps.pushSender),
 			a2asrv.WithCapabilityChecks(&agentCard.Capabilities),
 		)),
 		"a2a.message",

@@ -51,7 +51,7 @@ func newA2ACmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for all A2A requests")
 	cmd.PersistentFlags().StringVar(&flags.corsOrigin, "cors-origin", "", "Allowed browser origin(s), comma-separated; empty disables CORS")
 	cmd.PersistentFlags().BoolVar(&flags.insecureNoAuth, "insecure-no-auth", false, "Allow unauthenticated non-loopback binding (insecure)")
-	cmd.PersistentFlags().BoolVar(&flags.pushAllowPrivate, "push-allow-private", false, "Allow push-notification webhooks to loopback/private addresses (disables SSRF guard)")
+	cmd.PersistentFlags().BoolVar(&flags.pushAllowPrivate, "push-allow-private", false, "Allow push-notification webhooks to loopback/private addresses (disables SSRF guard; enables HTTP(S)_PROXY for webhooks)")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
 	return cmd

@@ -1,7 +1,9 @@
-package pushstore
+package a2astore
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -140,14 +142,19 @@ func TestValidationErrors(t *testing.T) {
 	ctx := t.Context()
 
 	for name, cfg := range map[string]*a2a.PushConfig{
-		"nil":         nil,
-		"empty url":   {ID: "x"},
-		"invalid url": {ID: "x", URL: "not a url"},
+		"nil":           nil,
+		"empty url":     {ID: "x"},
+		"invalid url":   {ID: "x", URL: "not a url"},
+		"relative path": {ID: "x", URL: "/callback"},
+		"non-http":      {ID: "x", URL: "ftp://hook.example/cb"},
+		"file scheme":   {ID: "x", URL: "file:///etc/passwd"},
+		"missing host":  {ID: "x", URL: "https:///cb"},
+		"unparsable":    {ID: "x", URL: "https://hook.example/%zz?sig=leak"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := s.Save(ctx, "task-1", cfg)
-			require.Error(t, err)
-			assert.ErrorIs(t, err, a2a.ErrInvalidParams)
+			require.ErrorIs(t, err, a2a.ErrInvalidParams)
+			assert.NotContains(t, err.Error(), "leak", "errors must not echo the URL")
 		})
 	}
 }
@@ -182,6 +189,38 @@ func TestReturnedConfigIsCopy(t *testing.T) {
 	got, err := s.Get(ctx, "task-1", "c1")
 	require.NoError(t, err)
 	assert.Equal(t, "orig", got.Token)
+}
+
+// TestDatabaseFilesAreOwnerOnly asserts the store keeps callback tokens and
+// auth credentials in files unreadable by other users, tightening even a
+// database file that already exists with permissive permissions.
+func TestDatabaseFilesAreOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not meaningful on Windows")
+	}
+
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "a2a.db")
+	// Pre-create the file world-readable so the assertion proves New tightens
+	// it rather than merely inheriting a restrictive ambient umask.
+	require.NoError(t, os.WriteFile(path, nil, 0o644))
+
+	s, err := New(ctx, path)
+	require.NoError(t, err)
+	// A write materializes the WAL sidecars so we can assert their mode too.
+	_, err = s.Save(ctx, "task-1", &a2a.PushConfig{URL: "https://hook.example/cb", Token: "sekret"})
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		info, err := os.Stat(path + suffix)
+		if os.IsNotExist(err) {
+			continue // sidecar not present in this journal mode
+		}
+		require.NoError(t, err)
+		assert.Equalf(t, os.FileMode(0o600), info.Mode().Perm(),
+			"%q must be owner-only; group/other bits leak stored credentials", path+suffix)
+	}
 }
 
 // Guard against accidental interface drift.

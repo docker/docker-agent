@@ -1,12 +1,11 @@
-// Package pushstore provides a SQLite-backed implementation of the A2A
-// push.ConfigStore interface. It persists per-task push notification
-// configurations so that webhooks registered via tasks/pushNotificationConfig/set
-// survive an agent restart, unlike the SDK's in-memory default store.
+// Package a2astore provides SQLite-backed implementations of the A2A SDK's
+// push.ConfigStore and taskstore.Store, so tasks and the webhooks registered
+// for them survive an agent restart (the SDK defaults are in-memory).
 //
-// Authorization (cross-tenant / cross-task isolation) is enforced at the
-// a2asrv handler level via the task store; this store is a plain persistent
-// CRUD store keyed by (taskID, configID).
-package pushstore
+// Push-config authorization (cross-tenant / cross-task isolation) is enforced
+// at the a2asrv handler level via the task store; the push-config store is a
+// plain persistent CRUD store keyed by (taskID, configID).
+package a2astore
 
 import (
 	"context"
@@ -14,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/push"
@@ -22,7 +22,8 @@ import (
 	"github.com/docker/docker-agent/pkg/sqliteutil"
 )
 
-// Store is a SQLite-backed push.ConfigStore. The zero value is not usable;
+// Store is a SQLite-backed push.ConfigStore. It also owns the database handle
+// shared with the TaskStore returned by Tasks. The zero value is not usable;
 // construct it with New.
 type Store struct {
 	db *sql.DB
@@ -31,7 +32,7 @@ type Store struct {
 // Ensure Store satisfies the SDK interface at compile time.
 var _ push.ConfigStore = (*Store)(nil)
 
-const createTableSQL = `
+const schemaSQL = `
 CREATE TABLE IF NOT EXISTS a2a_push_configs (
 	task_id          TEXT NOT NULL,
 	config_id        TEXT NOT NULL,
@@ -41,21 +42,61 @@ CREATE TABLE IF NOT EXISTS a2a_push_configs (
 	auth_scheme      TEXT NOT NULL DEFAULT '',
 	auth_credentials TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (task_id, config_id)
-);`
+);
+
+CREATE TABLE IF NOT EXISTS a2a_tasks (
+	task_id    TEXT PRIMARY KEY,
+	context_id TEXT NOT NULL,
+	owner      TEXT NOT NULL,
+	state      TEXT NOT NULL,
+	status_ts  INTEGER,
+	version    INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	data       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS a2a_tasks_owner_updated ON a2a_tasks (owner, updated_at, task_id);`
 
 // New opens (creating if necessary) a SQLite database at path and ensures the
-// push-config table exists. Pass ":memory:" for an ephemeral store (useful in
+// push-config and task tables exist. Pass ":memory:" for an ephemeral store (useful in
 // tests). The caller owns the returned Store and must call Close.
 func New(ctx context.Context, path string) (*Store, error) {
 	db, err := sqliteutil.OpenDB(ctx, path)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, createTableSQL); err != nil {
+	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("failed to create a2a_push_configs table: %w", err)
+		return nil, fmt.Errorf("failed to create a2a tables: %w", err)
+	}
+	// This database holds webhook callback tokens and auth credentials in
+	// plaintext. sqliteutil.OpenDB creates the file with the process umask
+	// (often world-readable) and does not tighten a pre-existing data
+	// directory, so enforce owner-only access on the database and the WAL
+	// sidecars the schema write above has just materialized.
+	if path != ":memory:" {
+		if err := restrictToOwner(path); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	return &Store{db: db}, nil
+}
+
+// restrictToOwner forces owner-only (0600) permissions on the database file and
+// any of its SQLite sidecars that exist. Missing sidecars are not an error:
+// which ones are present depends on the journal mode (-wal/-shm in WAL mode,
+// a transient -journal in DELETE mode).
+func restrictToOwner(path string) error {
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("failed to secure a2a database permissions: %w", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if err := os.Chmod(path+suffix, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("failed to secure a2a database permissions: %w", err)
+		}
+	}
+	return nil
 }
 
 // Close releases the underlying database handle.
@@ -63,9 +104,8 @@ func (s *Store) Close() error {
 	return sqliteutil.CloseDB(s.db)
 }
 
-// validateConfig mirrors the validation the SDK's in-memory store performs so
-// that callers get identical a2a.ErrInvalidParams behaviour regardless of the
-// backing store.
+// validateConfig rejects configs the sender could never deliver to, reporting
+// a2a.ErrInvalidParams like the SDK's in-memory store.
 func validateConfig(config *a2a.PushConfig) error {
 	if config == nil {
 		return errors.New("push config cannot be nil")
@@ -73,8 +113,17 @@ func validateConfig(config *a2a.PushConfig) error {
 	if config.URL == "" {
 		return errors.New("push config endpoint cannot be empty")
 	}
-	if _, err := url.ParseRequestURI(config.URL); err != nil {
-		return fmt.Errorf("invalid push config endpoint URL: %w", err)
+	// Don't wrap the parse error: it embeds the URL, which may carry secrets.
+	// Destination IP checks happen at dial time in the sender.
+	u, err := url.Parse(config.URL)
+	if err != nil {
+		return errors.New("invalid push config endpoint URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("push config endpoint URL must use http or https")
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return errors.New("push config endpoint URL must include a host")
 	}
 	return nil
 }
