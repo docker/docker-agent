@@ -68,6 +68,12 @@ type Settings struct {
 	// ExpandThinking expands reasoning/tool blocks in the TUI by default.
 	// Defaults to false when not set.
 	ExpandThinking *bool `yaml:"expand_thinking,omitempty"`
+	// CompactWorkLog groups agent activity into compact Work blocks in the TUI.
+	// Defaults to false when not set, so upstream behaviour is unchanged.
+	CompactWorkLog *bool `yaml:"compact_work_log,omitempty"`
+	// VisibleReplies limits regular assistant replies retained in the transcript.
+	// Empty means the default of three.
+	VisibleReplies string `yaml:"visible_replies,omitempty"`
 	// SplitDiffView enables side-by-side split diff rendering for file edits.
 	// Defaults to true when not set.
 	SplitDiffView *bool `yaml:"split_diff_view,omitempty"`
@@ -255,6 +261,27 @@ func (s *Settings) GetExpandThinking() bool {
 		return false
 	}
 	return *s.ExpandThinking
+}
+
+// GetVisibleReplies returns the normalized visible-replies policy, defaulting to three.
+func (s *Settings) GetVisibleReplies() string {
+	if s == nil {
+		return "3"
+	}
+	switch s.VisibleReplies {
+	case "latest", "5", "all":
+		return s.VisibleReplies
+	default:
+		return "3"
+	}
+}
+
+// GetCompactWorkLog returns whether agent activity is grouped into Work blocks. Defaults to false.
+func (s *Settings) GetCompactWorkLog() bool {
+	if s == nil || s.CompactWorkLog == nil {
+		return false
+	}
+	return *s.CompactWorkLog
 }
 
 // GetSplitDiffView returns whether split diff view is enabled, defaulting to true.

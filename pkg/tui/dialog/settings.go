@@ -2,6 +2,7 @@ package dialog
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -38,6 +39,17 @@ const (
 
 var settingsTabLabels = [tabCount]string{"Appearance", "Behavior", "Notifications"}
 
+var visibleRepliesOptions = []messages.VisibleReplies{
+	messages.VisibleRepliesLatest, messages.VisibleRepliesThree, messages.VisibleRepliesFive, messages.VisibleRepliesAll,
+}
+
+var visibleRepliesLabels = map[messages.VisibleReplies]string{
+	messages.VisibleRepliesLatest: "Latest only",
+	messages.VisibleRepliesThree:  "Last 3",
+	messages.VisibleRepliesFive:   "Last 5",
+	messages.VisibleRepliesAll:    "All",
+}
+
 const (
 	rowTheme = iota
 	rowFadeScrollEdges
@@ -69,6 +81,8 @@ const (
 	rowBackgroundCompaction
 	rowBackgroundCompactionThreshold
 	rowLean
+	rowCompactWorkLog
+	rowVisibleReplies
 	rowTabTitleLength
 	rowInterruptConfirmation
 	behaviorRowCount
@@ -141,6 +155,12 @@ type settingsDialog struct {
 	preserveBodyScroll bool
 	body               *scrollview.Model
 	tabSpans           [tabCount][2]int
+	// rowSpans and bodyOrigin/bodySize are the last rendered body geometry:
+	// row line spans in body coordinates, and the body's top-left and size
+	// relative to the dialog's top-left. Pointer hit tests read them.
+	rowSpans   map[int][2]int
+	bodyOrigin [2]int
+	bodySize   [2]int
 }
 
 func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialog {
@@ -191,6 +211,10 @@ func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 					}
 				}
 			}
+			if target, ok := d.bodyRowAt(msg.X-col, msg.Y-row); ok {
+				cmd := d.clickRow(target)
+				return d, cmd
+			}
 		}
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
@@ -212,6 +236,36 @@ func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 	}
 	return d, nil
+}
+
+// bodyRowAt maps a dialog-relative pointer position to the row rendered there,
+// using the body's on-screen origin and its current scroll offset.
+func (d *settingsDialog) bodyRowAt(x, y int) (int, bool) {
+	left, top := d.bodyOrigin[0], d.bodyOrigin[1]
+	if x < left || x >= left+d.bodySize[0] || y < top || y >= top+d.bodySize[1] {
+		return 0, false
+	}
+	line := d.body.ScrollOffset() + y - top
+	for row, span := range d.rowSpans {
+		if line >= span[0] && line < span[1] {
+			return row, true
+		}
+	}
+	return 0, false
+}
+
+// clickRow handles a left click on a body row. Only the compact work log and
+// visible replies rows are clickable; other rows keep their keyboard-only controls. The click selects
+// the row and runs the same change as Left/Right/Space, so the live preview
+// and the Enter/Esc save and restore paths are shared.
+func (d *settingsDialog) clickRow(row int) tea.Cmd {
+	clickable := d.tab == tabBehavior && (row == rowCompactWorkLog || row == rowVisibleReplies)
+	if !clickable || !d.selectable(d.tab, row) {
+		return nil
+	}
+	d.confirmYOLO = false
+	d.selected[d.tab] = row
+	return d.changeValue(1)
 }
 
 func (d *settingsDialog) rowCount() int {
@@ -376,6 +430,11 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.CacheStablePrompts = !d.current.CacheStablePrompts
 		case rowLean:
 			d.current.Lean = !d.current.Lean
+		case rowCompactWorkLog:
+			d.current.CompactWorkLog = !d.current.CompactWorkLog
+		case rowVisibleReplies:
+			d.current.VisibleReplies = cycleValue(visibleRepliesOptions, messages.ParseVisibleReplies(string(d.current.VisibleReplies)), delta)
+			return core.CmdHandler(messages.PreviewVisibleRepliesMsg{Policy: d.current.VisibleReplies})
 		case rowTabTitleLength:
 			d.current.TabTitleMaxLength = stepValue(d.current.TabTitleMaxLength, delta, 1, 5, 100)
 		case rowInterruptConfirmation:
@@ -423,10 +482,13 @@ func (d *settingsDialog) apply() tea.Cmd {
 }
 
 func (d *settingsDialog) cancel() tea.Cmd {
-	if d.current.Layout == d.original.Layout {
+	if d.current.Layout == d.original.Layout && d.current.VisibleReplies == d.original.VisibleReplies {
 		return closeDialogCmd()
 	}
-	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.CancelLayoutPreviewMsg{Original: d.original.Layout}))
+	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.CancelLayoutPreviewMsg{
+		Original:               d.original.Layout,
+		OriginalVisibleReplies: d.original.VisibleReplies,
+	}))
 }
 
 func (d *settingsDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }
@@ -458,6 +520,9 @@ func (d *settingsDialog) View() string {
 		}
 	}
 
+	d.rowSpans = body.rowSpans                     //rubocop:disable Lint/TUIViewPurity // click-zone cache for mouse hit-testing, written during render
+	d.bodySize = [2]int{controlsWidth, bodyHeight} //rubocop:disable Lint/TUIViewPurity // paired with the click-zone cache above
+
 	var preview string
 	if d.showVisuals && d.tab == tabAppearance && inner >= settingsControlsWidth+settingsPreviewGap+previewMaxWidth {
 		if candidate := d.renderPreview(); lipgloss.Height(candidate) <= bodyHeight {
@@ -470,13 +535,17 @@ func (d *settingsDialog) View() string {
 		if preview != "" {
 			bodyView = lipgloss.JoinHorizontal(lipgloss.Top, bodyView, strings.Repeat(" ", settingsPreviewGap), preview)
 		}
-		bodyInset = max(0, inner-lipgloss.Width(bodyView)) / 2
+		bodyInset = centeredOffset(inner, lipgloss.Width(bodyView))
 		bodyView = lipgloss.PlaceHorizontal(inner, lipgloss.Center, bodyView)
 		return frame.Render(lipgloss.JoinVertical(lipgloss.Left, header, bodyView, footer))
 	}
 	view := render()
 	row, col := d.CenterDialog(view)
-	if d.body.SetPositionAndReconcileScrollbar(col+frame.GetBorderLeftSize()+frame.GetPaddingLeft()+bodyInset, row+frame.GetBorderTopSize()+lipgloss.Height(header)) {
+	d.bodyOrigin = [2]int{ //rubocop:disable Lint/TUIViewPurity // click-zone cache for mouse hit-testing, written during render
+		frame.GetBorderLeftSize() + frame.GetPaddingLeft() + bodyInset,
+		frame.GetBorderTopSize() + frame.GetPaddingTop() + lipgloss.Height(header),
+	}
+	if d.body.SetPositionAndReconcileScrollbar(col+d.bodyOrigin[0], row+d.bodyOrigin[1]) {
 		view = render()
 	}
 	return view
@@ -510,6 +579,7 @@ type settingsContent struct {
 	width, groupSpacing        int
 	lines                      []string
 	selectedStart, selectedEnd int
+	rowSpans                   map[int][2]int
 }
 
 func (c *settingsContent) addRow(row, selected int, value string) {
@@ -518,6 +588,10 @@ func (c *settingsContent) addRow(row, selected int, value string) {
 		value = styles.PaletteSelectedActionStyle.Width(c.width).Render(ansi.Strip(value))
 	}
 	c.lines = append(c.lines, strings.Split(value, "\n")...)
+	if c.rowSpans == nil {
+		c.rowSpans = make(map[int][2]int)
+	}
+	c.rowSpans[row] = [2]int{start, len(c.lines)}
 	if row == selected {
 		c.selectedStart, c.selectedEnd = start, len(c.lines)-1
 	}
@@ -619,6 +693,8 @@ func (d *settingsDialog) renderBehaviorTab(content *settingsContent, width int) 
 	toggle(rowBackgroundCompaction, "Background compaction", d.current.BackgroundCompaction)
 	add(rowBackgroundCompactionThreshold, d.renderStepperRow(rowBackgroundCompactionThreshold, "Background compaction threshold", d.current.BackgroundCompactionThreshold, "%", width, false))
 	toggle(rowLean, "Lean UI by default", d.current.Lean)
+	toggle(rowCompactWorkLog, "Compact work log", d.current.CompactWorkLog)
+	add(rowVisibleReplies, d.renderSelectorRow(rowVisibleReplies, "Visible replies", visibleRepliesLabels[messages.ParseVisibleReplies(string(d.current.VisibleReplies))], width))
 	add(rowTabTitleLength, d.renderStepperRow(rowTabTitleLength, "Tab title max length", d.current.TabTitleMaxLength, "chars", width, false))
 	content.addGroup("Interrupts", width)
 	add(rowInterruptConfirmation, d.renderSelectorRow(rowInterruptConfirmation, "Interrupt confirmation", interruptConfirmationLabels[d.current.InterruptConfirmation], width))
@@ -910,4 +986,14 @@ func renderBandPreview(s messages.LayoutSettings, width int, bottom bool) string
 	)
 
 	return strings.Join(lines, "\n")
+}
+
+// centeredOffset is the left offset lipgloss.PlaceHorizontal uses to centre a
+// block of width w in width outer.
+func centeredOffset(outer, w int) int {
+	gap := outer - w
+	if gap <= 0 {
+		return 0
+	}
+	return gap - int(math.Round(float64(gap)*0.5))
 }

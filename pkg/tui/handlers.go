@@ -923,6 +923,8 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		SendMode:                      m.sendMode,
 		SplitDiffView:                 settings.GetSplitDiffView(),
 		ExpandThinking:                settings.GetExpandThinking(),
+		CompactWorkLog:                settings.GetCompactWorkLog(),
+		VisibleReplies:                messages.ParseVisibleReplies(settings.GetVisibleReplies()),
 		HideToolResults:               settings.HideToolResults,
 		RenderImages:                  settings.GetRenderImages(),
 		ShowBanner:                    settings.GetShowBanner(),
@@ -946,6 +948,16 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 	})
 }
 
+// applyVisibleReplies sets the visible-replies policy on every tab's transcript.
+func (m *appModel) applyVisibleReplies(policy messages.VisibleReplies) {
+	m.visibleReplies = policy
+	for _, tab := range m.tabs {
+		if tab.chatPage != nil {
+			tab.chatPage.SetVisibleReplies(policy)
+		}
+	}
+}
+
 // handleApplySettings applies the settings chosen in the /settings dialog
 // and persists them to the user config.
 func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model, tea.Cmd) {
@@ -956,6 +968,8 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
 	m.showBanner = preferences.ShowBanner
 	scrollview.SetEdgeFadeEnabled(preferences.FadeScrollEdges)
+	m.compactWorkLog = preferences.CompactWorkLog
+	m.applyVisibleReplies(preferences.VisibleReplies)
 	for _, tab := range m.tabs {
 		page := tab.chatPage
 		if page == nil {
@@ -964,6 +978,7 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 		page.SetSendMode(m.sendMode)
 		page.SetInterruptMode(m.interruptMode)
 		page.SetShowBanner(m.showBanner)
+		cmd = tea.Batch(cmd, page.SetCompactWorkLog(m.compactWorkLog))
 	}
 	if m.activeTab.sessionState.SplitDiffView() != preferences.SplitDiffView {
 		m.activeTab.sessionState.SetSplitDiffView(preferences.SplitDiffView)
@@ -1054,6 +1069,13 @@ func savePreferences(p messages.Preferences) error {
 		s.ExpandThinking = boolPreference(p.ExpandThinking, false)
 		s.RestoreTabs = boolPreference(p.RestoreTabs, false)
 		s.Snapshot = boolPreference(p.Snapshot, false)
+		s.CompactWorkLog = boolPreference(p.CompactWorkLog, false)
+		visibleReplies := messages.ParseVisibleReplies(string(p.VisibleReplies))
+		if visibleReplies == messages.VisibleRepliesThree {
+			s.VisibleReplies = ""
+		} else {
+			s.VisibleReplies = string(visibleReplies)
+		}
 		s.CacheStablePrompts = boolPreference(p.CacheStablePrompts, false)
 		s.BackgroundCompaction = p.BackgroundCompaction
 		s.BackgroundCompactionThreshold = p.BackgroundCompactionThreshold
@@ -1125,8 +1147,9 @@ func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.Send
 	settings := userconfig.Get()
 	return savePreferences(messages.Preferences{
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
-		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
-		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
+		ExpandThinking: settings.GetExpandThinking(), CompactWorkLog: settings.GetCompactWorkLog(), HideToolResults: settings.HideToolResults,
+		VisibleReplies: messages.ParseVisibleReplies(settings.GetVisibleReplies()),
+		RenderImages:   settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
 		FadeScrollEdges: settings.GetFadeScrollEdges(),
 		YOLO:            settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
 		BackgroundCompaction:          settings.BackgroundCompaction,

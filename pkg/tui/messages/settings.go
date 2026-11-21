@@ -160,6 +160,8 @@ type Preferences struct {
 	SendMode                      SendMode
 	SplitDiffView                 bool
 	ExpandThinking                bool
+	CompactWorkLog                bool
+	VisibleReplies                VisibleReplies
 	HideToolResults               bool
 	RenderImages                  bool
 	ShowBanner                    bool
@@ -197,6 +199,11 @@ type (
 
 	// CancelLayoutPreviewMsg restores the layout that was active before a preview.
 	CancelLayoutPreviewMsg struct {
-		Original LayoutSettings
+		Original               LayoutSettings
+		OriginalVisibleReplies VisibleReplies
+	}
+	// PreviewVisibleRepliesMsg applies a visible-replies policy live without persisting it.
+	PreviewVisibleRepliesMsg struct {
+		Policy VisibleReplies
 	}
 )

@@ -21,6 +21,13 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 
 func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
 	params, err := toolcommon.ParseArgs[transfertask.Args](msg.ToolCall.Function.Arguments)
+	if msg.CompactWorkTool {
+		result := ""
+		if msg.ToolStatus == types.ToolStatusError {
+			result = toolcommon.FormatToolResult(msg.Content, width)
+		}
+		return toolcommon.RenderTool(msg, s, params.Task, result, width, sessionState != nil && sessionState.HideToolResults())
+	}
 	if err != nil || (params.Agent == "" && params.Task == "") {
 		hideResults := false
 		if sessionState != nil {

@@ -7,10 +7,8 @@
 │                           › ● Steer  send to the working agent mid-turn                                                      │
 │                             ○ Queue  hold until the current turn ends                                                        │
 │                                                                                                                              │
-│                                                                                                                              │
 │                           ── Tool approval ───────────────────────────────────────────────────                               │
 │                             [ ] Auto-approve tools by default                                                                │
-│                                                                                                                              │
 │                                                                                                                              │
 │                           ── Session defaults ────────────────────────────────────────────────                               │
 │                             [ ] Restore tabs on launch                                                                       │
@@ -20,11 +18,13 @@
 │                             [ ] Background compaction                                                                        │
 │                             Background compaction threshold                             ‹ 70 % ›                             │
 │                             [ ] Lean UI by default                                                                           │
+│                             [ ] Compact work log                                                                             │
+│                             Visible replies                                           ‹ Last 3 ›                             │
 │                             Tab title max length                                    ‹ 20 chars ›                             │
-│                                                                                                                              │
 │                                                                                                                              │
 │                           ── Interrupts ──────────────────────────────────────────────────────                               │
 │                             Interrupt confirmation                   ‹ Always (confirm dialog) ›                             │
+│                                                                                                                              │
 │                                                                                                                              │
 │                                                                                                                              │
 │                                                                                                                              │
