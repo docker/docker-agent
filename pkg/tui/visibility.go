@@ -70,6 +70,7 @@ func (m *appModel) setPaneHidden(hidden bool) tea.Cmd {
 	m.paneHidden = hidden
 	m.viewCacheValid = false
 	if hidden {
+		m.resetResizeGrips()
 		if m.activeTab != nil {
 			chat.CancelStartupBanner(m.activeTab.chatPage)
 		}

@@ -13,9 +13,10 @@ import (
 // StatusBar displays key-binding help on the left and version info on the right.
 // When the tab bar is hidden (single tab), it also shows a clickable "+ new tab" button.
 type StatusBar struct {
-	width int
-	help  core.KeyMapHelp
-	title string
+	width  int
+	help   core.KeyMapHelp
+	title  string
+	status string
 
 	showNewTab   bool
 	newTabStartX int
@@ -66,6 +67,14 @@ func (s *StatusBar) SetHelp(help core.KeyMapHelp) {
 	s.cacheDirty = true
 }
 
+// SetStatus adds persistent status before the usual key hints.
+func (s *StatusBar) SetStatus(status string) {
+	if s.status != status {
+		s.status = status
+		s.cacheDirty = true
+	}
+}
+
 // SetShowNewTab controls whether the "+" button is shown.
 func (s *StatusBar) SetShowNewTab(show bool) {
 	if s.showNewTab != show {
@@ -110,13 +119,21 @@ func (s *StatusBar) rebuild() {
 		rightW = lipgloss.Width(right)
 	}
 
-	// Build the styled left side: help bindings (possibly truncated).
 	const pad = 1
-	maxHelpW := s.width - rightW - 2*pad - 1
+	maxLeftW := s.width - rightW - 2*pad - 1
+	statusW := lipgloss.Width(s.status)
+	if statusW > 0 && statusW > maxLeftW {
+		// Give the pause notice priority over help and title on narrow terminals.
+		s.cached = " " + ansi.Truncate(s.status, max(0, s.width-2*pad), "") + " "
+		return
+	}
 
 	var left string
-	var leftW int
-	if s.help != nil {
+	if statusW > 0 {
+		left = s.status
+		maxLeftW -= statusW + 2
+	}
+	if s.help != nil && maxLeftW > 0 {
 		if help := s.help.Help(); help != nil {
 			var parts []string
 			for _, b := range help.ShortHelp() {
@@ -127,18 +144,19 @@ func (s *StatusBar) rebuild() {
 							styles.SecondaryStyle.Render(b.Help().Desc))
 				}
 			}
-			if len(parts) > 0 && maxHelpW > 0 {
-				helpStr := strings.Join(parts, "  ")
-				helpW := lipgloss.Width(helpStr)
-				if helpW > maxHelpW {
-					helpStr = ansi.Truncate(helpStr, maxHelpW, "...")
-					helpW = lipgloss.Width(helpStr)
+			if len(parts) > 0 {
+				hints := ansi.Truncate(strings.Join(parts, "  "), maxLeftW, "...")
+				if left != "" && hints != "" {
+					left += "  "
 				}
-				left = " " + helpStr
-				leftW = pad + helpW
+				left += hints
 			}
 		}
 	}
+	if left != "" {
+		left = " " + left
+	}
+	leftW := lipgloss.Width(left)
 
 	gap := max(1, s.width-leftW-rightW-pad)
 

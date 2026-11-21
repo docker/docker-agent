@@ -28,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/internal/resizegrip"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/streamcontent"
@@ -37,7 +38,7 @@ import (
 const (
 	// minWindowWidth is the threshold below which sidebar switches to horizontal mode
 	minWindowWidth = 120
-	// dragThreshold is pixels of movement needed to distinguish click from drag
+	// dragThreshold is columns of movement needed to distinguish click from drag
 	dragThreshold = 3
 	// toggleColumnWidth is the width of the sidebar toggle/resize handle column
 	toggleColumnWidth = 1
@@ -71,6 +72,15 @@ type sidebarLayout struct {
 	handleX       int  // X coordinate of resize handle column (only valid in vertical mode)
 	chatHeight    int  // height available for chat area
 	sidebarHeight int  // height of sidebar
+}
+
+// dividerX uses the same column for layout and resize previews. A zero
+// width has no vertical divider, so preview collapse at the nearest edge.
+func (l sidebarLayout) dividerX(width int) int {
+	if l.sidebarOnLeft {
+		return max(0, width-toggleColumnWidth)
+	}
+	return min(l.innerWidth-1, l.innerWidth-width)
 }
 
 // isOnHandle returns true if adjustedX (already adjusted for app padding) is on the resize handle.
@@ -185,7 +195,7 @@ type Page interface {
 
 func (p *chatPage) VisualGeneration() uint64 { return p.messages.VisualGeneration() }
 func (p *chatPage) SidebarVisualGeneration() uint64 {
-	return p.sidebar.VisualGeneration()
+	return p.sidebar.VisualGeneration() + p.sidebarGrip.Generation()
 }
 
 type queuedMessage struct {
@@ -285,10 +295,14 @@ type chatPage struct {
 	commandParser *commands.Parser
 
 	// Sidebar drag state
-	isDraggingSidebar     bool // True while dragging the sidebar resize handle
-	sidebarDragStartX     int  // X position when drag started
-	sidebarDragStartWidth int  // Sidebar preferred width when drag started
-	sidebarDragMoved      bool // True if mouse moved beyond threshold during drag
+	sidebarGrip       resizegrip.Reveal
+	sidebarGuide      animation.Transition
+	sidebarGuideFrom  SidebarGuide
+	sidebarGuideTo    SidebarGuide
+	isDraggingSidebar bool // True while dragging the sidebar resize handle
+	sidebarDragStartX int  // X position when drag started
+	sidebarDragWidth  int  // Prospective width; zero previews collapse
+	sidebarDragMoved  bool // True if mouse moved beyond threshold during drag
 
 	// appliedLayout is the layout geometry last pushed to child components by
 	// SetSize. Update compares it against the live layout to catch silent
@@ -341,12 +355,11 @@ func (p *chatPage) computeSidebarLayout() sidebarLayout {
 	case sidebarVertical:
 		l.sidebarWidth = p.sidebar.ClampWidth(p.sidebar.GetPreferredWidth(), innerWidth)
 		l.chatWidth = max(1, innerWidth-l.sidebarWidth)
+		l.handleX = l.dividerX(l.sidebarWidth)
 		if l.sidebarOnLeft {
 			l.sidebarStartX = 0
-			l.handleX = l.sidebarWidth - toggleColumnWidth
 			l.chatStartX = l.sidebarWidth
 		} else {
-			l.handleX = l.chatWidth
 			l.sidebarStartX = l.chatWidth + toggleColumnWidth
 		}
 		l.chatHeight = max(1, p.height)
@@ -416,6 +429,8 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 		sessionState:      sessionState,
 		showStartupBanner: true,
 		bannerTransition:  ar.Transition(),
+		sidebarGrip:       resizegrip.NewReveal(ar),
+		sidebarGuide:      ar.Transition(),
 	}
 
 	for _, opt := range opts {
@@ -557,6 +572,7 @@ func WatchGitBranch(page Page) tea.Cmd {
 
 func Cleanup(page Page) {
 	if p, ok := page.(*chatPage); ok {
+		ResetSidebarGrip(p)
 		p.bannerTransition.Cancel()
 		if p.inputScope != nil {
 			p.inputScope.close()
@@ -617,6 +633,9 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case animation.TickMsg:
+		p.sidebarGrip.Tick(msg)
+		// Guide-only ticks are painted over the cached frame by the root.
+		p.sidebarGuide.Tick()
 		if p.bannerTransition.Running() {
 			p.bannerTransition.Tick()
 			msg.MarkDirty()
@@ -628,6 +647,10 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		cmd := p.SetSize(msg.Width, msg.Height)
 		return p, cmd
+
+	case tea.BlurMsg:
+		ResetSidebarGrip(p)
+		return p, nil
 
 	case tea.KeyPressMsg:
 		return p.handleKeyPress(msg)
@@ -828,7 +851,8 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 		sidebarLines[0] = padded + toggleGlyph
 	}
 
-	divider := styles.FadingStyle.Render(strings.Repeat("─", width))
+	// Keep the separator row for layout and pointer coordinates, not decoration.
+	divider := strings.Repeat(" ", width)
 	switch {
 	case sl.bandAtBottom:
 		sidebarLines = append([]string{divider}, sidebarLines...)
@@ -933,30 +957,11 @@ func (p *chatPage) View() string {
 	return appStyle.Render(bodyContent)
 }
 
-// renderSidebarHandle renders the sidebar toggle/resize handle.
-// The glyph points toward the edge the sidebar collapses to and flips when
-// the sidebar sits on the left.
-func (p *chatPage) renderSidebarHandle(height int) string {
-	lines := make([]string, height)
-
-	expandGlyph, collapseGlyph := "«", "»"
-	if p.layoutSettings.SidebarPosition == msgtypes.SidebarLeft {
-		expandGlyph, collapseGlyph = "»", "«"
-	}
-
-	glyph := collapseGlyph
-	if p.sidebar.IsCollapsed() {
-		glyph = expandGlyph
-	}
-	lines[0] = styles.MutedStyle.Render(glyph)
-	for i := 1; i < height; i++ {
-		lines[i] = " "
-	}
-
-	return strings.Join(lines, "\n")
+func (p *chatPage) SetSize(width, height int) tea.Cmd {
+	return p.setSize(width, height, false)
 }
 
-func (p *chatPage) SetSize(width, height int) tea.Cmd {
+func (p *chatPage) setSize(width, height int, fromSidebarDrop bool) tea.Cmd {
 	p.width = width
 	p.height = height
 
@@ -964,6 +969,11 @@ func (p *chatPage) SetSize(width, height int) tea.Cmd {
 
 	// Compute layout once and use it for all sizing
 	sl := p.computeSidebarLayout()
+	old := p.appliedLayout
+	if !fromSidebarDrop && sl != old && (sl.mode != sidebarVertical || sl.chatHeight != old.chatHeight ||
+		p.isDraggingSidebar || p.sidebarGuide.Running() || (sl.sidebarOnLeft == old.sidebarOnLeft && sl.handleX != old.handleX)) {
+		ResetSidebarGrip(p)
+	}
 	p.appliedLayout = sl
 
 	switch sl.mode {

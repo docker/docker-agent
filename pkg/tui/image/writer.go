@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +21,8 @@ type overlay struct {
 	x, y             int
 	cols, rows       int
 	pixelW, pixelH   int
-	sourceY, sourceH int
+	sourceX, sourceY int
+	sourceW, sourceH int
 }
 
 // Writer adds kitty graphics after Bubble Tea has rendered its text cell buffer.
@@ -28,6 +32,8 @@ type Writer struct {
 	out io.Writer
 
 	mu        sync.Mutex
+	base      []overlay
+	occlusion image.Rectangle
 	overlays  []overlay
 	uploaded  map[uint32]bool
 	active    bool
@@ -67,7 +73,7 @@ func (w *Writer) SetSupported(supported bool) {
 	if w.supported != supported {
 		w.supported = supported
 		if !supported {
-			w.overlays = nil
+			w.base, w.overlays = nil, nil
 		}
 		w.dirty = true
 	}
@@ -101,7 +107,7 @@ func (w *Writer) SetEnabled(enabled bool) {
 	if w.enabled != enabled {
 		w.enabled = enabled
 		if !enabled {
-			w.overlays = nil
+			w.base, w.overlays = nil, nil
 		}
 		w.dirty = true
 	}
@@ -117,18 +123,92 @@ func (w *Writer) Invalidate() {
 	w.dirty = true
 }
 
-func (w *Writer) SetContent(content string) string {
+// SetContent extracts placements from the text frame and clips them around foreground layers.
+func (w *Writer) SetContent(content string, foreground ...image.Rectangle) string {
 	clean, overlays := extractOverlays(content)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.enabled || !w.supported {
 		overlays = nil
 	}
+	for _, area := range foreground {
+		overlays = clipOverlays(overlays, area)
+	}
+	if !sameOverlays(w.base, overlays) {
+		w.base = overlays
+		w.updateOverlays()
+	}
+	return clean
+}
+
+// SetOcclusion masks part of the cached frame without reprocessing its content.
+func (w *Writer) SetOcclusion(area image.Rectangle) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.occlusion != area {
+		w.occlusion = area
+		w.updateOverlays()
+	}
+}
+
+func (w *Writer) updateOverlays() {
+	overlays := clipOverlays(w.base, w.occlusion)
 	if !sameOverlays(w.overlays, overlays) {
 		w.overlays = overlays
 		w.dirty = true
 	}
-	return clean
+}
+
+func clipOverlays(overlays []overlay, area image.Rectangle) []overlay {
+	if area.Empty() {
+		return overlays
+	}
+	var clipped []overlay
+	for i, img := range overlays {
+		bounds := image.Rect(img.x, img.y, img.x+img.cols, img.y+img.rows)
+		cut := bounds.Intersect(area)
+		if cut.Empty() {
+			if clipped != nil {
+				clipped = append(clipped, img)
+			}
+			continue
+		}
+		if clipped == nil {
+			clipped = append(make([]overlay, 0, len(overlays)+3), overlays[:i]...)
+		}
+		// Upscaled marker rows can round to an empty source interval. Normalize only the clipped copy.
+		if img.sourceH == 0 && img.sourceY >= 0 && img.sourceY < img.pixelH {
+			img.sourceH = 1
+		}
+		// Pair each visible cell rectangle with its portion of the existing source crop.
+		for _, piece := range [...]image.Rectangle{
+			image.Rect(bounds.Min.X, bounds.Min.Y, bounds.Max.X, cut.Min.Y),
+			image.Rect(bounds.Min.X, cut.Max.Y, bounds.Max.X, bounds.Max.Y),
+			image.Rect(bounds.Min.X, cut.Min.Y, cut.Min.X, cut.Max.Y),
+			image.Rect(cut.Max.X, cut.Min.Y, bounds.Max.X, cut.Max.Y),
+		} {
+			if !piece.Empty() && img.sourceW > 0 && img.sourceH > 0 {
+				clipped = append(clipped, img.crop(piece))
+			}
+		}
+	}
+	if clipped != nil {
+		return clipped
+	}
+	return overlays
+}
+
+func (o overlay) crop(piece image.Rectangle) overlay {
+	x0 := (piece.Min.X - o.x) * o.sourceW / o.cols
+	x1 := (piece.Max.X - o.x) * o.sourceW / o.cols
+	y0 := (piece.Min.Y - o.y) * o.sourceH / o.rows
+	y1 := (piece.Max.Y - o.y) * o.sourceH / o.rows
+	o.sourceX += x0
+	o.sourceY += y0
+	// A zero Kitty crop dimension would use the full image dimension.
+	o.sourceW, o.sourceH = max(1, x1-x0), max(1, y1-y0)
+	o.x, o.y, o.cols, o.rows = piece.Min.X, piece.Min.Y, piece.Dx(), piece.Dy()
+	return o
 }
 
 func (w *Writer) Write(p []byte) (int, error) {
@@ -150,21 +230,21 @@ func (w *Writer) Write(p []byte) (int, error) {
 	}
 
 	wasDirty := w.dirty
-	newUploads := make([]uint32, 0, len(w.overlays))
+	var newUploads []uint32
 	var b strings.Builder
 	b.WriteString("\x1b7")
 	if wasDirty {
 		b.WriteString("\x1b_Ga=d,d=a,q=2\x1b\\")
 	}
 	for index, image := range w.overlays {
-		if !w.uploaded[image.id] {
+		if !w.uploaded[image.id] && !slices.Contains(newUploads, image.id) {
 			writeTransmission(&b, image.id, image.png)
 			newUploads = append(newUploads, image.id)
 		}
 		fmt.Fprintf(&b, "\x1b[%d;%dH", image.y+1, image.x+1)
 		fmt.Fprintf(&b, "\x1b_Ga=p,i=%d,p=%d,q=2,C=1,c=%d,r=%d", image.id, index+1, image.cols, image.rows)
-		if image.sourceY > 0 || image.sourceH < image.pixelH {
-			fmt.Fprintf(&b, ",x=0,y=%d,w=%d,h=%d", image.sourceY, image.pixelW, image.sourceH)
+		if image.sourceX > 0 || image.sourceY > 0 || image.sourceW < image.pixelW || image.sourceH < image.pixelH {
+			fmt.Fprintf(&b, ",x=%d,y=%d,w=%d,h=%d", image.sourceX, image.sourceY, image.sourceW, image.sourceH)
 		}
 		b.WriteString("\x1b\\")
 	}
@@ -186,8 +266,8 @@ func (w *Writer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func writeTransmission(b *strings.Builder, id uint32, png []byte) {
-	encoded := base64.StdEncoding.EncodeToString(png)
+func writeTransmission(b *strings.Builder, id uint32, data []byte) {
+	encoded := base64.StdEncoding.EncodeToString(data)
 	for offset := 0; offset < len(encoded); offset += kittyMaxChunkSize {
 		end := min(offset+kittyMaxChunkSize, len(encoded))
 		more := 0
@@ -210,7 +290,8 @@ func sameOverlays(a, b []overlay) bool {
 		if a[i].id != b[i].id || a[i].x != b[i].x || a[i].y != b[i].y ||
 			a[i].cols != b[i].cols || a[i].rows != b[i].rows ||
 			a[i].pixelW != b[i].pixelW || a[i].pixelH != b[i].pixelH ||
-			a[i].sourceY != b[i].sourceY || a[i].sourceH != b[i].sourceH {
+			a[i].sourceX != b[i].sourceX || a[i].sourceY != b[i].sourceY ||
+			a[i].sourceW != b[i].sourceW || a[i].sourceH != b[i].sourceH {
 			return false
 		}
 	}
@@ -256,8 +337,11 @@ func extractOverlays(content string) (string, []overlay) {
 			}
 			data, err := base64.StdEncoding.DecodeString(encoded.String())
 			if err == nil && len(data) > 0 && cols > 0 && rows > 0 {
-				id := imageID(data)
-				overlays = append(overlays, overlay{id: id, png: data, x: x, y: y, cols: cols, rows: rows})
+				cfg, _ := png.DecodeConfig(bytes.NewReader(data))
+				overlays = append(overlays, overlay{
+					id: imageID(data), png: data, x: x, y: y, cols: cols, rows: rows,
+					pixelW: cfg.Width, pixelH: cfg.Height, sourceW: cfg.Width, sourceH: cfg.Height,
+				})
 			}
 			line = line[:start] + line[end:]
 		}
@@ -317,6 +401,6 @@ func markerOverlay(id uint32, img Inline, x, y, cols, totalRows, row int) overla
 	return overlay{
 		id: id, png: img.PNGData, x: x, y: y, cols: cols, rows: 1,
 		pixelW: img.Width, pixelH: img.Height,
-		sourceY: sourceY, sourceH: sourceEnd - sourceY,
+		sourceW: img.Width, sourceY: sourceY, sourceH: sourceEnd - sourceY,
 	}
 }
