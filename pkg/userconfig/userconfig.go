@@ -77,6 +77,9 @@ type Settings struct {
 	// ShowBanner displays the ASCII-art startup banner in the TUI.
 	// Defaults to true when not set.
 	ShowBanner *bool `yaml:"show_banner,omitempty"`
+	// FadeScrollEdges dims viewport edges when content is hidden.
+	// Defaults to true when not set.
+	FadeScrollEdges *bool `yaml:"fade_scroll_edges,omitempty"`
 	// Theme is the default theme reference (e.g., "dark", "light")
 	// Theme files are loaded from ~/.cagent/themes/<theme>.yaml
 	// The special value "auto" follows the terminal's light/dark background,
@@ -276,6 +279,11 @@ func (s *Settings) GetShowBanner() bool {
 		return true
 	}
 	return *s.ShowBanner
+}
+
+// GetFadeScrollEdges reports whether to fade scroll edges, defaulting to true.
+func (s *Settings) GetFadeScrollEdges() bool {
+	return s == nil || s.FadeScrollEdges == nil || *s.FadeScrollEdges
 }
 
 // GetRestoreTabs returns whether previously open tabs are restored on

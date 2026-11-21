@@ -13,7 +13,7 @@ import (
 
 func newTestSettingsDialog(t *testing.T, layout messages.LayoutSettings) *settingsDialog {
 	t.Helper()
-	d, ok := NewSettingsDialog(messages.Preferences{Layout: layout, SendMode: messages.SendModeSteer, SplitDiffView: true, RenderImages: true, ShowBanner: true, TabTitleMaxLength: 20, SoundThreshold: 10}, true).(*settingsDialog)
+	d, ok := NewSettingsDialog(messages.Preferences{Layout: layout, SendMode: messages.SendModeSteer, SplitDiffView: true, RenderImages: true, ShowBanner: true, FadeScrollEdges: true, TabTitleMaxLength: 20, SoundThreshold: 10}, true).(*settingsDialog)
 	require.True(t, ok)
 	d.Init()
 	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
@@ -59,6 +59,9 @@ func TestSettingsDialogNavigation(t *testing.T) {
 	up := tea.KeyPressMsg{Code: tea.KeyUp}
 
 	require.Equal(t, rowTheme, d.selected[tabAppearance])
+
+	d.Update(down)
+	require.Equal(t, rowFadeScrollEdges, d.selected[tabAppearance])
 
 	d.Update(down)
 	require.Equal(t, rowPosition, d.selected[tabAppearance])
@@ -125,6 +128,7 @@ func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
 	assert.NotContains(t, view, "Active agents only")
 	assert.NotContains(t, view, "Plans")
 	assert.Contains(t, view, "Split diff view")
+	assert.Contains(t, view, "Fade scroll edges")
 
 	assert.False(t, d.selectable(tabAppearance, rowInfoMode),
 		"the info mode row is not selectable without a sidebar")
@@ -134,9 +138,11 @@ func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
 		"the Plans row is not selectable without a sidebar")
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	assert.Equal(t, rowFadeScrollEdges, d.selected[tabAppearance])
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	assert.Equal(t, rowSplitDiff, d.selected[tabAppearance], "navigation skips every sidebar row")
 	d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	assert.Equal(t, rowTheme, d.selected[tabAppearance], "reverse navigation skips every sidebar row")
+	assert.Equal(t, rowFadeScrollEdges, d.selected[tabAppearance], "reverse navigation skips every sidebar row")
 	assert.True(t, d.current.Layout.ShowPlans, "hidden sidebar preferences are preserved")
 }
 

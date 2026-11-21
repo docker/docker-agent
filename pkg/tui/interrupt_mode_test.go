@@ -88,6 +88,7 @@ func defaultTestPreferences() messages.Preferences {
 		SplitDiffView:         true,
 		RenderImages:          true,
 		ShowBanner:            true,
+		FadeScrollEdges:       true,
 		TabTitleMaxLength:     userconfig.DefaultTabTitleMaxLength,
 		SoundThreshold:        userconfig.DefaultSoundThreshold,
 		InterruptConfirmation: messages.InterruptModeAlways,

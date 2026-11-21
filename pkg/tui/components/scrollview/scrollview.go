@@ -76,8 +76,10 @@ type Model struct {
 	wheelStep             int
 	keyMap                *ScrollKeyMap
 
-	lines       []string
-	totalHeight int
+	lines         []string
+	contentHeight int
+	totalHeight   int
+	fade          *edgeFade
 
 	// lineWidths lazily caches the display width of each content line. It is
 	// invalidated when SetContent receives a different slice. Width
@@ -119,15 +121,22 @@ func (m *Model) SetPosition(x, y int) {
 }
 
 // SetContent provides the full content buffer and total height.
-// totalHeight may be >= len(lines) for virtual blank lines (e.g. bottomSlack).
+// totalHeight may be >= len(lines) for callers that render rows separately.
 // The lines slice must not be mutated in place after being passed here;
 // callers rebuild a fresh slice when content changes.
 func (m *Model) SetContent(lines []string, totalHeight int) {
+	m.SetContentWithTrailingSlack(lines, totalHeight, 0)
+}
+
+// SetContentWithTrailingSlack adds scrollable blank rows below the content.
+// Those rows keep their scroll geometry but do not trigger a bottom fade.
+func (m *Model) SetContentWithTrailingSlack(lines []string, contentHeight, trailingSlack int) {
 	if len(lines) != len(m.lines) || (len(lines) > 0 && &lines[0] != &m.lines[0]) {
 		m.lineWidths = nil
 	}
 	m.lines = lines
-	m.totalHeight = max(totalHeight, len(lines))
+	m.contentHeight = max(contentHeight, len(lines))
+	m.totalHeight = m.contentHeight + max(0, trailingSlack)
 	m.sb.SetDimensions(m.height, m.totalHeight)
 }
 
@@ -307,44 +316,13 @@ func (m *Model) ViewWithPaddedLines(visibleLines []string) string {
 	if m.NeedsScrollbar() && len(visibleLines) < m.height {
 		result := make([]string, m.height)
 		copy(result, visibleLines)
+		blank := strings.Repeat(" ", m.ContentWidth())
+		for i := len(visibleLines); i < len(result); i++ {
+			result[i] = blank
+		}
 		visibleLines = result
 	}
-	return m.composePadded(visibleLines)
-}
-
-func (m *Model) composePadded(lines []string) string {
-	switch {
-	case m.NeedsScrollbar():
-		sbLines := m.sb.ViewLines()
-		gap := strings.Repeat(" ", m.gapWidth)
-		var b strings.Builder
-		for i, line := range lines {
-			if i > 0 {
-				b.WriteByte('\n')
-			}
-			b.WriteString(line)
-			b.WriteString(gap)
-			if i < len(sbLines) {
-				b.WriteString(sbLines[i])
-			} else {
-				b.WriteString(strings.Repeat(" ", scrollbar.Width))
-			}
-		}
-		return b.String()
-	case m.reserveScrollbarSpace:
-		blank := strings.Repeat(" ", m.gapWidth+scrollbar.Width)
-		var b strings.Builder
-		for i, line := range lines {
-			if i > 0 {
-				b.WriteByte('\n')
-			}
-			b.WriteString(line)
-			b.WriteString(blank)
-		}
-		return b.String()
-	default:
-		return strings.Join(lines, "\n")
-	}
+	return m.composeLines(visibleLines, -1, true)
 }
 
 // ViewWithRestyledLines is like [Model.ViewWithLines] for callers whose
@@ -383,66 +361,59 @@ func (m *Model) syncScrollbar() {
 // are re-measured since restyling may not be exactly width-preserving for
 // complex grapheme clusters (ZWJ emoji, flags).
 func (m *Model) compose(lines []string, baseLine int) string {
+	return m.composeLines(lines, baseLine, false)
+}
+
+func (m *Model) composeLines(lines []string, baseLine int, padded bool) string {
 	contentWidth := m.ContentWidth()
-	contentLen := 0
+	var top, bottom int
+	if !edgeFadeDisabled.Load() {
+		top, bottom = m.fadeEdges(len(lines))
+	}
+	fade := top != 0 || bottom != 0
+	var bar []string
+	gap := ""
+	needsScrollbar := m.NeedsScrollbar()
+	if needsScrollbar {
+		bar = m.sb.ViewLines()
+		gap = strings.Repeat(" ", m.gapWidth)
+	} else if m.reserveScrollbarSpace {
+		gap = strings.Repeat(" ", m.ReservedCols())
+	}
 
-	// Pad or truncate each line to exact content width
+	var b strings.Builder
+	b.Grow(len(lines) * (m.width + 1))
 	for i, line := range lines {
-		var w int
-		// The equality check is O(1) for unchanged lines: they share the same
-		// string backing, so it short-circuits on pointer identity.
-		if gi := baseLine + i; baseLine >= 0 && gi < len(m.lines) && line == m.lines[gi] {
-			w = m.lineWidth(gi)
-		} else {
-			w = ansi.StringWidth(line)
+		if i > 0 {
+			b.WriteByte('\n')
 		}
-		switch {
-		case w > contentWidth:
-			lines[i] = ansi.Truncate(line, contentWidth, "")
-		case w < contentWidth:
-			lines[i] = line + strings.Repeat(" ", contentWidth-w)
-		}
-		contentLen += len(lines[i])
-	}
-	contentLen += max(0, len(lines)-1) // newline separators
-
-	// Zip the right-side column (scrollbar or placeholder) directly: every
-	// line is exactly contentWidth wide at this point, so JoinHorizontal's
-	// per-line re-measuring would be pure overhead.
-	switch {
-	case m.NeedsScrollbar():
-		sbLines := m.sb.ViewLines()
-		gap := strings.Repeat(" ", m.gapWidth)
-		var b strings.Builder
-		b.Grow(contentLen + len(lines)*(m.gapWidth+scrollbar.Width*4))
-		for i, line := range lines {
-			if i > 0 {
-				b.WriteByte('\n')
-			}
-			b.WriteString(line)
-			b.WriteString(gap)
-			if i < len(sbLines) {
-				b.WriteString(sbLines[i])
+		if !padded {
+			var w int
+			// Comparing unchanged lines is O(1): they share the same backing string.
+			if gi := baseLine + i; baseLine >= 0 && gi < len(m.lines) && line == m.lines[gi] {
+				w = m.lineWidth(gi)
 			} else {
-				b.WriteString(strings.Repeat(" ", scrollbar.Width))
+				w = ansi.StringWidth(line)
+			}
+			switch {
+			case w > contentWidth:
+				line = ansi.Truncate(line, contentWidth, "")
+			case w < contentWidth:
+				line += strings.Repeat(" ", contentWidth-w)
 			}
 		}
-		return b.String()
-	case m.reserveScrollbarSpace:
-		blank := strings.Repeat(" ", m.gapWidth+scrollbar.Width)
-		var b strings.Builder
-		b.Grow(contentLen + len(lines)*len(blank))
-		for i, line := range lines {
-			if i > 0 {
-				b.WriteByte('\n')
-			}
-			b.WriteString(line)
-			b.WriteString(blank)
+		if fade {
+			line = m.fade.line(line, len(lines), i, top, bottom)
 		}
-		return b.String()
-	default:
-		return strings.Join(lines, "\n")
+		b.WriteString(line)
+		b.WriteString(gap)
+		if i < len(bar) {
+			b.WriteString(bar[i])
+		} else if needsScrollbar {
+			b.WriteString(strings.Repeat(" ", scrollbar.Width))
+		}
 	}
+	return b.String()
 }
 
 func (m *Model) updateScrollbarPosition() {

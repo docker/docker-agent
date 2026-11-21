@@ -842,7 +842,7 @@ func (m *model) View() string {
 	// fixed-width padding, pinned scrollbar, and exact height. Selection and
 	// URL-hover restyling preserve display width, so the scrollview can reuse
 	// memoized line widths instead of re-measuring every visible line.
-	m.scrollview.SetContent(m.renderedLines, m.totalScrollableHeight())
+	m.scrollview.SetContentWithTrailingSlack(m.renderedLines, m.totalHeight, m.bottomSlack)
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	// Segmented active lines are not in scrollview's flattened content buffer,
 	// so use its pre-sliced path. Selection/URL restyling already requires the
@@ -1168,7 +1168,7 @@ func (m *model) materializeDeferredTailForInteraction() tea.Cmd {
 	if len(m.deferredTail) != 0 {
 		cmd := m.materializeDeferredTail()
 		m.updateScrollState()
-		m.scrollview.SetContent(m.renderedLines, m.totalScrollableHeight())
+		m.scrollview.SetContentWithTrailingSlack(m.renderedLines, m.totalHeight, m.bottomSlack)
 		m.scrollview.SetScrollOffset(m.scrollOffset)
 		return cmd
 	}
@@ -2707,7 +2707,7 @@ func (m *model) handleScrollviewUpdate(msg tea.Msg) (layout.Model, tea.Cmd) {
 	}
 	// Streaming can advance geometry without View, even with no deferred tail.
 	m.updateScrollState()
-	m.scrollview.SetContent(m.renderedLines, m.totalScrollableHeight())
+	m.scrollview.SetContentWithTrailingSlack(m.renderedLines, m.totalHeight, m.bottomSlack)
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	_, cmd := m.scrollview.UpdateMouse(msg)
 	m.scrollOffset = m.scrollview.ScrollOffset()

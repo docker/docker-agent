@@ -35,6 +35,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/statusbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
@@ -510,6 +511,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 
 	// Initialize tab bar with configurable title length from user settings
 	userSettings := userconfig.Get()
+	scrollview.SetEdgeFadeEnabled(userSettings.GetFadeScrollEdges())
 	tb := tabbar.New(ar, userSettings.GetTabTitleMaxLength())
 
 	// Initialize tab store
