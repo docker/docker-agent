@@ -465,6 +465,15 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 
 	switch decision.Outcome {
 	case OutcomeAllow:
+		// A delegation wrapper is safe by itself, but its child can write.
+		// Balanced used to route it through the default pre_tool_use lane
+		// because the wrapper had no read-only hint. Keep that veto, and an
+		// explicit ask, without restoring the automatic prompt.
+		if c.tool.Delegation && decision.Reason == ReasonMode && c.sess.GetSafetyPolicy() == session.SafetyPolicyBalanced {
+			if outcome, handled := c.consultPreToolUseHook(ctx, runTool); handled {
+				return outcome
+			}
+		}
 		c.logAllow(decision)
 		c.notifyApproval(ctx, ApprovalDecisionAllow, allowSourceForDecision(decision))
 		return runTool()

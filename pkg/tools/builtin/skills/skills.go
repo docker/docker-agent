@@ -486,6 +486,7 @@ func (s *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 		result = append(result, tools.Tool{
 			Name:           ToolNameRunSkill,
 			RuntimeHandler: ToolNameRunSkill,
+			Delegation:     true,
 			Category:       "skills",
 			Description:    "Run a skill in a forked context with its own conversation history. Use this for skills marked with forked mode — never use transfer_task for skills.",
 			Parameters:     tools.MustSchemaFor[RunSkillArgs](),
@@ -494,7 +495,8 @@ func (s *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 				Title: "Run Skill",
 				// The wrapper only launches the child session; the child
 				// dispatcher gates every call with the inherited policy
-				// and permissions.
+				// and permissions. Side-effectful startup is gated in
+				// runSkillFork.
 				ReadOnlyHint: true,
 			},
 		})

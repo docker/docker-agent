@@ -32,6 +32,7 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:           ToolNameHandoff,
 			RuntimeHandler: ToolNameHandoff,
+			Delegation:     true,
 			Category:       "handoff",
 			Description:    "Use this function to hand off the conversation to the selected agent.",
 			Parameters:     tools.MustSchemaFor[Args](),

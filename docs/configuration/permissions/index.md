@@ -70,7 +70,7 @@ For a **new** root session the first source in this order wins:
 
 **Resuming a session never re-applies defaults**: the stored mode is kept unless you pass an explicit `--safety` or `--yolo` flag for that run. Agent switches, handoffs, and delegated sub-agent sessions inherit the active session's mode rather than resetting it.
 
-Delegation wrappers (`transfer_task`, `handoff`, `run_skill`) carry a read-only annotation: launching a sub-session does not prompt by itself. Every tool call inside the sub-session is evaluated against that session's inherited safety mode and permissions.
+Delegation wrappers (`transfer_task`, `handoff`, `run_skill`) carry a read-only annotation: by default, launching a sub-session does not prompt by itself. Strict mode still evaluates the launch like any other call, a session-scoped `ask` rule or mandatory guard can still require confirmation, and balanced mode keeps the default `pre_tool_use` deny veto. Every tool call inside the sub-session is evaluated against that session's inherited safety mode and permissions. A fork skill whose toolsets start background work (for example a stdio MCP server) asks before starting them, except under strict (already approved at launch) and autonomous.
 
 Sessions created through the API (`POST /api/sessions`) without a `safety_policy` receive the author-declared defaults (5–6) when their first run starts — the earliest point the agent configuration is loaded. If the server restarts before that first run, the session keeps the historical unset default (7).
 

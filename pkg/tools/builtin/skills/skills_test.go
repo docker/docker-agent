@@ -619,6 +619,7 @@ func TestSkillsToolset_RunSkillIsDelegationWrapper(t *testing.T) {
 	runSkill := result[1]
 	require.Equal(t, ToolNameRunSkill, runSkill.Name)
 	assert.True(t, runSkill.Annotations.ReadOnlyHint)
+	assert.True(t, runSkill.Delegation)
 	assert.Equal(t, "Run Skill", runSkill.Annotations.Title)
 }
 

@@ -68,6 +68,7 @@ func newSkillApprovalRuntime(
 	script []chat.MessageStream,
 	skill skills.Skill,
 	toolList []tools.Tool,
+	forkToolSets map[string][]tools.ToolSet,
 	opts ...session.Opt,
 ) (*LocalRuntime, *session.Session) {
 	t.Helper()
@@ -77,11 +78,15 @@ func newSkillApprovalRuntime(
 		agent.WithModel(prov),
 		agent.WithToolSets(newStubToolSet(nil, toolList, nil)),
 	)
+	skillToolSet := skillstool.New([]skills.Skill{skill}, "")
+	if len(forkToolSets) > 0 {
+		skillToolSet.SetForkToolSets(forkToolSets)
+	}
 	root := agent.New("root", "Root agent",
 		agent.WithModel(prov),
 		agent.WithSubAgents(worker),
 		agent.WithToolSets(
-			skillstool.New([]skills.Skill{skill}, ""),
+			skillToolSet,
 			transfertask.New(),
 			newStubToolSet(nil, toolList, nil),
 		),
@@ -191,7 +196,7 @@ func TestForkSkillReadOnlyApprovalMatrix(t *testing.T) {
 
 			readCalls := &toolRecorder{}
 			rt, sess := newSkillApprovalRuntime(t, readOnlySkillScript(), reviewSkill(),
-				[]tools.Tool{recordedTool("read_file", true, readCalls)},
+				[]tools.Tool{recordedTool("read_file", true, readCalls)}, nil,
 				session.WithSafetyPolicy(tc.policy),
 			)
 
@@ -234,7 +239,7 @@ func TestForkSkillDoesNotAutoApproveNestedWrites(t *testing.T) {
 				newStreamBuilder().AddToolCallWithStop("child-write", "write_file", `{"path":"child"}`).Build(),
 				newStreamBuilder().AddContent("skill done").AddStopWithUsage(1, 1).Build(),
 				newStreamBuilder().AddContent("root done").AddStopWithUsage(1, 1).Build(),
-			}, reviewSkill(), []tools.Tool{recordedTool("write_file", false, writeCalls)},
+			}, reviewSkill(), []tools.Tool{recordedTool("write_file", false, writeCalls)}, nil,
 				session.WithSafetyPolicy(policy),
 			)
 
@@ -260,7 +265,7 @@ func TestForkSkillRestrictedModeStillDeniesNestedWrites(t *testing.T) {
 		newStreamBuilder().AddToolCallWithStop("child-write", "write_file", `{"path":"child"}`).Build(),
 		newStreamBuilder().AddContent("skill done").AddStopWithUsage(1, 1).Build(),
 		newStreamBuilder().AddContent("root done").AddStopWithUsage(1, 1).Build(),
-	}, reviewSkill(), []tools.Tool{recordedTool("write_file", false, writeCalls)},
+	}, reviewSkill(), []tools.Tool{recordedTool("write_file", false, writeCalls)}, nil,
 		session.WithSafetyPolicy(session.SafetyPolicyRestricted),
 	)
 
@@ -298,7 +303,7 @@ func TestForkSkillChildApprovalDoesNotEscapeToParent(t *testing.T) {
 		newStreamBuilder().AddContent("skill done").AddStopWithUsage(1, 1).Build(),
 		newStreamBuilder().AddToolCallWithStop("root-write", "write_file", `{"path":"root"}`).Build(),
 		newStreamBuilder().AddContent("root done").AddStopWithUsage(1, 1).Build(),
-	}, reviewSkill(), []tools.Tool{recordedTool("write_file", false, writeCalls)})
+	}, reviewSkill(), []tools.Tool{recordedTool("write_file", false, writeCalls)}, nil)
 
 	prompts, _ := runSkillStream(t, rt, sess, func(prompt *ToolCallConfirmationEvent) ResumeRequest {
 		if prompt.ToolCall.ID == "child-write" {
@@ -334,7 +339,7 @@ func TestForkSkillInheritsParentSessionPermissions(t *testing.T) {
 		newStreamBuilder().AddToolCallWithStop("child-blocked", "write_file", `{"path":"blocked/b"}`).Build(),
 		newStreamBuilder().AddContent("skill done").AddStopWithUsage(1, 1).Build(),
 		newStreamBuilder().AddContent("root done").AddStopWithUsage(1, 1).Build(),
-	}, reviewSkill(), []tools.Tool{recordedTool("write_file", false, writeCalls)},
+	}, reviewSkill(), []tools.Tool{recordedTool("write_file", false, writeCalls)}, nil,
 		session.WithPermissions(&session.PermissionsConfig{
 			Allow: []string{"write_file:path=allowed/*"},
 		}),
@@ -371,7 +376,7 @@ func TestForkSkillEmbeddedCommandStillGated(t *testing.T) {
 		FilePath:    path,
 		BaseDir:     dir,
 		Local:       true,
-	}, []tools.Tool{recordedTool("read_file", true, &toolRecorder{})})
+	}, []tools.Tool{recordedTool("read_file", true, &toolRecorder{})}, nil)
 
 	prompts, _ := runSkillStream(t, rt, sess, nil)
 
@@ -390,4 +395,72 @@ func TestForkSkillEmbeddedCommandStillGated(t *testing.T) {
 		}
 	}
 	assert.Contains(t, userMessage, "hello")
+}
+
+// recordingStartableToolSet records whether a fork child started it.
+type recordingStartableToolSet struct {
+	mu      sync.Mutex
+	started bool
+}
+
+func (s *recordingStartableToolSet) Start(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.started = true
+	return nil
+}
+
+func (s *recordingStartableToolSet) Stop(context.Context) error { return nil }
+
+func (s *recordingStartableToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return []tools.Tool{{Name: "extra_read", Annotations: tools.ToolAnnotations{ReadOnlyHint: true}}}, nil
+}
+
+func (s *recordingStartableToolSet) wasStarted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.started
+}
+
+var _ tools.Startable = (*recordingStartableToolSet)(nil)
+
+// TestForkSkillStartupApproval keeps the pre-hint launch boundary for a skill
+// that brings in a toolset with startup work: the child must not start it
+// before approval.
+func TestForkSkillStartupApproval(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		policy      session.SafetyPolicy
+		wantPrompts int
+		wantStarted bool
+	}{
+		{name: "legacy", wantPrompts: 1, wantStarted: true},
+		{name: "balanced", policy: session.SafetyPolicyBalanced, wantPrompts: 1, wantStarted: true},
+		{name: "restricted", policy: session.SafetyPolicyRestricted},
+		{name: "autonomous", policy: session.SafetyPolicyAutonomous, wantStarted: true},
+		{name: "strict", policy: session.SafetyPolicyStrict, wantPrompts: 1, wantStarted: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			extra := &recordingStartableToolSet{}
+			rt, sess := newSkillApprovalRuntime(t, []chat.MessageStream{
+				newStreamBuilder().AddToolCallWithStop("root-skill", "run_skill", `{"name":"review","task":"review"}`).Build(),
+				newStreamBuilder().AddContent("skill done").AddStopWithUsage(1, 1).Build(),
+				newStreamBuilder().AddContent("root done").AddStopWithUsage(1, 1).Build(),
+			}, reviewSkill(), []tools.Tool{recordedTool("read_file", true, &toolRecorder{})},
+				map[string][]tools.ToolSet{"review": {extra}},
+				session.WithSafetyPolicy(tc.policy),
+			)
+
+			prompts, _ := runSkillStream(t, rt, sess, nil)
+
+			assert.Len(t, prompts, tc.wantPrompts)
+			assert.Equal(t, tc.wantStarted, extra.wasStarted())
+		})
+	}
 }

@@ -19,9 +19,10 @@ const (
 )
 
 // ConfirmedRun describes an action a tool has to perform on the user's machine
-// outside of its own tool call — today a shell command embedded in the body of
-// a skill the tool just loaded. The host presents it as a tool call so the
-// user learns about it and can reject it.
+// outside of its own tool call — a shell command embedded in a skill body, or
+// starting a fork sub-session's toolsets before the child dispatcher sees a
+// call. The host presents it as a tool call so the user learns about it and
+// can reject it.
 type ConfirmedRun struct {
 	// ToolName attributes the action to a tool: the host classifies,
 	// permission-matches and renders it as a call to that tool, so an
