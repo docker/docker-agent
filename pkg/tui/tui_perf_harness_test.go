@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
+	"github.com/docker/docker-agent/pkg/tui/internal/resizegrip"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
@@ -101,6 +102,7 @@ func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appM
 	m := New(tb.Context(), nil, a, "", func() {}, WithHideSidebar()).(*appModel)
 	if ar != nil {
 		m.ar = ar
+		m.composerGrip = resizegrip.NewReveal(ar)
 	}
 	if cleaner, ok := tb.(interface{ Cleanup(f func()) }); ok {
 		cleaner.Cleanup(m.cleanupManagedResources)

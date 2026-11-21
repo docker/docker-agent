@@ -39,6 +39,9 @@ func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
 
 // updateDialogCmd forwards a message to the dialog manager and returns its cmd.
 func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
+	if _, ok := msg.(dialog.OpenDialogMsg); ok {
+		m.resetResizeGrips()
+	}
 	updated, cmd := m.dialogMgr.Update(msg)
 	m.dialogMgr = updated.(dialog.Manager)
 	return cmd

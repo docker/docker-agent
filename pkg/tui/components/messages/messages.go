@@ -131,6 +131,7 @@ type Model interface {
 	AdjustBottomSlack(delta int)
 	// VisualGeneration increments only when Update changes rendered output.
 	VisualGeneration() uint64
+	SetScrollbarDim(dim float64)
 
 	// MessageTypeCount returns how many messages currently in the list have
 	// the given type. Read-only introspection for callers (e.g. tests) that
@@ -1081,6 +1082,9 @@ func (m *model) Help() help.KeyMap {
 // Scrolling methods
 // invalidateView must be called after any state change that can affect View output.
 func (m *model) invalidateView() { m.visualGeneration++ }
+
+// SetScrollbarDim changes the scrollbar paint without rebuilding content.
+func (m *model) SetScrollbarDim(dim float64) { m.scrollview.SetScrollbarDim(dim) }
 
 func (m *model) VisualGeneration() uint64 { return m.visualGeneration }
 

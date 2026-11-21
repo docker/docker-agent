@@ -158,6 +158,7 @@ type Model interface {
 	IsScrollbarDragging() bool
 	// VisualGeneration increments whenever an update changes rendered sidebar state.
 	VisualGeneration() uint64
+	SetScrollbarDim(dim float64)
 	// WorkingDirectory returns the working directory path displayed in the sidebar.
 	WorkingDirectory() string
 	EditPlan(name, tabID string) tea.Cmd
@@ -1527,6 +1528,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 }
+
+// SetScrollbarDim changes the scrollbar paint without rebuilding content.
+func (m *model) SetScrollbarDim(dim float64) { m.scrollview.SetScrollbarDim(dim) }
 
 func (m *model) VisualGeneration() uint64 { return m.visualGeneration }
 
