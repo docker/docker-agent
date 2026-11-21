@@ -441,11 +441,6 @@ func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
 // handleTogglePause toggles whether the runtime loop is paused at iteration
 // boundaries. The pause kicks in once the in-flight LLM request and its tool
 // calls finish; running /pause again resumes the loop.
-//
-// The TUI reflects this in the resize-handle indicator: requesting a pause
-// while the agent is working shows "Pausing…" until the runtime emits a
-// RuntimePausedEvent at the next iteration boundary (flipping it to
-// "Paused"); requesting a pause while idle shows "Paused" immediately.
 func (m *appModel) handleTogglePause() (tea.Model, tea.Cmd) {
 	paused, supported := m.application.TogglePause()
 	switch {

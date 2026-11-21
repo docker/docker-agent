@@ -1,9 +1,11 @@
 package scrollbar
 
 import (
+	"image/color"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -25,6 +27,8 @@ type Model struct {
 	dragging        bool
 	dragStartY      int
 	dragStartOffset int
+
+	dim float64
 
 	trackChar string
 	thumbChar string
@@ -111,6 +115,25 @@ func (m *Model) handleClick(y int) (*Model, tea.Cmd) {
 	}
 }
 
+// SetDim blends the scrollbar's colors toward the terminal background.
+func (m *Model) SetDim(dim float64) { m.dim = dim }
+
+func (m *Model) dimStyle(style lipgloss.Style) lipgloss.Style {
+	if m.dim == 0 {
+		return style
+	}
+	fade := func(c color.Color) color.Color {
+		r, g, b := styles.ColorToRGB(c)
+		br, bg, bb := styles.ColorToRGB(styles.Background)
+		return styles.RGBToColor(r+(br-r)*m.dim, g+(bg-g)*m.dim, b+(bb-b)*m.dim)
+	}
+	style = style.Foreground(fade(style.GetForeground()))
+	if c := style.GetBackground(); c != (lipgloss.NoColor{}) {
+		style = style.Background(fade(c))
+	}
+	return style
+}
+
 func (m *Model) View() string {
 	if m.ViewLines() == nil {
 		return ""
@@ -133,8 +156,8 @@ func (m *Model) ViewLines() []string {
 		thumbStyle = styles.ThumbActiveStyle
 	}
 	// Render each styled cell once instead of once per line.
-	trackCell := styles.TrackStyle.Render(strings.Repeat(m.trackChar, m.width))
-	thumbCell := thumbStyle.Render(strings.Repeat(m.thumbChar, m.width))
+	trackCell := m.dimStyle(styles.TrackStyle).Render(strings.Repeat(m.trackChar, m.width))
+	thumbCell := m.dimStyle(thumbStyle).Render(strings.Repeat(m.thumbChar, m.width))
 
 	c := &m.cache
 	if c.lines != nil && c.height == m.height && c.thumbTop == thumbTop && c.thumbHeight == thumbHeight &&

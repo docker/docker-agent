@@ -104,6 +104,9 @@ func New(opts ...Option) *Model {
 	return m
 }
 
+// SetScrollbarDim changes only scrollbar paint, not its geometry or content.
+func (m *Model) SetScrollbarDim(dim float64) { m.sb.SetDim(dim) }
+
 // SetSize sets the total width and height of the scrollable region.
 func (m *Model) SetSize(width, height int) {
 	m.width = width
