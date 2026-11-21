@@ -92,22 +92,25 @@ func TestNotification_Position(t *testing.T) {
 	n := New()
 	n.SetSize(100, 50)
 	updated, _ := n.Update(ShowMsg{Text: "Test"})
-	row, col := updated.position()
+	bounds := updated.itemBounds()[0]
+	row, col := bounds.row, bounds.col
 
 	view := updated.View()
 	require.Equal(t, 50-lipgloss.Height(view)-notificationPadding, row)
 	require.Equal(t, 100-lipgloss.Width(view)-notificationPadding, col)
 }
 
-func TestNotification_GetLayer(t *testing.T) {
+func TestNotification_GetLayers(t *testing.T) {
 	t.Parallel()
 
 	n := New()
 
-	require.Nil(t, n.GetLayer())
+	require.Empty(t, n.GetLayers())
 
 	updated, _ := n.Update(ShowMsg{Text: "Test"})
-	require.NotNil(t, updated.GetLayer())
+	require.Empty(t, updated.GetLayers(), "an unsized stack has no on-screen items")
+	updated.SetSize(100, 50)
+	require.Len(t, updated.GetLayers(), 1)
 }
 
 func TestNotification_AutoHideGeneration(t *testing.T) {
@@ -130,7 +133,8 @@ func TestNotification_StaleTimerIgnored(t *testing.T) {
 	n.SetSize(100, 50)
 	updated, _ := n.Update(ShowMsg{Text: "hover me", Type: TypeInfo})
 	id := updated.items[0].ID
-	row, col := updated.position()
+	bounds := updated.itemBounds()[0]
+	row, col := bounds.row, bounds.col
 
 	updated, cmd := updated.HandleMouseMotion(col+1, row+1)
 	require.Nil(t, cmd)
@@ -152,7 +156,8 @@ func TestNotification_HoverEnterLeaveRestartsTimer(t *testing.T) {
 	n.SetSize(100, 50)
 	updated, _ := n.Update(ShowMsg{Text: "hover", Type: TypeInfo})
 	id := updated.items[0].ID
-	row, col := updated.position()
+	bounds := updated.itemBounds()[0]
+	row, col := bounds.row, bounds.col
 
 	updated, cmd := updated.HandleMouseMotion(col+1, row+1)
 	require.Nil(t, cmd)
@@ -181,7 +186,8 @@ func TestNotification_WarningHoverEnterLeaveRestartsTimer(t *testing.T) {
 	updated, showCmd := n.Update(ShowMsg{Text: "warning", Type: TypeWarning})
 	require.NotNil(t, showCmd)
 	id := updated.items[0].ID
-	row, col := updated.position()
+	bounds := updated.itemBounds()[0]
+	row, col := bounds.row, bounds.col
 
 	updated, cmd := updated.HandleMouseMotion(col+1, row+1)
 	require.Nil(t, cmd)
@@ -264,7 +270,7 @@ func TestNotification_StackingLayerBasics(t *testing.T) {
 	require.Contains(t, view, "old")
 	require.Contains(t, view, "new")
 	require.Less(t, stringsIndex(t, view, "old"), stringsIndex(t, view, "new"))
-	require.NotNil(t, updated.GetLayer())
+	require.Len(t, updated.GetLayers(), 2)
 	require.Len(t, updated.itemBounds(), 2)
 	bounds := updated.itemBounds()
 	require.Equal(t, 50-lipgloss.Height(updated.View())-notificationPadding, bounds[0].row)
@@ -340,7 +346,8 @@ func TestNotification_ErrorHoverEnterLeaveRestartsTimer(t *testing.T) {
 	n.SetSize(100, 50)
 	updated, _ := n.Update(ShowMsg{Text: "err", Type: TypeError})
 	id := updated.items[0].ID
-	row, col := updated.position()
+	bounds := updated.itemBounds()[0]
+	row, col := bounds.row, bounds.col
 
 	updated, cmd := updated.HandleMouseMotion(col+1, row+1)
 	require.Nil(t, cmd)
@@ -511,12 +518,12 @@ func TestNotification_AvoidanceClipsOverflowAndHitTargets(t *testing.T) {
 			y -= n.layout.top
 			input := image.Rect(x-1, tc.clipRow, x+1, tc.clipRow+2)
 			n.SetAvoidance(nil, []image.Rectangle{input})
-			layer := n.GetLayer()
+			layers := n.GetLayers()
 			if tc.clipRow == 0 {
-				require.Nil(t, layer)
+				require.Empty(t, layers)
 			} else {
-				require.NotNil(t, layer)
-				rendered := lipgloss.NewCompositor(layer)
+				require.NotEmpty(t, layers)
+				rendered := lipgloss.NewCompositor(layers...)
 				require.Equal(t, tc.clipRow, rendered.Bounds().Max.Y)
 				first := n.itemBounds()[0]
 				closeX, closeY := closeButtonPosition(first)
@@ -535,8 +542,29 @@ func TestNotification_AvoidanceClipsOverflowAndHitTargets(t *testing.T) {
 				require.False(t, ok, "a clipped close glyph is not clickable")
 			}
 			n.SetAvoidance(nil, nil)
-			require.NotNil(t, n.GetLayer(), "temporary clipping does not drop a notification")
+			require.NotEmpty(t, n.GetLayers(), "temporary clipping does not drop a notification")
 			require.Len(t, n.items, tc.count)
 		})
 	}
+}
+
+func TestNotification_ClipsToTerminal(t *testing.T) {
+	t.Parallel()
+
+	n := New()
+	n.SetSize(3, 2)
+	n.Update(ShowMsg{Text: "界"})
+	n.Update(ShowMsg{Text: "語"})
+	layers := n.GetLayers()
+	require.Len(t, layers, 1, "the second item has no visible rows")
+	frame := lipgloss.NewCompositor(layers...)
+	require.Equal(t, image.Rect(0, 0, 3, 2), frame.Bounds())
+	require.NotContains(t, ansi.Strip(frame.Render()), closeGlyph, "the close glyph is beyond the right edge")
+	_, _, hit := n.BodyHit(2, 1)
+	require.True(t, hit, "the clipped item still covers its visible cells")
+	x, y := closeButtonPosition(n.itemBounds()[0])
+	require.GreaterOrEqual(t, x, 3)
+	require.Nil(t, n.HandleClick(x, y))
+	_, _, hit = n.BodyHit(1, 2)
+	require.False(t, hit, "the bottom of the item is not visible")
 }

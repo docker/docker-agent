@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"image"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -9,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -289,54 +291,48 @@ func (n *Manager) View() string {
 	return lipgloss.JoinVertical(lipgloss.Right, views...)
 }
 
-// GetLayer groups the items for the compositor without painting blank
-// alignment space beside shorter notifications.
-func (n *Manager) GetLayer() *lipgloss.Layer {
-	if !n.Open() {
-		return nil
-	}
-	bounds := n.itemBounds()
-	row, col := n.position()
-	if len(bounds) == 0 {
-		return lipgloss.NewLayer(n.View()).X(col).Y(row)
-	}
-	layers := make([]*lipgloss.Layer, 0, len(bounds))
-	bottom, clip := n.clipOverflow()
-	for i, b := range bounds {
-		if clip && b.row >= bottom {
-			break
-		}
-		item := n.items[len(n.items)-1-i]
+// GetLayers returns each visible item as a separate layer, leaving the space
+// beside narrower items clear for the underlying interface.
+func (n *Manager) GetLayers() []*lipgloss.Layer {
+	var layers []*lipgloss.Layer
+	for b, visible := range n.visibleItems {
 		view := b.view
-		if n.closeHoveredID == item.ID || n.hoveredID == item.ID || n.copiedID == item.ID {
-			view = item.render(n.maxWidth(), n.closeHoveredID == item.ID, n.hoveredID == item.ID, n.copiedID == item.ID)
+		if n.closeHoveredID == b.id || n.hoveredID == b.id || n.copiedID == b.id {
+			item := notificationItem{Text: b.text, Type: b.kind}
+			view = item.render(n.maxWidth(), n.closeHoveredID == b.id, n.hoveredID == b.id, n.copiedID == b.id)
 		}
-		if clip && b.row+b.height > bottom {
-			rows := bottom - b.row
-			view = strings.Join(strings.SplitN(view, "\n", rows+1)[:rows], "\n")
+		if visible.Dy() < b.height {
+			view = strings.Join(strings.SplitN(view, "\n", visible.Dy()+1)[:visible.Dy()], "\n")
 		}
-		layers = append(layers, lipgloss.NewLayer(view).X(b.col-col).Y(b.row-row))
+		if visible.Dx() < b.width {
+			lines := strings.Split(view, "\n")
+			for i, line := range lines {
+				lines[i] = ansi.Truncate(line, visible.Dx(), "")
+			}
+			view = strings.Join(lines, "\n")
+		}
+		layers = append(layers, lipgloss.NewLayer(view).X(visible.Min.X).Y(visible.Min.Y))
 	}
-	if len(layers) == 0 {
-		return nil
-	}
-	return lipgloss.NewLayer("", layers...).X(col).Y(row)
+	return layers
 }
 
-func (n *Manager) position() (row, col int) {
-	bounds := n.itemBounds()
-	if len(bounds) == 0 {
-		return max(0, n.height-notificationPadding), max(0, n.width-notificationPadding)
+// visibleItems is the painted and interactive geometry. The avoidance solver
+// uses the uncut item bounds so it can also reposition off-screen items.
+func (n *Manager) visibleItems(yield func(notifBounds, image.Rectangle) bool) {
+	bottom := n.height
+	if clip, ok := n.clipOverflow(); ok {
+		bottom = clip
 	}
-
-	viewWidth := 0
-	for _, b := range bounds {
-		viewWidth = max(viewWidth, b.width)
+	screen := image.Rectangle{Max: image.Pt(n.width, bottom)}
+	for _, b := range n.itemBounds() {
+		if b.row >= bottom {
+			break
+		}
+		visible := image.Rect(b.col, b.row, b.col+b.width, b.row+b.height).Intersect(screen)
+		if !visible.Empty() && !yield(b, visible) {
+			return
+		}
 	}
-
-	row = bounds[0].row
-	col = max(0, n.width-viewWidth-notificationPadding)
-	return row, col
 }
 
 func (n *Manager) Open() bool {
@@ -350,7 +346,7 @@ type notifBounds struct {
 	width  int
 	height int
 	text   string
-	style  lipgloss.Style
+	kind   Type
 	view   string
 }
 
@@ -362,8 +358,7 @@ type stackLayout struct {
 	revision uint64
 }
 
-// itemBounds returns the same screen-space rectangles used by rendering and
-// mouse routing. Scrolling the stack only moves the cached rectangles.
+// itemBounds returns the uncut screen-space layout, including the current lift.
 func (n *Manager) itemBounds() []notifBounds {
 	if !n.Open() || n.width <= 0 {
 		return nil
@@ -390,7 +385,7 @@ func (n *Manager) layoutStack() {
 		w, h := lipgloss.Size(view)
 		bounds = append(bounds, notifBounds{
 			id: item.ID, row: totalHeight, width: w, height: h,
-			text: item.Text, style: item.Type.style(), view: view,
+			text: item.Text, kind: item.Type, view: view,
 		})
 		totalHeight += h
 		viewWidth = max(viewWidth, w)
@@ -406,19 +401,29 @@ func (n *Manager) layoutStack() {
 }
 
 func closeButtonPosition(b notifBounds) (x, y int) {
-	return b.col + max(0, b.width-b.style.GetBorderRightSize()-1-closeInset), b.row + b.style.GetBorderTopSize()
+	style := b.kind.style()
+	return b.col + b.width - style.GetBorderRightSize() - 1 - closeInset, b.row + style.GetBorderTopSize()
+}
+
+func (b notifBounds) hitsClose(x, y int) bool {
+	closeX, closeY := closeButtonPosition(b)
+	return x == closeX && y == closeY
+}
+
+func (n *Manager) itemAt(x, y int) (notifBounds, bool) {
+	point := image.Pt(x, y)
+	for b, visible := range n.visibleItems {
+		if point.In(visible) {
+			return b, true
+		}
+	}
+	return notifBounds{}, false
 }
 
 // CloseButtonHit checks if the given screen coordinates hit a notification close glyph.
 func (n *Manager) CloseButtonHit(x, y int) (uint64, bool) {
-	if !n.onScreen(x, y) {
-		return 0, false
-	}
-	for _, b := range n.itemBounds() {
-		closeX, closeY := closeButtonPosition(b)
-		if x == closeX && y == closeY {
-			return b.id, true
-		}
+	if b, ok := n.itemAt(x, y); ok && b.hitsClose(x, y) {
+		return b.id, true
 	}
 	return 0, false
 }
@@ -427,17 +432,7 @@ func (n *Manager) CloseButtonHit(x, y int) (uint64, bool) {
 // returns its ID and text. The close button is excluded so dismiss priority can
 // stay separate from click-to-copy behavior.
 func (n *Manager) BodyHit(x, y int) (uint64, string, bool) {
-	if !n.onScreen(x, y) {
-		return 0, "", false
-	}
-	for _, b := range n.itemBounds() {
-		if x < b.col || x >= b.col+b.width || y < b.row || y >= b.row+b.height {
-			continue
-		}
-		closeX, closeY := closeButtonPosition(b)
-		if x == closeX && y == closeY {
-			return 0, "", false
-		}
+	if b, ok := n.itemAt(x, y); ok && !b.hitsClose(x, y) {
 		return b.id, b.text, true
 	}
 	return 0, "", false
@@ -465,23 +460,6 @@ func (n *Manager) HandleClick(x, y int) tea.Cmd {
 	return cmd(DismissMsg{ID: id})
 }
 
-func (n *Manager) onScreen(x, y int) bool {
-	bottom, clip := n.clipOverflow()
-	return x >= 0 && x < n.width && y >= 0 && y < n.height && (!clip || y < bottom)
-}
-
-func (n *Manager) hitTestNotification(x, y int) uint64 {
-	if !n.onScreen(x, y) {
-		return 0
-	}
-	for _, b := range n.itemBounds() {
-		if x >= b.col && x < b.col+b.width && y >= b.row && y < b.row+b.height {
-			return b.id
-		}
-	}
-	return 0
-}
-
 func (n *Manager) findItemIndex(id uint64) int {
 	for i := range n.items {
 		if n.items[i].ID == id {
@@ -495,8 +473,11 @@ func (n *Manager) findItemIndex(id uint64) int {
 // invalidates its pending timer; leaving restarts a generation-safe timer.
 func (n *Manager) HandleMouseMotion(x, y int) (Manager, tea.Cmd) {
 	n.mouseX, n.mouseY, n.mouseKnown = x, y, true
-	newHoveredID := n.hitTestNotification(x, y)
-	newCloseHoveredID, _ := n.CloseButtonHit(x, y)
+	item, hit := n.itemAt(x, y)
+	newHoveredID, newCloseHoveredID := item.id, uint64(0)
+	if hit && item.hitsClose(x, y) {
+		newCloseHoveredID = item.id
+	}
 
 	var cmd tea.Cmd
 	if newHoveredID != n.hoveredID {

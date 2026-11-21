@@ -39,7 +39,7 @@ func TestSidebarResizeGuideStaysBelowForeground(t *testing.T) {
 		}},
 		{"notification", messages.SidebarRight, func(m *appModel) *lipgloss.Layer {
 			m.Update(notification.ShowMsg{Text: strings.Repeat("Notice text ", 30), Type: notification.TypeInfo})
-			return m.notification.GetLayer()
+			return m.notification.GetLayers()[0]
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -89,6 +89,30 @@ func TestSidebarResizeGuideStaysBelowForeground(t *testing.T) {
 			assert.Equal(t, base.CellAt(guide.X, insideY), full.CellAt(guide.X, insideY), "retraction also stays under foreground")
 		})
 	}
+}
+
+func TestSidebarResizeGuideShowsThroughNotificationGap(t *testing.T) {
+	m, x, _ := sidebarResizeTestRoot(t, messages.SidebarRight)
+	// Choose a stack that spans the chat rows, with a wide item above a
+	// short one. The same guide column is occluded on one row but not the other.
+	m.notification.SetSize(m.width, m.contentHeight)
+	m.Update(notification.ShowMsg{Text: strings.Repeat("wide ", 12)})
+	m.Update(notification.ShowMsg{Text: "tiny"})
+	layers := m.notification.GetLayers()
+	require.Len(t, layers, 2)
+	guideX := x + 4
+	require.GreaterOrEqual(t, guideX, layers[0].GetX())
+	require.Less(t, guideX, layers[1].GetX())
+
+	_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
+	m.Update(tea.MouseMotionMsg{X: guideX, Y: 1, Button: tea.MouseLeft})
+	require.Equal(t, guideX, requireSidebarGuide(t, m).X)
+	require.Nil(t, sidebarGuideTestTick(t, m, cmd))
+	frame := m.View().Content
+	screen := uv.NewScreenBuffer(lipgloss.Width(frame), lipgloss.Height(frame))
+	uv.NewStyledString(frame).Draw(&screen, screen.Bounds())
+	assert.Equal(t, "─", screen.CellAt(guideX, layers[0].GetY()).String(), "guide stays under the wider toast border")
+	assert.Equal(t, "│", screen.CellAt(guideX, layers[1].GetY()).String(), "guide is visible beside the shorter toast")
 }
 
 func TestSidebarResizeGuideClipsKittyPlacements(t *testing.T) {
