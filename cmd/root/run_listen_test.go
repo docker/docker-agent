@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 )
@@ -82,4 +83,35 @@ func TestStartSessionCoordinatorRejectsNonLocalListener(t *testing.T) {
 	opt, err := flags.startSessionCoordinator(t.Context(), nil, &recallRuntime{store: store}, sess)
 	require.ErrorContains(t, err, "require --auth-token")
 	assert.Nil(t, opt)
+}
+
+func TestDetachOnCleanupReleasesListenSession(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	rt := &recallRuntime{store: store}
+
+	sm := server.NewSessionManager(ctx, nil, store, 0, &config.RuntimeConfig{})
+	flags := &runExecFlags{listenSM: sm}
+	_ = flags.recallCoordinatorOpt(ctx, rt, sess)
+	require.Len(t, sm.GetActiveSessions(), 1)
+	require.NotNil(t, rt.recallHandler)
+
+	cleaned := false
+	detachOnCleanup(sm, sess.ID, func() { cleaned = true })()
+
+	assert.True(t, cleaned, "wrapped cleanup must still run")
+	assert.Empty(t, sm.GetActiveSessions(), "closed initial tab must leave the active session list")
+	assert.Nil(t, rt.recallHandler, "recall handler must be cleared")
+}
+
+func TestDetachOnCleanupWithoutListenKeepsCleanup(t *testing.T) {
+	t.Parallel()
+
+	cleaned := false
+	detachOnCleanup(nil, "id", func() { cleaned = true })()
+	assert.True(t, cleaned)
 }
