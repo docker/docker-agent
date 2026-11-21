@@ -1068,16 +1068,17 @@ func (m *model) Bindings() []key.Binding {
 
 // InlineEditBindings returns key bindings for inline edit mode
 func (m *model) InlineEditBindings() []key.Binding {
-	// Get the newline key help based on the configured keymap
-	newlineKeys := m.inlineEditTextarea.KeyMap.InsertNewline.Keys()
-	newlineHelp := "Ctrl+j"
-	if slices.Contains(newlineKeys, "shift+enter") {
-		newlineHelp = "Shift+Enter"
-	}
+	send := core.GetKeys().EditorSend
+	send.SetHelp(send.Help().Key, "save")
+	newline := m.inlineEditTextarea.KeyMap.InsertNewline
+	send.SetKeys(slices.DeleteFunc(slices.Clone(send.Keys()), func(k string) bool {
+		return slices.Contains(newline.Keys(), k)
+	})...)
+	newline.SetHelp(newline.Help().Key, "newline")
 	return []key.Binding{
-		key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "save")),
+		send,
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("Esc", "cancel")),
-		key.NewBinding(key.WithKeys(newlineKeys...), key.WithHelp(newlineHelp, "newline")),
+		newline,
 	}
 }
 
