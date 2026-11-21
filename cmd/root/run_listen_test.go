@@ -2,6 +2,7 @@ package root
 
 import (
 	"context"
+	"io"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
@@ -41,7 +43,7 @@ func TestStartSessionCoordinatorWithoutListenRoutesIdleRecallToApp(t *testing.T)
 
 		rt := &recallRuntime{store: store}
 		flags := &runExecFlags{runConfig: config.RuntimeConfig{}}
-		opt, err := flags.startSessionCoordinator(ctx, nil, rt, sess)
+		opt, _, err := flags.startSessionCoordinator(ctx, nil, rt, sess)
 		require.NoError(t, err)
 		require.NotNil(t, opt)
 		require.NotNil(t, rt.recallHandler)
@@ -79,7 +81,47 @@ func TestStartSessionCoordinatorRejectsNonLocalListener(t *testing.T) {
 	require.NoError(t, store.AddSession(t.Context(), sess))
 	flags := &runExecFlags{listenAddr: "0.0.0.0:0"}
 
-	opt, err := flags.startSessionCoordinator(t.Context(), nil, &recallRuntime{store: store}, sess)
+	opt, detach, err := flags.startSessionCoordinator(t.Context(), nil, &recallRuntime{store: store}, sess)
 	require.ErrorContains(t, err, "require --auth-token")
 	assert.Nil(t, opt)
+	assert.Nil(t, detach)
+}
+
+func TestStartSessionCoordinatorListenReturnsDetach(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	flags := &runExecFlags{listenAddr: "127.0.0.1:0"}
+
+	opt, detach, err := flags.startSessionCoordinator(ctx, cli.NewPrinter(io.Discard), &recallRuntime{store: store}, sess)
+	require.NoError(t, err)
+	require.NotNil(t, opt)
+	require.NotNil(t, detach)
+	require.NotNil(t, flags.listenSM)
+	require.Len(t, flags.listenSM.GetActiveSessions(), 1)
+
+	detach()
+
+	require.Empty(t, flags.listenSM.GetActiveSessions())
+	assert.False(t, flags.listenSM.WaitSessionAttached(ctx, sess.ID, 10*time.Millisecond))
+}
+
+func TestDetachOnCloseRunsDetachOnceBeforeCleanup(t *testing.T) {
+	t.Parallel()
+
+	var order []string
+	cleanup := detachOnClose(
+		func() { order = append(order, "cleanup") },
+		func() { order = append(order, "detach") },
+	)
+
+	cleanup()
+	cleanup()
+
+	assert.Equal(t, []string{"detach", "cleanup"}, order)
 }

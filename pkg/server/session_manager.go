@@ -462,6 +462,43 @@ func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, r
 	return &rs.streaming
 }
 
+// DetachRuntime removes the runtime attached for sessionID without deleting the
+// session. It is symmetric with [SessionManager.AttachRuntime]: the attach context
+// is cancelled and the follow-up injector, recall handler and event log are
+// unregistered, while the persisted session and its history are left alone. The
+// owner of a closed view (a TUI tab) calls it instead of DeleteSession, so the
+// runtime, session and context do not accumulate for the process lifetime.
+func (sm *SessionManager) DetachRuntime(sessionID string) {
+	sessionRuntime, ok := sm.runtimeSessions.Load(sessionID)
+	if !ok {
+		return
+	}
+	// Delete only our entry: a concurrent AttachRuntime may have replaced it.
+	if current, ok := sm.runtimeSessions.Load(sessionID); ok && current == sessionRuntime {
+		sm.runtimeSessions.Delete(sessionID)
+	}
+	if sessionRuntime.cancel != nil {
+		sessionRuntime.cancel()
+	}
+	if setter, ok := sessionRuntime.runtime.(recallHandlerSetter); ok {
+		setter.SetRecallHandler(nil)
+	}
+	sm.followUpInjectors.Delete(sessionID)
+	sm.followUpKeys.Delete(sessionID)
+	sm.detachEventLog(sessionID)
+}
+
+// detachEventLog removes the session's event log without marking the session as
+// deleted, so a later AttachRuntime can register a fresh one.
+func (sm *SessionManager) detachEventLog(sessionID string) {
+	sm.eventLogsMu.Lock()
+	defer sm.eventLogsMu.Unlock()
+	if pe, ok := sm.eventLogs.Load(sessionID); ok {
+		pe.cancel()
+		sm.eventLogs.Delete(sessionID)
+	}
+}
+
 // GetSession retrieves a session by ID.
 func (sm *SessionManager) GetSession(ctx context.Context, id string) (*session.Session, error) {
 	if rs, ok := sm.runtimeSessions.Load(id); ok && rs.session != nil {

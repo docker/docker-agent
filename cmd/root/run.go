@@ -560,7 +560,10 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	// The closure (not the func value) is deferred: startSessionCoordinator may
+	// wrap cleanup with the attach detach callback below, so the deferred call
+	// must read cleanup when it runs.
+	defer func() { cleanup() }() //nolint:gocritic // deferUnlambda would capture cleanup before the detach wrapper is installed
 
 	if !useTUI {
 		// Non-interactive (--exec) runs never clean up the worktree: there
@@ -573,9 +576,16 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	// same busy guard RunSession/AddMessage/UpdateMessage use, so a
 	// concurrent REST call is correctly rejected with 409 instead of racing
 	// the TUI's live stream (#3590); see app.WithStreamGuard.
-	coordinatorOpt, err := f.startSessionCoordinator(ctx, out, rt, sess)
+	coordinatorOpt, detachCoordinator, err := f.startSessionCoordinator(ctx, out, rt, sess)
 	if err != nil {
 		return err
+	}
+	// The initial tab attaches its runtime to the control plane (--listen) or to
+	// the recall manager like a spawned tab, so closing it must detach before its
+	// runtime is torn down: otherwise the manager keeps the runtime, session,
+	// attach context and event log for the process lifetime (#4909).
+	if detachCoordinator != nil {
+		cleanup = detachOnClose(cleanup, detachCoordinator)
 	}
 
 	applyTheme(f.theme)
@@ -1395,11 +1405,6 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 		spawnReq.AgentName = agt.Name()
 		newSess := session.New(f.buildSessionOpts(agt, t, spawnReq)...)
 
-		// Create cleanup function
-		cleanup := func() {
-			stopToolSets(spawnCtx, t)
-		}
-
 		// Create the app
 		var appOpts []app.Opt
 		if gen := localRt.TitleGenerator(spawnCtx); gen != nil {
@@ -1408,10 +1413,13 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 		if ctrl != nil {
 			appOpts = append(appOpts, app.WithSnapshotController(ctrl))
 		}
-		coordinatorOpt := f.recallCoordinatorOpt(spawnCtx, localRt, newSess)
+		coordinatorOpt, detachRuntime := f.recallCoordinatorOpt(spawnCtx, localRt, newSess)
 		if coordinatorOpt != nil {
 			appOpts = append(appOpts, coordinatorOpt)
 		}
+
+		// Create cleanup function
+		cleanup := detachOnClose(func() { stopToolSets(spawnCtx, t) }, detachRuntime)
 
 		a := app.New(spawnCtx, localRt, newSess, appOpts...)
 
