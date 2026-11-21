@@ -47,6 +47,10 @@ func (m *appModel) clearSidebarResizeGuide() {
 
 // withSidebarResizeGuide paints the guide over the chat rows and under the foreground.
 func (m *appModel) withSidebarResizeGuide(view tea.View) tea.View {
+	if m.err != nil || !m.ready {
+		m.clearSidebarResizeGuide()
+		return view
+	}
 	guide, ok := chat.SidebarResizeGuide(m.activeTab.chatPage)
 	if !ok || guide.Start >= guide.End {
 		m.clearSidebarResizeGuide()
