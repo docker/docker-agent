@@ -26,12 +26,6 @@ const (
 	defaultCharLimit = 500
 	numberCharLimit  = 50
 	defaultWidth     = 50
-
-	// elicitationHeaderLines is the count of fixed header lines above the
-	// scrollable body (title + separator).
-	elicitationHeaderLines = 2
-	// Header (2), footer blank (1), and frame border+padding (4).
-	elicitationOverhead = 7
 )
 
 // ElicitationDialog implements Dialog for MCP elicitation requests.
@@ -237,7 +231,7 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, d.keyMap.Copy) && d.message != "":
-		return d, messagecomponents.CopyTextToClipboard(d.message)
+		return d, messagecomponents.CopyTextToClipboard(markdown.StripTerminalControls(d.message))
 	case key.Matches(msg, d.keyMap.Space) && !d.isTextInputField() && !d.hasFreeFormInput():
 		// Space toggles a multiselect option, and cycles forward through
 		// other options, same as down arrow
@@ -443,13 +437,18 @@ type elicitationLayout struct {
 	bodyLines    []string // pre-rendered body, one entry per line
 	codeBlocks   []markdown.CodeBlock
 	helpLines    []string
+	title        string
 	fieldStarts  []int           // line offset of each field's label
 	fieldGeoms   []fieldGeometry // wrapped row layout per field, relative to fieldStarts
 }
 
 // dialogHeight is the total rendered height of the dialog, including frame.
 func (l elicitationLayout) dialogHeight() int {
-	return l.viewport + elicitationOverhead + len(l.helpLines)
+	footer := 0
+	if len(l.helpLines) > 0 {
+		footer = 1 + len(l.helpLines)
+	}
+	return l.viewport + 4 + lipgloss.Height(l.title) + 1 + footer
 }
 
 func (d *ElicitationDialog) layout() elicitationLayout {
@@ -458,13 +457,25 @@ func (d *ElicitationDialog) layout() elicitationLayout {
 	innerWidth := max(1, contentWidth-d.scrollview.ReservedCols())
 
 	bodyLines, codeBlocks, fieldStarts, fieldGeoms := d.buildBody(innerWidth)
+	maxHeight := min(d.Height(), max(8, min(d.Height()*80/100, 40)))
+	titleLines := strings.Split(RenderTitle(d.title, contentWidth, styles.DialogTitleStyle), "\n")
+	// Keep at least one body row visible when a server supplies a very long title.
+	titleLines = titleLines[:min(len(titleLines), max(1, maxHeight-6))]
+	title := strings.Join(titleLines, "\n")
+	fixedHeight := 4 + len(titleLines) + 1
 	helpLines := d.renderHelpLines(contentWidth, false)
-	maxHeight := min(d.Height()*80/100, 40)
-	viewport := max(1, min(len(bodyLines), maxHeight-elicitationOverhead-len(helpLines)))
+	viewport := max(1, min(len(bodyLines), maxHeight-fixedHeight-1-len(helpLines)))
 	if len(bodyLines) > viewport {
 		helpLines = d.renderHelpLines(contentWidth, true)
-		viewport = max(1, min(len(bodyLines), maxHeight-elicitationOverhead-len(helpLines)))
 	}
+	// Help is secondary to the body; omit overflowing rows on short screens.
+	maxHelp := max(0, maxHeight-fixedHeight-2)
+	helpLines = helpLines[:min(len(helpLines), maxHelp)]
+	footer := 0
+	if len(helpLines) > 0 {
+		footer = 1 + len(helpLines)
+	}
+	viewport = max(1, min(len(bodyLines), maxHeight-fixedHeight-footer))
 
 	return elicitationLayout{
 		dialogWidth:  dialogWidth,
@@ -473,6 +484,7 @@ func (d *ElicitationDialog) layout() elicitationLayout {
 		bodyLines:    bodyLines,
 		codeBlocks:   codeBlocks,
 		helpLines:    helpLines,
+		title:        title,
 		fieldStarts:  fieldStarts,
 		fieldGeoms:   fieldGeoms,
 	}
@@ -568,17 +580,19 @@ func (d *ElicitationDialog) View() string {
 	row, col := CenterPosition(d.Width(), d.Height(), l.dialogWidth, l.dialogHeight())
 	frameTop := styles.DialogStyle.GetBorderTopSize() + styles.DialogStyle.GetPaddingTop()
 	frameLeft := styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
-	d.scrollableRow = row + frameTop + elicitationHeaderLines //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
-	d.scrollableCol = col + frameLeft                         //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
+	d.scrollableRow = row + frameTop + lipgloss.Height(l.title) + 1 //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
+	d.scrollableCol = col + frameLeft                               //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
 	d.scrollview.SetPosition(d.scrollableCol, d.scrollableRow)
 
 	parts := []string{
-		RenderTitle(d.title, l.contentWidth, styles.DialogTitleStyle),
+		l.title,
 		RenderSeparator(l.contentWidth),
 	}
 	parts = append(parts, strings.Split(d.scrollview.View(), "\n")...)
-	parts = append(parts, "")
-	parts = append(parts, l.helpLines...)
+	if len(l.helpLines) > 0 {
+		parts = append(parts, "")
+		parts = append(parts, l.helpLines...)
+	}
 
 	return styles.DialogStyle.Width(l.dialogWidth).Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
@@ -612,11 +626,11 @@ func (d *ElicitationDialog) renderHelpLines(width int, scrollable bool) []string
 	start := 0
 	for i := 2; i <= len(pairs); i += 2 {
 		if i > start+2 && common.HelpKeysWidth(pairs[start:i]...) > width {
-			lines = append(lines, RenderHelpKeys(width, pairs[start:i-2]...))
+			lines = append(lines, strings.Split(RenderHelpKeys(width, pairs[start:i-2]...), "\n")...)
 			start = i - 2
 		}
 	}
-	return append(lines, RenderHelpKeys(width, pairs[start:]...))
+	return append(lines, strings.Split(RenderHelpKeys(width, pairs[start:]...), "\n")...)
 }
 
 // hasSelectionFields returns true if any field uses selection-based input (boolean, enum or multiselect).
@@ -798,6 +812,10 @@ func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Mode
 	return d, nil
 }
 
+func (d *ElicitationDialog) TitleZoneHeight() int {
+	return styles.DialogStyle.GetBorderTopSize() + styles.DialogStyle.GetPaddingTop() + lipgloss.Height(d.layout().title) + 1
+}
+
 func (d *ElicitationDialog) Position() (row, col int) {
 	l := d.layout()
 	return CenterPosition(d.Width(), d.Height(), l.dialogWidth, l.dialogHeight())
@@ -872,7 +890,7 @@ func (d *ElicitationDialog) codeBlockAt(x, y int) (string, bool) {
 
 // renderMarkdownMessage falls back to plain text if the renderer fails.
 func renderMarkdownMessage(message string, contentWidth int) (string, []markdown.CodeBlock) {
-	rendered, blocks, err := markdown.NewFastRenderer(contentWidth).RenderWithCodeBlocks(message)
+	rendered, blocks, err := markdown.NewFastRenderer(contentWidth).RenderWithSourceCodeBlocks(message)
 	if err != nil {
 		return styles.DialogContentStyle.Width(contentWidth).Render(message), nil
 	}

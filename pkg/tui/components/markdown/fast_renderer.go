@@ -328,6 +328,72 @@ func (r *FastRenderer) RenderWithCodeBlocks(input string) (string, []CodeBlock, 
 	return finalizeOutput(result, r.width), blocks, nil
 }
 
+// RenderWithSourceCodeBlocks preserves source bytes when the raw and safe
+// parses agree. If controls change the parse, hide copy labels rather than
+// associate a visible block with the wrong source.
+func (r *FastRenderer) RenderWithSourceCodeBlocks(input string) (string, []CodeBlock, error) {
+	out, blocks, err := r.RenderWithCodeBlocks(input)
+	if err != nil || len(blocks) == 0 || sanitizeForTerminal(input) == input {
+		return out, blocks, err
+	}
+	p := parserPool.Get().(*parser)
+	p.reset(input, r.width)
+	p.hideCopyIcon = r.hideCopyIcon
+	rawOutput := finalizeOutput(p.parse(), r.width)
+	rawBlocks := slices.Clone(p.codeBlocks)
+	parserPool.Put(p)
+	compatible := len(rawBlocks) == len(blocks) && sanitizeForTerminal(rawOutput) == sanitizeForTerminal(out)
+	if compatible {
+		for i := range blocks {
+			// The last line separator belongs to the fence, not the code.
+			rawBlocks[i].Content = strings.TrimSuffix(rawBlocks[i].Content, "\r")
+			if blocks[i].Line != rawBlocks[i].Line || blocks[i].Content != sanitizeForTerminal(rawBlocks[i].Content) || containsHiddenControl(rawBlocks[i].Content) {
+				compatible = false
+				break
+			}
+		}
+	}
+	if !compatible {
+		safe := *r
+		safe.HideCopyIcon()
+		return safe.RenderWithCodeBlocks(input)
+	}
+	for i := range blocks {
+		blocks[i].Content = rawBlocks[i].Content
+	}
+	return out, blocks, nil
+}
+
+// containsHiddenControl permits CRLF and SGR colors but rejects control
+// strings and cursor controls whose invisible payload can alter pasted text.
+func containsHiddenControl(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\r':
+			if i+1 >= len(s) || s[i+1] != '\n' {
+				return true
+			}
+		case '\x1b':
+			if i+1 >= len(s) || s[i+1] != '[' {
+				return true
+			}
+			j := i + 2
+			for j < len(s) && ((s[j] >= '0' && s[j] <= '9') || s[j] == ';' || s[j] == ':') {
+				j++
+			}
+			if j >= len(s) || s[j] != 'm' {
+				return true
+			}
+			i = j
+		default:
+			if isControlByte(s[i]) || s[i] >= 0x80 && s[i] <= 0x9f && !utf8.ValidString(s) {
+				return true
+			}
+		}
+	}
+	return hasEncodedC1(s)
+}
+
 // parser holds the state for parsing markdown.
 type parser struct {
 	input        string
@@ -386,15 +452,37 @@ func (p *parser) parse() string {
 	return strings.TrimRight(p.out.String(), "\n")
 }
 
-// tryCodeBlock checks for fenced code blocks (``` or ~~~)
-func (p *parser) tryCodeBlock(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "```") && !strings.HasPrefix(trimmed, "~~~") {
+// openingFence returns the complete run of fence characters and its info string.
+func openingFence(line string) (string, string) {
+	line = strings.TrimSpace(line)
+	if len(line) < 3 || (line[0] != '`' && line[0] != '~') {
+		return "", ""
+	}
+	i := 0
+	for i < len(line) && line[i] == line[0] {
+		i++
+	}
+	if i < 3 {
+		return "", ""
+	}
+	return line[:i], strings.TrimSpace(line[i:])
+}
+
+func closingFence(line, fence string) bool {
+	line = strings.TrimSpace(line)
+	rest, ok := strings.CutPrefix(line, fence)
+	if !ok {
 		return false
 	}
+	return strings.Trim(rest, string(fence[0])+" \t") == ""
+}
 
-	fence := trimmed[:3]
-	lang := strings.TrimSpace(trimmed[3:])
+// tryCodeBlock checks for fenced code blocks (``` or ~~~)
+func (p *parser) tryCodeBlock(line string) bool {
+	fence, lang := openingFence(line)
+	if fence == "" {
+		return false
+	}
 	p.lineIdx++
 
 	// Build code directly into a builder to avoid slice + Join allocation
@@ -402,7 +490,7 @@ func (p *parser) tryCodeBlock(line string) bool {
 	first := true
 	for p.lineIdx < len(p.lines) {
 		codeLine := p.lines[p.lineIdx]
-		if strings.HasPrefix(strings.TrimSpace(codeLine), fence) {
+		if closingFence(codeLine, fence) {
 			p.lineIdx++
 			break
 		}
@@ -630,16 +718,14 @@ func (p *parser) renderBlockquoteContent(lines []string, indent string, availabl
 		}
 
 		// Check for fenced code block start
-		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			fence := trimmed[:3]
-			lang := strings.TrimSpace(trimmed[3:])
+		if fence, lang := openingFence(trimmed); fence != "" {
 			i++
 
 			// Collect code lines until fence end
 			var codeLines []string
 			for i < len(lines) {
 				codeLine := lines[i]
-				if strings.HasPrefix(strings.TrimSpace(codeLine), fence) {
+				if closingFence(codeLine, fence) {
 					i++
 					break
 				}
@@ -1412,16 +1498,14 @@ func (p *parser) renderListCodeBlock(codeIndent, bulletWidth int) {
 	line := p.lines[p.lineIdx]
 	ltrimmed := strings.TrimLeft(line, " \t")
 
-	fence := ltrimmed[:3]
-	lang := strings.TrimSpace(ltrimmed[3:])
+	fence, lang := openingFence(ltrimmed)
 	p.lineIdx++
 
 	// Collect code lines
 	var codeLines []string
 	for p.lineIdx < len(p.lines) {
 		codeLine := p.lines[p.lineIdx]
-		codeTrimmed := strings.TrimLeft(codeLine, " \t")
-		if strings.HasPrefix(codeTrimmed, fence) {
+		if closingFence(codeLine, fence) {
 			p.lineIdx++
 			break
 		}

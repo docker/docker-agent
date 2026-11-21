@@ -389,17 +389,13 @@ func classifyFenceLines(input string) []bool {
 		switch {
 		case openFence != "":
 			lines = append(lines, true)
-			if strings.HasPrefix(strings.TrimSpace(trimmed), openFence) {
+			if closingFence(trimmed, openFence) {
 				openFence = ""
 			}
-		case strings.HasPrefix(trimmed, "```"):
-			lines = append(lines, true)
-			openFence = "```"
-		case strings.HasPrefix(trimmed, "~~~"):
-			lines = append(lines, true)
-			openFence = "~~~"
 		default:
-			lines = append(lines, false)
+			fence, _ := openingFence(trimmed)
+			lines = append(lines, fence != "")
+			openFence = fence
 		}
 		lineStart = i + 1
 	}
