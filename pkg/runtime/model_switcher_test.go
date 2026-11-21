@@ -104,6 +104,10 @@ func TestModelSupportsThinking(t *testing.T) {
 		{"openai gpt-5-chat is non-reasoning", latest.ModelConfig{Provider: "openai", Model: "gpt-5-chat"}, false},
 		{"anthropic claude", latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-4-5"}, true},
 		{"bedrock claude", latest.ModelConfig{Provider: "amazon-bedrock", Model: "us.anthropic.claude-sonnet-4-5"}, true},
+		{"gemini 4 hydrogen", latest.ModelConfig{Provider: "google", Model: "gemini-4-hydrogen"}, true},
+		{"gemini 4 neon", latest.ModelConfig{Provider: "google", Model: "gemini-4-neon"}, true},
+		{"gemini 4 carbon", latest.ModelConfig{Provider: "google", Model: "gemini-4-carbon"}, true},
+		{"gemini 4 argon", latest.ModelConfig{Provider: "google", Model: "gemini-4-argon"}, true},
 		{"gemini 3", latest.ModelConfig{Provider: "google", Model: "gemini-3-pro"}, true},
 		{"gemini 2.5", latest.ModelConfig{Provider: "google", Model: "gemini-2.5-pro"}, true},
 		{"gemini 2.0 no thinking", latest.ModelConfig{Provider: "google", Model: "gemini-2.0-flash"}, false},
@@ -647,6 +651,61 @@ func TestCycleAgentThinkingLevel_PerModelTopTier(t *testing.T) {
 			}
 
 			// Walk one full cycle starting from None and record every level.
+			var got []effort.Level
+			for range tt.wantCycle {
+				level, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+				require.NoError(t, err)
+				got = append(got, level)
+			}
+			assert.Equal(t, tt.wantCycle, got)
+		})
+	}
+}
+
+func TestCycleAgentThinkingLevel_Gemini4(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		modelID   string
+		wantCycle []effort.Level
+	}{
+		{
+			name:      "gemini 4 hydrogen drops minimal and reaches xhigh",
+			modelID:   "gemini-4-hydrogen",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.None},
+		},
+		{
+			name:      "gemini 4 neon drops minimal and reaches xhigh",
+			modelID:   "gemini-4-neon",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.None},
+		},
+		{
+			name:      "gemini 4 carbon drops minimal and tops out at high",
+			modelID:   "gemini-4-carbon",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.None},
+		},
+		{
+			name:      "gemini 4 argon drops minimal and tops out at high",
+			modelID:   "gemini-4-argon",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.None},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := newConfigProvider(latest.ModelConfig{Provider: "google", Model: tt.modelID})
+			root := agent.New("root", "test", agent.WithModel(model))
+			r := &LocalRuntime{
+				team: team.New(team.WithAgents(root)),
+				modelSwitcherCfg: &modelcatalog.Config{
+					ProviderRegistry: testProviderRegistry(),
+					EnvProvider:      environment.NewMapEnvProvider(map[string]string{"GOOGLE_API_KEY": "test-key"}),
+				},
+			}
+
 			var got []effort.Level
 			for range tt.wantCycle {
 				level, err := r.CycleAgentThinkingLevel(t.Context(), "root")

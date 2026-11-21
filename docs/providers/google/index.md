@@ -125,7 +125,7 @@ Gemini supports two approaches depending on the model version:
 > [!WARNING]
 > **Different thinking formats**
 >
-> Gemini 2.5 uses **token-based** budgets (integers). Gemini 3 uses **level-based** budgets (strings like `low`, `high`). Make sure you use the right format for your model version.
+> Gemini 2.5 uses **token-based** budgets (integers). Gemini 3+ uses **level-based** budgets (strings like `low`, `high`, `xhigh`). Make sure you use the right format for your model version.
 
 ### Gemini 2.5 (Token-based)
 
@@ -147,19 +147,24 @@ models:
     thinking_budget: 8192 # fixed token budget
 ```
 
-### Gemini 3 (Level-based)
+### Gemini 3+ (Level-based)
 
 ```yaml
 models:
-  gemini-pro:
+  gemini-neon:
     provider: google
-    model: gemini-3.1-pro-preview
-    thinking_budget: high # default for Pro: low | high
+    model: gemini-4-neon
+    thinking_budget: xhigh # Hydrogen / Neon: low | medium | high | xhigh
+
+  gemini-carbon:
+    provider: google
+    model: gemini-4-carbon
+    thinking_budget: high # Carbon / Argon: low | medium | high
 
   gemini-flash:
     provider: google
     model: gemini-3.8-flash
-    thinking_budget: medium # default for Flash: minimal | low | medium | high
+    thinking_budget: medium # Gemini 3 Flash: minimal | low | medium | high
 ```
 
 ## Built-in Tools (Grounding)
