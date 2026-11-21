@@ -1,0 +1,8 @@
+{
+  "source": "echo: 0123456789abcdefghijklmnopqrstuvwxyz",
+  "max_tool_result_tokens": 4,
+  "stored_result": "echo: 0...uvwxyz",
+  "max_old_tool_call_tokens": 3,
+  "projected_result": "[content truncated]",
+  "stop": "Execution stopped after reaching the configured max_iterations limit (1)."
+}

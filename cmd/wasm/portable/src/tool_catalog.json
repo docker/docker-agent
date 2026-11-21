@@ -1,0 +1,920 @@
+{
+  "calculator": {
+    "instructions": "## Calculator\n\nUse calculate for numerical calculations instead of doing arithmetic yourself.\nPass a single expression with decimal numbers, parentheses, +, -, *, /, %, or ^.\nPowers use integer exponents and associate right-to-left; -2^2 means -(2^2).\n% is integer remainder, not a percentage: write 15 / 100 for 15%.\nScientific notation such as 1.5e3 is supported. Variables and functions are not.\nThe result field is always exact. When approximate is true, decimal is rounded\n(to 20 decimal places); use the exact fraction in result for further calculations.",
+    "read_only": {
+      "calculate": true
+    },
+    "strict": {
+      "calculate": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Calculate an arithmetic expression using exact rational arithmetic, avoiding floating-point rounding and integer overflow. Supports +, -, *, /, integer remainder %, integer powers ^, parentheses, and scientific notation. No code execution or side effects. Returns an exact result plus a decimal representation, explicitly marked when rounded.",
+          "name": "calculate",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "expression": {
+                "description": "Arithmetic expression using decimal numbers (including scientific notation), parentheses, +, -, *, /, %, and ^ for integer powers. Example: (19.99 * 3) * (1 + 8.25 / 100). No variables or function calls. Maximum 8192 bytes.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "expression"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "datetime": {
+    "instructions": "## Date and Time\n\nCall get_datetime to obtain the current date, time, or datetime rather than guessing.\nChoose format using Go's reference time: Mon Jan 2 15:04:05 MST 2006.\nExamples: \"2006-01-02\" (date), \"15:04:05\" (time), \"2006-01-02T15:04:05Z07:00\" (datetime).\nDo not use strftime directives or YYYY-MM-DD tokens. The result is the formatted string only.\nTimezone defaults to the host's local timezone; set timezone to an IANA name or UTC when needed.",
+    "read_only": {
+      "get_datetime": true
+    },
+    "strict": {
+      "get_datetime": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Obtain the current date, time, or datetime in the chosen Go time layout, optionally in a specific timezone. Returns only the formatted string. Read-only, no side effects.",
+          "name": "get_datetime",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "format": {
+                "description": "Go time layout using the reference Mon Jan 2 15:04:05 MST 2006. Examples: 2006-01-02 for date, 15:04:05 for time, 2006-01-02T15:04:05Z07:00 for RFC3339 datetime, Monday, January 2, 2006 for a long date. Use Go layouts, not strftime or YYYY-MM-DD tokens.",
+                "type": "string"
+              },
+              "timezone": {
+                "description": "Optional IANA timezone, e.g. Europe/Paris, America/New_York, or UTC. Omit or use Local for the host's local timezone.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "format",
+              "timezone"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "deferred": {
+    "instructions": "## Deferred Tools\n\nUse search_tool to discover additional tools by keyword (e.g., \"remote\", \"read\", \"write\"). Use add_tool to activate a discovered tool.",
+    "read_only": {
+      "add_tool": true,
+      "search_tool": true
+    },
+    "strict": {
+      "add_tool": true,
+      "search_tool": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Search for available deferred tools by name or description. Use this to discover tools that can be activated.",
+          "name": "search_tool",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "query": {
+                "description": "Search query to find tools by name or description (case-insensitive)",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Activate a deferred tool by name, making it available for use. Use search_tool first to find available tools.",
+          "name": "add_tool",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "The name of the tool to activate",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "fetch": {
+    "instructions": "## Fetch Tool\n\nFetch HTTP/HTTPS URLs; respects robots.txt.",
+    "read_only": {
+      "fetch": false
+    },
+    "strict": {
+      "fetch": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Fetch HTTP/HTTPS URLs; return response bodies and metadata.",
+          "name": "fetch",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "urls": {
+                "description": "URLs to fetch",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "format": {
+                "description": "Output format",
+                "enum": [
+                  "text",
+                  "markdown",
+                  "html"
+                ],
+                "type": "string"
+              },
+              "timeout": {
+                "description": "Request timeout in seconds (default: 30)",
+                "maximum": 300,
+                "minimum": 1,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "urls",
+              "format",
+              "timeout"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "handoff": {
+    "instructions": "",
+    "read_only": {
+      "handoff": true
+    },
+    "strict": {
+      "handoff": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Use this function to hand off the conversation to the selected agent.",
+          "name": "handoff",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "agent": {
+                "description": "The name of the agent to hand off the conversation to.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "agent"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "memory": {
+    "instructions": "## Memory Tools\n\nYou have memory scoped to this session: it survives turns and a restart of the session, but is lost when the session is closed, a new session is created or the page is reloaded. Use it silently: never mention memory operations in your replies (no \"I'll remember that\", \"stored\", \"saved\", \"noted\", \"I searched my memory\"). Just act on what you recall or store.\n\nRECALL: Before acting on a request or answering a question that depends on prior context — preferences, past decisions, or personal facts like \"what's my name?\" — call search_memories first. Skip this only for simple greetings and self-contained informational questions.\n\nSTORE: Scan each user message for durable facts worth keeping — preferences, corrections, project conventions, tech stack, environment, constraints, and decisions — including details mentioned in passing. Corrections (\"use alpine instead\") are preferences; store them. Capture every distinct fact. Never store secrets, tokens, or transient debugging details.\n\n- Use search_memories with keywords/category for targeted lookup; use get_memories only for a full dump\n- Use update_memory to revise existing entries instead of adding duplicates; use add_memory only for genuinely new information\n- Organize with categories: \"preference\", \"fact\", \"project\", \"decision\", \"environment\", \"correction\"",
+    "read_only": {
+      "add_memory": false,
+      "delete_memory": false,
+      "get_memories": true,
+      "search_memories": true,
+      "update_memory": false
+    },
+    "strict": {
+      "add_memory": true,
+      "delete_memory": true,
+      "get_memories": true,
+      "search_memories": true,
+      "update_memory": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Add a new memory to the database",
+          "name": "add_memory",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "memory": {
+                "description": "The memory content to store",
+                "type": "string"
+              },
+              "category": {
+                "description": "Optional category to organize the memory (e.g. preference, fact, project)",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "memory",
+              "category"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Retrieve all stored memories",
+          "name": "get_memories",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Delete a specific memory by ID",
+          "name": "delete_memory",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "description": "The ID of the memory to delete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Search memories by keywords and/or category. More efficient than retrieving all memories.",
+          "name": "search_memories",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "query": {
+                "description": "Keywords to search for in memory content (space-separated, all must match)",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "category": {
+                "description": "Optional category to filter by",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "query",
+              "category"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Update an existing memory's content and/or category by ID",
+          "name": "update_memory",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "description": "The ID of the memory to update",
+                "type": "string"
+              },
+              "memory": {
+                "description": "The new memory content",
+                "type": "string"
+              },
+              "category": {
+                "description": "Optional new category for the memory",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "memory",
+              "category"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "model_picker": {
+    "instructions": "## Model Switching\n\nAvailable models: {AVAILABLE_MODELS}.\n\nUse `change_model` to switch to a model better suited for the current task (e.g., faster model for simple tasks, more capable model for complex reasoning).\nUse `revert_model` to return to the original model when done.",
+    "read_only": {
+      "change_model": true,
+      "revert_model": true
+    },
+    "strict": {
+      "change_model": true,
+      "revert_model": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Change the current model to one of the available models: {AVAILABLE_MODELS}. Use this when you need a different model for the current task.",
+          "name": "change_model",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "model": {
+                "description": "The model to switch to. Must be one of the available models.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Revert to the agent's original/default model. Use this after completing a task that required a different model.",
+          "name": "revert_model",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "plan": {
+    "instructions": "## Plan Tools\n\nCollaborate on shared, named plans with other agents. Plans are stored in a\nglobal shared folder, so every agent using this toolset sees the same plans.\n\n- Use list_plans to discover existing plans.\n- Use read_plan to inspect a plan before acting on or changing it.\n- Use write_plan to create or update a plan by name. Writing replaces the whole\n  document, so read it first and preserve any content you want to keep. Set the\n  title and author (your agent name) so collaborators can see who made the\n  latest change. Each write bumps the revision number.\n- Use delete_plan to remove a plan once it is no longer needed.\n\n### Editing a large plan cheaply\n\nRelative import and export paths use your working directory; absolute paths\nare used as given. Plans themselves remain in the global shared folder.\n\nRe-sending the whole plan body on every edit is expensive. To avoid it:\n\n1. Call export_plan_to_file to write the current plan content to a file. The\n   content is written to disk and is NOT returned, so this costs no tokens.\n2. Edit that file in place with your filesystem tools.\n3. Call update_plan_from_file with the same path to commit the new content.\n\n### Status\n\nEach plan has a free-form status string (you define the vocabulary, e.g.\n\"idle\", \"in-progress\", \"blocked\", \"done\"). Use set_plan_status and\nget_plan_status to write and read it independently of the body, or pass status\nto write_plan / update_plan_from_file.\n\n### Concurrent edits (optimistic locking)\n\nReads return a revision number. When several sessions edit one plan, pass the\nrevision you last read as last_known_revision to write_plan, update_plan_from_file,\nset_plan_status or delete_plan. If the plan changed in the meantime the write is\nrejected with a version-conflict error: re-read the plan and retry.\n\nPlan names must be lowercase and may contain only letters, digits, '-' and '_'\n(for example \"release-2025\" or \"db_migration\").",
+    "read_only": {
+      "delete_plan": false,
+      "get_plan_status": true,
+      "list_plans": true,
+      "read_plan": true,
+      "set_plan_status": false,
+      "write_plan": false
+    },
+    "strict": {
+      "delete_plan": true,
+      "get_plan_status": true,
+      "list_plans": true,
+      "read_plan": true,
+      "set_plan_status": true,
+      "write_plan": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Create or update a shared plan by name. Replaces the entire plan content, so read it first to preserve anything you want to keep. Each write bumps the revision number.",
+          "name": "write_plan",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "The plan name. Lowercase letters, digits, '-' and '_' only (e.g. 'release', 'db-migration').",
+                "type": "string"
+              },
+              "content": {
+                "description": "The full plan content (markdown). Replaces the existing plan.",
+                "type": "string"
+              },
+              "title": {
+                "description": "Optional human-readable title. Preserved from the previous revision when omitted.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "author": {
+                "description": "Optional label identifying who is writing the plan (typically the agent name). Preserved from the previous revision when omitted.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "description": "Optional free-form lifecycle status (e.g. 'in-progress', 'blocked', 'done'). Preserved from the previous revision when omitted.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_known_revision": {
+                "description": "Optional optimistic-lock guard. When set, the write is rejected with a conflict error unless it matches the plan's current revision. Obtain it by reading the plan first.",
+                "type": [
+                  "null",
+                  "integer"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "content",
+              "title",
+              "author",
+              "status",
+              "last_known_revision"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Read a shared plan by name, including its title, content, author, status, and revision number.",
+          "name": "read_plan",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "The name of the plan to read.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Set a shared plan's free-form status (e.g. 'in-progress', 'blocked', 'done') without rewriting its body. The plan must already exist. Each call bumps the revision number.",
+          "name": "set_plan_status",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "The name of the plan whose status to set.",
+                "type": "string"
+              },
+              "status": {
+                "description": "The new free-form status string (e.g. 'in-progress', 'blocked', 'done'). Defined by your own vocabulary.",
+                "type": "string"
+              },
+              "last_known_revision": {
+                "description": "Optional optimistic-lock guard. When set, the write is rejected with a conflict error unless it matches the plan's current revision.",
+                "type": [
+                  "null",
+                  "integer"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "status",
+              "last_known_revision"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Read a shared plan's free-form status and current revision without fetching its body.",
+          "name": "get_plan_status",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "The name of the plan whose status to read.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "List all shared plans with their name, title, author, status, and revision.",
+          "name": "list_plans",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Delete a shared plan by name.",
+          "name": "delete_plan",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "The name of the plan to delete.",
+                "type": "string"
+              },
+              "last_known_revision": {
+                "description": "Optional optimistic-lock guard. When set, the delete is rejected with a conflict error unless it matches the plan's current revision.",
+                "type": [
+                  "null",
+                  "integer"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "last_known_revision"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "random": {
+    "instructions": "",
+    "read_only": {
+      "random_int": true
+    },
+    "strict": {
+      "random_int": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Generate a uniformly random integer between min and max (both inclusive). Supply both bounds on every call. Negative values are allowed; min must be less than or equal to max.",
+          "name": "random_int",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "min": {
+                "description": "Minimum integer value (inclusive)",
+                "type": "integer"
+              },
+              "max": {
+                "description": "Maximum integer value (inclusive); must be greater than or equal to min",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "min",
+              "max"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "session_context": {
+    "instructions": "## Session Context Tools\n\nUse this toolset to reuse work from a previous session as context, instead of asking the user to repeat it.\n\n- `list_sessions(limit?)` returns recent sessions (most recent first) with their id, title, creation time and message count. The session you are running in is never listed.\n- `read_session(session_id)` returns the conversation transcript of a previous session so you can use it as context. `session_id` accepts a concrete id from `list_sessions`, or a relative reference like `-1` (most recent), `-2` (second most recent), and so on. Long transcripts are truncated from the start, keeping the most recent messages.\n\nCall `list_sessions` first to find the right session, then `read_session` to pull it in. Only read a session when its content is actually relevant to the current task.",
+    "read_only": {
+      "list_sessions": true,
+      "read_session": true
+    },
+    "strict": {
+      "list_sessions": true,
+      "read_session": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "List previous sessions (most recent first) with their id, title, creation time and message count. The current session is never included.",
+          "name": "list_sessions",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "limit": {
+                "description": "Maximum number of sessions to return, most recent first. Defaults to 20 and is capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Read the conversation transcript of a previous session to use it as context. Accepts a concrete session id or a relative reference like '-1'. Long transcripts are truncated, keeping the most recent messages.",
+          "name": "read_session",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "session_id": {
+                "description": "The session to read. Use an id from list_sessions, or a relative reference like '-1' (most recent), '-2' (second most recent).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "session_id"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "think": {
+    "instructions": "## Think Tool\n\nUse the think tool as a scratchpad before acting. Think to:\n- Check which rules or policies apply\n- Verify you have all required information\n- Validate planned actions before executing\n- Reason through complex multi-step problems",
+    "read_only": {
+      "think": true
+    },
+    "strict": {
+      "think": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Use the tool to think about something. It will not obtain new information or change external data; it appends to an internal conversation scratchpad. Use it when complex reasoning or some cache memory is needed.",
+          "name": "think",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "thought": {
+                "description": "The thought to think about",
+                "type": "string"
+              }
+            },
+            "required": [
+              "thought"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "todo": {
+    "instructions": "## Todo Tools\n\nTrack task progress with todos:\n- Create todos for each major step before starting complex work (prefer batch create_todos)\n- Update status to \"in-progress\" before starting, \"completed\" immediately after finishing\n- Every todo MUST be marked \"completed\" before your final response\n- Batch multiple updates in a single update_todos call\n- Never leave todos pending or in-progress when done",
+    "read_only": {
+      "create_todo": true,
+      "create_todos": true,
+      "list_todos": true,
+      "update_todos": true
+    },
+    "strict": {
+      "create_todo": true,
+      "create_todos": true,
+      "list_todos": true,
+      "update_todos": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Create a new todo item with a description",
+          "name": "create_todo",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "description": "Description of the todo item",
+                "type": "string"
+              }
+            },
+            "required": [
+              "description"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Create a list of new todo items with descriptions",
+          "name": "create_todos",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "descriptions": {
+                "description": "Descriptions of the todo items",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "descriptions"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Update the status of one or more todo item(s)",
+          "name": "update_todos",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "updates": {
+                "description": "List of todo updates",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "description": "ID of the todo item",
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "New status (pending, in-progress, completed)",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "updates"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "List all current todos with their status",
+          "name": "list_todos",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "transfer_task": {
+    "instructions": "",
+    "read_only": {
+      "transfer_task": true
+    },
+    "strict": {
+      "transfer_task": true
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Use this function to transfer a task to the selected team member.\n            You must provide a clear and concise description of the task the member should achieve AND the expected output.",
+          "name": "transfer_task",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "agent": {
+                "description": "The name of the agent to transfer the task to.",
+                "type": "string"
+              },
+              "task": {
+                "description": "A clear and concise description of the task the member should achieve.",
+                "type": "string"
+              },
+              "expected_output": {
+                "description": "The expected output from the member (optional).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "agent",
+              "task",
+              "expected_output"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "user_prompt": {
+    "instructions": "## User Prompt Tool\n\nAsk the user a question when you need clarification, input, or a decision.\n\nOptionally provide a JSON schema to structure the response:\n- Enum: {\"type\": \"string\", \"enum\": [\"option1\", \"option2\"], \"title\": \"Select\"}\n- Object: {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"required\": [\"name\"]}\n\nResponse contains \"action\" (accept/decline/cancel) and \"content\" (user data when accepted).",
+    "read_only": {
+      "user_prompt": true
+    },
+    "strict": {
+      "user_prompt": false
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Ask the user a question and wait for their response. Use this when you need interactive input, clarification, or confirmation from the user. Optionally provide a JSON schema to define the expected response structure.",
+          "name": "user_prompt",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "description": "The message/question to display to the user",
+                "type": "string"
+              },
+              "title": {
+                "description": "Optional title for the dialog window (defaults to 'Question')",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "description": "JSON Schema defining the expected response structure. Supports object schemas with properties or primitive type schemas.",
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "message",
+              "title",
+              "schema"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  }
+}

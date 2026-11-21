@@ -1,0 +1,499 @@
+# Portable browser agent (Rust/Wasm)
+
+An independent port of a **subset** of the [Go small profile](../README.md#small-profile).
+The browser runs Rust's YAML loader, conversation and tool loop in Wasm. A small
+ES module host handles browser I/O, cancellation, approval prompts and MCP.
+There is no Go runtime, `wasm_exec.js`, WASI, server-side agent, npm dependency,
+or Go binary to download. The model still runs at the configured provider.
+The measured release is **2,057,287 bytes (1.96 MiB) uncompressed**, including
+all twelve runtime JS modules, versus 35.8 MiB for the packed Go small module
+alone. CI enforces a 2 MiB budget for the Wasm and JS together.
+
+```sh
+# Requires Rust 1.90+, Cargo and Binaryen (`wasm-opt`; e.g. brew install binaryen).
+rustup target add wasm32-unknown-unknown
+task test-wasm-portable                 # or task build-wasm-portable
+python3 -m http.server --directory bin/wasm-portable 8000
+```
+
+Open <http://localhost:8000>. The demo uses OpenRouter by default; its key stays
+in the tab and is sent to the chosen model endpoint. Only use configs and model
+endpoints you trust. To embed it without the demo, deploy `docker-agent.wasm` and **all `.mjs`
+files** from `bin/wasm-portable/` together:
+
+```js
+import { loadDockerAgent } from './agent.mjs';
+const agent = await loadDockerAgent(); // loads the adjacent docker-agent.wasm
+const session = await agent.createSession({
+  yaml: `agents: {root: {model: openai/gpt-4o-mini}}`,
+  env: { OPENAI_API_KEY: key },
+}, event => {
+  if (event.type === 'delta' && event.content) appendText(event.content);
+});
+try { await session.send('Hi!'); } finally { await session.close(); }
+```
+
+Use a secure context (HTTPS or loopback), serve `.wasm` as `application/wasm`,
+and use a provider that allows your origin through CORS.
+`loadDockerAgent` also accepts module bytes or a compiled `WebAssembly.Module`.
+Nothing is installed on `globalThis` unless the host chooses to do so.
+
+| Area | Ported | Not yet ported |
+|---|---|---|
+| Config | Current schema: named agents/models, reusable `toolsets` / `use_toolsets`, named remote `mcps`, filters and instruction overrides, redaction, date/environment flags and supported builtin hooks. | Historical versions and filesystem-backed config sources are not part of the Go small target. Unknown options are errors. |
+| Providers | Streamed OpenAI Chat Completions and Responses, native and tool-mode structured output, token caps/penalties, service tier, media history, static and selected parameterized endpoints from the Go provider catalog. Azure, Copilot, Cloudflare and session-supplied Codex credentials have separate transport handling. | No ambient login or token storage, realtime/audio generation, encrypted reasoning replay or server-hosted Responses tools. |
+| Sessions | Multi-turn send, local transfers/handoffs, ordered fallbacks, abort/restart/close, stateless chat, foreground compaction using a declared `context_window` (including compatible tool-free fallback chains), and live selection between compatible models. | No disk persistence, compaction window discovery or provider-native compaction. |
+| Tools | `datetime`, `random`, `think`, `calculator`, `todo`, `plan`, `memory`, `model_picker`, `session_context`, `user_prompt`, `fetch`, `api` and remote MCP, including deferred discovery, TOON and approvals. In-memory stores survive restart but are isolated by handle. | No stdio, process or file tools. `openapi` and opt-in RAG are not part of Go small. |
+
+For example, a custom provider can set `api_type: openai_responses` (or
+`openai_chatcompletions`). The supported sampling fields are `temperature`,
+`top_p`, `frequency_penalty`, `presence_penalty`, `max_tokens` and
+`parallel_tool_calls`; model values override provider defaults. The wire fields
+are protocol-specific. `thinking_budget` takes an effort name (`minimal` to
+`max`) or `0`/`none`; token counts and `preserve_reasoning: true` are admitted
+only where Go ignores them. Requests match Go for every OpenAI-compatible
+provider of its catalog, headers included; see
+[model requests](parity/model-requests.md). A `user_prompt` answer has the form
+`{id: event.id, action: 'accept', content: {answer: 'blue'}}`; `decline` and
+`cancel` need no content. Use `respondToElicitation` on the originating session.
+
+Unsupported runtime features are rejected at session creation, even if a config
+can be inspected with `parseConfig`. They do not silently weaken settings.
+Tool rounds are bounded (8 per turn, 16 calls per round), and scratchpads,
+answers and todo lists have portable memory limits. A parallel tool batch
+follows Go's browser order; see [tool batches](parity/batch-order.md).
+Model requests use only explicit session credentials, never ambient environment
+or cookies, and refuse redirects. Tool calls are a separate trust boundary.
+
+For a runnable team config that both profiles accept, see
+[`examples/small-team.yaml`](../examples/small-team.yaml). Paste it into the
+portable demo, supply an OpenRouter key, and start a session. The analyst uses
+the calculator and the session's shared plan; plan writes prompt for approval.
+
+### Remote tools and consent
+
+- `toolProxy` is an **operator-trusted HTTPS proxy**. It receives configured
+  tool credentials and must enforce destination IP policy at dial time and never
+  follow redirects. See the [Go bridge proxy contract](../README.md#javascript-api).
+  Without it, protected calls fail closed. `allow_private_ips: true` is an
+  explicit opt-in to direct browser access, not an automatic fallback.
+- In `createSession`, handle `tool_confirmation` by calling `session.confirm({confirmationId: event.confirmationId,
+  decision: 'approve'})` (or `'reject'`). The ID prevents a delayed UI response
+  from approving a different call. A `chat` callback returns the decision.
+  Declining must not perform the call. Only enable `autoApprove` on trusted configs.
+- As in Go, `api_config.args` and `required` describe an `api` tool to the
+  model; they do not validate its arguments. A GET decodes a string map and
+  substitutes exact key names into the endpoint, a POST re-encodes the decoded
+  object the way Go marshals it, and other methods ignore arguments. The
+  expanded endpoint must keep the configured origin and still goes through the
+  egress policy. See [API tool arguments](parity/api-arguments.md).
+- `fetch` takes any `format`, as in Go: an unknown one returns the body
+  unconverted. A non-positive `timeout` falls back to the toolset's. Results
+  and errors carry Go's wording and status phrases. A call is still limited to
+  eight URLs and 300 seconds. A direct request never follows a redirect, and
+  a relayed one drops every header once it leaves the origin. See
+  [HTTP tool behaviour](parity/http-behavior.md).
+- MCP tool catalogs are obtained over guarded HTTP. Treat server instructions
+  and tool output as untrusted. The streamable HTTP client supports JSON and
+  SSE replies, pagination and session teardown; it does not replay a failed tool
+  invocation on a transport error. It negotiates like Go (`server/discover`,
+  then `initialize`), normalizes tool schemas for the model the same way and
+  joins result parts the same way; see [remote MCP](parity/remote-mcp.md).
+  `remote.transport_type: sse` selects the
+  legacy transport; it pins a same-origin POST endpoint, uses configured headers
+  and does not perform OAuth or reconnect. HTML conversion in `fetch` is offline:
+  no DOM or subresource requests, and unsupported markup is reported explicitly.
+- For MCP OAuth set `oauthRedirectURI` to an exact, trusted HTTPS callback.
+  Public clients use authorization code + PKCE S256 with resource and issuer
+  binding. The host must verify the popup/message source and origin and return
+  the **actual callback URL** in `content.callback_url` via `respondToElicitation`.
+  Never synthesize it from an untrusted code/state pair. Unsupported servers,
+  confidential clients and implicit flows are refused. Access and refresh tokens
+  live only in that MCP session. If the server issues a refresh token, the next
+  protected request renews a near-expiry bearer using the same resource, issuer,
+  and client. Concurrent requests share that refresh. An explicit `invalid_grant`
+  can prompt for PKCE again. Once a bearer has been sent, only an HTTP 401
+  Bearer `invalid_token` challenge permits one replay of the same RPC and ID.
+  A transport error never triggers a replay. There is no background refresh or
+  refresh on close. The demo declines URL authorization.
+
+### Structured output
+
+`structured_output.mode: native` (the default) sends the configured JSON schema
+to the provider. For a Claude-family model behind an OpenAI-compatible endpoint,
+Go small also puts the schema in a leading system instruction because some
+endpoints ignore the native format field. Portable does the same on both APIs,
+only on requests that use the agent's native schema, never in summary calls.
+This path accepts unnamed, text-only seed history and schemas with safe
+integers, not floats. It rejects YAML tag syntax, control characters and
+ambiguous strings (including numeric-looking strings) rather than send a
+different instruction from Go.
+
+In `mode: tool`, the portable runtime validates the arguments
+of an exclusive `__structured_output__` call against the original schema before
+returning its JSON. A mixed tool batch cannot finalize a turn. The local
+validator supports typed objects, arrays, string enums and length bounds, and
+bounded integers. A property, array item, or root definition can be a bare
+`{"$ref":"#/$defs/Name"}` pointing to another root definition. Acyclic chains
+and JSON Pointer `~0`/`~1` escapes work. The definitions stay on the provider
+wire and are followed locally when validating the answer; nothing is fetched
+or inlined.
+
+A property, array item or root definition can also be a bare `anyOf` or `oneOf`
+with 2–4 scalar alternatives. `anyOf` needs at least one match; `oneOf` needs
+exactly one. With `oneOf`, the Responses tool is sent with `strict: false`, as
+in Go; the runtime still rejects both ambiguous and unmatched answers.
+For example, `{"anyOf":[{"type":"boolean"},{"type":"string","enum":["auto"]}]}`
+accepts `true`, `false` or `"auto"`. Branches support `string`, `number`,
+`boolean`, or `null`, with optional title/description and string enums. A local
+`$ref` may point to the union, but branches cannot themselves be references,
+containers or nested compositions. Other compositions (including `allOf`),
+regex constraints, unknown keywords, unresolved or cyclic references, `$ref`
+siblings and external references are rejected before inference, even in unused
+definitions. The graph is limited to 128 source nodes, depth 16 and 512 visits
+following references and alternatives. Use native mode for more complex schemas.
+A single agent without `fallback.models` and with `session_compaction: false`
+can combine tool mode with `num_history_items`, `max_old_tool_call_tokens`, an
+agent iteration cap (1–8) or per-tool model overrides. A reminder counts toward
+the cap, and reaching it ends the send normally with the cap notice.
+`max_tool_result_tokens` also needs outgoing secret redaction to be off:
+Go truncates the stored answer before redacting it, which can split a
+credential into a fragment the scanner no longer recognises. Tool mode still
+cannot be combined with team routing, or with these limits on a fallback chain.
+
+### Attachments in `chat` history
+
+Use the Go bridge's `multi_content` on **prior** messages, not OpenAI wire-format
+arrays in `content`. For example, declare `capabilities: {image: true, pdf: true}`
+on a named model and pass this history to `chat`:
+
+```js
+messages: [
+  { role: 'user', multi_content: [
+    { type: 'text', text: 'Here is the invoice.' },
+    { type: 'document', document: { name: 'invoice.pdf', mime_type: 'application/pdf',
+      source: { inline_data: base64PDF } } },
+  ] },
+  { role: 'user', content: 'What is the total?' },
+]
+```
+
+- User and tool history can carry `document` with `inline_text` or canonical
+  base64 `inline_data` (PNG, JPEG, GIF, WebP, PDF). WAV and MP3 are supported
+  with `audio: true` on **Chat Completions only**. Text documents need no
+  capability flag. As in Go small, the model catalog is empty; do not rely
+  on a model name to enable binary documents. Undeclared modalities and audio
+  on Responses are not sent. System and assistant history replay text, not files.
+- Legacy `image_url` parts accept HTTPS URLs without credentials/fragments or
+  base64 raster image data URLs. URLs are sent to the **provider**; the browser
+  does not fetch, inspect or upload remote files. Tool replies stay grouped
+  before their attachment messages (Chat), or retain the attachments under the
+  corresponding `function_call_output` (Responses).
+- `session.send` and the final user prompt are text-only. Portable rejects
+  final-prompt attachments rather than silently dropping them. `developer` is
+  not a Go `chat.Message` role; use `system`. No `file_id`, paths, artifacts,
+  video, direct `input_audio` parts or audio output.
+- Portable validates base64 and binary signatures (not full file integrity).
+  Use an ASCII basename, a MIME type without parameters, and at most 5 MiB per
+  attachment and 16 MiB total per history (including text-envelope overhead),
+  1,024 parts and 4,096 messages. HTTPS image URLs are limited to 8 KiB.
+
+A fallback or handoff can switch between Chat Completions and Responses, or to
+an agent with different media capabilities. Each request uses the destination's
+credentials and attachment format. For example, a text-only primary omits an
+image, but a vision-capable backup receives the original image. A handoff keeps
+the conversation; `transfer_task` starts fresh and does **not** inherit the
+caller's attachments. On return the caller still has its history.
+
+Multipart history with a dedicated summarizer or active fallback compaction is
+not supported. Routed multipart history with named messages or `reasoning_content`
+is rejected before model I/O if a reachable target uses Responses. File IDs and opaque provider
+state are not portable attachment formats.
+
+### Routing and tool policy
+
+Local `sub_agents` run `transfer_task` with fresh history and return their
+final answer to the caller. A `handoff` keeps history and switches the acting
+agent, its instructions and tools. `force_handoff` routes on natural completion
+without advertising a switch tool; missing targets and cycles are errors.
+`fallback.models` can name other providers. The host binds each attempt's
+body to that model's transport and credentials. It retries only before visible
+output; it never retries a completed tool action to recover a model stream.
+`session_compaction` uses a foreground summary when a declared `context_window`
+and threshold warrant it. Without a declared window the agent still runs and
+never compacts on its own. Summary requests honor the same outbound secret
+redaction as ordinary model requests, including an explicit `before_llm_call`
+redaction hook. Provider-native compaction is not supported.
+
+When the provider rejects a request because the context is too long, the
+runtime warns, summarizes and retries on the summary, as Go does. It does so
+once per consecutive failure, after any fallback models are exhausted, and
+never reruns a completed tool. See [session compaction](parity/session-compaction.md).
+
+As with the Go SDK, a model request answered with 408, 409, 429 or a 5xx
+status, or whose `fetch` is rejected, is resent up to twice to the same model
+before the runtime's own retry or fallback sees the failure. `x-should-retry`
+overrides that choice; `Retry-After-Ms` or `Retry-After` set the wait, capped
+at eight seconds. A resend carries the same body and credentials and never
+reruns a tool. An HTTP failure reads `error receiving from stream: HTTP
+<status>: <message>`, with Go's rendering of a body that carries no message. A
+diagnostic that echoes the request credential is withheld, and an ambiguous
+error envelope rejects the send.
+
+A **single agent** can use a named `compaction_model` for text-only
+history. An agent setting overrides the primary model's setting, which overrides
+its provider's default. Declare `context_window` on both models: the smaller
+window drives the compaction trigger and usage gauge, but the summarizer's own
+window determines how much history it receives and its output token cap. The
+summarizer can use a different endpoint, API, and token. It receives redacted
+history (unless redaction is disabled), **not** the ordinary output schema.
+See [the two-model example](../examples/small-compaction.yaml).
+
+The ordinary models in a compacting fallback chain must share their API,
+context window, and effective threshold. The summary goes to the dedicated
+model if set, otherwise to the **primary**. Neither choice changes the fallback
+cooldown. The continuation goes to the serving model with its own credentials,
+parameters, and native structured-output schema.
+
+If the summary request overflows the summarizer's window, the runtime retries
+with half of the conversation it just sent, up to three times. The messages
+kept after the summary do not change, a prior summary stays in front while it
+fits, and each smaller request gets its own transient retries. Plain compaction
+retries on its own model, a fallback chain on its primary and a dedicated
+`compaction_model` on its own endpoint.
+
+If the summary still fails, the browser reports the error, then drains the
+uncompressed continuation before `send` rejects. That reply is not streamed to
+the caller, but is retained for the next turn, as in Go small. A drained
+continuation never runs a tool: a tool call in a drained reply is stopped
+before dispatch and rejects the send. A blank summary is skipped and the
+request goes out on the full history. A summarizer that asks for a tool is told
+it is unavailable and asked again, at most four times. A truncated, refused or
+partial summary still fails closed.
+
+Picker/toolset model overrides must be transport-compatible. A single agent
+with `session_compaction: false` can combine them with `fallback.models`: the
+selected model is tried first and a failure falls through the chain, as in
+Go. Inside a team they stay unsupported. `session_context` reads only the
+originating handle's previous conversations and is unavailable inside a routed
+team. Teams reject readonly-to-writable routing. Routed teams do not support
+active compaction.
+
+Agents of a team can differ in `redact_secrets`. The caller's hooks govern the
+transfer arguments and the returned result; the acting agent's hooks govern its
+own provider requests. A reusable session rejects a foreground handoff between
+two agents when either disables redaction, because an interrupted send could
+resume on the wrong agent; one-shot `chat` supports it.
+
+Tool-mode structured output works in a team when each output agent has one
+serving model. A caller can delegate and then finalize its own answer. An
+output agent reachable through `transfer_task` must be capped at
+`max_iterations: 1` or `2` in every frame it can run in and use a model that
+accepts reminders; its JSON becomes the `transfer_task` result. Both features
+require unnamed, text-only seed history.
+Teams share plan and memory within one handle, but each acting agent gets its
+own authorized tool catalog, MCP connection, credentials and grants. Teams are
+limited to ten nested transfers and 32 switches per user turn.
+
+In a team, limits belong to a session, as in Go. `max_iterations`,
+`max_tool_result_tokens`, `max_old_tool_call_tokens` and
+`max_consecutive_tool_calls` come from the agent that opened the session, or
+from the agent a `transfer_task` was delegated to. A handoff keeps them and
+ignores the target's own values. `num_history_items` and the `max_iterations`
+hook follow the acting agent; the hook counts every model call of the send,
+forced handoffs included. A delegate stopped by its cap returns the notice as
+its result, and its caller carries on. A handoff that stops at the cap is
+announced when the next send starts.
+
+Three team combinations stay rejected at session creation: the `max_iterations`
+hook on an agent that can run inside `transfer_task` (Go fails the send there
+but lets the caller keep running unobserved), iteration or history limits on an
+agent that also has `fallback.models`, and named or reasoning-bearing seed
+messages when any agent limits history.
+
+`num_history_items`, `max_old_tool_call_tokens` and `max_tool_result_tokens`
+control the stored or transmitted history; they do not truncate a tool event
+just to hide it from the host. A single agent can use all three limits on a
+**text-only fallback chain** with `session_compaction: false`, including chains
+that switch between Chat Completions and Responses. History is trimmed before
+encoding the request for the selected API: a retained tool result keeps its
+call ID, and trimming a call removes its paired result. Failover does not run
+the tool again. If any target uses Responses, named or reasoning-bearing seed
+messages are rejected before I/O. Multipart history, `session_context` and
+tool-mode structured output remain unsupported with these limits on a fallback
+chain.
+
+Agent `max_iterations` finishes normally at its limit, while the `before_llm_call`
+builtin `max_iterations` rejects the send before the next model call. With a
+single agent, `fallback.models` and explicit `session_compaction: false`, either
+limit can be 1–8 and can be combined with the history limits above. If both
+limits are equal, the agent cap stops normally before the hook would reject.
+
+In these capped fallback runs, each new model round checks the cooldown after
+all tools and approvals finish. A transient primary failure doesn't pin the
+backup; a non-retryable one can. Model retries do not spend another iteration
+or repeat a completed tool. If the continuation fails, the next send starts
+with a fresh limit and retains the completed tool results. On a fallback chain
+these limits still cannot be combined with teams or tool-mode structured
+output.
+
+Identical tool batches are checked against `max_consecutive_tool_calls` after execution;
+successful random and datetime reads are exempt, as in Go.
+
+### Replies and calls the model gets wrong
+
+The runtime recovers the way Go does instead of failing the send:
+
+- **No visible reply.** An empty, whitespace-only or reasoning-only reply emits
+  a `warning` that names the serving model and says whether tools ran just
+  before. The blank reply joins no history. `send` then resolves with the last
+  assistant text that was kept: an earlier turn, the text beside a tool call,
+  or the reply of a delegate that just returned.
+- **Refused reply.** A `content_filter` or `refusal` ending warns as well, keeps
+  any text it carried and retracts its tool calls.
+- **Result text is trimmed.** Deltas and history keep the model's whitespace.
+- **Unavailable tool.** A call to a tool that was not advertised for the step
+  gets `Tool '…' is not available. You can only use the tools provided to you.`
+  as an error result. That covers a hallucinated name, a deferred tool
+  activated in the same batch, and a tool seen in another agent's history after
+  a handoff. It never prompts or runs.
+- **Odd stream ending.** A turn without tool calls finishes even if the stream
+  gives no `finish_reason`, or one that cannot apply.
+- **Blank tool result.** It is stored as `(no output)`; the `tool_result` event
+  keeps the raw text.
+- **Blank prompt or instruction.** Text that is only whitespace never reaches a
+  request. If nothing else is left to send, the send fails with `model failed:
+  at least one message is required` before any I/O.
+- **Arguments a tool cannot decode.** Malformed JSON, a wrong type or a
+  non-object comes back as Go's own `encoding/json` complaint (`Error calling
+  tool: …`). The call is announced and still needs its approval first. Tools
+  decode like Go, leniency included: unknown and case-folded fields, repeated
+  keys, and the repairs for a list sent as a string or a one-key object. The
+  few syntax errors whose Go message depends on Unicode tables still reject the
+  send.
+
+Usage events and results count prompt tokens read from or written to a provider
+cache toward `context_length`, not `input_tokens`.
+
+Go drops text that shares a non-final stream chunk with a tool-call fragment;
+this port keeps it.
+
+`abort()` cancels the run, not the conversation. As in Go, the next send still
+sees the prompt, the completed model rounds and tool results, and each
+unanswered call recorded as `The tool call was canceled by the user.` Output
+of a stream that had not finished is dropped. Nothing runs after an abort: a
+late host result or decision is ignored. `restart()` begins a fresh
+conversation. See [interrupted turns](parity/interrupted-turns.md).
+
+On Chat Completions, a later tool-name fragment replaces the earlier one rather
+than extending it, calls run in the order they first appear, and a stream error
+after `tool_calls` cancels the pending call. Input that is ambiguous about
+which call runs (a missing or changing call ID, a rename onto an available
+tool, a cut record) rejects the send. See
+[Chat Completions streams](parity/chat-completions.md).
+
+On Responses, a tool runs only if the stream announced its name and delivered
+arguments for that item. A completion snapshot cannot add a call or complete
+arguments Go would not use, and a `response.failed` that follows a tool-call
+completion cancels it. Text that Go loses because it appears only in a snapshot
+is kept. A refusal event, a top-level `error` event or an unknown lifecycle
+event beside a tool call rejects the send rather than dispatching.
+
+The tool registry applies `tools` and `readonly` before exposing a tool; a
+filtered toolset keeps its instructions. As in Go, a tool denied by
+`permissions.deny` is still offered and discoverable, and is refused when
+called. `defer` provides `search_tool`/`add_tool`; activation takes
+effect on the next model call. Selective `toon` encoding is applied to tool
+results, not to credentials or wire protocol messages. Within an admitted
+batch, every call (including Rust builtins) goes through a permission decision
+before a side effect. The portable policy accepts bounded ASCII name globs and
+argument conditions. As in Go, a condition is tested against the argument
+object, with a non-string value in Go's `%v` form, and never matches arguments
+that are not an object. Go checks the exact key only, although its handlers
+also read a field name that differs in case and skip a number that overflows.
+Here a deny covers such a variant, an allow requires every variant to match,
+and arguments with an overflowing number are refused. Explicit asks remain
+mandatory even with
+`autoApprove` or an overlapping `allow` (Go lets both win over `ask`), and
+unsupported checks deny rather than allow. An untrusted MCP server cannot
+self-authorize a write by declaring its tool read-only.
+
+A parallel batch runs the way Go small runs it in a browser. Calls start in
+order. A call waiting for approval does not hold back calls that need none,
+and approvals are asked one at a time. The error for an unavailable tool, or
+for arguments a tool cannot decode, is reported after the other calls finish.
+Tool messages reach the next request in completion order, and simple `api` and
+`fetch` calls can be in flight together. A batch with a model picker call, an
+MCP call, or network calls with more than one possible prompt still runs one
+call after another: Go's order there depends on timing. See
+[tool batches](parity/batch-order.md).
+
+Go small validates `runtime.safety` and an agent's `safety` but does not
+enforce them: only the host's `autoApprove` waives approval there. Here a
+config can never waive approval, so `autonomous` behaves like the default.
+`strict` asks for every call no `allow` rule covers, and `restricted` denies
+and hides what would need a prompt; both are stricter than Go.
+
+In a team, repeated identical calls are counted across transfers and handoffs
+as in Go, each new model round rechecks the acting agent's fallback cooldown,
+and an approval remembered inside a delegated task ends with that task.
+Structured-output answers that violate the schema get Go's diagnostics, so the
+model's retry sees the same history; see
+[structured output and attachments](parity/structured-media.md).
+
+Builtin tools keep Go's state and wording: each private `todo` declaration has
+its own list, `user_prompt` hands the model the host's action in Go's JSON
+encoding, and named time zones use Go's zone database (transitions since 2020
+and the rules after them). See [builtin results](parity/builtin-results.md).
+
+Supported builtin hooks are `add_date`, `add_environment_info`, `max_iterations`,
+`limit_large_tool_results` and `redact_secrets`; their text, limits and
+redaction output are compared with Go in [builtin hooks](parity/builtin-hooks.md). `add_date` samples the date once
+per model round: retries and fallbacks see the same date, even across midnight.
+The next round or send samples it again. `add_environment_info` follows the
+agent that started the send through a handoff; a delegated task starts its own
+run and does not inherit that environment prompt. Secret redaction defaults on;
+there is no process environment lookup and no hook can run a command. The
+scanner catalog is regenerated from the pinned Go dependency with
+`sh cmd/wasm/portable/gen/redaction/generate.sh`. Resource limits and matcher
+syntax are intentionally bounded. As in Go, raw model stream deltas are not a
+redaction boundary; avoid logging untrusted stream data.
+
+## Keeping up with docker-agent
+
+The Go small profile remains the reference. This port is source code, not a
+transpiler: update the corresponding Rust module when Go behavior changes.
+`src/config.rs` implements the config projection and provider selection;
+`src/turn.rs` owns prompt history and tool execution; `src/responses.rs`
+adapts that loop to the Responses wire protocol.
+`src/lib.rs` exposes a synchronous JSON command boundary; `agent.mjs` handles
+browser I/O. A reference change that isn't ported should remain explicitly
+unsupported rather than be silently accepted.
+
+Add a fixture to `../node/small_test.js` for behavior both runtimes should
+share. Run it against both:
+
+```sh
+task build-wasm-small && node --test cmd/wasm/node/{small,config_projection}_test.js
+task test-wasm-portable
+```
+
+The latter also runs Rust unit tests and a real HTTP/SSE loop against a local
+mock provider, checks for zero Wasm imports and enforces a 2 MiB uncompressed
+budget for the Wasm **plus** its JS host. Neither test requires model credentials.
+
+### Differential replay
+
+`task test-wasm-parity` builds both binaries and runs the same fixtures in two
+fresh headless Chrome profiles. Set `CHROME_BIN` if Chrome isn't on the default
+path. A scripted `fetch` supplies identical model streams; neither runtime can
+contact a provider. The test compares every model request body (including tool
+schemas, prompts, and follow-up history), endpoint path, authorization header,
+ordered JS events and turn results. Only generated correlation IDs are renamed;
+missing vs. empty fields and array order are significant. The traces are in
+`bin/parity-go.json` and `bin/parity-rust.json` for inspection.
+
+Add paired fixtures in `parity/replay.mjs` when porting a feature. Refresh
+Go-derived builtin prompts and schemas with `task generate-wasm-portable-tools`;
+the generator's Go test detects stale definitions. Passing replay establishes
+parity for the scenarios covered, not for every possible agent configuration.

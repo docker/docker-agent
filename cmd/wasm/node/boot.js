@@ -11,6 +11,8 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
+const wasmPath = process.env.DOCKER_AGENT_TEST_WASM || path.join(__dirname, "..", "web", "docker-agent.wasm");
+
 // wasm_exec.js is tied to the compiler version, so it must come from the
 // toolchain that built the binary.
 function goroot() {
@@ -19,6 +21,12 @@ function goroot() {
 
 async function bootDockerAgent() {
   if (globalThis.dockerAgent) return globalThis.dockerAgent;
+  if (process.env.DOCKER_AGENT_TEST_PORTABLE) {
+    const { pathToFileURL } = require("node:url");
+    const { loadDockerAgent } = await import(pathToFileURL(path.join(path.dirname(wasmPath), "agent.mjs")));
+    globalThis.dockerAgent = await loadDockerAgent(fs.readFileSync(wasmPath));
+    return globalThis.dockerAgent;
+  }
 
   globalThis.require = require;
   globalThis.fs = fs;
@@ -29,7 +37,7 @@ async function bootDockerAgent() {
   globalThis.crypto ??= require("node:crypto").webcrypto;
   require(path.join(goroot(), "lib", "wasm", "wasm_exec.js"));
 
-  const wasm = fs.readFileSync(path.join(__dirname, "..", "web", "docker-agent.wasm"));
+  const wasm = fs.readFileSync(wasmPath);
   const go = new Go();
   go.argv = ["docker-agent.wasm"];
   const { instance } = await WebAssembly.instantiate(wasm, go.importObject);
@@ -45,4 +53,4 @@ async function bootDockerAgent() {
   return globalThis.dockerAgent;
 }
 
-module.exports = { bootDockerAgent };
+module.exports = { bootDockerAgent, wasmPath };

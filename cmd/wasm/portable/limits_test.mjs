@@ -1,0 +1,345 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { before, test } from 'node:test';
+import boot from '../node/boot.js';
+
+const reference = JSON.parse(readFileSync(new URL('./testdata/session-limits.json', import.meta.url)));
+const provider = 'providers: {local: {provider: openai, base_url: "https://model.invalid/v1", token_key: KEY}}';
+const config = (fields, models = '') => `${provider}\n${models}\nagents: {root: {model: local/test, ${fields}}}`;
+const opts = yaml => ({ yaml, env: { KEY: 'test', OTHER: 'test' } });
+const echo = '{type: api, allow_private_ips: true, api_config: {method: GET, name: echo, endpoint: "https://tool.invalid/echo"}}';
+const call = (name, args = {}, id = 'a', index = 0) => ({index, id, type: 'function', function: {name, arguments: JSON.stringify(args)}});
+let api;
+before(async () => { api = await boot.bootDockerAgent(); });
+
+function intercept(t, rounds, output = reference.source) {
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const req = new Request(url, init);
+    if (req.url === 'https://tool.invalid/echo') {
+      assert.equal(req.headers.has('Authorization'), false);
+      return new Response(output);
+    }
+    assert.equal(req.url, 'https://model.invalid/v1/chat/completions');
+    assert.equal(req.headers.get('Authorization'), 'Bearer test');
+    requests.push(await req.json());
+    assert.ok(rounds.length, 'unexpected model request');
+    const calls = rounds.shift();
+    if (typeof calls === 'number') return new Response('unavailable', {status: calls, headers: {'Retry-After-Ms': '1'}});
+    const chunk = {choices: [{index: 0, delta: calls ? {tool_calls: calls} : {content: 'done'}, finish_reason: calls ? 'tool_calls' : 'stop'}]};
+    const usage = {choices: [], usage: {prompt_tokens: 10, completion_tokens: 5}};
+    return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(usage)}\n\ndata: [DONE]\n\n`, {headers: {'Content-Type': 'text/event-stream'}});
+  });
+  return requests;
+}
+
+for (const oldBudget of [reference.max_old_tool_call_tokens, reference.max_tool_result_tokens]) {
+  test(`agent stop commits tool results, history and usage (old budget ${oldBudget})`, async t => {
+    const requests = intercept(t, [[call('echo')], null]);
+    const events = [];
+    const yaml = config(`toolsets: [${echo}], max_iterations: 1, max_tool_result_tokens: ${reference.max_tool_result_tokens}, max_old_tool_call_tokens: ${oldBudget}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['1']}}`);
+    const s = await api.createSession(opts(yaml), e => events.push(e));
+    try {
+      assert.deepEqual(await s.send('first'), {message: {role: 'assistant', content: reference.stop}, usage: {input_tokens: 10, output_tokens: 5}});
+      assert.equal(requests.length, 1);
+      assert.equal(events.find(e => e.type === 'tool_result').output, reference.source);
+      assert.equal(events.at(-2).content, reference.stop);
+      assert.deepEqual(events.at(-1), {type: 'finish', reason: 'stop'});
+      assert.equal((await s.send('again')).message.content, 'done');
+      const tail = requests[1].messages.slice(-3);
+      assert.deepEqual(tail.map(m => m.content), [oldBudget === reference.max_old_tool_call_tokens ? reference.projected_result : reference.stored_result, reference.stop, 'again']);
+    } finally { await s.close(); }
+  });
+}
+
+test('a blank tool result is stored as "(no output)" while its event keeps the raw text', async t => {
+  const requests = intercept(t, [[call('echo')], null], ' \n');
+  const events = [];
+  await api.chat({...opts(config(`toolsets: [${echo}]`)), messages: [{role: 'user', content: 'go'}]}, e => events.push(e));
+  assert.equal(requests[1].messages.at(-1).content, '(no output)');
+  assert.equal(events.find(e => e.type === 'tool_result').output, ' \n');
+});
+
+test('transient failover spends one iteration and the next send starts fresh on primary', async t => {
+  const requests = intercept(t, [503, 503, 503, [call('echo')], [call('echo', {}, 'b')]]);
+  const yaml = config(`max_iterations: 1, session_compaction: false, fallback: {models: [local/backup], retries: -1}, toolsets: [${echo}]`);
+  const s = await api.createSession(opts(yaml));
+  try {
+    assert.equal((await s.send('first')).message.content, reference.stop);
+    assert.deepEqual(requests.map(r => r.model), ['test', 'test', 'test', 'backup']);
+    assert.equal((await s.send('again')).message.content, reference.stop);
+    assert.equal(requests.length, 5);
+    assert.equal(requests.at(-1).model, 'test');
+    assert.deepEqual(requests.at(-1).messages.slice(-3).map(m => m.content), [reference.source, reference.stop, 'again']);
+  } finally { await s.close(); }
+});
+
+test('failed continuation retries the capped history, not the tool, and the next send trims the pair', async t => {
+  const requests = intercept(t, [[call('echo')], 400, 400, null]);
+  const yaml = config(`num_history_items: 3, max_tool_result_tokens: 4, session_compaction: false, fallback: {models: [local/backup], retries: -1}, toolsets: [${echo}]`);
+  const events = [];
+  const s = await api.createSession(opts(yaml), e => events.push(e));
+  try {
+    await assert.rejects(s.send('first'), /all models failed/);
+    assert.deepEqual(events.filter(e => e.type === 'tool_result').map(e => e.output), [reference.source]);
+    assert.equal(requests[1].messages.at(-1).content, reference.stored_result);
+    assert.deepEqual(requests[2].messages, requests[1].messages);
+    await s.send('again');
+    assert.deepEqual(requests.map(r => r.model), ['test', 'test', 'backup', 'test']);
+    assert.deepEqual(requests[3].messages.filter(m => m.role !== 'system'), [{role: 'user', content: 'first\nagain'}]);
+  } finally { await s.close(); }
+});
+
+test('the maximum routed cap keeps eight tool results without a ninth model call', async t => {
+  const calls = Array.from({length:8}, (_, i) => [call('think', {thought:`step ${i}`}, `id_${i}`)]);
+  const requests = intercept(t, [503, 503, 503, ...calls, null]);
+  const yaml = config('max_iterations: 8, session_compaction: false, fallback: {models: [local/backup], retries: -1}, toolsets: [{type: think}]');
+  const s = await api.createSession(opts(yaml));
+  try {
+    assert.match((await s.send('start')).message.content, /max_iterations limit \(8\)/);
+    assert.deepEqual(requests.map(r => r.model), ['test', 'test', 'test', 'backup', ...Array(7).fill('test')]);
+    await s.send('new turn');
+    assert.deepEqual(requests.at(-1).messages.filter(m => m.role === 'tool').map(m => m.tool_call_id),
+      calls.map(([c]) => c.id));
+  } finally { await s.close(); }
+});
+
+test('pending user_prompt is answered and capped before agent stop', async t => {
+  const requests = intercept(t, [[call('user_prompt', {message:'ok?'})], null]);
+  const yaml = config('toolsets: [{type: user_prompt}], max_iterations: 1, max_tool_result_tokens: 1');
+  const s = await api.createSession(opts(yaml));
+  try {
+    assert.equal((await s.send('ask')).message.content, reference.stop);
+    await s.send('again');
+    assert.equal(requests[1].messages.at(-3).content, '{...');
+  } finally { await s.close(); }
+});
+
+test('first matching toolset in model call order overrides exactly one round', async t => {
+  const requests = intercept(t, [[call('echo'), call('calculate', {expression:'1+1'}, 'b', 1)], [call('think', {thought:'hi'})], null, null]);
+  const routed = echo.replace('type: api', 'type: api, model: local/cheap');
+  const yaml = config(`toolsets: [{type: calculator, model: local/other}, ${routed}, {type: think}]`);
+  const s = await api.createSession(opts(yaml));
+  try { await s.send('first'); await s.send('again'); } finally { await s.close(); }
+  assert.deepEqual(requests.map(r => r.model), ['test', 'cheap', 'test', 'test']);
+});
+
+const seed = (content, parts) => [
+  {role: 'assistant', tool_calls: [call('echo')]},
+  {role: 'tool', tool_call_id: 'a', content, multi_content: parts},
+  {role: 'user', content: 'go'},
+];
+
+test('seeded text results are capped on the actual request (Go len/4 and UTF-8 cuts)', async t => {
+  const marker = '\n[...tool result truncated: middle omitted...]\n';
+  const cases = [
+    [1, 'ééé', 'ééé'], [1, '🌏🌏', '...'], [4, reference.source, reference.stored_result],
+    [20, '🌏'.repeat(80), '🌏'.repeat(4) + marker + '🌏'.repeat(4)],
+  ];
+  const requests = intercept(t, cases.map(() => null));
+  for (const [tokens, content, expected] of cases) {
+    await api.chat({...opts(config(`max_tool_result_tokens: ${tokens}`)), messages: seed(content)});
+    assert.equal(requests.at(-1).messages.find(m => m.role === 'tool').content, expected);
+  }
+});
+
+const outputName = '__structured_output__';
+const outputMode = 'structured_output: {mode: tool, name: result, schema: {type: object, properties: {text: {type: string}}, required: [text]}}, session_compaction: false';
+
+test('the agent cap counts reminders and accepts an exclusive output on the last iteration', async t => {
+  const requests = intercept(t, [null, ...Array.from({length: 6}, (_, i) => [call('think', {thought: String(i)}, `t${i}`)]),
+    [call(outputName, {text: 'final'})], null, null, null]);
+  const yaml = config(`${outputMode}, max_iterations: 8, toolsets: [{type: think}]`);
+  const s = await api.createSession(opts(yaml));
+  try {
+    assert.equal((await s.send('first')).message.content, '{"text":"final"}');
+    // Exhausting the reminder budget is an error, not a successful cap stop.
+    await assert.rejects(s.send('again'), /after 2 reminders/);
+    assert.equal(requests.length, 11);
+  } finally { await s.close(); }
+});
+
+test('reused IDs synthesize missing results outside the old-tool budget but inside the read-time cap', async t => {
+  const requests = intercept(t, [[call(outputName, {text: 'ok'})]]);
+  const batch = [call('think', {}, 'repeat'), call('think', {}, 'kept')];
+  const messages = [{role: 'assistant', tool_calls: [batch[0]]}, {role: 'tool', tool_call_id: 'repeat', content: 'old'},
+    {role: 'assistant', tool_calls: batch}, {role: 'tool', tool_call_id: 'repeat', content: 'new'},
+    {role: 'tool', tool_call_id: 'kept', content: 'four'}, {role: 'user', content: 'go'}];
+  const yaml = config(`${outputMode}, num_history_items: 4, max_old_tool_call_tokens: 1, max_tool_result_tokens: 1, redact_secrets: false`);
+  await api.chat({...opts(yaml), messages});
+  assert.deepEqual(requests[0].messages.filter(m => m.role === 'tool').map(m => [m.tool_call_id, m.content]),
+    [['kept', 'four'], ['repeat', 'N...']]);
+});
+
+test('a rejected tool still selects its model; its redacted receipt precedes an unmodified output call', async t => {
+  const secret = 'dckr_pat_' + 'A'.repeat(27);
+  const requests = intercept(t, [[call('think', {thought: 'ask'})], [call(outputName, {text: secret})]]);
+  const yaml = config(`${outputMode}, toolsets: [{type: think, model: local/cheap}]`) + '\npermissions: {ask: [think]}';
+  const result = await api.chat({...opts(yaml), messages: [{role:'user', content:'go'}]}, e =>
+    e.type === 'tool_confirmation' ? {decision:'reject', reason:secret} : undefined);
+  assert.deepEqual(requests.map(r => r.model), ['test', 'cheap']);
+  assert.equal(requests[1].messages.at(-1).content, 'The user rejected the tool call. Reason: [REDACTED]');
+  assert.equal(JSON.parse(result.message.content).text, secret);
+});
+
+test('output mode rejects unsafe result truncation, fallback routing and incompatible overrides before I/O', async t => {
+  const requests = intercept(t, []);
+  for (const fields of ['max_tool_result_tokens: 1',
+    'max_tool_result_tokens: 4, redact_secrets: false, hooks: {before_llm_call: {type: builtin, command: redact_secrets}}']) {
+    await assert.rejects(api.createSession(opts(config(`${outputMode}, ${fields}`))), /cannot safely truncate results before secret redaction/);
+  }
+  for (const fields of ['max_iterations: 1', 'num_history_items: 2', 'max_old_tool_call_tokens: 3',
+    'max_tool_result_tokens: 4, redact_secrets: false', 'toolsets: [{type: think, model: local/fast}]']) {
+    await assert.rejects(api.createSession(opts(config(`${outputMode}, fallback: {models: [local/backup]}, ${fields}`))), /cannot use fallback models/);
+  }
+  await assert.rejects(api.createSession(opts(config(`${outputMode}, toolsets: [{type: think, model: local/gpt-5}]`))), /cannot change/);
+  assert.deepEqual(requests, []);
+});
+
+test('unsafe projections and model routes reject before any request', async t => {
+  const requests = intercept(t, []);
+  for (const field of ['num_history_items: 1', 'max_tool_result_tokens: 1', 'max_old_tool_call_tokens: 1', 'toolsets: [{type: think, model: local/other}]']) {
+    await assert.rejects(api.chat({...opts(config(field)), messages: seed('secret', [{type:'text', text:'duplicate'}])}), /text-only history/);
+  }
+  for (const yaml of [
+    config('max_iterations: 9'), config('max_iterations: -1'), config('max_tool_result_tokens: -2'), config('num_history_items: -1'),
+    config('toolsets: [{type: session_context}], max_old_tool_call_tokens: 1'),
+    config('max_iterations: 1, toolsets: [{type: think, model: local/cheap}], sub_agents: [root]'),
+    config('max_tool_result_tokens: 4', 'models: {local/test: {provider: local, model: test, context_window: 2048}}'),
+    ...['missing', 'openai/test', 'local/gpt-5', 'local/a,local/b'].map(model => config(`toolsets: [{type: think, model: '${model}'}]`)),
+    ...['base_url: https://elsewhere.invalid', 'token_key: OTHER', 'context_window: 2048'].map(extra => config('toolsets: [{type: think, model: cheap}]', `models: {cheap: {provider: local, model: cheap, ${extra}}}`)),
+  ]) await assert.rejects(api.createSession(opts(yaml)));
+  const routed = 'toolsets: [{type: think, model: local/cheap}], fallback: {models: [local/other]}';
+  await assert.rejects(api.createSession(opts(config(routed))), /requires session_compaction: false/);
+  await (await api.createSession(opts(config(`session_compaction: false, ${routed}`)))).close();
+  const token = 'dckr_pat_' + 'A'.repeat(27);
+  await assert.rejects(api.chat({...opts(config('max_tool_result_tokens: 4')), messages: seed(token)}), /cannot safely truncate/);
+  assert.equal(requests.length, 0);
+});
+
+test('bounded tool overrides keep the trimmed request when switching to a fallback', async t => {
+  const requests = intercept(t, [[call('think', {thought: 'route'})], 403, null, null]);
+  const yaml = config('num_history_items: 3, max_iterations: 2, session_compaction: false, fallback: {models: [local/backup]}, toolsets: [{type: think, model: local/cheap}]');
+  const s = await api.createSession(opts(yaml));
+  t.after(() => s.close());
+  await s.send('first');
+  await s.send('again');
+  assert.deepEqual(requests.map(r => r.model), ['test', 'cheap', 'backup', 'backup']);
+  assert.deepEqual(requests[1].messages, requests[2].messages);
+});
+
+test('fallback history limits reject incompatible configurations and seeds before I/O', async t => {
+  const requests = intercept(t, []);
+  const route = 'session_compaction: false, fallback: {models: [local/backup]}';
+  const fields = `num_history_items: 3, ${route}`;
+  for (const [yaml, reason] of [
+    [config(fields.replace('session_compaction: false, ', '')), /requires session_compaction: false/],
+    [config(fields.replace('false', 'true'), 'models: {local/test: {provider: local, model: test, context_window: 4096}}'), /require session_compaction: false/],
+    [config(`${fields}, handoffs: [root]`), /fallback chain within local teams/],
+    [config(`${fields}, toolsets: [{type: session_context}]`), /session_context/],
+    [config(`${fields}, toolsets: [{type: think, model: local/gpt-5}]`), /toolset cannot change/],
+    [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
+    [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['9']}}`), /portable tool round limit/],
+  ]) await assert.rejects(api.createSession(opts(yaml)), reason);
+  for (const field of ['num_history_items: 1', 'max_tool_result_tokens: 4', 'max_old_tool_call_tokens: 3']) {
+    const options = opts(config(`${field}, ${route}`));
+    await assert.rejects(api.chat({...options, messages: seed('text', [{type:'text', text:'part'}])}), /text-only history/);
+  }
+  assert.equal(requests.length, 0);
+});
+
+test('Responses fallback re-encodes a trimmed tool pair without replaying its tool', async t => {
+  const requests = [];
+  const output = [{type: 'response.output_text.delta', item_id: 'm', output_index: 0, delta: 'done'},
+    {type: 'response.completed', response: {id: 'r', status: 'completed', output: []}}];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const req = new Request(url, init);
+    requests.push({url: req.url, auth: req.headers.get('Authorization'), body: await req.json()});
+    if (requests.length === 1) return new Response('invalid model', {status: 404});
+    return new Response(output.map(e => `data: ${JSON.stringify(e)}\n\n`).join(''), {headers: {'Content-Type': 'text/event-stream'}});
+  });
+  const yaml = config('num_history_items: 5, max_tool_result_tokens: 4, session_compaction: false, fallback: {models: [backup]}',
+    'models: {backup: {provider: local, model: gpt-5, base_url: https://backup.invalid/v1, token_key: SPARE}}');
+  const messages = [{role: 'user', content: 'one'}, {role: 'assistant', tool_calls: [call('echo', {}, 'cut')]},
+    {role: 'tool', tool_call_id: 'cut', content: 'removed'}, {role: 'user', content: 'two'}, ...seed(reference.source)];
+  const result = await api.chat({yaml, env: {KEY: 'first', SPARE: 'second'}, messages});
+  assert.equal(result.message.content, 'done');
+  assert.deepEqual(requests.map(r => [r.url, r.auth]), [
+    ['https://model.invalid/v1/chat/completions', 'Bearer first'], ['https://backup.invalid/v1/responses', 'Bearer second'],
+  ]);
+  const [chat, responses] = requests.map(r => r.body);
+  assert.deepEqual(chat.messages.filter(m => m.role === 'user').map(m => m.content), ['one\ntwo', 'go']);
+  assert.deepEqual(chat.messages.filter(m => m.role === 'tool'), [{role: 'tool', tool_call_id: 'a', content: reference.stored_result}]);
+  assert.deepEqual(responses.input.filter(m => m.role !== 'system'), [
+    {role: 'user', content: 'one'}, {role: 'user', content: 'two'},
+    {type: 'function_call', call_id: 'a', name: 'echo', arguments: '{}'},
+    {type: 'function_call_output', call_id: 'a', output: reference.stored_result}, {role: 'user', content: 'go'},
+  ]);
+});
+
+test('history-limited routes reject multipart and unreplayable seeds before opening any target', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', () => { throw new Error('unexpected request'); });
+  const yaml = config('num_history_items: 1, max_iterations: 2, session_compaction: false, fallback: {models: [local/backup, local/gpt-5]}, toolsets: [{type: mcp, remote: {url: https://tool.invalid/mcp}}]');
+  const messages = seed('text fallback');
+  for (const [fields, reason] of [
+    [{multi_content: [{type: 'image_url', image_url: {url: 'https://image.invalid/secret'}}]}, /text-only/],
+    [{name: 'caller'}, /named or reasoning/],
+    [{reasoning_content: 'private'}, /named or reasoning/],
+    [{openai_response: {}}, /provider state/],
+  ]) {
+    const history = [{...messages[0], ...fields}, ...messages.slice(1)];
+    await assert.rejects(api.chat({...opts(yaml), messages: history}), reason);
+  }
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+test('routed iteration cap rejects incompatible settings before any request', async t => {
+  const requests = intercept(t, []);
+  const fields = 'max_iterations: 1, session_compaction: false, fallback: {models: [local/backup]}';
+  for (const [yaml, reason] of [
+    [config(fields.replace('max_iterations: 1', 'max_iterations: 9')), /tool round limit/],
+    [config(fields.replace('session_compaction: false, ', '')), /requires session_compaction: false/],
+    [config(`fallback: {models: [local/backup]}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}`), /requires session_compaction: false/],
+    [config(`${fields}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['9']}}`), /portable tool round limit/],
+    [config(`${fields.replace('max_iterations: 1, ', '')}, hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
+    [config(`${fields}, sub_agents: [root]`), /fallback chain within local teams/],
+    [config(`${fields}, toolsets: [{type: think, model: local/gpt-5}]`), /toolset cannot change/],
+    [config(`${fields}, structured_output: {name: out, mode: tool, schema: {type: object, properties: {}}}`), /tool-mode structured output/],
+  ]) await assert.rejects(api.createSession(opts(yaml)), reason);
+  assert.equal(requests.length, 0);
+});
+
+test('old tool budget is newest first, uses floor(bytes/4), and never rewrites arguments', async t => {
+  const requests = intercept(t, [null]);
+  const exchanges = ['abc', 'four', 'abcdefgh', '😀', 'hi'].flatMap((text, i) => [
+    {role: 'assistant', tool_calls: [call('echo', {source: i}, `tool-${i}`)]},
+    {role: 'tool', tool_call_id: `tool-${i}`, content: text},
+  ]);
+  await api.chat({...opts(config('max_old_tool_call_tokens: 2')), messages: [...exchanges, {role:'user', content:'go'}]});
+  const messages = requests[0].messages;
+  assert.deepEqual(messages.filter(m => m.role === 'tool').map(m => m.content), ['abc', '[content truncated]', '[content truncated]', '😀', 'hi']);
+  assert.deepEqual(messages.filter(m => m.tool_calls).map(m => JSON.parse(m.tool_calls[0].function.arguments).source), [0,1,2,3,4]);
+});
+
+test('before-LLM-only redaction cannot be bypassed by capping a live host tool result', async t => {
+  const token = 'dckr_pat_' + 'B'.repeat(27);
+  const requests = intercept(t, [[call('echo')], null], token);
+  const yaml = config(`toolsets: [${echo}], max_tool_result_tokens: 4, redact_secrets: false, hooks: {before_llm_call: {type: builtin, command: redact_secrets}}`);
+  const s = await api.createSession(opts(yaml));
+  try {
+    await assert.rejects(s.send('call echo'), /cannot safely truncate/);
+    assert.equal(requests.length, 1);
+    await s.send('after error');
+    assert.equal(requests[1].messages.some(m => m.role === 'tool'), false);
+  } finally { await s.close(); }
+});
+
+
+test('finish is the last event even when the only pending host call is first in a batch', async t => {
+  intercept(t, [[call('echo'), call('calculate', {expression:'1'}, 'b', 1)]]);
+  const events = [];
+  const s = await api.createSession(opts(config(`toolsets: [${echo}, {type: calculator}], max_iterations: 1`)), e => events.push(e));
+  try { assert.equal((await s.send('go')).message.content, reference.stop); } finally { await s.close(); }
+  assert.equal(events.filter(e => e.type === 'tool_result').length, 2);
+  assert.deepEqual(events.slice(-2).map(e => e.type), ['delta', 'finish']);
+});
