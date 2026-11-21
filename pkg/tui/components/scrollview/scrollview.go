@@ -71,6 +71,8 @@ type Model struct {
 	xPos, yPos    int
 	width, height int
 
+	visibility scrollbarVisibility
+
 	gapWidth              int
 	reserveScrollbarSpace bool
 	wheelStep             int
@@ -95,10 +97,11 @@ type Model struct {
 // New creates a new scrollview with the given options.
 func New(opts ...Option) *Model {
 	m := &Model{
-		sb:        scrollbar.New(),
-		gapWidth:  1,
-		wheelStep: 2,
-		keyMap:    DefaultScrollKeyMap(),
+		sb:         scrollbar.New(),
+		visibility: scrollbarVisibility{x: -1, y: -1},
+		gapWidth:   1,
+		wheelStep:  2,
+		keyMap:     DefaultScrollKeyMap(),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -111,6 +114,7 @@ func (m *Model) SetSize(width, height int) {
 	m.width = width
 	m.height = height
 	m.updateScrollbarPosition()
+	m.reconcileScrollbarVisibility()
 }
 
 // SetPosition sets the absolute screen position (for mouse hit-testing).
@@ -118,6 +122,7 @@ func (m *Model) SetPosition(x, y int) {
 	m.xPos = x
 	m.yPos = y
 	m.updateScrollbarPosition()
+	m.reconcileScrollbarVisibility()
 }
 
 // SetContent provides the full content buffer and total height.
@@ -138,6 +143,7 @@ func (m *Model) SetContentWithTrailingSlack(lines []string, contentHeight, trail
 	m.contentHeight = max(contentHeight, len(lines))
 	m.totalHeight = m.contentHeight + max(0, trailingSlack)
 	m.sb.SetDimensions(m.height, m.totalHeight)
+	m.reconcileScrollbarVisibility()
 }
 
 // lineWidth returns the display width of content line i, memoized across frames.
@@ -220,24 +226,33 @@ func (m *Model) EnsureRangeVisible(startLine, endLine int) {
 // Returns handled=true when the event was consumed.
 func (m *Model) Update(msg tea.Msg) (handled bool, cmd tea.Cmd) {
 	m.updateScrollbarPosition() // Ensure scrollbar position is fresh for hit-testing
-	switch msg := msg.(type) {
+	switch msg.(type) {
 	case tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
 		return m.UpdateMouse(msg)
-
+	}
+	before := m.scrollOffset
+	defer func() {
+		if before != m.scrollOffset {
+			cmd = tea.Batch(cmd, m.RevealScrollbar())
+		}
+	}()
+	switch msg := msg.(type) {
 	case messages.WheelCoalescedMsg:
+		cmd = m.SetScrollbarPointer(msg.X, msg.Y)
 		if msg.Delta != 0 {
 			m.ScrollBy(msg.Delta * m.wheelStep)
-			return true, nil
+			return true, cmd
 		}
 
 	case tea.MouseWheelMsg:
+		cmd = m.SetScrollbarPointer(msg.X, msg.Y)
 		switch msg.Button.String() {
 		case "wheelup":
 			m.ScrollBy(-m.wheelStep)
-			return true, nil
+			return true, cmd
 		case "wheeldown":
 			m.ScrollBy(m.wheelStep)
-			return true, nil
+			return true, cmd
 		}
 
 	case tea.KeyPressMsg:
@@ -247,34 +262,48 @@ func (m *Model) Update(msg tea.Msg) (handled bool, cmd tea.Cmd) {
 		switch {
 		case m.keyMap.Up.Enabled() && key.Matches(msg, m.keyMap.Up):
 			m.LineUp()
-			return true, nil
+			return true, cmd
 		case m.keyMap.Down.Enabled() && key.Matches(msg, m.keyMap.Down):
 			m.LineDown()
-			return true, nil
+			return true, cmd
 		case key.Matches(msg, m.keyMap.PageUp):
 			m.PageUp()
-			return true, nil
+			return true, cmd
 		case key.Matches(msg, m.keyMap.PageDown):
 			m.PageDown()
-			return true, nil
+			return true, cmd
 		case key.Matches(msg, m.keyMap.Top):
 			m.ScrollToTop()
-			return true, nil
+			return true, cmd
 		case key.Matches(msg, m.keyMap.Bottom):
 			m.ScrollToBottom()
-			return true, nil
+			return true, cmd
 		}
 	}
-	return false, nil
+	return false, cmd
 }
 
 // UpdateMouse delegates mouse events to the scrollbar. Low-level alternative to [Update].
 func (m *Model) UpdateMouse(msg tea.Msg) (handled bool, cmd tea.Cmd) {
-	prev := m.scrollOffset
-	sb, c := m.sb.Update(msg)
-	m.sb = sb
+	point, ok := msg.(tea.MouseMsg)
+	if !ok {
+		return false, nil
+	}
+	mouse := point.Mouse()
+	cmd = m.SetScrollbarPointer(mouse.X, mouse.Y)
+	if !m.IsDragging() && !m.onScrollbar(mouse.X, mouse.Y) {
+		return false, cmd
+	}
+	prev, dragging := m.scrollOffset, m.IsDragging()
+	_, _ = m.sb.Update(msg)
 	m.scrollOffset = m.sb.GetScrollOffset()
-	return m.scrollOffset != prev || m.sb.IsDragging(), c
+	if prev != m.scrollOffset || (dragging && !m.IsDragging()) {
+		cmd = tea.Batch(cmd, m.RevealScrollbar())
+	} else if dragging != m.IsDragging() {
+		cmd = tea.Batch(cmd, m.syncScrollbarAnimation())
+	}
+	_, clicked := msg.(tea.MouseClickMsg)
+	return prev != m.scrollOffset || dragging || m.IsDragging() || (clicked && mouse.Button == tea.MouseLeft), cmd
 }
 
 // IsDragging returns whether the scrollbar thumb is being dragged.
@@ -375,7 +404,7 @@ func (m *Model) composeLines(lines []string, baseLine int, padded bool) string {
 	gap := ""
 	needsScrollbar := m.NeedsScrollbar()
 	if needsScrollbar {
-		bar = m.sb.ViewLines()
+		bar = m.scrollbarLines()
 		gap = strings.Repeat(" ", m.gapWidth)
 	} else if m.reserveScrollbarSpace {
 		gap = strings.Repeat(" ", m.ReservedCols())

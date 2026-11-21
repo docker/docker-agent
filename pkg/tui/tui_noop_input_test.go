@@ -21,6 +21,11 @@ import (
 func populateScrollableRoot(t *testing.T) *appModel {
 	t.Helper()
 	root, _, _ := wallClockRoot(t, 100, 35)
+	fillScrollableRoot(root)
+	return root
+}
+
+func fillScrollableRoot(root *appModel) {
 	for i := range 30 {
 		msg := session.NewAgentMessage("root", &chat.Message{
 			Role:    chat.MessageRoleAssistant,
@@ -32,7 +37,6 @@ func populateScrollableRoot(t *testing.T) *appModel {
 	root.handleWindowResize(100, 35)
 	root.activeTab.chatPage.ScrollToBottom()
 	root.viewCacheValid = false
-	return root
 }
 
 func TestEffectiveScrollInputRendersImmediately(t *testing.T) {

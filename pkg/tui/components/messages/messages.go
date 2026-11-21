@@ -296,6 +296,7 @@ func newModel(ar *animation.Runtime, width, height int, sessionState SessionStat
 	if ar == nil {
 		panic("messages: nil animation runtime")
 	}
+	sv.SetAnimationRuntime(ar)
 	m := &model{
 		toolRenderers:        tool.NewRegistry(),
 		ar:                   ar,
@@ -363,7 +364,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m.handleMouseRelease(msg)
 
 	case messages.WheelCoalescedMsg:
+		before := m.scrollOffset
 		cmd := m.scrollByWheel(msg.Delta)
+		cmd = m.revealAfterScroll(before, cmd)
 		return m, cmd
 
 	case AutoScrollTickMsg:
@@ -414,6 +417,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case animation.TickMsg:
+		m.scrollview.UpdateScrollbarAnimation(msg)
 		// Child owners mark the shared tick dirty only at visible frame
 		// boundaries. Invalidate after fanout below.
 
@@ -427,7 +431,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
-		return m.handleKeyPress(msg)
+		before := m.scrollOffset
+		model, cmd := m.handleKeyPress(msg)
+		return model, m.revealAfterScroll(before, cmd)
 	}
 
 	// Forward updates to all message views
@@ -645,12 +651,11 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 	return m, nil
 }
 
-func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.Cmd) {
+func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (model layout.Model, cmd tea.Cmd) {
 	// Unrelated releases must not restore scroll state from a deferred frame.
 	if m.scrollview.IsDragging() {
-		if updated, cmd := m.handleScrollviewUpdate(msg); cmd != nil {
-			return updated, cmd
-		}
+		_, scrollbarCmd := m.handleScrollviewUpdate(msg)
+		defer func() { cmd = tea.Batch(scrollbarCmd, cmd) }()
 	}
 
 	if msg.Button == tea.MouseLeft && m.selection.mouseButtonDown {
@@ -1228,6 +1233,24 @@ func (m *model) scrollByWheel(delta int) tea.Cmd {
 		m.userHasScrolled = false
 	}
 	return cmd
+}
+
+func (m *model) revealAfterScroll(before int, cmd tea.Cmd) tea.Cmd {
+	if before == m.scrollOffset {
+		return cmd
+	}
+	m.scrollview.SetContentWithTrailingSlack(m.renderedLines, m.totalHeight, m.bottomSlack)
+	return tea.Batch(cmd, m.scrollview.RevealScrollbar())
+}
+
+func (m *model) SetScrollbarPointer(x, y int) tea.Cmd {
+	return m.scrollview.SetScrollbarPointer(x, y)
+}
+
+func (m *model) ScrollbarView() *scrollview.Model { return m.scrollview }
+
+func (m *model) ClearScrollbarPointer() {
+	m.scrollview.ClearScrollbarPointer()
 }
 
 func (m *model) setScrollOffset(offset int) {
@@ -2915,6 +2938,7 @@ type InlineEditCommittedMsg struct {
 }
 
 func (m *model) StopAnimations() {
+	m.ClearScrollbarPointer()
 	m.slackAnimationSub.Stop()
 	for _, v := range m.views {
 		animation.StopView(v)

@@ -564,7 +564,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		activeTab:                     initialTab,
 		history:                       historyStore,
 		notification:                  notification.New(),
-		dialogMgr:                     dialog.New(),
+		dialogMgr:                     dialog.NewWithAnimation(ar),
 		completions:                   completion.New(),
 		tour:                          tour.New(),
 		workingSpinner:                spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
@@ -960,19 +960,22 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.acknowledgeProgramStatus(msg)
+	previousPage := m.activeTab.chatPage
+	pointerCmd := m.updateScrollbarPointer(msg)
 	stateCmd := m.applyTabEvent(m.activeTab, msg)
 	model, cmd := m.update(msg)
 	if m.ready && !m.leanMode && m.activeTab != nil && m.activeTab.editor != nil && m.editorChrome() != m.editorChromeHeight {
 		cmd = tea.Batch(cmd, m.resizeAll())
 		m.viewCacheValid = false
 	}
+	m.clearInactiveScrollbarPointer(previousPage)
 	if isTabStateEvent(msg) && m.supervisor != nil {
 		cmd = tea.Batch(cmd, stateCmd, m.replayPendingEvent(m.supervisor.ActiveID()))
 	}
 	if obs := m.tour.Observe(msg); obs != nil {
 		cmd = tea.Batch(cmd, obs)
 	}
-	cmd = tea.Batch(cmd, m.syncNotificationAvoidance(), m.refreshProgramStatus())
+	cmd = tea.Batch(cmd, pointerCmd, m.syncNotificationAvoidance(), m.refreshProgramStatus())
 	return model, cmd
 }
 
@@ -1050,7 +1053,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		msg = accepted
 		m.composerGrip.Tick(msg)
-		cmds := []tea.Cmd{m.updateChatCmd(msg)}
+		cmds := []tea.Cmd{m.updateChatCmd(msg), m.updateDialogCmd(msg)}
 		// Update working spinner
 		if m.leanMode && m.activeTab.chatPage.IsWorking() {
 			model, cmd := m.workingSpinner.Update(msg)
@@ -1969,7 +1972,8 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 
 	// Rebuild all per-session UI components.
 	m.initSessionComponents(activeID, m.application, newSess)
-	m.dialogMgr = dialog.New()
+	m.clearDialogScrollbarPointer()
+	m.dialogMgr = dialog.NewWithAnimation(m.ar)
 	m.supervisor.SetRunnerTitle(activeID, "")
 	m.activeTab.sessionState.SetSessionTitle("")
 	m.activeTab.sessionState.SetPreviousMessage(nil)
@@ -2887,6 +2891,14 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 		return model, batchWith(cmd)
 	}
 
+	// A captured thumb and a text selection both keep receiving motion
+	// outside the chat region.
+	if chatScrollbarDragging(m.activeTab.chatPage) {
+		cmds = append(cmds, m.composerGrip.Set(false, false, false))
+		model, cmd := m.forwardChat(msg)
+		return model, batchWith(cmd)
+	}
+
 	// A text-selection drag must keep receiving motion wherever the cursor
 	// goes (editor, tab bar, status bar), otherwise the selection freezes
 	// and the release-copy pair is lost.
@@ -2943,8 +2955,8 @@ func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.C
 		return m.forwardDialog(msg)
 	}
 
-	// Finish text selection even if the button was released outside chat.
-	if m.activeTab.chatPage.IsSelecting() {
+	// Finish text selection or scrollbar capture even outside chat.
+	if m.activeTab.chatPage.IsSelecting() || chatScrollbarDragging(m.activeTab.chatPage) {
 		return m.forwardChat(msg)
 	}
 

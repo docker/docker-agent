@@ -84,7 +84,9 @@ func (m *Model) Update(msg tea.Msg) (*Model, tea.Cmd) {
 		}
 
 	case tea.MouseReleaseMsg:
-		if msg.Button == tea.MouseLeft {
+		// Drags start only with the left button. X10 mouse mode reports every
+		// release as MouseNone, so that also ends the drag.
+		if msg.Button == tea.MouseLeft || msg.Button == tea.MouseNone {
 			m.dragging = false
 		}
 	}

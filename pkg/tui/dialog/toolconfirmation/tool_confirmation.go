@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/toolconfirm"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -120,8 +121,12 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	fixedContentHeight := titleHeight + separatorHeight + toolConfirmEmptyLinesBefore + questionHeight + toolConfirmEmptyLinesAfter + optionsHeight + safetyHeight + metadataHeight
 	availableHeight := max(maxDialogHeight-frameHeight-fixedContentHeight, toolConfirmMinScrollHeight)
 	d.scrollView.SetSize(contentWidth, availableHeight)
-
-	return nil
+	row, col := d.Position()
+	x := col + styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
+	// View() places the arguments below the title, the separator, and one
+	// blank row. The title wraps in narrow dialogs, so use measured heights.
+	y := row + styles.DialogStyle.GetBorderTopSize() + styles.DialogStyle.GetPaddingTop() + titleHeight + separatorHeight + 1
+	return d.scrollView.SetPosition(x, y)
 }
 
 // renderOptions renders the Y/N/T/B/A decision block: the option
@@ -352,7 +357,36 @@ func NewToolConfirmationDialog(ar *animation.Runtime, msg *runtime.ToolCallConfi
 	}
 }
 
-// Init initializes the tool confirmation dialog
+// scrollbar returns the arguments viewport, whose scrollbar visibility this
+// dialog drives itself so it also works without the app dialog manager.
+func (d *toolConfirmationDialog) scrollbar() *scrollview.Model {
+	if owner, ok := d.scrollView.(interface{ ScrollbarView() *scrollview.Model }); ok {
+		return owner.ScrollbarView()
+	}
+	return nil
+}
+
+func (d *toolConfirmationDialog) observeScrollbarPointer(x, y int) tea.Cmd {
+	if sv := d.scrollbar(); sv != nil {
+		return sv.SetScrollbarPointer(x, y)
+	}
+	return nil
+}
+
+// ClearScrollbarPointer hides the arguments scrollbar and releases its tick
+// subscription while the dialog is covered or moved off screen.
+func (d *toolConfirmationDialog) ClearScrollbarPointer() {
+	if sv := d.scrollbar(); sv != nil {
+		sv.ClearScrollbarPointer()
+	}
+}
+
+// StopAnimation implements [animation.Stopper] for a discarded dialog.
+func (d *toolConfirmationDialog) StopAnimation() {
+	d.scrollView.StopAnimations()
+}
+
+// Init initializes the tool confirmation dialog.
 func (d *toolConfirmationDialog) Init() tea.Cmd {
 	return d.scrollView.Init()
 }
@@ -402,11 +436,26 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
-	case tea.MouseClickMsg:
-		if msg.Button == tea.MouseLeft {
-			return d.handleMouseClick(msg)
+	case animation.TickMsg:
+		if sv := d.scrollbar(); sv != nil {
+			sv.UpdateScrollbarAnimation(msg)
 		}
 		return d, nil
+
+	case tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
+		mouse := msg.(tea.MouseMsg).Mouse()
+		hover := d.observeScrollbarPointer(mouse.X, mouse.Y)
+		if d.scrollView.IsScrollbarDragging() || d.scrollView.IsMouseOnScrollbar(mouse.X, mouse.Y) {
+			updated, cmd := d.scrollView.Update(msg)
+			d.scrollView = updated.(messages.Model)
+			return d, tea.Batch(hover, cmd)
+		}
+		click, ok := msg.(tea.MouseClickMsg)
+		if ok && click.Button == tea.MouseLeft {
+			model, cmd := d.handleMouseClick(click)
+			return model, tea.Batch(hover, cmd)
+		}
+		return d, hover
 
 	case tea.KeyPressMsg:
 		if cmd := common.HandleQuit(msg); cmd != nil {
@@ -425,9 +474,10 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 
 	case tuimessages.WheelCoalescedMsg:
+		hover := d.observeScrollbarPointer(msg.X, msg.Y)
 		updatedScrollView, cmd := d.scrollView.Update(msg)
 		d.scrollView = updatedScrollView.(messages.Model)
-		return d, cmd
+		return d, tea.Batch(hover, cmd)
 	}
 
 	return d, nil

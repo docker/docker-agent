@@ -3,21 +3,21 @@
 │                                                                          │
 │              Appearance   ·   Behavior   ·   Notifications               │
 │                                                                          │
-│  › Theme                                                  ‹ default › │  │
-│    [x] Fade scroll edges                                              │  │
-│                                                                       │  │
-│  ── Sidebar layout ────────────────────────────────────────────────   │  │
-│    Sidebar position                                         ‹ Right › │  │
-│    Section spacing                                         ‹ Normal › │  │
-│    Sidebar info mode                                      ‹ Compact › │  │
-│                                                                       │  │
-│  ── Sidebar sections ──────────────────────────────────────────────   │  │
-│    [x] Session path                                                   │  │
-│    [x] Token usage                                                    │  │
-│    [x] Agents                                                         │  │
-│      [ ] Active agents only                                           │  │
-│    [x] Tools                                                          │  │
-│    [ ] Plans                                                          │  │
+│  › Theme                                                  ‹ default ›    │
+│    [x] Fade scroll edges                                                 │
+│                                                                          │
+│  ── Sidebar layout ────────────────────────────────────────────────      │
+│    Sidebar position                                         ‹ Right ›    │
+│    Section spacing                                         ‹ Normal ›    │
+│    Sidebar info mode                                      ‹ Compact ›    │
+│                                                                          │
+│  ── Sidebar sections ──────────────────────────────────────────────      │
+│    [x] Session path                                                      │
+│    [x] Token usage                                                       │
+│    [x] Agents                                                            │
+│      [ ] Active agents only                                              │
+│    [x] Tools                                                             │
+│    [ ] Plans                                                             │
 │                                                                          │
 │                                                                          │
 │      ↑↓ move  ←→/space change  tab category  enter open  esc cancel      │

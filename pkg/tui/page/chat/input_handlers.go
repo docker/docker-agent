@@ -231,7 +231,7 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 	// During a scrollbar drag, forward motion to both scrollable components
 	// so the drag continues even when the cursor drifts outside the component.
 	// The scrollbar ignores motion if it isn't the one being dragged.
-	if p.isScrollbarDragging() {
+	if p.IsScrollbarDragging() {
 		cmds := []tea.Cmd{p.setSidebarGrip(false, false)}
 		messagesModel, messagesCmd := p.messages.Update(msg)
 		p.messages = messagesModel.(messages.Model)
@@ -284,8 +284,8 @@ func (p *chatPage) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, te
 	return p, tea.Batch(cmds...)
 }
 
-// isScrollbarDragging returns true if any scrollable component has an active scrollbar drag.
-func (p *chatPage) isScrollbarDragging() bool {
+// IsScrollbarDragging returns true if any scrollable component has an active scrollbar drag.
+func (p *chatPage) IsScrollbarDragging() bool {
 	return p.messages.IsScrollbarDragging() || p.sidebar.IsScrollbarDragging()
 }
 
