@@ -3,6 +3,8 @@ package image
 import (
 	"bytes"
 	"errors"
+	stdimage "image"
+	"image/png"
 	"strings"
 	"testing"
 
@@ -52,8 +54,8 @@ func TestWriterRetriesImageStateAfterOverlayWriteFailure(t *testing.T) {
 }
 
 func TestWriterExtractsAndOverlaysKittyImage(t *testing.T) {
-	png := []byte("png-data")
-	content := "header\n    " + KittySequence(png, 20, 10) + "\n"
+	data := []byte("png-data")
+	content := "header\n    " + KittySequence(data, 20, 10) + "\n"
 	var output bytes.Buffer
 	writer := NewWriter(&output)
 
@@ -98,6 +100,57 @@ func TestMarkerOverlayCropsScrolledImage(t *testing.T) {
 	assert.Equal(t, 4, overlays[0].rows)
 	assert.Positive(t, overlays[0].sourceY)
 	assert.Less(t, overlays[0].sourceH, img.Height)
+}
+
+func TestWriterClipsSingleVisibleUpscaledMarkerRow(t *testing.T) {
+	var data bytes.Buffer
+	require.NoError(t, png.Encode(&data, stdimage.NewGray(stdimage.Rect(0, 0, 16, 16))))
+	img := Inline{PNGData: data.Bytes(), Width: 16, Height: 16}
+	lines := RenderMarkers(img, 44)
+	require.Len(t, lines, 20)
+
+	var output bytes.Buffer
+	writer := NewWriter(&output)
+	writeFrame := func() string {
+		t.Helper()
+		output.Reset()
+		_, err := writer.Write([]byte("frame"))
+		require.NoError(t, err)
+		return output.String()
+	}
+
+	writer.SetContent(strings.Join(lines, "\n"))
+	commands := writeFrame()
+	require.Equal(t, 1, strings.Count(commands, "\x1b_Ga=p,"), "contiguous marker rows remain grouped")
+	assert.Contains(t, commands, ",c=40,r=20\x1b\\")
+
+	writer.SetContent(lines[0])
+	writer.SetOcclusion(stdimage.Rect(12, 0, 13, 1))
+	commands = writeFrame()
+	require.Equal(t, 2, strings.Count(commands, "\x1b_Ga=p,"), commands)
+	assert.Contains(t, commands, ",c=10,r=1,x=0,y=0,w=4,h=1\x1b\\")
+	assert.Contains(t, commands, ",c=29,r=1,x=4,y=0,w=12,h=1\x1b\\")
+	assert.Contains(t, commands, "\x1b[1;14H\x1b_Ga=p,")
+	assert.NotContains(t, commands, "\x1b_Ga=t,")
+
+	writer.SetOcclusion(stdimage.Rect(2, 0, 42, 1))
+	commands = writeFrame()
+	assert.Contains(t, commands, "\x1b_Ga=d,")
+	assert.NotContains(t, commands, "\x1b_Ga=p,")
+
+	writer.SetOcclusion(stdimage.Rectangle{})
+	commands = writeFrame()
+	require.Equal(t, 1, strings.Count(commands, "\x1b_Ga=p,"))
+	assert.Contains(t, commands, "\x1b[1;3H\x1b_Ga=p,")
+	assert.Contains(t, commands, ",c=40,r=1,")
+	assert.NotContains(t, commands, "\x1b_Ga=t,")
+
+	// A foreground mask at the image edge must retain the later row's source offset.
+	writer.SetContent(lines[15], stdimage.Rect(2, 0, 3, 1))
+	commands = writeFrame()
+	require.Equal(t, 1, strings.Count(commands, "\x1b_Ga=p,"))
+	assert.Contains(t, commands, "\x1b[1;4H\x1b_Ga=p,")
+	assert.Contains(t, commands, ",c=39,r=1,x=0,y=12,w=16,h=1\x1b\\")
 }
 
 func TestWriterUnsupportedTerminalStripsMarkersWithoutRendering(t *testing.T) {

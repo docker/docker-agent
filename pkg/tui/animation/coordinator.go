@@ -120,6 +120,7 @@ func (r *Runtime) Unregister() {
 	}
 	if r.active == 0 {
 		r.abandonLeaseLocked()
+		r.lastDeliveredAt = time.Time{}
 	}
 }
 
