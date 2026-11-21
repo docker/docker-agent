@@ -334,6 +334,48 @@ func TestBuildConfig_Gemini3_ThinkingLevel(t *testing.T) {
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "medium"},
 			expectThinkingLevel: genai.ThinkingLevelMedium,
 		},
+		{
+			name:                "gemini-3-pro clamps unsupported xhigh down to high",
+			model:               "gemini-3-pro",
+			thinkingBudget:      &latest.ThinkingBudget{Effort: "xhigh"},
+			expectThinkingLevel: genai.ThinkingLevelHigh,
+		},
+		{
+			name:                "gemini-4-carbon clamps unsupported xhigh down to high",
+			model:               "gemini-4-carbon",
+			thinkingBudget:      &latest.ThinkingBudget{Effort: "xhigh"},
+			expectThinkingLevel: genai.ThinkingLevelHigh,
+		},
+		{
+			name:                "gemini-4-argon clamps unsupported xhigh down to high",
+			model:               "gemini-4-argon",
+			thinkingBudget:      &latest.ThinkingBudget{Effort: "xhigh"},
+			expectThinkingLevel: genai.ThinkingLevelHigh,
+		},
+		{
+			name:                "gemini-4-carbon clamps unsupported minimal up to low",
+			model:               "gemini-4-carbon",
+			thinkingBudget:      &latest.ThinkingBudget{Effort: "minimal"},
+			expectThinkingLevel: genai.ThinkingLevelLow,
+		},
+		{
+			name:                "gemini-4-hydrogen clamps unsupported minimal up to low",
+			model:               "gemini-4-hydrogen",
+			thinkingBudget:      &latest.ThinkingBudget{Effort: "minimal"},
+			expectThinkingLevel: genai.ThinkingLevelLow,
+		},
+		{
+			name:                "gemini-4-neon clamps unsupported minimal up to low",
+			model:               "gemini-4-neon",
+			thinkingBudget:      &latest.ThinkingBudget{Effort: "minimal"},
+			expectThinkingLevel: genai.ThinkingLevelLow,
+		},
+		{
+			name:                "gemini-4-hydrogen clamps max down to xhigh",
+			model:               "gemini-4-hydrogen",
+			thinkingBudget:      &latest.ThinkingBudget{Effort: "max"},
+			expectThinkingLevel: genai.ThinkingLevelXhigh,
+		},
 	}
 
 	for _, tt := range tests {

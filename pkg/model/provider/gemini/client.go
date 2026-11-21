@@ -565,7 +565,7 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 
 // applyGemini3ThinkingLevel applies level-based thinking for Gemini 3+ models.
 func (c *Client) applyGemini3ThinkingLevel(config *genai.GenerateContentConfig) {
-	level, ok := gemini3ThinkingLevel(c.ModelConfig.ThinkingBudget.Effort)
+	level, ok := c.gemini3ThinkingLevel(c.ModelConfig.ThinkingBudget.Effort)
 	if !ok {
 		// No recognized effort string — fall back to token-based if tokens are set.
 		if c.ModelConfig.ThinkingBudget.Tokens != 0 {
@@ -586,13 +586,21 @@ func (c *Client) applyGemini3ThinkingLevel(config *genai.GenerateContentConfig) 
 	)
 }
 
-// gemini3ThinkingLevel maps an effort string to a Gemini ThinkingLevel.
-func gemini3ThinkingLevel(effortStr string) (genai.ThinkingLevel, bool) {
+// gemini3ThinkingLevel maps an effort string to a model-supported Gemini ThinkingLevel.
+func (c *Client) gemini3ThinkingLevel(effortStr string) (genai.ThinkingLevel, bool) {
 	l, ok := effort.Parse(effortStr)
-	if !ok {
+	if !ok || l == effort.None {
 		return "", false
 	}
-	s, ok := effort.ForGemini(l)
+	clamped := effort.Clamp(modelinfo.SupportedThinkingLevels("google", c.ModelConfig.Model), l)
+	if clamped != l {
+		slog.Debug("Clamped Gemini thinking level to model-supported value",
+			"model", c.ModelConfig.Model,
+			"requested", l,
+			"effective", clamped,
+		)
+	}
+	s, ok := effort.ForGemini(clamped)
 	if !ok {
 		return "", false
 	}
