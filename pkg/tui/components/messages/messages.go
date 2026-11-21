@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -220,8 +221,9 @@ type model struct {
 	height        int
 
 	// Height tracking system fields
-	scrollOffset      int                              // Current scroll position in lines
-	bottomSlack       int                              // Extra blank lines added after content shrinks
+	scrollOffset      int // Current scroll position in lines
+	bottomSlack       int // Extra blank lines added after content shrinks
+	slackRemainder    time.Duration
 	slackAnimationSub animation.Subscription           // Subscription to animation ticks while slack > 0
 	renderedLines     []string                         // Cached flattened content excluding a segmented active suffix
 	activeSegments    *activeTranscriptSegments        // Segmented final assistant item while visibly streaming
@@ -897,6 +899,9 @@ func (m *model) updateScrollState() {
 		delta := m.totalHeight - prevTotalHeight
 		switch {
 		case delta < 0:
+			if m.bottomSlack == 0 {
+				m.slackRemainder = 0
+			}
 			// Cap so the viewport is never mostly empty after a large
 			// shrinkage (e.g., several tool calls fading out at once).
 			m.bottomSlack = min(m.bottomSlack-delta, m.maxBottomSlack())
@@ -923,19 +928,25 @@ func (m *model) maxBottomSlack() int {
 	return max(1, min(5, m.height/3))
 }
 
-// handleAnimationTick refreshes scroll state, decays any leftover slack by
-// one line, and keeps the slack subscription alive while slack > 0 so
-// further ticks fire even after fade animations finish. Returns the command
-// to schedule the next tick when the subscription transitions to active.
+// handleAnimationTick decays slack that existed over the elapsed interval.
+// Slack created by this tick's content shrinkage starts aging on the next tick.
 func (m *model) handleAnimationTick(tick animation.TickMsg) tea.Cmd {
-	m.updateScrollState()
 	if !m.userHasScrolled && m.bottomSlack > 0 {
-		m.bottomSlack--
-		tick.MarkDirty()
+		before, after := tick.ElapsedBounds()
+		elapsed := after - before + m.slackRemainder
+		m.slackRemainder = elapsed % animation.TranscriptSlackRowDuration
+		rows := animation.TimedStep(elapsed, animation.TranscriptSlackRowDuration)
+		if rows > 0 {
+			m.bottomSlack = max(0, m.bottomSlack-rows)
+			m.scrollOffset = min(m.scrollOffset, max(0, m.totalScrollableHeight()-m.height))
+			tick.MarkDirty()
+		}
 	}
+	m.updateScrollState()
 	if m.bottomSlack > 0 {
 		return m.slackAnimationSub.Start()
 	}
+	m.slackRemainder = 0
 	m.slackAnimationSub.Stop()
 	return nil
 }
@@ -2397,6 +2408,9 @@ func (m *model) ScrollToBottom() tea.Cmd {
 func (m *model) AdjustBottomSlack(delta int) {
 	if delta == 0 {
 		return
+	}
+	if m.bottomSlack == 0 {
+		m.slackRemainder = 0
 	}
 	m.bottomSlack = max(0, min(m.bottomSlack+delta, m.maxBottomSlack()))
 }

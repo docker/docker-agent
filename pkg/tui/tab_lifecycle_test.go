@@ -430,3 +430,24 @@ func TestClearSessionDiscardsPreviousAttention(t *testing.T) {
 	assert.True(t, running, "late stop from previous conversation is not the new root")
 	assert.Equal(t, id, m.supervisor.ActiveID())
 }
+
+func TestHiddenRecordingEditorReleasesAnimation(t *testing.T) {
+	t.Parallel()
+	m := newTabLifecycleModel(t)
+	m.speechCtx, m.cancelSpeech = context.WithCancel(t.Context())
+	firstID := m.supervisor.ActiveID()
+	recording := m.activeTab.editor
+	baseline := m.ar.ActiveCount()
+	_, cmd := m.handleStartSpeak()
+	_, _ = m.handleSpeechEvent(nextSpeechEvent(t, cmd))
+	require.True(t, recording.IsRecording())
+	require.Equal(t, baseline+1, m.ar.ActiveCount())
+
+	_, _ = m.handleSpawnSession("/second")
+	assert.Equal(t, baseline, m.ar.ActiveCount(), "hidden recording dots must not keep the clock ticking")
+	assert.True(t, recording.IsRecording())
+	assert.True(t, m.isTranscribing(), "transcription continues in the background")
+
+	_, _ = m.handleSwitchTab(firstID)
+	assert.Equal(t, baseline+1, m.ar.ActiveCount())
+}

@@ -7,7 +7,9 @@ import (
 	"image"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -194,9 +196,10 @@ type appModel struct {
 		content string
 	}
 
-	paneHidden           bool
-	tmuxVisibilityProbe  func(context.Context) bool
-	visibilityGeneration uint64
+	paneHidden             bool
+	terminalExecInProgress bool
+	tmuxVisibilityProbe    func(context.Context) bool
+	visibilityGeneration   uint64
 
 	// Window state
 	wWidth, wHeight int
@@ -771,6 +774,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 // editorOpts returns the editor.Option slice derived from the current appModel.
 func (m *appModel) editorOpts() []editor.Option {
 	opts := []editor.Option{
+		editor.WithAnimationRuntime(m.ar),
 		editor.WithCompletions(
 			completions.NewCommandCompletion(m.commandCategories()),
 			completions.NewFileCompletion(m.ctx()),
@@ -952,12 +956,47 @@ func (m *appModel) init() tea.Cmd {
 	)
 }
 
+type terminalExecMsg struct{ exec tea.Msg }
+
+func execTerminalProcess(cmd *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
+	process := tea.ExecProcess(cmd, callback)
+	return func() tea.Msg { return terminalExecMsg{exec: process()} }
+}
+
+// FilterTerminalHandoff pauses animations before Bubble Tea relinquishes the
+// terminal. Bubble Tea delivers the same suspend or exec message to Update
+// after the handoff completes, even if it fails.
+func FilterTerminalHandoff(model tea.Model, msg tea.Msg) tea.Msg {
+	m, ok := model.(*appModel)
+	if !ok {
+		return msg
+	}
+	switch msg := msg.(type) {
+	case terminalExecMsg:
+		m.ar.Pause()
+		m.terminalExecInProgress = true
+		return msg.exec
+	case tea.SuspendMsg:
+		if goruntime.GOOS != "windows" {
+			m.ar.Pause()
+		}
+	}
+	return msg
+}
+
 // Update handles messages. It wraps update so the getting-started tour can
 // observe every message that flows through the TUI (to detect completed
 // steps) without ever consuming it.
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.application != nil && !m.application.IsCurrentOperation(msg) {
 		return m, nil
+	}
+	var resume tea.Cmd
+	if m.terminalExecInProgress {
+		m.terminalExecInProgress = false
+		if !m.paneHidden {
+			resume = m.ar.Resume()
+		}
 	}
 	m.acknowledgeProgramStatus(msg)
 	previousPage := m.activeTab.chatPage
@@ -975,7 +1014,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if obs := m.tour.Observe(msg); obs != nil {
 		cmd = tea.Batch(cmd, obs)
 	}
-	cmd = tea.Batch(cmd, pointerCmd, m.syncNotificationAvoidance(), m.refreshProgramStatus())
+	cmd = tea.Batch(resume, cmd, pointerCmd, m.syncNotificationAvoidance(), m.refreshProgramStatus())
 	return model, cmd
 }
 
@@ -1054,6 +1093,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		msg = accepted
 		m.composerGrip.Tick(msg)
 		cmds := []tea.Cmd{m.updateChatCmd(msg), m.updateDialogCmd(msg)}
+		if m.activeTab.editor != nil && m.activeTab.editor.IsRecording() {
+			cmds = append(cmds, m.updateEditorCmd(msg))
+		}
 		// Update working spinner
 		if m.leanMode && m.activeTab.chatPage.IsWorking() {
 			model, cmd := m.workingSpinner.Update(msg)
@@ -1166,6 +1208,16 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewCacheInitialized = false
 		cmd := m.handleWindowResize(msg.Width, msg.Height)
 		return m, cmd
+
+	case terminalExecMsg:
+		// Hosts without the handoff filter still run the original process.
+		return m, func() tea.Msg { return msg.exec }
+
+	case tea.SuspendMsg:
+		if goruntime.GOOS == "windows" || m.paneHidden {
+			return m, nil
+		}
+		return m, m.ar.Resume()
 
 	case tea.BlurMsg:
 		m.resetResizeGrips()
@@ -2110,6 +2162,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 		m.resetResizeGrips()
 		chat.CancelStartupBanner(outgoing.chatPage)
 		m.cancelSpeechSend(outgoing)
+		outgoing.editor.SetHidden(true)
 		m.parkAttention(outgoing)
 	}
 
@@ -2162,7 +2215,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	m.workingSpinner.Stop()
 	m.workingSpinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)
 
-	var cmds []tea.Cmd
+	cmds := []tea.Cmd{m.activeTab.editor.SetHidden(false)}
 
 	if !pageExists || !editorExists {
 		if !pageExists {
@@ -3471,7 +3524,7 @@ func (m *appModel) openExternalEditor() (tea.Model, tea.Cmd) {
 	cmd := editorname.Command(tmpPath)
 
 	ed := m.activeTab.editor
-	return m, tea.ExecProcess(cmd, externalEditorCallback(ed, tmpPath))
+	return m, execTerminalProcess(cmd, externalEditorCallback(ed, tmpPath))
 }
 
 // externalEditorCallback builds the tea.ExecProcess callback that reads the

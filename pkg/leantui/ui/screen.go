@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/tui/service"
@@ -28,11 +29,11 @@ func NewScreen(workingDir, branch, editorPlaceholder string, historyStore ...*hi
 }
 
 // Frame produces the full terminal frame and cursor position.
-func (s *Screen) Frame(width, _, spinnerFrame int, busy bool, sessionState service.SessionStateReader, pendingUsers []PendingUserMessage) (lines []string, cursorLine, cursorCol int) {
-	lines = s.Transcript.Lines(width, spinnerFrame, busy, sessionState, pendingUsers)
+func (s *Screen) Frame(width, _ int, elapsed time.Duration, busy bool, sessionState service.SessionStateReader, pendingUsers []PendingUserMessage) (lines []string, cursorLine, cursorCol int) {
+	lines = s.Transcript.Lines(width, elapsed, busy, sessionState, pendingUsers)
 
 	lines = append(lines, s.Autocomplete.Render(width)...)
-	lines = append(lines, renderInputSeparator(width, spinnerFrame, busy))
+	lines = append(lines, renderInputSeparator(width, elapsed, busy))
 
 	inputStart := len(lines)
 	switch {
@@ -64,13 +65,13 @@ func (s *Screen) Frame(width, _, spinnerFrame int, busy bool, sessionState servi
 	return lines, cursorLine, cursorCol
 }
 
-func renderInputSeparator(width, spinnerFrame int, busy bool) string {
+func renderInputSeparator(width int, elapsed time.Duration, busy bool) string {
 	width = max(width, 0)
 	if !busy {
 		return StMuted().Render(strings.Repeat("─", width))
 	}
 
-	label := StMuted().Render("── ") + spinnerLine(spinnerFrame) + " "
+	label := StMuted().Render("── ") + spinnerLine(elapsed) + " "
 	return Truncate(label+StMuted().Render(strings.Repeat("─", max(width-DisplayWidth(label), 0))), width)
 }
 

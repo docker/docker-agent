@@ -1282,5 +1282,5 @@ func (m *appModel) startShell() (tea.Model, tea.Cmd) {
 	if runner := m.supervisor.GetRunner(m.supervisor.ActiveID()); runner != nil && runner.WorkingDir != "" {
 		cmd.Dir = runner.WorkingDir
 	}
-	return m, tea.ExecProcess(cmd, nil)
+	return m, execTerminalProcess(cmd, nil)
 }

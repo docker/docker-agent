@@ -698,7 +698,7 @@ func planDraftFile(pattern, content string) (string, error) {
 // execPlanEditor opens result.path in $VISUAL/$EDITOR via tea.ExecProcess
 // and reports back with result once the editor exits.
 func (m *appModel) execPlanEditor(result planEditorClosedMsg) tea.Cmd {
-	return tea.ExecProcess(editorname.Command(result.path), func(err error) tea.Msg {
+	return execTerminalProcess(editorname.Command(result.path), func(err error) tea.Msg {
 		result.err = err
 		return result
 	})

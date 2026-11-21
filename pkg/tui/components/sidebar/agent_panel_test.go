@@ -3,6 +3,7 @@ package sidebar
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -28,7 +29,7 @@ func newAgentPanelSidebar(t *testing.T, width int, agents ...runtime.AgentDetail
 	sess := session.New()
 	ss := service.NewSessionState(sess)
 	ss.SetCurrentAgentName("root")
-	m := New(animation.NewRuntime(), t.Context(), ss).(*model)
+	m := New(animation.NewRuntimeWithScheduler(&immediateScheduler{now: time.Unix(1, 0)}), t.Context(), ss).(*model)
 	m.sessionHasContent = true
 	m.titleGenerated = true
 	m.sessionTitle = "Test"

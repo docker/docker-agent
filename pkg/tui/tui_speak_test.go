@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,7 +18,10 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -440,4 +444,53 @@ func TestNew_KeepsInjectedTranscriber(t *testing.T) {
 	t.Cleanup(m.cleanupManagedResources)
 
 	assert.Same(t, ft, m.transcriber)
+}
+
+func TestSpeech_SuspendExcludesStoppedTimeFromRecording(t *testing.T) {
+	t.Parallel()
+	m := newSpeakTestModel(t, &fakeTranscriber{})
+	clock := &rootImmediateScheduler{now: time.Unix(1, 0)}
+	m.ar = animation.NewRuntimeWithScheduler(clock)
+	t.Cleanup(m.ar.Stop)
+	m.tabBar = tabbar.New(m.ar, 0)
+	m.activeTab.editor = editor.New(nil, editor.WithAnimationRuntime(m.ar))
+	_, cmd := m.handleStartSpeak()
+	_, _ = m.handleSpeechEvent(nextSpeechEvent(t, cmd))
+	require.True(t, m.activeTab.editor.IsRecording())
+	_, next := m.Update(m.ar.EnsureRunning()())
+	require.Equal(t, animation.TickRate, m.ar.Now())
+
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'z', Mod: tea.ModCtrl})
+	require.NotNil(t, cmd)
+	suspend := cmd()
+	require.IsType(t, tea.SuspendMsg{}, suspend)
+	// Ctrl+Z only queues the suspend. Other messages, including animation
+	// ticks, can still run before Bubble Tea receives it.
+	require.NotNil(t, next)
+	_, next = m.Update(next())
+	require.Equal(t, 2*animation.TickRate, m.ar.Now())
+	require.NotNil(t, next)
+
+	suspend = FilterTerminalHandoff(m, suspend)
+	require.IsType(t, tea.SuspendMsg{}, suspend)
+	if runtime.GOOS == "windows" {
+		_, resume := m.Update(suspend)
+		assert.Nil(t, resume)
+		_, _ = m.Update(next())
+		assert.Equal(t, 3*animation.TickRate, m.ar.Now(), "a no-op suspend leaves the pending tick valid")
+		return
+	}
+
+	// Bubble Tea blocks between filtering SuspendMsg and calling Update.
+	clock.now = clock.now.Add(time.Hour)
+	stale := collectMsgs(next)
+	_, resume := m.Update(suspend)
+	require.NotNil(t, resume)
+	for _, msg := range stale {
+		_, _ = m.Update(msg)
+	}
+	assert.Equal(t, 2*animation.TickRate, m.ar.Now(), "the pre-suspend tick is stale")
+	_, _ = m.Update(resume())
+	assert.Equal(t, 3*animation.TickRate, m.ar.Now())
+	assert.True(t, m.ar.HasActive(), "recording dots stay subscribed after resume")
 }
