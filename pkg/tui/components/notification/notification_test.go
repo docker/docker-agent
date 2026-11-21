@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"image"
 	"strings"
 	"testing"
 
@@ -483,3 +484,59 @@ func stringsIndex(t *testing.T, s, substr string) int {
 }
 
 var _ tea.Msg = AutoHideMsg{}
+
+func TestNotification_AvoidanceClipsOverflowAndHitTargets(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		count   int
+		text    string
+		clipRow int
+	}{
+		{name: "seven toasts", count: 7, text: "toast", clipRow: 19},
+		{name: "tall toast", count: 1, text: strings.Repeat("tall toast\n", 22) + "last line", clipRow: 19},
+		{name: "no room", count: 1, text: strings.Repeat("tall toast\n", 22) + "last line", clipRow: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			n := New()
+			n.SetSize(80, 24)
+			for range tc.count {
+				n.Update(ShowMsg{Text: tc.text})
+			}
+			// Locate the last item's close column at maximum lift, then put
+			// input across its body and close glyph at that position.
+			bounds := n.itemBounds()
+			x, y := closeButtonPosition(bounds[len(bounds)-1])
+			y -= n.layout.top
+			input := image.Rect(x-1, tc.clipRow, x+1, tc.clipRow+2)
+			n.SetAvoidance(nil, []image.Rectangle{input})
+			layer := n.GetLayer()
+			if tc.clipRow == 0 {
+				require.Nil(t, layer)
+			} else {
+				require.NotNil(t, layer)
+				rendered := lipgloss.NewCompositor(layer)
+				require.Equal(t, tc.clipRow, rendered.Bounds().Max.Y)
+				first := n.itemBounds()[0]
+				closeX, closeY := closeButtonPosition(first)
+				id, ok := n.CloseButtonHit(closeX, closeY)
+				require.True(t, ok)
+				require.Equal(t, first.id, id)
+				_, _, ok = n.BodyHit(x-1, tc.clipRow-1)
+				require.True(t, ok, "the portion above the clip stays clickable")
+			}
+			_, _, ok := n.BodyHit(x-1, tc.clipRow)
+			require.False(t, ok, "the clipped portion is not clickable")
+			_, _ = n.HandleMouseMotion(x-1, tc.clipRow)
+			require.Zero(t, n.hoveredID)
+			if y >= tc.clipRow {
+				_, ok := n.CloseButtonHit(x, y)
+				require.False(t, ok, "a clipped close glyph is not clickable")
+			}
+			n.SetAvoidance(nil, nil)
+			require.NotNil(t, n.GetLayer(), "temporary clipping does not drop a notification")
+			require.Len(t, n.items, tc.count)
+		})
+	}
+}

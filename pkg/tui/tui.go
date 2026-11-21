@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"image"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -160,10 +161,12 @@ type appModel struct {
 	history *history.History
 
 	// UI components
-	notification notification.Manager
-	dialogMgr    dialog.Manager
-	statusBar    statusbar.StatusBar
-	completions  completion.Manager
+	notification         notification.Manager
+	notificationOccupied []image.Rectangle
+	notificationStopped  bool
+	dialogMgr            dialog.Manager
+	statusBar            statusbar.StatusBar
+	completions          completion.Manager
 
 	// Speech-to-text
 	envProvider  environment.Provider
@@ -855,6 +858,8 @@ func (m *appModel) autoThemeInitCmd() tea.Cmd {
 // theme enabled it, so the terminal stops sending color-scheme reports
 // after exit.
 func (m *appModel) quitCmd() tea.Cmd {
+	m.notificationStopped = true
+	m.notification.ResetAvoidance()
 	statusCmd := m.retireProgramStatus()
 	// Bubble Tea leaves the final frame in scrollback in lean mode.
 	m.paneHidden, m.viewCacheValid = false, false
@@ -950,7 +955,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if obs := m.tour.Observe(msg); obs != nil {
 		cmd = tea.Batch(cmd, obs)
 	}
-	cmd = tea.Batch(cmd, m.refreshProgramStatus())
+	cmd = tea.Batch(cmd, m.syncNotificationAvoidance(), m.refreshProgramStatus())
 	return model, cmd
 }
 
@@ -1045,7 +1050,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.MarkDirty()
 			}
 		}
-		cmds = append(cmds, m.ar.Continue())
+		updated, notificationCmd := m.notification.Update(msg)
+		m.notification = updated
+		cmds = append(cmds, notificationCmd, m.ar.Continue())
 		if msg.Dirty() {
 			m.viewCacheValid = false
 		}
@@ -3194,8 +3201,8 @@ func (m *appModel) composeView() tea.View {
 			allLayers = append(allLayers, dialogLayers...)
 		}
 
-		if m.notification.Open() {
-			allLayers = append(allLayers, m.notification.GetLayer())
+		if layer := m.notification.GetLayer(); layer != nil {
+			allLayers = append(allLayers, layer)
 		}
 
 		if m.completions.Open() {
