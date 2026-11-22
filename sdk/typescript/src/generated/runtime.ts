@@ -56,6 +56,7 @@ export interface AgentDetails {
 /** Go: pkg/runtime/event.go AgentInfoEvent */
 export interface AgentInfoEvent {
   timestamp: string;
+  session_id?: string;
   type: 'agent_info';
   agent_name: string;
   model: string;

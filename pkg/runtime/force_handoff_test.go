@@ -84,15 +84,25 @@ func TestForceHandoff_RoutesToTargetOnNaturalStop(t *testing.T) {
 	sess := session.New(session.WithUserMessage("Summarize this article"))
 	sess.Title = "Unit Test"
 
-	var events []Event
-	for ev := range rt.RunStream(t.Context(), sess) {
-		events = append(events, ev)
-	}
-
-	for _, ev := range events {
-		errEv, isErr := ev.(*ErrorEvent)
-		require.False(t, isErr, "unexpected error event: %+v", errEv)
-	}
+	events := runRouted(t, rt, sess)
+	require.Empty(t, routedErrors(events))
+	decisions := sess.RoutingDecisionHistory()
+	require.Len(t, decisions, 1)
+	d := decisions[0]
+	assert.Equal(t, agentSwitchKindForceHandoff, d.Action)
+	assert.Equal(t, "root", d.FromAgent)
+	assert.Equal(t, "summarizer", d.ToAgent)
+	emitted := routingDecisionEvents(events)
+	require.Len(t, emitted, 1)
+	assert.Equal(t, d, emitted[0].Decision)
+	routes := routeEvents(events)
+	require.Len(t, routes, 1)
+	assert.Equal(t, agentSwitchKindForceHandoff, routes[0].Phase)
+	turn := slices.IndexFunc(events, func(e Event) bool {
+		info, ok := e.(*AgentInfoEvent)
+		return ok && info.SessionID == sess.ID && info.AgentName == "summarizer"
+	})
+	assert.Less(t, slices.Index(events, Event(routes[0])), turn, "announce the switch before the target turn")
 
 	assert.Equal(t, "summarizer", rt.CurrentAgentName(t.Context()), "current agent must be the force_handoff target after the run")
 	assert.Equal(t, 1, sumProv.handoffCallCount(), "target agent's model must be invoked exactly once")

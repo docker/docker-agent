@@ -22,7 +22,7 @@ func (a *App) operationContext(ctx context.Context) context.Context {
 	return a.BeginOperation(ctx)
 }
 
-// IsCurrentOperation rejects terminal events from a canceled, replaced run.
+// IsCurrentOperation rejects events tagged with a replaced foreground run.
 func (a *App) IsCurrentOperation(msg tea.Msg) bool {
 	event, ok := msg.(interface{ Operation() uint64 })
 	return !ok || event.Operation() == 0 || event.Operation() == a.operation.Load()
@@ -35,6 +35,14 @@ func operationEvent(ctx context.Context, msg tea.Msg) tea.Msg {
 	}
 	switch event := msg.(type) {
 	case *runtime.StreamStartedEvent:
+		tagged := *event
+		tagged.OperationID = id
+		return &tagged
+	case *runtime.RoutingDecisionEvent:
+		tagged := *event
+		tagged.OperationID = id
+		return &tagged
+	case *runtime.AgentRouteEvent:
 		tagged := *event
 		tagged.OperationID = id
 		return &tagged

@@ -32,7 +32,7 @@ func TestAssistantRenderedSegmentsMatchViewAtEveryMarkdownBoundary(t *testing.T)
 	for _, width := range []int{24, 47, 80} {
 		t.Run(strconv.Itoa(width), func(t *testing.T) {
 			msg := types.Agent(types.MessageTypeAssistant, "root", "")
-			m := New(animation.NewRuntime(), msg, nil)
+			m := New(animation.NewRuntime(), msg)
 			for end := range len(input) + 1 {
 				if end < len(input) && !utf8.RuneStart(input[end]) {
 					continue
@@ -78,7 +78,7 @@ func lineWidthsForMessage(lines []string) []int {
 func TestAssistantRenderedSegmentsMatchViewAcrossStreamingBoundariesAndWidth(t *testing.T) {
 	runtime := animation.NewRuntime()
 	msg := types.Agent(types.MessageTypeAssistant, "root", "")
-	m := New(runtime, msg, nil)
+	m := New(runtime, msg)
 	chunks := []string{"unfinished *em", "phasis* and [li", "nk](https://example.com)\n\n", "```go\nfmt.Print(\"λ界\")", "\n```\n\n- one", "\n- two\n\nfinal"}
 	for _, width := range []int{80, 37, 100} {
 		for _, chunk := range chunks {
@@ -108,7 +108,7 @@ func TestAssistantMarkdownImageRendersInline(t *testing.T) {
 	require.NoError(t, png.Encode(&data, img))
 	uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString(data.Bytes())
 	msg := types.Agent(types.MessageTypeAssistant, "assistant", "Here it is:\n\n![chart]("+uri+")")
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 
 	cmd := mv.loadMarkdownImages(msg)
@@ -128,7 +128,7 @@ func TestFailedMarkdownImageLoadCanRetry(t *testing.T) {
 
 	source := "https://example.com/missing.png"
 	msg := types.Agent(types.MessageTypeAssistant, "assistant", "![img]("+source+")")
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.loadingImages = map[string]bool{source: true}
 
 	_, _ = mv.Update(markdownImagesLoadedMsg{
@@ -167,7 +167,7 @@ func TestErrorMessageWrapping(t *testing.T) {
 		"It contains enough text to exceed typical terminal widths and demonstrate the wrapping behavior."
 
 	msg := types.Error(longError)
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 
 	// Set a narrow width to force wrapping
 	width := 50
@@ -196,7 +196,7 @@ func TestErrorMessageShowsRetryAffordance(t *testing.T) {
 	t.Parallel()
 
 	msg := types.Error("Something went wrong")
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 
 	plainRendered := stripANSI(mv.View())
@@ -209,7 +209,7 @@ func TestErrorMessageWithShortContent(t *testing.T) {
 
 	shortError := "Short error"
 	msg := types.Error(shortError)
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 
 	width := 80
 	mv.SetSize(width, 0)
@@ -229,7 +229,7 @@ func TestErrorMessagePreservesContent(t *testing.T) {
 
 	errorContent := "Error: Failed to connect to database\nConnection timeout after 30 seconds"
 	msg := types.Error(errorContent)
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 
 	width := 80
 	mv.SetSize(width, 0)
@@ -358,7 +358,7 @@ func TestWelcomeMessagePreservesLineBreaks(t *testing.T) {
 	// Simulate YAML multiline content with | syntax
 	welcomeContent := "Welcome!\n   indented line\nregular line"
 	msg := types.Welcome(welcomeContent)
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 
 	width := 80
 	mv.SetSize(width, 0)
@@ -389,7 +389,7 @@ func TestUserMessageCollapsible(t *testing.T) {
 		Type:    types.MessageTypeUser,
 		Content: content,
 	}
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 
 	// Initially, it should not be expanded.
@@ -434,7 +434,7 @@ func TestUserMessageNotCollapsible(t *testing.T) {
 		Type:    types.MessageTypeUser,
 		Content: strings.Join(lines, "\n"),
 	}
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 
 	renderedPlain := stripANSI(mv.View())
@@ -455,7 +455,7 @@ func TestLabeledSpinnerRendersDelegationContext(t *testing.T) {
 
 	// Sender drives the accent color (child); Content holds the label.
 	msg := types.SpinnerLabeled("researcher", "root → researcher")
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 
 	assert.True(t, mv.isSpinnerDriven(), "labeled spinner must stay uncached/animated")
@@ -470,7 +470,7 @@ func TestLabeledSpinnerRendersDelegationContext(t *testing.T) {
 func TestBareSpinnerKeepsPlayfulView(t *testing.T) {
 	t.Parallel()
 
-	mv := New(animation.NewRuntime(), types.Spinner(), nil)
+	mv := New(animation.NewRuntime(), types.Spinner())
 	mv.SetSize(80, 0)
 
 	assert.True(t, mv.isSpinnerDriven())
@@ -491,7 +491,7 @@ func TestUserMessageHoverKeepsHeightAtNarrowWidth(t *testing.T) {
 	// dropped/truncated rather than wrapped, so hovering never changes the
 	// message height (which would invalidate click hit-testing).
 	for _, width := range []int{4, 8, 12} {
-		mv := New(animation.NewRuntime(), msg, nil)
+		mv := New(animation.NewRuntime(), msg)
 		mv.SetSize(width, 0)
 		h := mv.Height(width)
 		mv.SetHovered(true)
@@ -506,7 +506,7 @@ func TestUserMessageHoverKeepsHeightAtNarrowWidth(t *testing.T) {
 func TestAgentReturnRendersBadgesAndLabel(t *testing.T) {
 	t.Parallel()
 
-	mv := New(animation.NewRuntime(), types.AgentReturn("researcher", "root"), nil)
+	mv := New(animation.NewRuntime(), types.AgentReturn("researcher", "root"))
 	mv.SetSize(80, 0)
 
 	assert.False(t, mv.isSpinnerDriven(), "the transition is static")
@@ -528,7 +528,7 @@ func TestAgentReturnRespectsNarrowWidths(t *testing.T) {
 
 	msg := types.AgentReturn("delegation-orchestrator", "implementation-reviewer")
 	for _, width := range []int{10, 16, 24, 40} {
-		mv := New(animation.NewRuntime(), msg, nil)
+		mv := New(animation.NewRuntime(), msg)
 		mv.SetSize(width, 0)
 		for i, line := range strings.Split(mv.View(), "\n") {
 			assert.LessOrEqualf(t, ansi.StringWidth(line), width,
@@ -539,7 +539,7 @@ func TestAgentReturnRespectsNarrowWidths(t *testing.T) {
 
 func TestAssistantRenderedSegmentsRebuildHeaderOnWidthChange(t *testing.T) {
 	msg := types.Agent(types.MessageTypeAssistant, "root", "streamed response")
-	m := New(animation.NewRuntime(), msg, nil)
+	m := New(animation.NewRuntime(), msg)
 
 	wide, ok := m.RenderedSegments(80)
 	require.True(t, ok)
@@ -576,7 +576,7 @@ func TestAssistantMediaRendersInlineAfterText(t *testing.T) {
 	inline := testInlineImage(t, "cat.png")
 	msg := types.Agent(types.MessageTypeAssistant, "assistant", "Here is your cat:")
 	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: `Generated image "cat.png" saved to: /tmp/cat.png`}}
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 
 	view := mv.View()
@@ -594,7 +594,7 @@ func TestAssistantMediaOnlyReplacesSpinnerWithVisibleContent(t *testing.T) {
 	inline := testInlineImage(t, "cat.png")
 	msg := types.Agent(types.MessageTypeAssistant, "assistant", "")
 	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: `Generated image "cat.png" saved to: /tmp/cat.png`}}
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 
 	assert.False(t, mv.isSpinnerDriven(), "a media-only assistant message is real content, not a spinner placeholder")
@@ -610,7 +610,7 @@ func TestAssistantMediaGraphicsDisabledShowsFallback(t *testing.T) {
 	inline := testInlineImage(t, "cat.png")
 	msg := types.Agent(types.MessageTypeAssistant, "assistant", "")
 	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: `Generated image "cat.png" saved to: /tmp/artifacts/sess/cat.png`}}
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 
 	view := mv.View()
@@ -625,7 +625,7 @@ func TestAssistantMediaUnrenderableImageShowsFallback(t *testing.T) {
 
 	msg := types.Agent(types.MessageTypeAssistant, "assistant", "Result:")
 	msg.AssistantMedia = []types.AssistantMedia{{Fallback: `Generated image "cat.png" is unavailable.`}}
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 
 	plain := ansi.Strip(mv.View())
@@ -640,7 +640,7 @@ func TestImageRenderingChangeInvalidatesMessageCache(t *testing.T) {
 	inline := testInlineImage(t, "generated.png")
 	msg := types.Agent(types.MessageTypeAssistant, "root", "Here is your cat:")
 	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: "saved to: /tmp/cat.png"}}
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 	assert.NotContains(t, mv.View(), "cagent-image")
 	for _, enabled := range []bool{true, false, true} {

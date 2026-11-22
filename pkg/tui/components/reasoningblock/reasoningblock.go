@@ -14,6 +14,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	handoff "github.com/docker/docker-agent/pkg/tools/builtin/handoff/types"
+	transfertask "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
@@ -111,7 +113,6 @@ type Model struct {
 	ar               *animation.Runtime
 	id               string
 	agentName        string
-	showAgentBadge   bool          // render the agent badge above the header
 	contentItems     []contentItem // Ordered sequence of reasoning and tool calls
 	toolEntries      []toolEntry   // All tool entries (referenced by contentItems)
 	expanded         bool
@@ -166,15 +167,6 @@ func (m *Model) ID() string {
 // AgentName returns the agent name for this block.
 func (m *Model) AgentName() string {
 	return m.agentName
-}
-
-// SetShowAgentBadge controls whether the block renders the agent badge above
-// the Thinking header. The messages list enables it when the block does not
-// visually continue content from the same agent (e.g. reasoning that starts a
-// sub-agent's turn right after a transfer_task), mirroring the sender prefix
-// on standard assistant messages.
-func (m *Model) SetShowAgentBadge(show bool) {
-	m.showAgentBadge = show
 }
 
 // SetReasoning sets reasoning content (replaces all content items with a single reasoning item).
@@ -305,8 +297,11 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		// Set grace period if transitioning from in-progress to completed
 		// Total visible time = completedToolVisibleDuration + completedToolFadeDuration
 		// Fade animation is driven by global animation tick
+		// Agent-boundary tools never fade: they stay visible in the collapsed
+		// view, so no grace period is needed for them.
+		fades := wasInProgress && isCompleted && !isAgentBoundary(entry.msg)
 		var animCmd tea.Cmd
-		if wasInProgress && isCompleted {
+		if fades {
 			totalDuration := completedToolVisibleDuration + completedToolFadeDuration
 			entry.collapsedVisibleUntil = m.now().Add(totalDuration)
 			entry.fadeProgress = 0
@@ -323,7 +318,7 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		m.toolEntries[i].view = view
 
 		// Pre-cache the ANSI-stripped collapsed view for fade rendering
-		if wasInProgress && isCompleted {
+		if fades {
 			if cv, ok := view.(layout.CollapsedViewer); ok {
 				m.toolEntries[i].strippedCollapsed = ansi.Strip(cv.CollapsedView())
 			} else {
@@ -531,30 +526,10 @@ func (m *Model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 // View renders the block.
 func (m *Model) View() string {
-	var content string
 	if m.expanded {
-		content = m.renderExpanded()
-	} else {
-		content = m.renderCollapsed()
+		return m.renderExpanded()
 	}
-	return m.agentBadgePrefix() + content
-}
-
-// rendersAgentBadge reports whether the agent badge actually renders: it
-// must be enabled and the agent name non-empty. Both rendering
-// (agentBadgePrefix) and hit-testing (headerLineIndex) rely on this single
-// condition so they can never diverge.
-func (m *Model) rendersAgentBadge() bool {
-	return m.showAgentBadge && m.agentName != ""
-}
-
-// agentBadgePrefix returns the agent badge line plus a blank separator when
-// enabled, using the same style and spacing as standard assistant messages.
-func (m *Model) agentBadgePrefix() string {
-	if !m.rendersAgentBadge() {
-		return ""
-	}
-	return styles.AgentBadgeStyleFor(m.agentName).MarginLeft(2).Render(m.agentName) + "\n\n"
+	return m.renderCollapsed()
 }
 
 // SetSize sets the component dimensions.
@@ -707,13 +682,15 @@ func (m *Model) renderCollapsed() string {
 }
 
 // getVisibleToolsCollapsed returns tool entries that should be visible in collapsed view.
-// This includes in-progress tools (pending/running) and recently completed tools that haven't fully faded.
+// This includes agent-boundary tools (always), in-progress tools (pending/running) and
+// recently completed tools that haven't fully faded.
 // Must use the same logic as hasFadingTools to avoid unregistering animation while tools are still visible.
 func (m *Model) getVisibleToolsCollapsed() []toolEntry {
 	var visible []toolEntry
 	for _, entry := range m.toolEntries {
-		// Show in-progress tools
-		if entry.msg.ToolStatus == types.ToolStatusPending ||
+		// Show agent boundaries and in-progress tools
+		if isAgentBoundary(entry.msg) ||
+			entry.msg.ToolStatus == types.ToolStatusPending ||
 			entry.msg.ToolStatus == types.ToolStatusRunning {
 			visible = append(visible, entry)
 			continue
@@ -725,6 +702,21 @@ func (m *Model) getVisibleToolsCollapsed() []toolEntry {
 		}
 	}
 	return visible
+}
+
+// isAgentBoundary reports whether a tool call marks a change of agent
+// (transfer_task delegation or handoff). Chat replies carry no agent badge,
+// so these are the only in-chat markers of who is speaking and must stay
+// visible even when the block is collapsed.
+func isAgentBoundary(msg *types.Message) bool {
+	switch msg.ToolCall.Function.Name {
+	case transfertask.ToolNameTransferTask:
+		return true
+	case handoff.ToolNameHandoff:
+		return msg.ToolStatus != types.ToolStatusError
+	default:
+		return false
+	}
 }
 
 // hasExtraContent returns true if there's content that would be shown when expanded
@@ -826,18 +818,9 @@ func (m *Model) StopAnimation() {
 	}
 }
 
-// headerLineIndex returns the view line index of the Thinking header. The
-// agent badge, when shown, occupies two lines (badge + blank) above it.
-func (m *Model) headerLineIndex() int {
-	if m.rendersAgentBadge() {
-		return 2
-	}
-	return 0
-}
-
 // IsHeaderLine returns true if the given line index is the header line.
 func (m *Model) IsHeaderLine(lineIdx int) bool {
-	return lineIdx == m.headerLineIndex()
+	return lineIdx == 0
 }
 
 // IsToggleLine returns true if clicking this line should toggle the block.

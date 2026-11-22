@@ -276,13 +276,23 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	// Routed conversations restart at the entry agent and let before_agent_run
 	// pick the agent that actually runs, before anything is prepared for it.
-	// Routing appends decision items before the user event is emitted, so
-	// the user's position must be captured first.
-	userPosition := sess.ItemCount() - 1
 	route := r.beginRouting(sess)
 	a := r.resolveSessionAgent(sess)
+	emitPrompt := func() chat.Message {
+		if sess.SendUserMessage {
+			if msgs, count := sess.GetMessagesWithInstructionContext(a, nil); len(msgs) > 0 {
+				last := msgs[len(msgs)-1]
+				sink.Emit(userMessageEvent(last, sess.ID, count-1))
+				return last
+			}
+		}
+		return chat.Message{}
+	}
+	var prompt chat.Message
 	var stop *routeStop
 	if route != nil {
+		// The prompt precedes any route taken by a before_agent_run hook.
+		prompt = emitPrompt()
 		a, stop = r.activateAgent(ctx, sess, a, route, sink)
 	} else {
 		stop = r.routingUnsupported(route, a)
@@ -349,29 +359,18 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	sink.Emit(ToolsetInfo(len(agentTools), false, a.Name()))
 
-	messages := sess.GetMessagesWithoutInstructionContext(a)
-
-	// Sub-sessions (transferred tasks, background agents, skill
-	// sub-sessions) carry a synthesised "Please proceed." message that
-	// no human authored. SendUserMessage is the same flag the runtime
-	// uses to gate the UserMessageEvent, which is exactly the right
-	// signal here too: "a real user prompt is at the tail of the session".
-	if sess.SendUserMessage && len(messages) > 0 {
-		lastMsg := messages[len(messages)-1]
-		sink.Emit(userMessageEvent(lastMsg, sess.ID, userPosition))
-
-		// user_prompt_submit fires once per real user message, after
-		// session_start and before the first model call.
-		if lastMsg.Role == chat.MessageRoleUser {
-			stop, msg, ctxMsgs := r.executeUserPromptSubmitHooks(ctx, sess, a, lastMsg.Content, sink)
-			if stop {
-				slog.WarnContext(ctx, "user_prompt_submit hook signalled run termination",
-					"agent", a.Name(), "session_id", sess.ID, "reason", msg)
-				r.emitHookDrivenShutdown(ctx, a, sess, msg, sink)
-				return
-			}
-			ls.userPromptMsgs = ctxMsgs
+	if route == nil {
+		prompt = emitPrompt()
+	}
+	if prompt.Role == chat.MessageRoleUser {
+		stop, msg, ctxMsgs := r.executeUserPromptSubmitHooks(ctx, sess, a, prompt.Content, sink)
+		if stop {
+			slog.WarnContext(ctx, "user_prompt_submit hook signalled run termination",
+				"agent", a.Name(), "session_id", sess.ID, "reason", msg)
+			r.emitHookDrivenShutdown(ctx, a, sess, msg, sink)
+			return
 		}
+		ls.userPromptMsgs = ctxMsgs
 	}
 
 	sink.Emit(StreamStarted(sess.ID, a.Name()))
@@ -513,7 +512,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// Notify sidebar of the model for this turn. For rule-based
 		// routing, the actual routed model is emitted from within the
 		// stream once the first chunk arrives.
-		sink.Emit(AgentInfo(a.Name(), modelID.String(), a.Description(), a.WelcomeMessage()))
+		info := AgentInfo(a.Name(), modelID.String(), a.Description(), a.WelcomeMessage()).(*AgentInfoEvent)
+		info.SessionID = sess.ID
+		sink.Emit(info)
 
 		slog.DebugContext(ctx, "Using agent", "agent", a.Name(), "model", modelID.String())
 		slog.DebugContext(ctx, "Getting model definition", "model_id", modelID.String())
@@ -1040,7 +1041,7 @@ func (r *LocalRuntime) runTurn(
 			// runtime intercepts the finish state and routes the conversation
 			// to that agent without involving the LLM. Hard-pinned background
 			// tasks stay put; skill forks route handoffs within their own session.
-			r.applyForceHandoff(ctx, sess, a, next)
+			r.applyRoute(ctx, sess, a, next, nil, agentSwitchKindForceHandoff, nil, events)
 			endReason = turnEndReasonForceHandoff
 			return turnContinue
 		}
