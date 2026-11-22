@@ -203,30 +203,77 @@ func TestDeliveryErrorsRedactURL(t *testing.T) {
 	}
 }
 
-func TestRedirectDropsTokenAcrossHosts(t *testing.T) {
+func TestRedirectsStayOnRegisteredOrigin(t *testing.T) {
 	t.Parallel()
 
-	var reached atomic.Bool
-	var gotToken atomic.Value
-	target := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		reached.Store(true)
-		gotToken.Store(r.Header.Get("A2A-Notification-Token"))
-	}))
+	var reached atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached.Add(1) }))
 	t.Cleanup(target.Close)
-	// "localhost" vs "127.0.0.1": same server, different host.
 	targetURL, err := url.Parse(target.URL)
 	require.NoError(t, err)
-	redirectTo := "http://localhost:" + targetURL.Port()
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, redirectTo, http.StatusTemporaryRedirect)
-	}))
-	t.Cleanup(redirector.Close)
+
+	redirector := func(t *testing.T, tls bool, location string) *httptest.Server {
+		t.Helper()
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, location, http.StatusTemporaryRedirect)
+		})
+		srv := httptest.NewUnstartedServer(h)
+		if tls {
+			srv.StartTLS()
+		} else {
+			srv.Start()
+		}
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	for name, tc := range map[string]struct {
+		tls      bool
+		location string
+	}{
+		"cross host":      {location: "http://localhost:" + targetURL.Port() + "/hook"},
+		"cross port":      {location: target.URL + "/hook"},
+		"https to http":   {tls: true, location: target.URL + "/hook"},
+		"scheme-relative": {location: "//localhost:" + targetURL.Port() + "/hook"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := redirector(t, tc.tls, tc.location)
+			s := New(Config{AllowPrivateNetworks: true})
+			t.Cleanup(func() { _ = s.Close(t.Context()) })
+			if tc.tls {
+				s.client.Transport.(*http.Transport).TLSClientConfig = srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+			}
+			before := reached.Load()
+			err := s.deliver(t.Context(), &delivery{config: a2a.PushConfig{URL: srv.URL + "/hook?sig=x", Token: "tok"}, body: []byte("{}")})
+			require.ErrorIs(t, err, errCrossOriginRedirect)
+			assert.Equal(t, before, reached.Load(), "redirect target must not be reached")
+		})
+	}
+}
+
+func TestRedirectWithinOriginKeepsCredentialsDropsReferer(t *testing.T) {
+	t.Parallel()
+
+	got := make(chan http.Header, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/old", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/new", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/new", func(_ http.ResponseWriter, r *http.Request) { got <- r.Header.Clone() })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
 
 	s := New(Config{AllowPrivateNetworks: true})
 	t.Cleanup(func() { _ = s.Close(t.Context()) })
-	require.NoError(t, s.deliver(t.Context(), &delivery{config: a2a.PushConfig{URL: redirector.URL, Token: "tok"}, body: []byte("{}")}))
-	require.True(t, reached.Load(), "redirect target must be reached")
-	assert.Empty(t, gotToken.Load())
+	cfg := a2a.PushConfig{
+		URL: srv.URL + "/old?sig=secret", Token: "tok",
+		Auth: &a2a.PushAuthInfo{Scheme: "Bearer", Credentials: "cred"},
+	}
+	require.NoError(t, s.deliver(t.Context(), &delivery{config: cfg, body: []byte("{}")}))
+	h := <-got
+	assert.Equal(t, "tok", h.Get("A2A-Notification-Token"))
+	assert.Equal(t, "Bearer cred", h.Get("Authorization"))
+	assert.Empty(t, h.Get("Referer"))
 }
 
 func TestSendAfterCloseIsDropped(t *testing.T) {

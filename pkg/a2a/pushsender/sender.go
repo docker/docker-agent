@@ -36,7 +36,9 @@ const (
 )
 
 var (
-	errBlockedTarget = errors.New("push notification target resolves to a blocked address range")
+	errBlockedTarget       = errors.New("push notification target resolves to a blocked address range")
+	errCrossOriginRedirect = errors.New("redirect to another origin rejected")
+	errTooManyRedirects    = fmt.Errorf("stopped after %d redirects", maxRedirects)
 
 	tokenHeader = http.CanonicalHeaderKey("A2A-Notification-Token")
 
@@ -188,16 +190,34 @@ func isBlockedIP(ip netip.Addr) bool {
 		sharedAddressSpace.Contains(ip)
 }
 
-// checkRedirect bounds the chain and drops the notification token on
-// cross-host hops: Go strips Authorization there, but not custom headers.
+// checkRedirect keeps deliveries on the registered origin. Elsewhere Go would
+// still send the custom headers, Authorization to subdomains or across
+// schemes, and a Referer holding the signed path and query.
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
-		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		return errTooManyRedirects
 	}
-	if len(via) > 0 && req.URL.Host != via[len(via)-1].URL.Host {
-		req.Header.Del(tokenHeader)
+	if !sameOrigin(req.URL, via[0].URL) {
+		return errCrossOriginRedirect
 	}
+	req.Header.Del("Referer")
 	return nil
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	return a.Scheme == b.Scheme &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if u.Scheme == "https" {
+		return "443"
+	}
+	return "80"
 }
 
 // SendPush implements push.Sender. It never blocks on the network and always
