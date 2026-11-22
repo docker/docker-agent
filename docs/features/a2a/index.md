@@ -52,24 +52,29 @@ $ docker agent serve a2a ./agent.yaml --auth-token "$A2A_TOKEN" \
 
 The agent card advertises `pushNotifications: true`, so clients can follow a
 task through a webhook instead of holding a stream open or polling. Register a
-webhook with `tasks/pushNotificationConfig/set`, or inline in `message/send`
-through `configuration.taskPushNotificationConfig`. The server then POSTs each
-task status and artifact update to the webhook URL as an A2A `StreamResponse`
-JSON body. The config's `token` is sent in the `A2A-Notification-Token` header
+webhook with the `CreateTaskPushNotificationConfig` JSON-RPC method, or inline
+in `SendMessage` through `configuration.taskPushNotificationConfig`. The
+server then POSTs each task status and artifact update to the webhook URL as an
+A2A `StreamResponse` JSON body. The config's `token` is sent in the `A2A-Notification-Token` header
 and its `authentication` as an `Authorization: Bearer` or `Basic` header.
 
-Delivery is asynchronous, so a slow webhook never delays the task or its
-streaming clients:
+Delivery is asynchronous and best effort: a slow webhook never delays the task
+or its streaming clients, but a callback can be lost. Clients that must not
+miss the outcome should fall back to `GetTask`.
 
 - Updates reach each webhook in order. Each attempt times out after 10 seconds
-  and is not retried.
-- At most 64 updates wait per webhook. Beyond that, intermediate updates are
-  dropped, but final ones (completed, failed, canceled, rejected,
-  input-required, auth-required) are always delivered.
-- Redirects are followed only within the registered origin (same scheme, host
-  and port); any other redirect fails the delivery.
-- Failures are logged with the webhook's scheme and host only, never its path,
-  query or credentials.
+  and is not retried; a timeout or non-2xx response loses that update.
+- Once 64 updates are waiting for a task's webhook, new intermediate updates
+  are dropped. Final updates (completed, failed, canceled, rejected,
+  input-required, auth-required) are still queued and evict the oldest
+  intermediate one, so the queue may grow past 64 when final updates pile up.
+- Pending updates live in memory. On shutdown the server waits up to 5 seconds
+  for them, then drops the rest; they are not replayed after a restart.
+- Only `307` and `308` redirects within the registered origin (same scheme,
+  host and port) are followed, so the POST body is kept. Any other redirect
+  fails the delivery.
+- Failures are logged with the webhook's scheme and host and an error category
+  or status code only, never its path, query, credentials or response text.
 
 ### Webhook destinations
 
@@ -99,8 +104,11 @@ database has its own directory, so servers using different `--session-db`
 files never share tasks.
 
 A task still submitted or working when the server stops cannot finish. On the
-next start it is marked failed, and its webhooks receive that final status.
-Tasks waiting for input or authentication are left unchanged.
+next start it is marked failed, and its webhooks are sent that final status on
+the same best-effort terms as any other update. Updates lost before the stop,
+including the final one of a task that had already completed, are not
+re-sent: read the task with `GetTask`. Tasks waiting for input or
+authentication are left unchanged.
 
 ## Tool safety and migration
 
