@@ -645,6 +645,12 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	}
 
 	// Create permissions checker from config
+	for _, shadow := range permissions.ShadowedAskPatterns(cfg.Permissions) {
+		slog.WarnContext(ctx, "permissions.ask rule is shadowed by an allow rule and will never prompt; allow rules are evaluated before ask rules",
+			"ask", shadow.Ask,
+			"allow", shadow.Allow,
+		)
+	}
 	permChecker := permissions.NewChecker(cfg.Permissions)
 
 	// Build agent default models map
