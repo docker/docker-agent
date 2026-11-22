@@ -3166,6 +3166,10 @@ func (m *appModel) composeView() tea.View {
 	m.foreground = viewForeground{}
 	windowTitle := m.windowTitle()
 
+	if (m.err != nil || !m.ready) && m.imageWriter != nil {
+		// The standalone frame replaces the chat, including its Kitty placements.
+		m.imageWriter.SetContent("")
+	}
 	if m.err != nil {
 		return toFullscreenView(styles.ErrorStyle.Render(m.err.Error()), windowTitle, false, m.leanMode)
 	}

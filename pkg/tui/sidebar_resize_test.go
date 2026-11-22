@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"image"
 	"image/png"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 func TestSidebarResizeGuideStaysBelowForeground(t *testing.T) {
@@ -145,4 +147,56 @@ func TestSidebarResizeGuideClipsKittyPlacements(t *testing.T) {
 	m.tour.Start()
 	m.viewCacheValid = false
 	checkPlacements(writeFrame(), "c=25,r=8,x=0,y=0,w=50,h=32")
+}
+
+func TestSidebarResizeGuideSkipsStandaloneViews(t *testing.T) {
+	for _, name := range []string{"error", "loading"} {
+		t.Run(name, func(t *testing.T) {
+			m, x, _ := sidebarResizeTestRoot(t, messages.SidebarRight)
+			var pngData, out bytes.Buffer
+			require.NoError(t, png.Encode(&pngData, image.NewGray(image.Rect(0, 0, 12, 4))))
+			m.imageWriter = tuiimage.NewWriter(&out)
+			imageFrame := strings.Repeat(" ", x-1) + tuiimage.KittySequence(pngData.Bytes(), 3, 1)
+			writeFrame := func(content string) string {
+				out.Reset()
+				_, err := m.imageWriter.Write([]byte(content))
+				require.NoError(t, err)
+				_, commands, _ := strings.Cut(out.String(), "\x1b7")
+				return commands
+			}
+
+			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
+			require.Nil(t, sidebarGuideTestTick(t, m, cmd))
+			frame := m.View().Content
+			require.Contains(t, frame, "│")
+			require.Equal(t, x, requireSidebarGuide(t, m).X)
+			m.imageWriter.SetContent(imageFrame)
+			placements := writeFrame(frame)
+			require.Equal(t, 2, strings.Count(placements, "\x1b_Ga=p,"), "the active guide splits the old image placement")
+
+			var want string
+			if name == "error" {
+				err := errors.New("terminal error")
+				m.Update(err)
+				want = styles.ErrorStyle.Render(err.Error())
+			} else {
+				m.ready = false
+				m.viewCacheValid = false
+				want = styles.CenterStyle.Width(m.wWidth).Height(m.wHeight).Render(styles.MutedStyle.Render("Loading…"))
+			}
+			require.Equal(t, 0, requireSidebarGuide(t, m).Start, "the chat guide still starts on the first row")
+			for _, render := range []string{"first", "cached"} {
+				if got := m.View().Content; got != want {
+					t.Errorf("%s standalone render differs from the unadorned view", render)
+				}
+			}
+			assert.Zero(t, m.sidebarGuideCache.guide)
+
+			placements = writeFrame(want)
+			assert.Contains(t, placements, "\x1b_Ga=d,d=a,q=2", "remove old chat placements")
+			assert.NotContains(t, placements, "\x1b_Ga=p,", "do not place chat images on a standalone view")
+			m.imageWriter.SetContent(imageFrame)
+			assert.Contains(t, writeFrame(want), ",c=3,r=1\x1b\\", "a subsequent image is not clipped by the old guide")
+		})
+	}
 }
