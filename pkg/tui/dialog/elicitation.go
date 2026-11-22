@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/elicitform"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -49,15 +50,15 @@ type ElicitationDialog struct {
 	message       string
 	elicitationID string
 	fields        []elicitform.Field
-	inputs        []textinput.Model
+	inputs        []input.Text
 	boolValues    map[int]bool
 	enumIndexes   map[int]int // selected index for enum fields
 	multiChecked  map[int][]bool
 	multiCursor   map[int]int // focused option of multiselect fields
 	currentField  int
 	keyMap        elicitationKeyMap
-	fieldErrors   map[int]string  // validation error messages per field
-	responseInput textinput.Model // free-form text input used when len(fields) == 0
+	fieldErrors   map[int]string // validation error messages per field
+	responseInput input.Text     // free-form text input used when len(fields) == 0
 
 	scrollview *scrollview.Model
 	// fieldStarts[i] is the line offset of field i's label inside the
@@ -142,7 +143,7 @@ func NewElicitationDialog(message string, schema any, meta map[string]any, elici
 		message:       message,
 		elicitationID: id,
 		fields:        fields,
-		inputs:        make([]textinput.Model, len(fields)),
+		inputs:        make([]input.Text, len(fields)),
 		boolValues:    make(map[int]bool),
 		enumIndexes:   make(map[int]int),
 		multiChecked:  make(map[int][]bool),
@@ -164,7 +165,7 @@ func NewElicitationDialog(message string, schema any, meta map[string]any, elici
 
 	// If no schema fields, add a free-form text input for the response
 	if len(fields) == 0 {
-		ti := textinput.New()
+		ti := input.NewText()
 		ti.SetStyles(styles.DialogInputStyle)
 		ti.SetWidth(defaultWidth)
 		ti.Prompt = ""
@@ -178,9 +179,14 @@ func NewElicitationDialog(message string, schema any, meta map[string]any, elici
 	return d
 }
 
-func (d *ElicitationDialog) Init() tea.Cmd {
-	if d.hasFreeFormInput() || len(d.inputs) > 0 {
-		return textinput.Blink
+func (d *ElicitationDialog) Init() tea.Cmd { return nil }
+
+func (d *ElicitationDialog) CursorInput() input.Cursor {
+	switch {
+	case d.hasFreeFormInput():
+		return &d.responseInput
+	case d.isTextInputField():
+		return &d.inputs[d.currentField]
 	}
 	return nil
 }
@@ -779,8 +785,8 @@ func (d *ElicitationDialog) initInputs() {
 	}
 }
 
-func (d *ElicitationDialog) createInput(field elicitform.Field, idx int) textinput.Model {
-	ti := textinput.New()
+func (d *ElicitationDialog) createInput(field elicitform.Field, idx int) input.Text {
+	ti := input.NewText()
 	ti.SetStyles(styles.DialogInputStyle)
 	ti.SetWidth(defaultWidth)
 	ti.Prompt = "" // Remove the "> " prefix

@@ -26,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/internal/ansiline"
 	"github.com/docker/docker-agent/pkg/tui/internal/termfeatures"
@@ -121,7 +122,7 @@ type historySearchState struct {
 
 // editor implements [Editor]
 type editor struct {
-	textarea  textarea.Model
+	textarea  input.Area
 	occupancy textOccupancyCache
 	hist      *history.History
 	width     int
@@ -174,7 +175,7 @@ type editor struct {
 	// historySearch holds state for history search mode
 	historySearch historySearchState
 	// searchInput is the input field for history search queries
-	searchInput textinput.Model
+	searchInput input.Text
 }
 
 // Option configures the Editor.
@@ -221,7 +222,7 @@ func searchInputStyles() textinput.Styles {
 
 // New creates a new editor component
 func New(hist *history.History, opts ...Option) Editor {
-	ta := textarea.New()
+	ta := input.NewArea()
 	ta.SetStyles(styles.InputStyle)
 	ta.Placeholder = defaultPlaceholder
 	ta.Prompt = ""
@@ -231,13 +232,14 @@ func New(hist *history.History, opts ...Option) Editor {
 	ta.Focus()
 	ta.ShowLineNumbers = false
 
-	si := textinput.New()
+	si := input.NewText()
 	si.Prompt = ""
 	si.Placeholder = "Type to search..."
 	si.SetStyles(searchInputStyles())
 
 	e := &editor{
 		textarea:                      ta,
+		height:                        ta.Height(),
 		searchInput:                   si,
 		hist:                          hist,
 		placeholder:                   defaultPlaceholder,
@@ -255,10 +257,8 @@ func New(hist *history.History, opts ...Option) Editor {
 	return e
 }
 
-// Init initializes the component
-func (e *editor) Init() tea.Cmd {
-	return textarea.Blink
-}
+// Init initializes the component.
+func (e *editor) Init() tea.Cmd { return nil }
 
 // stripANSI removes ANSI escape sequences from the provided string so width
 // calculations can be performed on plain text.
@@ -438,9 +438,13 @@ func (e *editor) applySuggestionOverlay(view string) string {
 		}
 
 		if i == 0 {
-			// First line: first character gets cursor styling, rest gets ghost styling
+			// Preserve the textarea cursor's blink phase under the suggestion.
 			firstRune, restOfLine := splitFirstRune(suggLine)
-			cursorChar := styles.SuggestionCursorStyle.Render(firstRune)
+			style := styles.SuggestionGhostStyle
+			if e.textarea.VirtualCursor() && e.textarea.Focused() {
+				style = styles.SuggestionCursorStyle
+			}
+			cursorChar := style.Render(firstRune)
 
 			overlays = append(overlays, overlay{x: xOffset, y: currentY, content: cursorChar})
 
@@ -683,6 +687,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		content, handled := e.handlePaste(msg.Content)
 		if handled {
+			e.textarea.WakeCursor()
 			return e, nil
 		}
 		// Forward the normalized content explicitly; falling through would
@@ -788,7 +793,8 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			e.fileLoadCancel()
 			e.fileLoadCancel = nil
 		}
-		return e, e.textarea.Focus()
+		cmd := e.Focus()
+		return e, cmd
 
 	case fileLoadResultMsg:
 		// Ignore stale results from older loads.
@@ -828,7 +834,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 
 		if key.Matches(msg, e.textarea.KeyMap.Paste) {
-			return e.handleClipboardPaste()
+			return e.handleClipboardPaste(clipboard.ReadAll)
 		}
 
 		// Handle backspace with grapheme cluster awareness.
@@ -970,8 +976,9 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return e, tea.Batch(cmds...)
 }
 
-func (e *editor) handleClipboardPaste() (layout.Model, tea.Cmd) {
-	content, err := clipboard.ReadAll()
+func (e *editor) handleClipboardPaste(read func() (string, error)) (layout.Model, tea.Cmd) {
+	content, err := read()
+	e.textarea.WakeCursor()
 	if err != nil {
 		slog.Warn("failed to read clipboard", "error", err)
 		return e, nil
@@ -983,13 +990,14 @@ func (e *editor) handleClipboardPaste() (layout.Model, tea.Cmd) {
 	if !handled {
 		e.textarea.InsertString(normalized)
 	}
-	return e, textarea.Blink
+	return e, nil
 }
 
 // handleGraphemeBackspace implements backspace with grapheme cluster awareness.
 // It removes the entire last grapheme cluster, not just the last rune.
 // This fixes deletion of multi-codepoint characters like emoji sequences.
 func (e *editor) handleGraphemeBackspace() (layout.Model, tea.Cmd) {
+	e.textarea.WakeCursor()
 	value := e.textarea.Value()
 	if value == "" {
 		return e, nil
@@ -1087,7 +1095,8 @@ func (e *editor) handleGraphemeBackspace() (layout.Model, tea.Cmd) {
 	}
 
 	e.refreshSuggestion()
-	return e, tea.Batch(textarea.Blink, e.updateCompletionQuery())
+	cmd := e.updateCompletionQuery()
+	return e, cmd
 }
 
 // updateCompletionQuery sends the appropriate completion message based on current editor state.
@@ -1399,14 +1408,25 @@ func (e *editor) AttachmentAt(x int) (AttachmentPreview, bool) {
 
 // Focus gives focus to the component
 func (e *editor) Focus() tea.Cmd {
+	if e.historySearch.active {
+		return e.searchInput.Focus()
+	}
 	return e.textarea.Focus()
 }
 
 // Blur removes focus from the component
 func (e *editor) Blur() tea.Cmd {
+	e.searchInput.Blur()
 	e.textarea.Blur()
 	e.clearSuggestion()
 	return nil
+}
+
+func (e *editor) CursorInput() input.Cursor {
+	if e.historySearch.active {
+		return &e.searchInput
+	}
+	return &e.textarea
 }
 
 func (e *editor) SetWorking(working bool) tea.Cmd {
@@ -1852,6 +1872,7 @@ func (e *editor) historySearchComputeMatch() {
 }
 
 func (e *editor) exitHistorySearch() tea.Cmd {
+	e.searchInput.Blur()
 	e.textarea.SetValue(e.historySearch.origTextValue)
 	e.textarea.Placeholder = e.historySearch.origTextPlaceholderValue
 	e.historySearch = historySearchState{matchIndex: -1}

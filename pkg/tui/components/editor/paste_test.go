@@ -6,14 +6,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/docker/go-units"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/paths"
+	tuiinput "github.com/docker/docker-agent/pkg/tui/core/input"
 )
 
 func TestHandlePaste_SmallContent(t *testing.T) {
@@ -78,6 +79,31 @@ func TestUpdate_PasteInsertsNormalizedLineEndings(t *testing.T) {
 	assert.Equal(t, "line1\nline2\nline3", e.textarea.Value())
 	assert.NotContains(t, e.textarea.Value(), "\r", "no raw CR should reach the textarea")
 	assert.Empty(t, e.attachments, "small paste should stay inline")
+}
+
+func TestEmptyClipboardPasteWakesHiddenCursor(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		e := newPasteTestEditor()
+		e.SetValue("draft")
+		caret := e.CursorInput()
+		tick, ok := tuiinput.Expose(nil, caret)().(*tuiinput.BlinkMsg)
+		require.True(t, ok)
+		pending := tick.Apply(caret)
+		require.False(t, caret.VirtualCursor())
+
+		_, cmd := e.handleClipboardPaste(func() (string, error) { return "", nil })
+		require.Nil(t, cmd, "clipboard input must not replace the timer")
+		require.Equal(t, "draft", e.Value())
+		require.True(t, caret.VirtualCursor(), "an empty clipboard paste immediately wakes the caret")
+
+		tuiinput.Expose(caret, nil)
+		_, _ = e.handleClipboardPaste(func() (string, error) { return "", nil })
+		require.False(t, caret.VirtualCursor(), "a covered composer must remain hidden")
+		tick, ok = pending().(*tuiinput.BlinkMsg)
+		require.True(t, ok)
+		require.Nil(t, tick.Apply(caret), "a covered composer cannot sustain blinking")
+	})
 }
 
 func TestUpdate_CRDelimitedPasteOverLineLimitBecomesAttachment(t *testing.T) {
@@ -663,7 +689,7 @@ func TestAddFileAttachment_SizeLimit(t *testing.T) {
 }
 
 func newPasteTestEditor() *editor {
-	ta := textarea.New()
+	ta := tuiinput.NewArea()
 	ta.Focus()
 	return &editor{
 		textarea: ta,
