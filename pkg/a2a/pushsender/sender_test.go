@@ -138,6 +138,48 @@ func TestQueueFullDropsAndLogs(t *testing.T) {
 	assert.NotContains(t, logs.String(), "secret")
 }
 
+func TestQueueFullKeepsFinalEvents(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var kinds []string
+	webhook := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-release
+		var sr a2a.StreamResponse
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&sr)) {
+			return
+		}
+		kind := "artifact"
+		if ev, ok := sr.Event.(*a2a.TaskStatusUpdateEvent); ok {
+			kind = string(ev.Status.State)
+		}
+		mu.Lock()
+		kinds = append(kinds, kind)
+		mu.Unlock()
+	}))
+	t.Cleanup(webhook.Close)
+
+	logger, logs := testLogger()
+	s := New(Config{AllowPrivateNetworks: true, QueueSize: 2, Logger: logger})
+	cfg := &a2a.PushConfig{ID: "c1", TaskID: "t1", URL: webhook.URL}
+	for range 10 {
+		artifact := &a2a.TaskArtifactUpdateEvent{TaskID: "t1", ContextID: "ctx", Artifact: &a2a.Artifact{ID: "a1"}}
+		require.NoError(t, s.SendPush(t.Context(), cfg, artifact))
+	}
+	for _, state := range []a2a.TaskState{a2a.TaskStateInputRequired, a2a.TaskStateFailed, a2a.TaskStateCompleted} {
+		require.NoError(t, s.SendPush(t.Context(), cfg, statusEvent(state)))
+	}
+	close(release)
+	closeSender(t, s)
+
+	assert.Contains(t, logs.String(), "queue full")
+	require.GreaterOrEqual(t, len(kinds), 3)
+	assert.Equal(t, []string{
+		string(a2a.TaskStateInputRequired), string(a2a.TaskStateFailed), string(a2a.TaskStateCompleted),
+	}, kinds[len(kinds)-3:], "final events must survive backpressure, in order")
+}
+
 // The guard must check the webhook itself: through a proxy, the dial-time IP
 // check would only see the proxy address.
 func TestGuardedSenderBypassesProxy(t *testing.T) {

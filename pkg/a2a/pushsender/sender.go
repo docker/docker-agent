@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,8 +55,9 @@ type Config struct {
 	AllowPrivateNetworks bool
 	// Timeout bounds a single delivery attempt. Defaults to 10s.
 	Timeout time.Duration
-	// QueueSize bounds pending notifications per (task, config). Events
-	// beyond it are dropped. Defaults to 64.
+	// QueueSize bounds pending notifications per (task, config). Beyond it,
+	// intermediate events are dropped; final ones (terminal, input or auth
+	// required) evict the oldest intermediate one. Defaults to 64.
 	QueueSize int
 	// MaxConcurrent bounds in-flight HTTP deliveries. Defaults to 8.
 	MaxConcurrent int
@@ -76,6 +78,8 @@ type queueKey struct {
 type delivery struct {
 	config a2a.PushConfig
 	body   []byte
+	// final marks events a webhook-only client waits for; never dropped.
+	final bool
 }
 
 type queue struct {
@@ -232,7 +236,7 @@ func (s *Sender) SendPush(ctx context.Context, config *a2a.PushConfig, event a2a
 		return nil
 	}
 
-	d := delivery{config: *config, body: body}
+	d := delivery{config: *config, body: body, final: isFinal(event)}
 	if config.Auth != nil {
 		auth := *config.Auth
 		d.config.Auth = &auth
@@ -254,7 +258,7 @@ func (s *Sender) enqueue(ctx context.Context, key queueKey, d delivery) {
 		q = &queue{}
 		s.queues[key] = q
 	}
-	if len(q.pending) >= s.queueSize {
+	if len(q.pending) >= s.queueSize && !q.evictIntermediate(d) {
 		s.logger.WarnContext(ctx, "Dropping push notification: queue full", "task_id", key.taskID, "target", RedactURL(d.config.URL))
 		return
 	}
@@ -263,6 +267,33 @@ func (s *Sender) enqueue(ctx context.Context, key queueKey, d delivery) {
 		s.wg.Add(1)
 		go s.drain(key, q)
 	}
+}
+
+// evictIntermediate makes room for a final event in a full queue by dropping
+// the oldest intermediate one. With none left, the final event still goes in:
+// a task emits only a handful of them.
+func (q *queue) evictIntermediate(d delivery) bool {
+	if !d.final {
+		return false
+	}
+	if i := slices.IndexFunc(q.pending, func(p delivery) bool { return !p.final }); i >= 0 {
+		q.pending = slices.Delete(q.pending, i, i+1)
+	}
+	return true
+}
+
+// isFinal reports whether event ends the task or hands it back to the client.
+func isFinal(event a2a.Event) bool {
+	var state a2a.TaskState
+	switch e := event.(type) {
+	case *a2a.Task:
+		state = e.Status.State
+	case *a2a.TaskStatusUpdateEvent:
+		state = e.Status.State
+	default:
+		return false
+	}
+	return state.Terminal() || state == a2a.TaskStateInputRequired || state == a2a.TaskStateAuthRequired
 }
 
 func (s *Sender) drain(key queueKey, q *queue) {
