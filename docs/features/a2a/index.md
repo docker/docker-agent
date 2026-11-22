@@ -48,6 +48,60 @@ $ docker agent serve a2a ./agent.yaml --auth-token "$A2A_TOKEN" \
     --cors-origin http://localhost:3000
 ```
 
+## Push notifications
+
+The agent card advertises `pushNotifications: true`, so clients can follow a
+task through a webhook instead of holding a stream open or polling. Register a
+webhook with `tasks/pushNotificationConfig/set`, or inline in `message/send`
+through `configuration.taskPushNotificationConfig`. The server then POSTs each
+task status and artifact update to the webhook URL as an A2A `StreamResponse`
+JSON body. The config's `token` is sent in the `A2A-Notification-Token` header
+and its `authentication` as an `Authorization: Bearer` or `Basic` header.
+
+Delivery is asynchronous, so a slow webhook never delays the task or its
+streaming clients:
+
+- Updates reach each webhook in order. Each attempt times out after 10 seconds
+  and is not retried.
+- At most 64 updates wait per webhook. Beyond that, intermediate updates are
+  dropped, but final ones (completed, failed, canceled, rejected,
+  input-required, auth-required) are always delivered.
+- Redirects are followed only within the registered origin (same scheme, host
+  and port); any other redirect fails the delivery.
+- Failures are logged with the webhook's scheme and host only, never its path,
+  query or credentials.
+
+### Webhook destinations
+
+By default, a webhook may only reach public addresses. Connections to loopback,
+private (RFC 1918, IPv6 ULA), link-local (including cloud metadata endpoints
+such as `169.254.169.254`), shared (`100.64.0.0/10`), multicast and unspecified
+addresses are refused. The check runs on the resolved address of every
+connection, so DNS rebinding and redirects are covered too. For the same
+reason, `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are ignored for webhooks:
+through a proxy, only the proxy's address could be checked.
+
+`--push-allow-private` lifts both rules: webhooks may reach any address, and
+environment proxies apply. Use it only for trusted internal deployments or
+local testing.
+
+```bash
+$ docker agent serve a2a ./agent.yaml --push-allow-private
+```
+
+### Persistence and restarts
+
+Tasks and webhook registrations are stored in `<session-db>-a2a/a2a.db`, next
+to the session database, and survive a restart. Webhook tokens and credentials
+are stored in plaintext, so the directory is private to the user running the
+server (mode `0700` on Unix, an owner-only ACL on Windows). Each session
+database has its own directory, so servers using different `--session-db`
+files never share tasks.
+
+A task still submitted or working when the server stops cannot finish. On the
+next start it is marked failed, and its webhooks receive that final status.
+Tasks waiting for input or authentication are left unchanged.
+
 ## Tool safety and migration
 
 A2A sessions default to the `restricted` tool safety policy. Precedence is the
