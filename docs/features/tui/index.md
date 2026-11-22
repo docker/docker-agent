@@ -596,12 +596,15 @@ Run `/settings` to open the settings dialog. Click a category tab, or use <kbd>T
 >
 > This section covers the `/settings` dialog. For the complete list of `settings:` fields (including ones with no dialog UI, like `permissions`, `hooks`, and `keybindings`) and how they interact with CLI flags and aliases, see [User Settings](../../configuration/user-settings/index.md).
 
+The **Fade scroll edges** toggle on the Appearance tab controls whether scrollable areas (such as the chat) gently fade out their top and bottom edges when more content lies beyond them. It is on by default; turn it off to render scrollable content at full brightness right up to the edge.
+
 Press <kbd>Enter</kbd> to apply and persist, or <kbd>Escape</kbd> to cancel and restore the previous layout. The settings are saved globally in `~/.config/cagent/config.yaml`:
 
 ```yaml
 # ~/.config/cagent/config.yaml
 settings:
   busy_send_mode: queue # steer (default), queue
+  fade_scroll_edges: true # false to turn off the fade at scrollable edges (default: true)
   layout:
     sidebar_position: left # right (default), left, top, bottom
     sidebar_info_mode: detailed # compact (default, omitted), detailed
