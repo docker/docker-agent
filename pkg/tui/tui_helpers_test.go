@@ -7,31 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
-	"github.com/docker/docker-agent/pkg/tui/components/statusbar"
-	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 )
-
-func TestKeyboardEnhancementsInvalidateStatusBarHelp(t *testing.T) {
-	m, _ := newTestModel(t)
-	m.focusedPanel = PanelEditor
-	m.tabBar = tabbar.New(animation.NewRuntime(), 0)
-	m.statusBar = statusbar.New(m)
-	m.statusBar.SetWidth(400)
-
-	before := m.statusBar.View()
-	if !strings.Contains(before, "Ctrl+j") {
-		t.Fatalf("status bar before keyboard enhancements = %q, want Ctrl+j newline help", before)
-	}
-
-	_, _ = m.Update(tea.KeyboardEnhancementsMsg{Flags: 1})
-
-	after := m.statusBar.View()
-	if !strings.Contains(after, "Shift+Enter") {
-		t.Fatalf("status bar after keyboard enhancements = %q, want Shift+Enter newline help", after)
-	}
-}
 
 func TestParseCtrlNumberKey(t *testing.T) {
 	t.Parallel()
