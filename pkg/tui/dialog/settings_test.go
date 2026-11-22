@@ -84,10 +84,10 @@ func TestSettingsDialogNavigation(t *testing.T) {
 	for range 20 {
 		d.Update(down)
 	}
-	require.Equal(t, rowShowBanner, d.selected[tabAppearance], "down must stop at the last row")
+	require.Equal(t, rowTopMargin, d.selected[tabAppearance], "down must stop at the last row")
 
 	d.Update(up)
-	require.Equal(t, rowRenderImages, d.selected[tabAppearance])
+	require.Equal(t, rowShowBanner, d.selected[tabAppearance])
 }
 
 func TestSettingsDialogTabSwitching(t *testing.T) {
@@ -445,6 +445,24 @@ func TestSettingsDialogTogglesShowBanner(t *testing.T) {
 	applied, ok := msgs[1].(messages.ApplySettingsMsg)
 	require.True(t, ok)
 	assert.False(t, applied.Preferences.ShowBanner)
+}
+
+func TestSettingsDialogTogglesTopMargin(t *testing.T) {
+	t.Parallel()
+
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.selected[tabAppearance] = rowTopMargin
+	assert.Contains(t, ansi.Strip(d.View()), "[ ] Show top margin")
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	assert.Nil(t, cmd, "the top margin changes only on save")
+	assert.Contains(t, ansi.Strip(d.View()), "[x] Show top margin")
+
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	msgs := collectMsgs(cmd)
+	require.Len(t, msgs, 2)
+	applied, ok := msgs[1].(messages.ApplySettingsMsg)
+	require.True(t, ok)
+	assert.True(t, applied.Preferences.TopMargin)
 }
 
 func TestSettingsDialogApplyEmitsApplySettings(t *testing.T) {

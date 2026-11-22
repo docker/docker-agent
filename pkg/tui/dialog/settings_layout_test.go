@@ -53,15 +53,15 @@ func TestSettingsDialogScrollsAndResizes(t *testing.T) {
 	d.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	d.View()
 	assert.Zero(t, d.body.ScrollOffset())
-	assert.NotContains(t, ansi.Strip(d.body.View()), "Show startup banner")
+	assert.NotContains(t, ansi.Strip(d.body.View()), "Show top margin")
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
-	assert.Contains(t, ansi.Strip(d.View()), "› [x] Show startup banner")
+	assert.Contains(t, ansi.Strip(d.View()), "› [ ] Show top margin")
 	assert.Positive(t, d.body.ScrollOffset())
 
 	d.Update(tea.WindowSizeMsg{Width: 48, Height: 18})
 	view := d.View()
-	assert.Contains(t, ansi.Strip(view), "Show startup banner")
+	assert.Contains(t, ansi.Strip(view), "Show top margin")
 	assert.LessOrEqual(t, lipgloss.Height(view), 18)
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyHome})
@@ -70,7 +70,7 @@ func TestSettingsDialogScrollsAndResizes(t *testing.T) {
 
 	d.Update(tea.WindowSizeMsg{Width: 100, Height: 60})
 	view = d.View()
-	assert.Contains(t, ansi.Strip(view), "Show startup banner")
+	assert.Contains(t, ansi.Strip(view), "Show top margin")
 	assert.NotContains(t, ansi.Strip(view), "Layout preview")
 }
 
@@ -206,8 +206,8 @@ func TestSettingsDialogFitsContent(t *testing.T) {
 		width, height, dialogWidth, dialogHeight int
 	}{
 		{80, 24, 76, 24},
-		{100, 40, 95, 32},
-		{140, 50, 128, 32},
+		{100, 40, 95, 33},
+		{140, 50, 128, 33},
 	} {
 		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
 			t.Parallel()
@@ -316,11 +316,11 @@ func TestSettingsDialogSpacingDoesNotForceScrolling(t *testing.T) {
 	t.Parallel()
 
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	for height := 34; height <= 60; height++ {
+	for height := 35; height <= 60; height++ {
 		d.Update(tea.WindowSizeMsg{Width: 100, Height: height})
 		view := d.View()
 		assert.False(t, d.body.NeedsScrollbar(), "height %d", height)
-		assert.Contains(t, ansi.Strip(view), "Show startup banner", "height %d", height)
+		assert.Contains(t, ansi.Strip(view), "Show top margin", "height %d", height)
 	}
 }
 

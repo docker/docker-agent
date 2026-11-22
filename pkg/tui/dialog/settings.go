@@ -22,7 +22,7 @@ const (
 	settingsWidthPercent  = 95
 	settingsMinWidth      = 60
 	settingsMaxWidth      = 128
-	settingsMaxHeight     = 32
+	settingsMaxHeight     = 33
 	settingsControlsWidth = 72
 	settingsPreviewGap    = 3
 	previewMaxWidth       = 44
@@ -56,6 +56,7 @@ const (
 	rowHideToolResults
 	rowRenderImages
 	rowShowBanner
+	rowTopMargin
 	appearanceRowCount
 )
 
@@ -343,6 +344,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.RenderImages = !d.current.RenderImages
 		case rowShowBanner:
 			d.current.ShowBanner = !d.current.ShowBanner
+		case rowTopMargin:
+			d.current.TopMargin = !d.current.TopMargin
 		}
 		if d.selected[d.tab] >= rowPosition && d.selected[d.tab] <= rowTodos {
 			return core.CmdHandler(messages.PreviewLayoutMsg{Layout: d.current.Layout})
@@ -577,6 +580,7 @@ func (d *settingsDialog) renderAppearanceTab(content *settingsContent, width int
 	toggle(rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)
 	toggle(rowRenderImages, "Render images", d.current.RenderImages)
 	toggle(rowShowBanner, "Show startup banner", d.current.ShowBanner)
+	toggle(rowTopMargin, "Show top margin", d.current.TopMargin)
 }
 
 func (d *settingsDialog) renderPreview() string {
