@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 )
 
@@ -143,7 +144,7 @@ func EnsureRoots() error {
 			r.mode.Store(int32(modeMarked))
 			continue
 		}
-		if legacy != "" && dirHasEntries(legacy) {
+		if legacy != "" && hasState(legacy) {
 			r.mode.Store(int32(modeLegacy))
 			continue
 		}
@@ -228,7 +229,7 @@ func resolve(r *root) string {
 	if markerExists(target, r.marker()) {
 		return target
 	}
-	if legacy != "" && legacy != target && dirHasEntries(legacy) {
+	if legacy != "" && legacy != target && hasState(legacy) {
 		return filepath.Clean(legacy)
 	}
 	return target
@@ -266,9 +267,19 @@ func dirExists(p string) bool {
 	return err == nil && info.IsDir()
 }
 
-func dirHasEntries(p string) bool {
+// hasState reports whether p holds anything beyond root markers: roots can
+// share a directory, so another root's marker is not state to preserve.
+func hasState(p string) bool {
 	entries, err := os.ReadDir(p)
-	return err == nil && len(entries) > 0
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), markerPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- XDG / OS-native default resolution ---

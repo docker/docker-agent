@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/internal/portcullistest"
 	"github.com/docker/docker-agent/pkg/promptfiles"
 	"github.com/docker/docker-agent/pkg/skills"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 // fakeGitHubToken is used only as input to the redactor, never as an
@@ -46,8 +47,7 @@ func TestBuild_StagesSkillsAndRedacts(t *testing.T) {
 	skillBody := "---\nname: secret-keeper\ndescription: ships with a secret\n---\n\ntoken=" + token + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillBody), 0o644))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	// Run from an empty cwd so cwd-walking finds nothing extra.
 	t.Chdir(t.TempDir())
 
@@ -92,8 +92,7 @@ func TestBuild_StagesSkillsAndRedacts(t *testing.T) {
 func TestBuild_RebuildsCleanDir(t *testing.T) {
 	isolateEnv(t)
 	hostHome := t.TempDir()
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(t.TempDir())
 
 	// A local agent YAML gives us a stable, offline AgentRef. A bare
@@ -169,8 +168,7 @@ models:
 	yamlPath := filepath.Join(workspace, "agent.yaml")
 	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(workspace)
 
 	cacheDir := t.TempDir()
@@ -228,8 +226,7 @@ models:
 	yamlPath := filepath.Join(workspace, "agent.yaml")
 	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(workspace)
 
 	res, err := Build(t.Context(), Options{
@@ -286,8 +283,7 @@ models:
 	yamlPath := filepath.Join(workspace, "agent.yaml")
 	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(workspace)
 
 	res, err := Build(t.Context(), Options{
@@ -316,8 +312,7 @@ func TestBuild_NoAgentRefLeavesPromptFilesEmpty(t *testing.T) {
 	// still builds (so the host-only skills lookup runs) but no
 	// prompt files are staged.
 	hostHome := t.TempDir()
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(t.TempDir())
 
 	cacheDir := t.TempDir()
@@ -379,8 +374,7 @@ func TestBuild_DropsSymlinksEscapingSkillRoot(t *testing.T) {
 		[]byte("---\nname: sneaky\ndescription: tries to exfiltrate\n---\n"), 0o644))
 	require.NoError(t, os.Symlink(secretFile, filepath.Join(skillDir, "creds")))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(t.TempDir())
 
 	res, err := Build(t.Context(), Options{
@@ -414,8 +408,7 @@ func TestBuild_AllowsSymlinksWithinSkillRoot(t *testing.T) {
 	require.NoError(t, os.WriteFile(helper, []byte("helper\n"), 0o644))
 	require.NoError(t, os.Symlink(helper, filepath.Join(skillDir, "alias.txt")))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(t.TempDir())
 
 	res, err := Build(t.Context(), Options{
@@ -444,8 +437,7 @@ func TestBuild_PreservesExecutableBit(t *testing.T) {
 	script := filepath.Join(skillDir, "run.sh")
 	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0o700))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(t.TempDir())
 
 	res, err := Build(t.Context(), Options{
@@ -476,8 +468,7 @@ func TestBuild_OnDiskManifestOmitsHostPaths(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
 		[]byte("---\nname: plain\ndescription: plain\n---\n"), 0o644))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(t.TempDir())
 
 	res, err := Build(t.Context(), Options{
@@ -516,8 +507,7 @@ func TestBuild_ConcurrentRunsForSameAgentAreSafe(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
 		[]byte("---\nname: shared\ndescription: shared skill\n---\n"), 0o644))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(t.TempDir())
 
 	cacheDir := t.TempDir()
@@ -622,8 +612,7 @@ models:
 	yamlPath := filepath.Join(workspace, "agent.yaml")
 	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(workspace)
 
 	res, err := Build(t.Context(), Options{
@@ -685,8 +674,7 @@ models:
 	yamlPath := filepath.Join(workspace, "agent.yaml")
 	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(workspace)
 
 	res, err := Build(t.Context(), Options{
@@ -765,8 +753,7 @@ models:
 	yamlPath = filepath.Join(workspace, "agent.yaml")
 	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(workspace)
 	return hostHome, workspace, yamlPath
 }
@@ -863,8 +850,7 @@ models:
 	yamlPath := filepath.Join(workspace, "agent.yaml")
 	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(workspace)
 
 	res, err := Build(t.Context(), Options{
@@ -911,8 +897,7 @@ models:
 	yamlPath := filepath.Join(workspace, "agent.yaml")
 	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
 
-	t.Setenv("HOME", hostHome)
-	t.Setenv("USERPROFILE", hostHome)
+	testutil.SetHome(t, hostHome)
 	t.Chdir(workspace)
 
 	res, err := Build(t.Context(), Options{

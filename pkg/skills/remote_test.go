@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 func TestLoadRemoteSkills(t *testing.T) {
@@ -249,8 +251,7 @@ func TestLoadWithMixedSources(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	skills := Load(t.Context(), []string{"local", srv.URL})
 

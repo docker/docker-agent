@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
@@ -15,8 +16,7 @@ import (
 // round-trip through the user config.
 func TestSandboxAllowDenyList(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	root := NewRootCmd()
 	root.SetContext(t.Context())

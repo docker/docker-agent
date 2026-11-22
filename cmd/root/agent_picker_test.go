@@ -14,6 +14,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 func TestRenderTags(t *testing.T) {
@@ -89,8 +91,7 @@ func TestParseAgentPickerRefsDefaults(t *testing.T) {
 
 func TestLoadBuiltinAgentChoices(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	choices := loadAgentChoices(t.Context(), defaultAgentPickerRefs(), nil, nil)
 	require.Len(t, choices, 2)

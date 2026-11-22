@@ -235,7 +235,11 @@ func TestCrossPlatformDefaults(t *testing.T) {
 			assert.Equal(t, config, GetConfigDir())
 			assert.Equal(t, data, GetDataDir())
 			assert.Equal(t, cache, GetCacheDir())
-			assert.FileExists(t, filepath.Join(data, dataRoot.marker()))
+			// Roots sharing a directory (data and cache on Windows) each keep
+			// their own marker.
+			for r, dir := range map[*root]string{configRoot: config, dataRoot: data, cacheRoot: cache} {
+				assert.FileExists(t, filepath.Join(dir, r.marker()))
+			}
 		})
 	}
 }
@@ -361,6 +365,7 @@ func TestSharedTargetDoesNotAdoptOtherRootsLegacyState(t *testing.T) {
 // EEXIST for it, but the root must not be treated as adopted.
 func TestEnsureRootsMarkerPathIsDirectory(t *testing.T) {
 	setup := func(t *testing.T) (home, target string) {
+		t.Helper()
 		resetRootState(t)
 		clearXDG(t)
 		home = setTestHome(t)

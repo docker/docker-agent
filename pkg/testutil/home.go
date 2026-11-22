@@ -22,6 +22,25 @@ func ClearXDG() {
 	}
 }
 
+// Setenver is implemented by *testing.T and *testing.B.
+type Setenver interface{ Setenv(key, value string) }
+
+// SetHome isolates state under home for a single test. HOME and USERPROFILE
+// are not enough on Windows, where config and data resolve from the
+// %APPDATA% and %LOCALAPPDATA% known folders, and XDG variables take
+// precedence everywhere.
+func SetHome(t Setenver, home string) {
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+		t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	}
+	for _, name := range xdgVariables {
+		t.Setenv(name, "")
+	}
+}
+
 // RunWithTempHome runs a test suite with the home directory pointing at an
 // empty temporary directory, so tests neither read nor write the developer's
 // configuration and data. Call it from TestMain.

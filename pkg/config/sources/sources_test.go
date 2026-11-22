@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
@@ -37,8 +38,7 @@ agents:
 
 func TestResolveAgentFile_EmptyIsDefault(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	resolved, err := resolve("")
 
@@ -48,8 +48,7 @@ func TestResolveAgentFile_EmptyIsDefault(t *testing.T) {
 
 func TestResolveAgentFile_DefaultIsDefault(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	resolved, err := resolve("default")
 
@@ -59,8 +58,7 @@ func TestResolveAgentFile_DefaultIsDefault(t *testing.T) {
 
 func TestResolveAgentFile_MinimalIsMinimal(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	resolved, err := resolve("minimal")
 
@@ -70,8 +68,7 @@ func TestResolveAgentFile_MinimalIsMinimal(t *testing.T) {
 
 func TestResolveAgentFile_ReplaceAliasWithActualFile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Prepare an aliased file: alias -> [xxx]/pirate.yaml
 	wd := t.TempDir()
@@ -92,8 +89,7 @@ func TestResolveAgentFile_ReplaceAliasWithActualFile(t *testing.T) {
 
 func TestResolveAgentFile_ReplaceDefaultAliasWithActualFile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Prepare an aliased file: alias -> [xxx]/pirate.yaml
 	wd := t.TempDir()
@@ -114,8 +110,7 @@ func TestResolveAgentFile_ReplaceDefaultAliasWithActualFile(t *testing.T) {
 
 func TestResolveAgentFile_ReplaceEmptyAliasWithActualFile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Prepare an aliased file: alias -> [xxx]/pirate.yaml
 	wd := t.TempDir()
@@ -248,8 +243,7 @@ func TestResolveSources(t *testing.T) {
 
 func TestResolve_DefaultAliasOverride(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Create an agent file
 	agentFile := filepath.Join(t.TempDir(), "custom-agent.yaml")
@@ -278,8 +272,7 @@ func TestResolve_DefaultAliasOverride(t *testing.T) {
 
 func TestResolve_BuiltinAgents(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	for _, ref := range []string{"", "default", "minimal"} {
 		t.Run(ref, func(t *testing.T) {
@@ -342,8 +335,7 @@ func TestResolve_BuiltinAgents(t *testing.T) {
 
 func TestResolve_DefaultAliasToMinimal(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	cfg, err := userconfig.Load()
 	require.NoError(t, err)
@@ -370,8 +362,7 @@ func TestBuiltinAgentNames(t *testing.T) {
 
 func TestResolve_DefaultAliasToOCIReference(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up alias for "default" pointing to an OCI reference
 	cfg, err := userconfig.Load()
@@ -387,8 +378,7 @@ func TestResolve_DefaultAliasToOCIReference(t *testing.T) {
 
 func TestResolveSources_DefaultAliasToOCIReference(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up alias for "default" pointing to an OCI reference
 	cfg, err := userconfig.Load()
@@ -409,8 +399,7 @@ func TestResolveSources_DefaultAliasToOCIReference(t *testing.T) {
 
 func TestResolve_EmptyWithDefaultAliasOverride(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Create an agent file
 	agentFile := filepath.Join(t.TempDir(), "custom-agent.yaml")
@@ -439,8 +428,7 @@ func TestResolve_EmptyWithDefaultAliasOverride(t *testing.T) {
 
 func TestResolveSources_DefaultAliasOverride(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Create an agent file
 	agentFile := filepath.Join(t.TempDir(), "custom-agent.yaml")
@@ -473,8 +461,7 @@ func TestResolveSources_DefaultAliasOverride(t *testing.T) {
 
 func TestResolveSources_EmptyWithDefaultAliasOverride(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Create an agent file
 	agentFile := filepath.Join(t.TempDir(), "custom-agent.yaml")
@@ -507,8 +494,7 @@ func TestResolveSources_EmptyWithDefaultAliasOverride(t *testing.T) {
 
 func TestResolveAlias_WithYoloOption(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up alias with yolo option
 	cfg, err := userconfig.Load()
@@ -528,8 +514,7 @@ func TestResolveAlias_WithYoloOption(t *testing.T) {
 
 func TestResolveAlias_WithModelOption(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up alias with model option
 	cfg, err := userconfig.Load()
@@ -549,8 +534,7 @@ func TestResolveAlias_WithModelOption(t *testing.T) {
 
 func TestResolveAlias_WithBothOptions(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up alias with both options
 	cfg, err := userconfig.Load()
@@ -571,8 +555,7 @@ func TestResolveAlias_WithBothOptions(t *testing.T) {
 
 func TestResolveAlias_WithSandboxOption(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	cfg, err := userconfig.Load()
 	require.NoError(t, err)
@@ -590,8 +573,7 @@ func TestResolveAlias_WithSandboxOption(t *testing.T) {
 
 func TestResolveAlias_NoOptions(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up alias without options
 	cfg, err := userconfig.Load()
@@ -608,8 +590,7 @@ func TestResolveAlias_NoOptions(t *testing.T) {
 
 func TestResolveAlias_NotAnAlias(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Resolve non-existent alias
 	alias := ResolveAlias("./some-file.yaml")
@@ -618,8 +599,7 @@ func TestResolveAlias_NotAnAlias(t *testing.T) {
 
 func TestResolveAlias_EmptyUsesDefault(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up default alias with yolo option
 	cfg, err := userconfig.Load()
@@ -638,8 +618,7 @@ func TestResolveAlias_EmptyUsesDefault(t *testing.T) {
 
 func TestResolveAlias_WithHideToolResultsOption(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up alias with hide_tool_results option
 	cfg, err := userconfig.Load()
@@ -660,8 +639,7 @@ func TestResolveAlias_WithHideToolResultsOption(t *testing.T) {
 
 func TestResolveAlias_WithAllOptions(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up alias with all options
 	cfg, err := userconfig.Load()

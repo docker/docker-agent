@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 // resetHomeDir overrides $HOME for the duration of the test (and also
@@ -14,8 +16,7 @@ import (
 // values are restored when the test ends.
 func resetHomeDir(t *testing.T, dir string) {
 	t.Helper()
-	t.Setenv("HOME", dir)
-	t.Setenv("USERPROFILE", dir)
+	testutil.SetHome(t, dir)
 }
 
 // newTestToolSet builds a ToolSet and releases it when the test ends. Allow-

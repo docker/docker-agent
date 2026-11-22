@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/content"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 type staticKeychain struct {
@@ -409,8 +410,7 @@ func testImage(t *testing.T, contents string) v1.Image {
 
 func TestPullKeepsRegistryScopedReferences(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	serverA := httptest.NewServer(testregistry.New(testregistry.Logger(log.New(io.Discard, "", 0))))
 	defer serverA.Close()

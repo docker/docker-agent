@@ -25,12 +25,12 @@ import (
 	"github.com/docker/docker-agent/pkg/memoize"
 	"github.com/docker/docker-agent/pkg/protect"
 	"github.com/docker/docker-agent/pkg/remote"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 func TestOCISource_Read_OversizedArtifactIsNotRedownloaded(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	resetOCIMemoizer(t)
 
 	const ref = "test-oversized/agent:latest"
@@ -139,8 +139,7 @@ func resetOCIMemoizer(t *testing.T) {
 // default content store via t.Setenv.
 func TestOCISource_Read_MemoizesSuccessfulReads(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	resetOCIMemoizer(t)
 
 	testData := []byte("version: v1\nname: memoized-agent")
@@ -172,8 +171,7 @@ func TestOCISource_Read_MemoizesSuccessfulReads(t *testing.T) {
 // default content store via t.Setenv.
 func TestOCISource_Read_DoesNotCacheFailures(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	resetOCIMemoizer(t)
 
 	ref := "test-memoize-errors/agent:latest"
@@ -208,8 +206,7 @@ func TestOCISource_Read_DoesNotCacheFailures(t *testing.T) {
 // default content store via t.Setenv.
 func TestOCISource_Read_CacheIsScopedToRegistry(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	resetOCIMemoizer(t)
 
 	// Same repository and tag on two different registries: distinct trust
@@ -235,8 +232,7 @@ func TestOCISource_Read_CacheIsScopedToRegistry(t *testing.T) {
 // default content store via t.Setenv.
 func TestOCISource_Read_FallbackIsScopedToRegistry(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	resetOCIMemoizer(t)
 
 	refA := "registry-a.example.com/test-fallback/agent:latest"
@@ -264,8 +260,7 @@ func TestOCISource_Read_FallbackIsScopedToRegistry(t *testing.T) {
 // default content store via t.Setenv.
 func TestOCISource_Read_DoesNotCacheDegradedFallback(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	resetOCIMemoizer(t)
 
 	// Artifact is available locally but the registry is unreachable: Read
@@ -347,8 +342,7 @@ func storeTestArtifactWithAnnotations(t *testing.T, ref string, data []byte, ann
 // default content store via t.Setenv.
 func TestOCISource_Read_VerifiesProtection(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	resetOCIMemoizer(t)
 	stubOCIPull(t, func(context.Context, string, bool) (string, error) { return "", nil })
 
@@ -399,8 +393,7 @@ func TestOCISource_Read_VerifiesProtection(t *testing.T) {
 // default content store via t.Setenv.
 func TestOCISource_Read_RejectsCopiedArtifact(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	resetOCIMemoizer(t)
 	stubOCIPull(t, func(context.Context, string, bool) (string, error) { return "", nil })
 
@@ -418,8 +411,7 @@ func TestOCISource_Read_RejectsCopiedArtifact(t *testing.T) {
 // default content store via t.Setenv.
 func TestOCISource_Read_CacheDistinguishesPrivateAndPublicKey(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	resetOCIMemoizer(t)
 	stubOCIPull(t, func(context.Context, string, bool) (string, error) { return "", nil })
 

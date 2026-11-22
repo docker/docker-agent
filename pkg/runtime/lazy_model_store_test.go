@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 // TestNewLocalRuntime_DefaultsToLazyModelStore verifies that NewLocalRuntime
@@ -91,8 +92,7 @@ func TestLazyModelStore_GatesCustomProvider(t *testing.T) {
 	// dir via os.UserCacheDir, which derives from HOME on macOS and from
 	// XDG_CACHE_HOME or HOME on Linux.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	var store ModelStore = &lazyModelStore{}
 

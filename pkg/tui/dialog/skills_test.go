@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/skills"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 func TestNewSkillsDialog_EmptyShowsPlaceholder(t *testing.T) {
@@ -53,8 +54,7 @@ func TestNewSkillsDialog_RendersSkills(t *testing.T) {
 
 func TestSkillLoadedFrom_LocalHomeSkillUsesTilde(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	skill := &skills.Skill{
 		BaseDir: filepath.Join(home, ".agents", "skills", "commit"),
@@ -66,8 +66,7 @@ func TestSkillLoadedFrom_LocalHomeSkillUsesTilde(t *testing.T) {
 
 func TestSkillLoadedFrom_LocalProjectSkillUsesRelativePath(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	repo := t.TempDir()
 	cwd := filepath.Join(repo, "subdir")

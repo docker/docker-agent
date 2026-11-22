@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
@@ -54,8 +55,7 @@ func TestDataDir_RootCommand(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
-			t.Setenv("HOME", home)
-			t.Setenv("USERPROFILE", home)
+			testutil.SetHome(t, home)
 			t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
 			t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 			t.Setenv(envConfigDir, t.TempDir())

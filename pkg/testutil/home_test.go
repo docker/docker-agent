@@ -139,17 +139,38 @@ func TestUnsetenvRestoresPreviousState(t *testing.T) {
 
 	require.NoError(t, os.Unsetenv(name))
 	restore := unsetenv(name)
-	require.NoError(t, os.Setenv(name, "set-during-run"))
+	setenv(name, "set-during-run")
 	restore()
 	_, set := os.LookupEnv(name)
 	assert.False(t, set, "a variable that was unset must be unset again")
 
-	require.NoError(t, os.Setenv(name, "original"))
+	setenv(name, "original")
 	restore = unsetenv(name)
 	_, set = os.LookupEnv(name)
 	assert.False(t, set)
 	restore()
 	assert.Equal(t, "original", os.Getenv(name))
+}
+
+func TestSetHomeIsolatesState(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	paths.SetRoot("")
+
+	home := t.TempDir()
+	SetHome(t, home)
+
+	assert.Equal(t, home, os.Getenv("HOME"))
+	assert.Equal(t, home, os.Getenv("USERPROFILE"))
+	for _, name := range xdgVariables {
+		assert.Empty(t, os.Getenv(name), name)
+	}
+
+	config, data, cache := expectedDirs(runtime.GOOS, home)
+	assert.Equal(t, config, paths.GetConfigDir())
+	assert.Equal(t, data, paths.GetDataDir())
+	assert.Equal(t, cache, paths.GetCacheDir())
 }
 
 func expectedDirs(goos, home string) (config, data, cache string) {

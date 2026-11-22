@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 func TestContractHome(t *testing.T) {
@@ -40,8 +41,7 @@ func TestExpandHome(t *testing.T) {
 // untouched instead of turning them into relative paths that a later save
 // would persist.
 func TestExpandHomeNoHome(t *testing.T) {
-	t.Setenv("HOME", "")
-	t.Setenv("USERPROFILE", "")
+	testutil.SetHome(t, "")
 
 	assert.Equal(t, "~/src/repo", expandHome("~/src/repo"))
 	assert.Equal(t, "~", expandHome("~"))

@@ -15,6 +15,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/sandbox"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 func TestSandboxStateDirs_DataDirEnvironment(t *testing.T) {
@@ -22,8 +23,7 @@ func TestSandboxStateDirs_DataDirEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	outside, err := sandbox.CanonicalPath(t.TempDir())
 	require.NoError(t, err)
-	t.Setenv("HOME", wd)
-	t.Setenv("USERPROFILE", wd)
+	testutil.SetHome(t, wd)
 
 	for _, tt := range []struct {
 		name    string
@@ -109,8 +109,7 @@ func TestSandboxStateDirs_ImplicitRun(t *testing.T) {
 	wd, err := sandbox.CanonicalPath(t.TempDir())
 	require.NoError(t, err)
 	t.Chdir(wd)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("USERPROFILE", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	t.Setenv("SANDBOX_VM_ID", "")
 	t.Setenv(envModelsGateway, "")
 	t.Setenv(cagentEnvModelsGateway, "")

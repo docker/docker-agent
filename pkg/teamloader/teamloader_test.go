@@ -30,6 +30,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	providerdefaults "github.com/docker/docker-agent/pkg/model/provider/providers"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
 	"github.com/docker/docker-agent/pkg/tools/codemode"
@@ -189,8 +190,7 @@ func gatherExampleEnvVars(t *testing.T, examples []string) map[string]bool {
 
 func TestLoadDefaultAgent(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	agentSource, err := sources.Resolve("default", nil)
 	require.NoError(t, err)
