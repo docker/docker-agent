@@ -1317,18 +1317,23 @@ func TestRepliesHaveNoAgentBadge(t *testing.T) {
 	m.AppendReasoning("developer", "Analyzing the request...")
 	m.AppendToLastMessage("developer", "Fixed it.")
 
-	require.Len(t, m.messages, 5)
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAssistantReasoningBlock))
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeToolCall))
+	assert.NotContains(t, ansi.Strip(m.View()), "─►")
+	var block *reasoningblock.Model
 	for i, msg := range m.messages {
 		view := ansi.Strip(m.views[i].View())
 		switch msg.Type {
 		case types.MessageTypeAssistant, types.MessageTypeAssistantReasoningBlock:
+			if msg.Type == types.MessageTypeAssistantReasoningBlock {
+				block = m.views[i].(*reasoningblock.Model)
+			}
 			assert.NotContains(t, view, msg.Sender, "reply from %s must not render an agent badge", msg.Sender)
 		case types.MessageTypeToolCall:
 			assert.Contains(t, flatten(view), "root calls developer", "the transfer keeps its agent badges")
 		}
 	}
-	block, ok := m.views[3].(*reasoningblock.Model)
-	require.True(t, ok)
+	require.NotNil(t, block)
 	assert.True(t, strings.HasPrefix(strings.TrimSpace(ansi.Strip(block.View())), "Thinking"))
 }
 
@@ -1351,13 +1356,15 @@ func TestTransferInsideCollapsedReasoningStaysVisible(t *testing.T) {
 	m.AppendToLastMessage("developer", "Fixed it.")
 	m.AddToolResult(&runtime.ToolCallResponseEvent{ToolCallID: "call_transfer", Response: "done"}, types.ToolStatusCompleted)
 
-	require.Len(t, m.messages, 2)
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAssistantReasoningBlock))
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAssistant))
+	assert.NotContains(t, ansi.Strip(m.View()), "─►")
 	block, ok := m.views[0].(*reasoningblock.Model)
 	require.True(t, ok)
 	block.SetExpanded(false)
 	require.True(t, block.HasToolCall("call_transfer"))
 	assert.Contains(t, flatten(ansi.Strip(block.View())), "root calls developer")
-	assert.NotContains(t, ansi.Strip(m.views[1].View()), "developer", "the sub-agent reply has no badge")
+	assert.NotContains(t, ansi.Strip(m.views[m.lastOrdinarySource()].View()), "developer", "the sub-agent reply has no badge")
 }
 
 func TestLoadFromSessionRepliesHaveNoAgentBadge(t *testing.T) {
@@ -1826,7 +1833,7 @@ func TestAppendAssistantMediaDifferentAgentStartsNewMessage(t *testing.T) {
 	require.Equal(t, 2, m.MessageTypeCount(types.MessageTypeAssistant),
 		"another agent's media must not be attached to the previous agent's message")
 	assert.Empty(t, m.messages[1].AssistantMedia)
-	assert.Equal(t, "researcher", m.messages[2].Sender)
+	assert.Equal(t, "researcher", m.lastMessage().Sender)
 }
 
 func TestAppendAssistantMediaEmptyIsNoOp(t *testing.T) {

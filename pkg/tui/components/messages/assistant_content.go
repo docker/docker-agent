@@ -27,7 +27,10 @@ func (m *model) trackMessageIdentity(sessionID, messageID string) {
 // AppendAssistantContent keeps separate attempts and interleaved sessions distinct.
 func (m *model) AppendAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd {
 	m.trackMessageIdentity(sessionID, messageID)
-	cmd := m.AppendToLastMessage(agentName, content)
+	if hasVisibleWorkProse(content) {
+		m.finishReasoningPreview(agentName, sessionID, "")
+	}
+	cmd := m.appendToLastMessage(agentName, content)
 	if last := m.lastMessage(); last != nil {
 		last.SessionID, last.MessageID = sessionID, messageID
 	}
@@ -52,6 +55,8 @@ func (m *model) ResetReasoningContent(sessionID, messageID, agentName string) te
 			continue
 		}
 		block := m.views[i].(*reasoningblock.Model)
+		delete(m.work.liveReasoning, block)
+		block.SetReasoningActive(false)
 		block.ClearReasoning()
 		msg.Content = ""
 		if block.ToolCount() == 0 {
@@ -64,7 +69,7 @@ func (m *model) ResetReasoningContent(sessionID, messageID, agentName string) te
 		}
 	}
 	m.invalidateAllItems()
-	return materialize
+	return tea.Batch(materialize, m.compactWorkCmd())
 }
 
 // ReconcileAssistantContent replaces incomplete streamed text with the saved answer.
@@ -72,6 +77,7 @@ func (m *model) ReconcileAssistantContent(sessionID, messageID, agentName, conte
 	if content == "" {
 		return nil
 	}
+	m.finishReasoningPreview(agentName, sessionID, messageID)
 	materialize := m.materializeDeferredTail()
 	var indices []int
 	var streamed strings.Builder

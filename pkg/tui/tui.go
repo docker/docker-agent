@@ -306,6 +306,10 @@ type appModel struct {
 	// conversation. Shared by every tab and managed via /settings.
 	showBanner             bool
 	startupBannerAnimation bool
+	// compactWorkLog groups agent activity into Work blocks on new and existing tabs.
+	compactWorkLog bool
+	// visibleReplies is the prose-retention policy applied to every tab's transcript.
+	visibleReplies messages.VisibleReplies
 
 	// buildCommandCategories is a function that returns the list of command categories.
 	buildCommandCategories func(context.Context, tea.Model) []commands.Category
@@ -574,6 +578,8 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
 		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
 		showBanner:                    userSettings.GetShowBanner(),
+		compactWorkLog:                userSettings.GetCompactWorkLog(),
+		visibleReplies:                messages.ParseVisibleReplies(userSettings.GetVisibleReplies()),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
 		appName:                       "docker agent",
@@ -598,6 +604,8 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	// Create initial chat page (after options are applied so leanMode is set)
 	initialChatPage := chat.New(m.ar, m.ctx(), initialApp, initialSessionState, append(m.chatPageOpts(), m.runLifecycleOption(initialTab))...)
 	initialChatPage.SetRoutingID(sessID)
+	initialChatPage.SetCompactWorkLog(m.compactWorkLog)
+	initialChatPage.SetVisibleReplies(m.visibleReplies)
 	initialTab.chatPage = initialChatPage
 
 	// Initialize status bar (pass m as help provider)
@@ -800,6 +808,8 @@ func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session
 	cp := chat.New(m.ar, m.ctx(), a, ss, opts...)
 	cp.Update(m.planSidebarData)
 	cp.SetRoutingID(tabID)
+	cp.SetCompactWorkLog(m.compactWorkLog)
+	cp.SetVisibleReplies(m.visibleReplies)
 	ed := editor.New(m.history, m.editorOpts()...)
 
 	tab.chatPage = cp
@@ -1623,7 +1633,12 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleApplySettings(msg)
 
 	case messages.CancelLayoutPreviewMsg:
+		m.applyVisibleReplies(msg.OriginalVisibleReplies)
 		return m.applyLayoutSettings(msg.Original)
+
+	case messages.PreviewVisibleRepliesMsg:
+		m.applyVisibleReplies(msg.Policy)
+		return m, nil
 
 	// --- Speech-to-text ---
 

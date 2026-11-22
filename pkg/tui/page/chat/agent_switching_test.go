@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -302,3 +303,32 @@ func TestRoutedTimerExpiryDrivesSidebarOnOwnerPage(t *testing.T) {
 // transferBoxMarker is the visible marker of the sidebar transfer box (the
 // box title embedded in the rounded top border).
 const transferBoxMarker = "─ Transfer "
+
+func TestCompactWorkObservedTransferAndReturn(t *testing.T) {
+	t.Parallel()
+
+	p, _ := newSwitchingTestPage(t)
+	p.messages.SetSize(90, 50)
+	p.messages.SetCompactWorkLog(true)
+	p.messages.AddUserMessage("request")
+	p.messages.AppendReasoning("root", "parent work")
+	call := tools.ToolCall{ID: "transfer", Function: tools.FunctionCall{Name: "transfer_task", Arguments: `{"agent":"researcher","task":"investigate"}`}}
+	p.messages.AddOrUpdateToolCall("root", call, tools.Tool{Name: "transfer_task"}, types.ToolStatusRunning)
+	p.handleRuntimeEvent(runtime.AgentSwitching(true, "root", "researcher"))
+	p.messages.AppendReasoning("researcher", "child work")
+	p.handleRuntimeEvent(runtime.AgentSwitching(false, "researcher", "root"))
+	p.handleRuntimeEvent(runtime.AgentSwitching(false, "researcher", "root"))
+	p.messages.AddToolResult(&runtime.ToolCallResponseEvent{ToolCallID: call.ID, Result: tools.ResultSuccess("child result")}, types.ToolStatusCompleted)
+	p.messages.AppendReasoning("root", "resumed work")
+
+	frame := ansi.Strip(p.messages.View())
+	last := -1
+	for _, text := range []string{"parent work", "calls", "child work", types.AgentReturnLabel, "resumed work"} {
+		at := strings.Index(frame, text)
+		require.Greater(t, at, last, frame)
+		require.Equal(t, 1, strings.Count(frame, text), frame)
+		last = at
+	}
+	require.Equal(t, 3, strings.Count(frame, "Work [+]"), frame)
+	require.NotContains(t, frame, "─►", "live sender changes do not duplicate observed events")
+}

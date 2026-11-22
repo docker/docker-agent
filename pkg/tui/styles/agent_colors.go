@@ -3,6 +3,7 @@ package styles
 import (
 	"image/color"
 	"sync"
+	"sync/atomic"
 
 	"charm.land/lipgloss/v2"
 )
@@ -38,6 +39,11 @@ var agentRegistry struct {
 	badgeStyles  []cachedBadgeStyle
 	accentStyles []lipgloss.Style
 }
+
+var agentColorGeneration atomic.Uint64
+
+// AgentColorGeneration identifies the agent palette and name order used by cached renders.
+func AgentColorGeneration() uint64 { return agentColorGeneration.Load() }
 
 // SetAgentOrder updates the agent name → index mapping and rebuilds the style cache.
 // Call this when the team info changes (e.g., on TeamInfoEvent).
@@ -95,6 +101,7 @@ func rebuildAgentColorCache() {
 	for i, c := range accentColors {
 		agentRegistry.accentStyles[i] = BaseStyle.Foreground(c)
 	}
+	agentColorGeneration.Add(1)
 }
 
 // InvalidateAgentColorCache rebuilds the cached agent styles.

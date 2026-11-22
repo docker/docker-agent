@@ -180,6 +180,10 @@ type Page interface {
 	// SetShowBanner controls whether the ASCII-art startup banner is drawn
 	// on an empty conversation.
 	SetShowBanner(show bool)
+	// SetCompactWorkLog groups agent activity into compact Work blocks.
+	SetCompactWorkLog(enabled bool) tea.Cmd
+	// SetVisibleReplies sets how many prose answers per exchange stay visible.
+	SetVisibleReplies(policy msgtypes.VisibleReplies)
 	// SetRoutingID records the tab identity used to address this page's
 	// one-shot UI timers back to it (messages.RoutedMsg.SessionID). The
 	// appModel keys its chat pages — and the supervisor its event routing —
@@ -230,7 +234,9 @@ type chatPage struct {
 	sessionState *service.SessionState
 
 	// State
-	working        bool
+	working bool
+	// workStartedAt is when the current turn began; it feeds the Work header duration.
+	workStartedAt  time.Time
 	leanMode       bool
 	hideSidebar    bool
 	layoutSettings msgtypes.LayoutSettings
@@ -575,6 +581,9 @@ func Cleanup(page Page) {
 		p.ClearScrollbarPointer()
 		ResetSidebarGrip(p)
 		p.bannerTransition.Cancel()
+		if p.messages != nil {
+			p.messages.StopAnimations()
+		}
 		if p.inputScope != nil {
 			p.inputScope.close()
 		}
@@ -799,10 +808,18 @@ func (p *chatPage) setWorking(working bool) tea.Cmd {
 	p.working = working
 
 	if working != wasWorking {
-		return core.CmdHandler(msgtypes.WorkingStateChangedMsg{
+		// Work headers follow the same turn state: Working while active, then the settled duration.
+		var elapsed time.Duration
+		if working {
+			p.workStartedAt = time.Now()
+		} else if !p.workStartedAt.IsZero() {
+			elapsed = time.Since(p.workStartedAt)
+		}
+		workCmd := p.messages.SetWorkStatus(working, elapsed)
+		return tea.Batch(workCmd, core.CmdHandler(msgtypes.WorkingStateChangedMsg{
 			Working:     working,
 			QueueLength: len(p.messageQueue),
-		})
+		}))
 	}
 
 	return nil
@@ -1696,6 +1713,17 @@ func CancelStartupBanner(page Page) {
 	if p, ok := page.(*chatPage); ok {
 		p.bannerTransition.Cancel()
 	}
+}
+
+// SetCompactWorkLog groups this tab's agent activity into Work blocks, or restores
+// the ungrouped transcript.
+func (p *chatPage) SetCompactWorkLog(enabled bool) tea.Cmd {
+	return p.messages.SetCompactWorkLog(enabled)
+}
+
+// SetVisibleReplies applies the visible-replies policy to this tab's transcript.
+func (p *chatPage) SetVisibleReplies(policy msgtypes.VisibleReplies) {
+	_ = p.messages.SetVisibleReplies(policy)
 }
 
 // SetRoutingID records the tab identity this page's routed UI timers are

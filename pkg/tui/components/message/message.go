@@ -32,6 +32,8 @@ type Model interface {
 	AppendContent(content string) tea.Cmd
 	SetSelected(selected bool)
 	SetHovered(hovered bool)
+	// AssistantActionRow is the local row reserved for Copy, or -1 if absent.
+	AssistantActionRow() int
 	CodeBlocks() []markdown.CodeBlock
 	// Finalize releases per-message render state that is only needed while the
 	// message is actively streaming. The message content and code-block metadata
@@ -86,11 +88,14 @@ type messageModel struct {
 	// mdRenderer is reused across renders of an assistant message so that
 	// streamed-in chunks only re-render the trailing block instead of the whole
 	// accumulated markdown each time.
-	mdRenderer        *markdown.IncrementalRenderer
-	streamLines       assistantStreamLines
-	segmentCodeBlocks []markdown.CodeBlock
-	contentBuf        strings.Builder
-	imageScanOffset   int
+	mdRenderer  *markdown.IncrementalRenderer
+	streamLines assistantStreamLines
+	// themeGeneration is the styles palette identity the cached renders were built with.
+	themeGeneration      uint64
+	agentColorGeneration uint64
+	segmentCodeBlocks    []markdown.CodeBlock
+	contentBuf           strings.Builder
+	imageScanOffset      int
 
 	// finalized is set by Finalize() once the message is no longer the active
 	// streaming view. After it is set, Render() still produces correct output,
@@ -358,7 +363,27 @@ func (mv *messageModel) IsToggleLine(lineIdx int) bool {
 	return lineIdx >= height-3
 }
 
+// ensureTheme drops every cached render when the palette changes. Cached output
+// embeds colors, so a generation change must rebuild it.
+func (mv *messageModel) ensureTheme() {
+	theme, agent := styles.ThemeGeneration(), styles.AgentColorGeneration()
+	if mv.agentColorGeneration != agent {
+		mv.agentColorGeneration = agent
+		mv.renderCache = renderCache{}
+	}
+	if mv.themeGeneration == theme {
+		return
+	}
+	mv.themeGeneration = theme
+	mv.renderCache = renderCache{}
+	mv.streamLines = assistantStreamLines{}
+	if mv.mdRenderer != nil {
+		mv.mdRenderer.Reset()
+	}
+}
+
 func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
+	mv.ensureTheme()
 	msg := mv.message
 	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.Content == "" || mv.selected || len(mv.markdownImages) != 0 || len(msg.AssistantMedia) != 0 {
 		return AssistantSegments{}, false
@@ -424,6 +449,7 @@ func (mv *messageModel) View() string {
 // calls with the same inputs (very common during streaming, hover tracking,
 // and from Height()) skip the expensive markdown parse.
 func (mv *messageModel) Render(width int) string {
+	mv.ensureTheme()
 	msg := mv.message
 
 	// Spinner-driven types (MessageTypeSpinner, MessageTypeLoading, and an empty
@@ -590,7 +616,11 @@ func (mv *messageModel) render(width int) string {
 	case types.MessageTypeCancelled:
 		return styles.WarningStyle.Render("⚠ stream cancelled ⚠")
 	case types.MessageTypeAgentReturn:
-		return renderAgentReturn(msg.Sender, msg.Content, width)
+		return renderAgentTransition(msg.Sender, types.AgentReturnLabel, msg.Content, width)
+	case types.MessageTypeAgentHandoff:
+		return renderAgentTransition(msg.Sender, "─►", msg.Content, width)
+	case types.MessageTypeAgentDelegation:
+		return renderAgentTransition(msg.Sender, "calls", msg.Content, width)
 	case types.MessageTypeWelcome:
 		messageStyle := styles.WelcomeMessageStyle
 		// Convert explicit newlines to markdown hard line breaks (two trailing spaces)
@@ -803,15 +833,20 @@ func actionRow(innerWidth int, show bool, labels ...string) string {
 	return strings.Repeat(" ", padding) + styles.MutedStyle.Render(joined)
 }
 
-// renderAgentReturn renders the delegation-return transition: the returning
-// child's badge, a muted "returned control to" connector, and the parent's
-// badge — the same visual language as the transfer_task/handoff headers, kept
-// visually light. The line is word-wrapped to the width and each wrapped line
+func (mv *messageModel) AssistantActionRow() int {
+	msg := mv.message
+	if msg == nil || msg.Type != types.MessageTypeAssistant || (msg.Content == "" && len(msg.AssistantMedia) == 0) {
+		return -1
+	}
+	return 0
+}
+
+// renderAgentTransition renders two agent badges joined by a muted connector. The line is word-wrapped to the width and each wrapped line
 // hard-capped, so narrow chat columns never overflow (the cap only ever trims
 // trailing wrap spaces).
-func renderAgentReturn(fromAgent, toAgent string, width int) string {
+func renderAgentTransition(fromAgent, connector, toAgent string, width int) string {
 	line := styles.AgentBadgeStyleFor(fromAgent).MarginLeft(2).Render(fromAgent) +
-		styles.MutedStyle.Render(" "+types.AgentReturnLabel+" ") +
+		styles.MutedStyle.Render(" "+connector+" ") +
 		styles.AgentBadgeStyleFor(toAgent).Render(toAgent)
 	if width <= 0 {
 		return line

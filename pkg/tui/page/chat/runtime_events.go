@@ -411,8 +411,8 @@ func (p *chatPage) handleAgentChoiceReasoning(msg *runtime.AgentChoiceReasoningE
 // accepted (it closed the exact inverse hop of a recorded start) additionally
 // adds the delegation-return transition to the chat ("child returned control
 // to parent"); a stale stop — no matching hop — stays silent everywhere, and
-// a start adds nothing to the chat: the transfer_task tool call already
-// narrates the outbound direction. Boundaries arriving after the user
+// an accepted start records the compact-only outbound transition. In the
+// ordinary transcript the transfer_task tool already narrates it. Boundaries arriving after the user
 // cancelled the stream are dropped entirely: the delegation they belong to
 // was already torn down visually.
 func (p *chatPage) handleAgentSwitching(msg *runtime.AgentSwitchingEvent) tea.Cmd {
@@ -421,7 +421,11 @@ func (p *chatPage) handleAgentSwitching(msg *runtime.AgentSwitchingEvent) tea.Cm
 	}
 	res := p.sidebar.SetAgentSwitching(msg.Switching, msg.FromAgent, msg.ToAgent)
 	cmd := tea.Batch(res.Cmd, p.scheduleTransferTimers(res.Timers))
-	if msg.Switching || !res.Accepted {
+	if !res.Accepted {
+		return cmd
+	}
+	if msg.Switching {
+		p.messages.AddAgentDelegation(msg.FromAgent, msg.ToAgent)
 		return cmd
 	}
 	returnCmd := p.messages.AddAgentReturn(msg.FromAgent, msg.ToAgent)

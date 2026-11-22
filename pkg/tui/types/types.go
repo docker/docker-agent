@@ -28,6 +28,8 @@ const (
 	// for the AgentSwitching runtime event, which is not persisted to the
 	// session, so it never reappears when a session is reloaded.
 	MessageTypeAgentReturn
+	MessageTypeAgentHandoff
+	MessageTypeAgentDelegation
 )
 
 const (
@@ -80,6 +82,7 @@ type AssistantMedia struct {
 
 // Message represents a single message in the chat
 type Message struct {
+	CompactOnly      bool // Display-only reasoning fragment hidden from the ordinary transcript.
 	SessionID        string
 	MessageID        string
 	Type             MessageType
@@ -88,6 +91,7 @@ type Message struct {
 	ToolCall         tools.ToolCall        // Associated tool call for tool messages
 	ToolDefinition   tools.Tool            // Definition of the tool being called
 	ToolStatus       ToolStatus            // Status for tool calls
+	CompactWorkTool  bool                  // Compact Work renders switch attempts as tools, without agent-transition badges.
 	HideToolProgress bool                  // The lean TUI supplies its own progress footer.
 	ToolResult       *tools.ToolCallResult // Result of tool call (when completed)
 	Images           []tuiimage.Inline     // Prepared terminal images from the result

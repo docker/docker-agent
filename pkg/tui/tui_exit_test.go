@@ -70,6 +70,10 @@ func (m *mockChatPage) SetInterruptMode(mode messages.InterruptMode) {
 	m.interruptMode = mode
 }
 
+func (m *mockChatPage) SetCompactWorkLog(enabled bool) tea.Cmd { return nil }
+
+func (m *mockChatPage) SetVisibleReplies(policy messages.VisibleReplies) {}
+
 func (m *mockChatPage) SetShowBanner(show bool) {
 	m.showBanner = show
 }

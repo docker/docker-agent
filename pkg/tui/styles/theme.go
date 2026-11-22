@@ -1017,6 +1017,11 @@ func mergeMarkdownTheme(base, override MarkdownTheme) MarkdownTheme {
 // currentTheme stores the currently applied theme for reference.
 var currentTheme atomic.Pointer[Theme]
 
+var themeGeneration atomic.Uint64
+
+// ThemeGeneration identifies the palette used by cached renders.
+func ThemeGeneration() uint64 { return themeGeneration.Load() }
+
 // CurrentTheme returns the currently applied theme, or the default if none applied.
 func CurrentTheme() *Theme {
 	t := currentTheme.Load()
@@ -1112,6 +1117,7 @@ func ApplyTheme(theme *Theme) {
 
 	// Let dependent packages invalidate their own memoized rendering
 	// (e.g. the markdown renderer's style cache).
+	themeGeneration.Add(1)
 	runThemeChangeHooks()
 }
 

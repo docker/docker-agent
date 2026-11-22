@@ -17,7 +17,7 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 
 func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
 	params, err := toolcommon.ParseArgs[handoff.Args](msg.ToolCall.Function.Arguments)
-	if msg.ToolStatus == types.ToolStatusError || err != nil || params.Agent == "" {
+	if msg.ToolStatus == types.ToolStatusError || err != nil || params.Agent == "" || msg.CompactWorkTool {
 		var result string
 		if msg.ToolStatus == types.ToolStatusError {
 			result = toolcommon.FormatToolResult(msg.Content, width)

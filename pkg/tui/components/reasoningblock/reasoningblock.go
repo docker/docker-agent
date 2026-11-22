@@ -103,6 +103,12 @@ type renderCache struct {
 	hasExtra         bool     // whether there's extra content beyond preview
 }
 
+// toolRow is the view-line range of one expanded nested tool; End is exclusive.
+type toolRow struct {
+	toolIndex  int
+	start, end int
+}
+
 type expandedToolView interface {
 	ExpandedView() string
 }
@@ -120,9 +126,14 @@ type Model struct {
 	width            int
 	height           int
 	sessionState     service.SessionStateReader
+	reasoningActive  bool
 	reasoningVersion int                    // increments when reasoning content changes
 	cache            *renderCache           // cached rendering results
 	animationSub     animation.Subscription // whether we're registered with animation coordinator
+	toolRows         []toolRow              // expanded nested tool line ranges from the last render
+	// workOwner is the Work block currently hosting this block, or nil when it
+	// renders standalone. A hosted block has no header or disclosure of its own.
+	workOwner any
 	// now returns the current time. Defaults to time.Now; tests override it
 	// per-instance for deterministic fade/grace-period behaviour.
 	now func() time.Time
@@ -224,6 +235,7 @@ func (m *Model) Reasoning() string {
 
 // AddToolCall adds a tool call to the block.
 func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
+	msg.CompactWorkTool = m.hostedByWork()
 	// Check if tool already exists (update case)
 	for i, entry := range m.toolEntries {
 		if entry.msg.ToolCall.ID == msg.ToolCall.ID {
@@ -335,6 +347,21 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 	return nil
 }
 
+// ReplayFragment snapshots settled reasoning and tools for the compact view.
+// It has its own tool views and disclosure state; the ordinary card can grow.
+func (m *Model) ReplayFragment() *Model {
+	fragment := New(m.ar, m.id, m.agentName, m.sessionState, WithToolRenderers(m.toolRenderers))
+	for _, item := range m.contentItems {
+		if item.kind == contentItemReasoning {
+			fragment.AppendReasoning(item.reasoning)
+		} else {
+			msg := *m.toolEntries[item.toolIndex].msg
+			fragment.AddToolCall(&msg)
+		}
+	}
+	return fragment
+}
+
 // RemoveToolCall drops a tool call that will never run. It reports whether
 // the block held it.
 func (m *Model) RemoveToolCall(toolCallID string) bool {
@@ -363,12 +390,17 @@ func (m *Model) RemoveToolCall(toolCallID string) bool {
 
 // HasToolCall returns true if the block contains the given tool call ID.
 func (m *Model) HasToolCall(toolCallID string) bool {
+	return m.ToolCall(toolCallID) != nil
+}
+
+// ToolCall returns the source row for a nested call, or nil if not found.
+func (m *Model) ToolCall(toolCallID string) *types.Message {
 	for _, entry := range m.toolEntries {
 		if entry.msg.ToolCall.ID == toolCallID {
-			return true
+			return entry.msg
 		}
 	}
-	return false
+	return nil
 }
 
 // computeFadeProgressAt computes the fade progress for all tools based on elapsed time.
@@ -461,6 +493,12 @@ func (m *Model) SetExpanded(expanded bool) {
 	m.expanded = expanded
 }
 
+// SetExpandedImmediately applies the expanded state without a reveal transition,
+// so callers can compute hit geometry in the same frame.
+func (m *Model) SetExpandedImmediately(expanded bool) {
+	m.expanded = expanded
+}
+
 // SetSelected sets the selected state for visual highlighting.
 func (m *Model) SetSelected(selected bool) {
 	m.selected = selected
@@ -526,7 +564,7 @@ func (m *Model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 // View renders the block.
 func (m *Model) View() string {
-	if m.expanded {
+	if m.expanded || m.hostedByWork() {
 		return m.renderExpanded()
 	}
 	return m.renderCollapsed()
@@ -593,36 +631,48 @@ func (m *Model) contentWidth() int {
 	return m.width - styles.AssistantMessageStyle.GetHorizontalFrameSize()
 }
 
-// renderExpanded renders the full block with all content in order.
+// renderExpanded renders the full block with all content in order and records
+// where each expanded nested tool lands, so pointer hits can reach it.
 func (m *Model) renderExpanded() string {
 	var parts []string
+	m.toolRows = m.toolRows[:0]
+	line := 0
+	add := func(part string) {
+		parts = append(parts, part)
+		line += strings.Count(part, "\n") + 1
+	}
 
-	// Header with collapse affordance
-	header := m.renderHeader(true)
-	parts = append(parts, header)
+	// A hosted block sits under its Work header, which owns the disclosure.
+	hosted := m.hostedByWork()
+	if !hosted {
+		// Header with collapse affordance
+		add(m.renderHeader(true))
+	}
 
 	// Render content items in order (interleaved reasoning and tools)
 	for i, item := range m.contentItems {
 		switch item.kind {
 		case contentItemReasoning:
 			if item.reasoning != "" {
-				if i == 0 {
-					parts = append(parts, "") // blank line after header for first item
+				if i == 0 && !hosted {
+					add("") // blank line after header for first item
 				}
-				parts = append(parts, m.renderReasoningChunk(item.reasoning))
+				add(m.renderReasoningChunk(item.reasoning))
 			}
 		case contentItemTool:
 			if item.toolIndex < len(m.toolEntries) {
 				// Blank line before first tool in a consecutive group
-				if i == 0 || (i > 0 && m.contentItems[i-1].kind == contentItemReasoning) {
-					parts = append(parts, "")
+				if (i == 0 && !hosted) || (i > 0 && m.contentItems[i-1].kind == contentItemReasoning) {
+					add("")
 				}
-				parts = append(parts, m.renderToolExpanded(m.toolEntries[item.toolIndex]))
+				rendered := m.renderToolExpanded(m.toolEntries[item.toolIndex])
+				m.toolRows = append(m.toolRows, toolRow{toolIndex: item.toolIndex, start: line, end: line + strings.Count(rendered, "\n") + 1})
+				add(rendered)
 				// Blank line after last tool in a consecutive group (next is reasoning or end)
 				isLastItem := i == len(m.contentItems)-1
 				nextIsReasoning := !isLastItem && m.contentItems[i+1].kind == contentItemReasoning
 				if isLastItem || nextIsReasoning {
-					parts = append(parts, "")
+					add("")
 				}
 			}
 		}
@@ -807,6 +857,48 @@ func (m *Model) renderReasoningPreviewWithTruncationInfo() (string, bool) {
 	return m.messageStyle().Render(preview), reasoningTruncated
 }
 
+// AdoptWorkOwner marks the block as hosted by a Work block. Hosted reasoning
+// renders its full text without a header, so the Work block owns the disclosure.
+func (m *Model) AdoptWorkOwner(owner any) {
+	m.workOwner = owner
+	for _, entry := range m.toolEntries {
+		entry.msg.CompactWorkTool = true
+	}
+}
+
+// ReleaseWorkOwner clears hosting only while owner still hosts the block, so a
+// block that already moved into another Work block keeps that host.
+func (m *Model) ReleaseWorkOwner(owner any) {
+	if m.workOwner == owner {
+		m.workOwner = nil
+		for _, entry := range m.toolEntries {
+			entry.msg.CompactWorkTool = false
+		}
+	}
+}
+
+func (m *Model) hostedByWork() bool { return m.workOwner != nil }
+
+// PreviewLines returns the most recent displayable reasoning rows.
+func (m *Model) PreviewLines() (lines []string, truncated bool) {
+	for _, line := range slices.Backward(m.ensureCache().lines) {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(lines) == previewLines {
+			truncated = true
+			break
+		}
+		lines = append(lines, strings.Clone(line))
+	}
+	slices.Reverse(lines)
+	return lines, truncated
+}
+
+func (m *Model) SetReasoningActive(active bool) { m.reasoningActive = active }
+
+func (m *Model) ReasoningActive() bool { return m.reasoningActive }
+
 // StopAnimation stops all animation subscriptions for this reasoning block.
 // This must be called when the block is removed from the UI to avoid leaked animation subscriptions.
 func (m *Model) StopAnimation() {
@@ -820,11 +912,83 @@ func (m *Model) StopAnimation() {
 
 // IsHeaderLine returns true if the given line index is the header line.
 func (m *Model) IsHeaderLine(lineIdx int) bool {
-	return lineIdx == 0
+	return !m.hostedByWork() && lineIdx == 0
 }
 
 // IsToggleLine returns true if clicking this line should toggle the block.
 // Only the header is toggleable.
 func (m *Model) IsToggleLine(lineIdx int) bool {
 	return m.IsHeaderLine(lineIdx) && (m.expanded || m.hasExtraContent())
+}
+
+// IsToggleAt makes the whole header row the click target, as IsToggleLine does.
+// Expanded nested tools take pointer hits in their own coordinates.
+func (m *Model) IsToggleAt(line, col int) bool {
+	if m.IsToggleLine(line) {
+		return col >= 0 && col < m.width
+	}
+	entry, local, ok := m.toolAtLine(line)
+	if !ok {
+		return false
+	}
+	view, ok := entry.view.(interface{ IsToggleAt(line, col int) bool })
+	toolCol := m.toolColumn(col)
+	return ok && toolCol >= 0 && view.IsToggleAt(local, toolCol)
+}
+
+// ToggleAt toggles the block when a click lands on its header row, or the
+// nested tool under the pointer.
+func (m *Model) ToggleAt(line, col int) {
+	if m.IsToggleLine(line) {
+		if col >= 0 && col < m.width {
+			m.Toggle()
+		}
+		return
+	}
+	entry, local, ok := m.toolAtLine(line)
+	toolCol := m.toolColumn(col)
+	if !ok || toolCol < 0 {
+		return
+	}
+	if toggleAt, ok := entry.view.(interface{ ToggleAt(line, col int) }); ok {
+		toggleAt.ToggleAt(local, toolCol)
+		return
+	}
+	if toggle, ok := entry.view.(interface {
+		IsToggleAt(line, col int) bool
+		Toggle()
+	}); ok && toggle.IsToggleAt(local, toolCol) {
+		toggle.Toggle()
+	}
+}
+
+// toolAtLine maps an expanded view line to the nested tool rendered there.
+func (m *Model) toolAtLine(line int) (toolEntry, int, bool) {
+	if !m.expanded && !m.hostedByWork() {
+		return toolEntry{}, 0, false
+	}
+	for _, row := range m.toolRows {
+		if line >= row.start && line < row.end {
+			return m.toolEntries[row.toolIndex], line - row.start, true
+		}
+	}
+	return toolEntry{}, 0, false
+}
+
+// toolColumn converts a block column to a nested tool column, excluding the
+// message frame that surrounds the block's content.
+func (m *Model) toolColumn(col int) int {
+	style := m.messageStyle()
+	return col - (style.GetMarginLeft() + style.GetBorderLeftSize() + style.GetPaddingLeft())
+}
+
+// TakeAnimationCmd returns lease starts made by nested tools outside Update.
+func (m *Model) TakeAnimationCmd() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, entry := range m.toolEntries {
+		if view, ok := entry.view.(interface{ TakeAnimationCmd() tea.Cmd }); ok {
+			cmds = append(cmds, view.TakeAnimationCmd())
+		}
+	}
+	return tea.Batch(cmds...)
 }

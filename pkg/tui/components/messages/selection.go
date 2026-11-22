@@ -167,8 +167,10 @@ func (m *model) autoScroll() tea.Cmd {
 	var scrollCmd tea.Cmd
 
 	// Use stored screen Y coordinate to check if mouse is in autoscroll region
-	// mouseToLineCol subtracts 2 for header, so viewport-relative Y is mouseY - 2
 	viewportY := max(m.selection.mouseY-2, 0)
+	if m.work.enabled {
+		viewportY = max(m.selection.mouseY-m.yPos-m.stickyWorkInset(), 0)
+	}
 
 	if viewportY < scrollThreshold && m.scrollOffset > 0 {
 		// Scroll up - mouse is near top of viewport
@@ -176,11 +178,11 @@ func (m *model) autoScroll() tea.Cmd {
 		m.scrollUp()
 		// Update endLine to reflect new scroll position
 		m.selection.endLine = max(0, m.selection.endLine-1)
-	} else if viewportY >= m.height-scrollThreshold {
+	} else if viewportY >= m.bodyHeight()-scrollThreshold {
 		// Scroll down - mouse is near or below the bottom of the viewport
 		// (drag motion keeps flowing even when the cursor leaves the chat
 		// region, e.g. over the editor).
-		maxScrollOffset := max(0, m.totalHeight-m.height)
+		maxScrollOffset := max(0, m.totalScrollableHeight()-m.height)
 		if m.scrollOffset < maxScrollOffset {
 			direction = 1
 			scrollCmd = m.scrollDown()
