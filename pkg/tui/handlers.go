@@ -93,7 +93,8 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 	m.bindTabSession(activeID, newSess.ID)
 	m.application.ReplaceSession(ctx, newSess)
 	m.initSessionComponents(activeID, m.application, newSess)
-	m.dialogMgr = dialog.New()
+	m.clearDialogScrollbarPointer()
+	m.dialogMgr = dialog.NewWithAnimation(m.ar)
 
 	// Restore sidebar settings
 	m.activeTab.chatPage.SetSidebarSettings(sidebarSettings)

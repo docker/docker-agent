@@ -32,7 +32,7 @@ func composeOracle(m *Model, lines []string, baseLine int) string {
 	contentView := strings.Join(lines, "\n")
 	switch {
 	case m.NeedsScrollbar():
-		sbLines := m.sb.ViewLines()
+		sbLines := m.scrollbarLines()
 		gap := strings.Repeat(" ", m.gapWidth)
 		var b strings.Builder
 		b.Grow(len(contentView) + len(lines)*(m.gapWidth+scrollbar.Width*4))

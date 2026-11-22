@@ -36,6 +36,7 @@ func TestScrollFadeEdges(t *testing.T) {
 			content := slices.Repeat([]string{line}, tt.content)
 			m.SetContentWithTrailingSlack(content, tt.content, tt.slack)
 			m.SetScrollOffset(tt.offset)
+			m.SetScrollbarPointer(m.ScrollbarX(), 0)
 			visible := content[tt.offset : tt.offset+height]
 			view := m.View()
 			assert.Equal(t, view, m.ViewWithLines(visible))
@@ -102,6 +103,7 @@ func TestScrollFadeDisabled(t *testing.T) { //nolint:paralleltest // This test c
 		m.SetSize(10, height)
 		m.SetContent(content, len(content))
 		m.SetScrollOffset(1)
+		m.SetScrollbarPointer(m.ScrollbarX(), 0)
 		return m
 	}
 	m := newView()

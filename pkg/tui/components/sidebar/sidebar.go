@@ -461,6 +461,8 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		layoutDirty:      true, // First render must probe scrollbar visibility
 		usageReadingLine: -1,   // No usage zone recorded until the first render
 	}
+	m.scrollview.SetAnimationRuntime(ar)
+
 	return m
 }
 
@@ -842,6 +844,17 @@ func (m *model) SetTitleRegenerating(regenerating bool) tea.Cmd {
 	}
 	m.stopSpinner()
 	return nil
+}
+
+func (m *model) SetScrollbarPointer(x, y int) tea.Cmd {
+	if m.mode == ModeVertical {
+		return m.scrollview.SetScrollbarPointer(x, y)
+	}
+	return nil
+}
+
+func (m *model) ClearScrollbarPointer() {
+	m.scrollview.ClearScrollbarPointer()
 }
 
 func (m *model) IsScrollbarDragging() bool {
@@ -1234,6 +1247,9 @@ func (m *model) workingDirLine() string {
 
 // Update handles messages and updates the component state.
 func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if tick, ok := msg.(animation.TickMsg); ok {
+		m.scrollview.UpdateScrollbarAnimation(tick)
+	}
 	switch msg := msg.(type) {
 	case messages.PlanSidebarDataMsg:
 		m.setPlans(msg)
@@ -3020,6 +3036,9 @@ func (m *model) GetSize() (width, height int) {
 }
 
 func (m *model) SetMode(mode Mode) {
+	if mode != ModeVertical {
+		m.ClearScrollbarPointer()
+	}
 	m.mode = mode
 	m.invalidateCache()
 }

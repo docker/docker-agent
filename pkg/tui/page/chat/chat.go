@@ -572,6 +572,7 @@ func WatchGitBranch(page Page) tea.Cmd {
 
 func Cleanup(page Page) {
 	if p, ok := page.(*chatPage); ok {
+		p.ClearScrollbarPointer()
 		ResetSidebarGrip(p)
 		p.bannerTransition.Cancel()
 		if p.inputScope != nil {
@@ -959,6 +960,31 @@ func (p *chatPage) View() string {
 
 func (p *chatPage) SetSize(width, height int) tea.Cmd {
 	return p.setSize(width, height, false)
+}
+
+type scrollbarPointer interface {
+	SetScrollbarPointer(x, y int) tea.Cmd
+	ClearScrollbarPointer()
+}
+
+func (p *chatPage) SetScrollbarPointer(x, y int) tea.Cmd {
+	var cmds []tea.Cmd
+	if owner, ok := p.messages.(scrollbarPointer); ok {
+		cmds = append(cmds, owner.SetScrollbarPointer(x, y))
+	}
+	if owner, ok := p.sidebar.(scrollbarPointer); ok {
+		cmds = append(cmds, owner.SetScrollbarPointer(x, y))
+	}
+	return tea.Batch(cmds...)
+}
+
+func (p *chatPage) ClearScrollbarPointer() {
+	if owner, ok := p.messages.(scrollbarPointer); ok {
+		owner.ClearScrollbarPointer()
+	}
+	if owner, ok := p.sidebar.(scrollbarPointer); ok {
+		owner.ClearScrollbarPointer()
+	}
 }
 
 func (p *chatPage) setSize(width, height int, fromSidebarDrop bool) tea.Cmd {

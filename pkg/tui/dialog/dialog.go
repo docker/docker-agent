@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog/common"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -71,6 +72,7 @@ type dragState struct {
 
 // manager implements Manager
 type manager struct {
+	clock         *animation.Runtime
 	width, height int
 	stack         []dialogEntry
 	drag          dragState
@@ -81,6 +83,11 @@ func New() Manager {
 	return &manager{}
 }
 
+// NewWithAnimation creates a manager with the program-owned scrollbar clock.
+func NewWithAnimation(clock *animation.Runtime) Manager {
+	return &manager{clock: clock}
+}
+
 // Init initializes the dialog component
 func (d *manager) Init() tea.Cmd {
 	return nil
@@ -89,6 +96,10 @@ func (d *manager) Init() tea.Cmd {
 // Update handles messages and updates dialog state
 func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case animation.TickMsg:
+		cmd := d.updateTopAnimation(msg)
+		return d, cmd
+
 	case tea.WindowSizeMsg:
 		d.width = msg.Width
 		d.height = msg.Height
@@ -140,7 +151,7 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.forwardToTop(d.adjustMouseMsg(msg))
 		return d, cmd
 
-	case tea.MouseWheelMsg:
+	case tea.MouseWheelMsg, messages.WheelCoalescedMsg:
 		cmd := d.forwardToTop(d.adjustMouseMsg(msg))
 		return d, cmd
 	}
@@ -180,9 +191,35 @@ func (d *manager) forwardToTop(msg tea.Msg) tea.Cmd {
 		return nil
 	}
 	top := len(d.stack) - 1
+	view := dialogScrollview(d.stack[top].dialog)
+	var pointerCmd tea.Cmd
+	before := 0
+	if view != nil {
+		before = view.ScrollOffset()
+		// Observe hover even when the dialog declines the motion event, and
+		// keep the tick command even when the event remains unconsumed.
+		switch event := msg.(type) {
+		case tea.MouseMsg:
+			mouse := event.Mouse()
+			pointerCmd = view.SetScrollbarPointer(mouse.X, mouse.Y)
+		case messages.WheelCoalescedMsg:
+			pointerCmd = view.SetScrollbarPointer(event.X, event.Y)
+		}
+	}
 	u, cmd := d.stack[top].dialog.Update(msg)
 	d.stack[top].dialog = u.(Dialog)
-	return cmd
+	current := dialogScrollview(d.stack[top].dialog)
+	if current != view {
+		if view != nil {
+			view.ClearScrollbarPointer()
+		}
+		if current != nil {
+			current.SetAnimationRuntime(d.clock)
+		}
+	} else if _, key := msg.(tea.KeyPressMsg); key && view != nil && view.ScrollOffset() != before {
+		cmd = tea.Batch(cmd, view.RevealScrollbar())
+	}
+	return tea.Batch(pointerCmd, cmd)
 }
 
 // titleZoneHeight is the number of rows from the top of a dialog that form
@@ -261,6 +298,10 @@ func (d *manager) adjustMouseMsg(msg tea.Msg) tea.Msg {
 		m.X -= e.offsetX
 		m.Y -= e.offsetY
 		return m
+	case messages.WheelCoalescedMsg:
+		m.X -= e.offsetX
+		m.Y -= e.offsetY
+		return m
 	case tea.MouseWheelMsg:
 		m.X -= e.offsetX
 		m.Y -= e.offsetY
@@ -271,6 +312,7 @@ func (d *manager) adjustMouseMsg(msg tea.Msg) tea.Msg {
 
 // handleOpen processes dialog opening requests and adds to stack
 func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
+	d.ClearScrollbarPointer()
 	d.stack = append(d.stack, dialogEntry{
 		dialog:           msg.Model,
 		originatingEvent: msg.OriginatingEvent,
@@ -285,15 +327,19 @@ func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
 		Height: d.height,
 	})
 	cmds = append(cmds, cmd)
+	d.bindTopScrollbar()
 
 	return d, tea.Batch(cmds...)
 }
 
 // handleClose processes dialog closing requests (pops top dialog from stack)
 func (d *manager) handleClose() (layout.Model, tea.Cmd) {
+	d.ClearScrollbarPointer()
 	if len(d.stack) > 0 {
+		animation.StopView(d.stack[len(d.stack)-1].dialog)
 		d.stack = d.stack[:len(d.stack)-1]
 	}
+	d.bindTopScrollbar()
 	d.drag.active = false
 	return d, nil
 }
@@ -312,6 +358,10 @@ func (d *manager) handleClosePlanDetail(msg ClosePlanDetailMsg) (layout.Model, t
 
 // handleCloseAll closes all dialogs in the stack
 func (d *manager) handleCloseAll() (layout.Model, tea.Cmd) {
+	d.ClearScrollbarPointer()
+	for _, entry := range d.stack {
+		animation.StopView(entry.dialog)
+	}
 	d.stack = nil
 	d.drag.active = false
 	return d, nil
@@ -402,6 +452,7 @@ func (d *manager) TakeBackgroundDialogs(pred func(tea.Msg) bool) []OpenDialogMsg
 		if entry.originatingEvent == nil || !pred(entry.originatingEvent) {
 			return false
 		}
+		clearDialogScrollbar(entry.dialog)
 		removed = append(removed, OpenDialogMsg{Model: entry.dialog, OriginatingEvent: entry.originatingEvent})
 		return true
 	})

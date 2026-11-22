@@ -132,14 +132,15 @@ var interruptConfirmationLabels = map[messages.InterruptMode]string{
 type settingsDialog struct {
 	BaseDialog
 
-	original    messages.Preferences
-	current     messages.Preferences
-	showVisuals bool
-	tab         int
-	selected    [tabCount]int
-	confirmYOLO bool
-	body        *scrollview.Model
-	tabSpans    [tabCount][2]int
+	original           messages.Preferences
+	current            messages.Preferences
+	showVisuals        bool
+	tab                int
+	selected           [tabCount]int
+	confirmYOLO        bool
+	preserveBodyScroll bool
+	body               *scrollview.Model
+	tabSpans           [tabCount][2]int
 }
 
 func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialog {
@@ -168,8 +169,13 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialo
 func (d *settingsDialog) Init() tea.Cmd { return nil }
 
 func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if handled, cmd := d.body.Update(msg); handled {
+		d.preserveBodyScroll = true
+		return d, cmd
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		d.preserveBodyScroll = false
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 	case tea.MouseClickMsg:
@@ -178,6 +184,7 @@ func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			if msg.Y == row+d.TitleZoneHeight() {
 				for tab, span := range d.tabSpans {
 					if msg.X >= col+3+span[0] && msg.X < col+3+span[1] {
+						d.preserveBodyScroll = false
 						d.tab = tab
 						d.confirmYOLO = false
 						break
@@ -189,7 +196,19 @@ func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
+		oldTab, oldSelected, manualScroll := d.tab, d.selected[d.tab], d.preserveBodyScroll
+		d.preserveBodyScroll = false
+		before := d.body.ScrollOffset()
 		cmd := d.handleKey(msg)
+		// Keys return the viewport to the selected row, including value keys
+		// after a manual scroll. Reconcile now so that snap reveals the
+		// scrollbar like other keyboard scrolling.
+		if manualScroll || d.tab != oldTab || d.selected[d.tab] != oldSelected {
+			d.View()
+			if d.body.ScrollOffset() != before {
+				cmd = tea.Batch(cmd, d.body.RevealScrollbar())
+			}
+		}
 		return d, cmd
 	}
 	return d, nil
@@ -431,22 +450,36 @@ func (d *settingsDialog) View() string {
 	body := d.renderBody(d.body.ContentWidth())
 	d.body.SetContent(body.lines, len(body.lines))
 	d.body.SetScrollOffset(d.body.ScrollOffset())
-	if d.selected[d.tab] == 0 && body.selectedEnd < d.body.VisibleHeight() {
-		d.body.EnsureRangeVisible(0, body.selectedEnd)
-	} else {
-		d.body.EnsureRangeVisible(body.selectedStart, body.selectedEnd)
-	}
-
-	bodyView := lipgloss.NewStyle().Height(bodyHeight).Render(d.body.View())
-	if d.showVisuals && d.tab == tabAppearance && inner >= settingsControlsWidth+settingsPreviewGap+previewMaxWidth {
-		preview := d.renderPreview()
-		if lipgloss.Height(preview) <= bodyHeight {
-			bodyView = lipgloss.JoinHorizontal(lipgloss.Top, bodyView, strings.Repeat(" ", settingsPreviewGap), preview)
+	if !d.preserveBodyScroll {
+		if d.selected[d.tab] == 0 && body.selectedEnd < d.body.VisibleHeight() {
+			d.body.EnsureRangeVisible(0, body.selectedEnd)
+		} else {
+			d.body.EnsureRangeVisible(body.selectedStart, body.selectedEnd)
 		}
 	}
-	bodyView = lipgloss.PlaceHorizontal(inner, lipgloss.Center, bodyView)
-	content := lipgloss.JoinVertical(lipgloss.Left, header, bodyView, footer)
-	return frame.Render(content)
+
+	var preview string
+	if d.showVisuals && d.tab == tabAppearance && inner >= settingsControlsWidth+settingsPreviewGap+previewMaxWidth {
+		if candidate := d.renderPreview(); lipgloss.Height(candidate) <= bodyHeight {
+			preview = candidate
+		}
+	}
+	var bodyInset int
+	render := func() string {
+		bodyView := lipgloss.NewStyle().Height(bodyHeight).Render(d.body.View())
+		if preview != "" {
+			bodyView = lipgloss.JoinHorizontal(lipgloss.Top, bodyView, strings.Repeat(" ", settingsPreviewGap), preview)
+		}
+		bodyInset = max(0, inner-lipgloss.Width(bodyView)) / 2
+		bodyView = lipgloss.PlaceHorizontal(inner, lipgloss.Center, bodyView)
+		return frame.Render(lipgloss.JoinVertical(lipgloss.Left, header, bodyView, footer))
+	}
+	view := render()
+	row, col := d.CenterDialog(view)
+	if d.body.SetPositionAndReconcileScrollbar(col+frame.GetBorderLeftSize()+frame.GetPaddingLeft()+bodyInset, row+frame.GetBorderTopSize()+lipgloss.Height(header)) {
+		view = render()
+	}
+	return view
 }
 
 func (d *settingsDialog) renderTabBar(width int) string {

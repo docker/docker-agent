@@ -3,6 +3,7 @@ package messages
 import (
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/require"
@@ -65,6 +66,47 @@ func TestScrollbarReleaseEndsInterruptedSelection(t *testing.T) {
 	offset := m.scrollOffset
 	_, _ = m.Update(tea.MouseMotionMsg{X: 10, Y: 0})
 	require.Equal(t, offset, m.scrollOffset, "button-free motion must not autoscroll")
+}
+
+func TestSettledScrollbarReleaseEndsInterruptedSelection(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ar := animation.NewRuntime()
+		t.Cleanup(ar.Stop)
+		m := NewScrollableView(ar, 80, 12, &service.SessionState{}).(*model)
+		m.AppendToLastMessage("root", strings.Repeat("history paragraph\n\n", 40))
+		m.View()
+
+		_, _ = m.Update(tea.MouseClickMsg{X: 10, Y: 6, Button: tea.MouseLeft})
+		require.True(t, m.IsSelecting())
+
+		// Grab the thumb after the terminal missed the selection's release.
+		x, y := m.scrollview.ScrollbarX(), m.height-3
+		_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: m.height - 1, Button: tea.MouseLeft})
+		require.True(t, m.IsScrollbarDragging())
+		require.NotNil(t, cmd, "grabbing the thumb starts its animation")
+		_, motionCmd := m.Update(tea.MouseMotionMsg{X: x - 5, Y: y, Button: tea.MouseLeft})
+		require.Nil(t, motionCmd, "motion reuses the click's tick chain")
+		for cmd != nil {
+			tick, ok := ar.Accept(cmd().(animation.TickMsg))
+			require.True(t, ok)
+			_, _ = m.Update(tick)
+			cmd = ar.Continue()
+		}
+		require.False(t, ar.HasActive(), "the captured scrollbar settles before release")
+
+		_, cmd = m.Update(tea.MouseReleaseMsg{X: x - 5, Y: y, Button: tea.MouseLeft})
+		require.False(t, m.IsScrollbarDragging())
+		require.NotNil(t, cmd, "release restarts the scrollbar animation")
+		require.False(t, m.IsSelecting(), "release must also end the interrupted selection")
+
+		batch, ok := cmd().(tea.BatchMsg)
+		require.True(t, ok, "release batches the scrollbar tick and selection copy")
+		require.Len(t, batch, 2)
+		_, ok = ar.Accept(batch[0]().(animation.TickMsg))
+		require.True(t, ok, "the returned scrollbar tick must be accepted")
+	})
 }
 
 func TestIgnoredScrollbarClickPreservesScrollBeforeView(t *testing.T) {
