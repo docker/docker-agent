@@ -474,8 +474,13 @@ func openingFence(line string) (string, string) {
 	return line[:i], strings.TrimSpace(line[i:])
 }
 
-func closingFence(line, fence string) bool {
-	line = strings.TrimSpace(line)
+func closingFence(line, fence string, openerIndent int) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	// Keep permissive deeply-indented openers usable without closing on deeper code.
+	if indentationWidth(line[:len(line)-len(trimmed)]) >= max(4, openerIndent+1) {
+		return false
+	}
+	line = strings.TrimSpace(trimmed)
 	rest, ok := strings.CutPrefix(line, fence)
 	if !ok {
 		return false
@@ -489,6 +494,7 @@ func (p *parser) tryCodeBlock(line string) bool {
 	if fence == "" {
 		return false
 	}
+	indent := indentationWidth(line[:len(line)-len(strings.TrimLeft(line, " \t"))])
 	p.lineIdx++
 
 	// Build code directly into a builder to avoid slice + Join allocation
@@ -496,7 +502,7 @@ func (p *parser) tryCodeBlock(line string) bool {
 	first := true
 	for p.lineIdx < len(p.lines) {
 		codeLine := p.lines[p.lineIdx]
-		if closingFence(codeLine, fence) {
+		if closingFence(codeLine, fence, indent) {
 			p.lineIdx++
 			break
 		}
@@ -725,13 +731,14 @@ func (p *parser) renderBlockquoteContent(lines []string, indent string, availabl
 
 		// Check for fenced code block start
 		if fence, lang := openingFence(trimmed); fence != "" {
+			fenceIndent := indentationWidth(line[:len(line)-len(strings.TrimLeft(line, " \t"))])
 			i++
 
 			// Collect code lines until fence end
 			var codeLines []string
 			for i < len(lines) {
 				codeLine := lines[i]
-				if closingFence(codeLine, fence) {
+				if closingFence(codeLine, fence, fenceIndent) {
 					i++
 					break
 				}
@@ -1314,7 +1321,7 @@ func (p *parser) tryList(line string) bool {
 	}
 
 	// Track the current list item's bullet width for continuation content (code blocks)
-	var currentBulletWidth int
+	var currentBulletWidth, currentSourceWidth int
 
 	for p.lineIdx < len(p.lines) {
 		l := p.lines[p.lineIdx]
@@ -1328,7 +1335,7 @@ func (p *parser) tryList(line string) bool {
 			// This is a code block - check if it's indented (part of list)
 			if lindent > 0 || currentBulletWidth > 0 {
 				// Render the code block with list indentation
-				p.renderListCodeBlock(lindent, currentBulletWidth)
+				p.renderListCodeBlock(lindent, currentBulletWidth, currentSourceWidth)
 				continue
 			}
 			// Not indented, break out of list
@@ -1389,6 +1396,11 @@ func (p *parser) tryList(line string) bool {
 
 		// Store current list item's bullet width for code blocks
 		currentBulletWidth = bulletWidth
+		markerWidth := 2
+		if item.ordered {
+			markerWidth = strings.Index(ltrimmed, ".") + 2
+		}
+		currentSourceWidth = indentationWidth(l[:lindent]) + markerWidth
 
 		rendered := p.renderInline(item.content)
 		wrapped := p.wrapText(rendered, contentWidth)
@@ -1497,7 +1509,7 @@ func (p *parser) tryFootnoteDefinition(line string) bool {
 }
 
 // renderListCodeBlock renders a fenced code block within a list context
-func (p *parser) renderListCodeBlock(codeIndent, bulletWidth int) {
+func (p *parser) renderListCodeBlock(codeIndent, bulletWidth, sourceWidth int) {
 	// Add spacing before code block
 	p.out.WriteString("\n")
 
@@ -1512,7 +1524,8 @@ func (p *parser) renderListCodeBlock(codeIndent, bulletWidth int) {
 	var codeLines []string
 	for p.lineIdx < len(p.lines) {
 		codeLine := p.lines[p.lineIdx]
-		if closingFence(codeLine, fence) {
+		containerWidth := min(sourceWidth, codeIndent)
+		if closingFence(removeIndentation(codeLine, containerWidth), fence, codeIndent-containerWidth) {
 			p.lineIdx++
 			break
 		}

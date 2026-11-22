@@ -311,7 +311,8 @@ func stableBoundary(input string) int {
 		if input[i-1] != '\n' {
 			continue
 		}
-		if inFenceAt(inFence, k) {
+		// A fence may belong to a list, which adds its own trailing spacing.
+		if inFenceAt(inFence, k) || inFenceAt(inFence, k-1) {
 			continue
 		}
 		boundary := i + 1
@@ -379,6 +380,7 @@ func classifyListLikeLines(input string, inFence []bool) []bool {
 func classifyFenceLines(input string) []bool {
 	var lines []bool
 	openFence := ""
+	listWidth, fenceListWidth, fenceIndent := 0, 0, 0
 	lineStart := 0
 	for i := 0; i <= len(input); i++ {
 		if i < len(input) && input[i] != '\n' {
@@ -389,13 +391,26 @@ func classifyFenceLines(input string) []bool {
 		switch {
 		case openFence != "":
 			lines = append(lines, true)
-			if closingFence(trimmed, openFence) {
+			if closingFence(removeIndentation(line, fenceListWidth), openFence, fenceIndent) {
 				openFence = ""
 			}
 		default:
 			fence, _ := openingFence(trimmed)
 			lines = append(lines, fence != "")
 			openFence = fence
+			if fence != "" {
+				indent := indentationWidth(line[:len(line)-len(trimmed)])
+				fenceListWidth = min(listWidth, indent)
+				fenceIndent = indent - fenceListWidth
+			} else if item, ok := parseListItem(trimmed); ok {
+				markerWidth := 2
+				if item.ordered {
+					markerWidth = strings.Index(trimmed, ".") + 2
+				}
+				listWidth = indentationWidth(line[:len(line)-len(trimmed)]) + markerWidth
+			} else if trimmed != "" && len(line) == len(trimmed) {
+				listWidth = 0
+			}
 		}
 		lineStart = i + 1
 	}

@@ -32,6 +32,36 @@ func runCopyCommand(cmd tea.Cmd) {
 	}
 }
 
+func TestElicitationCopyFromRootViewAfterScrollAndResize(t *testing.T) {
+	m, _, _ := wallClockRoot(t, 100, 30)
+	var copied string
+	restore := messagecomponents.SetClipboardWriterForTest(func(s string) error { copied = s; return nil })
+	defer restore()
+
+	message := strings.Repeat("A paragraph.\n\n", 30) + "```\nexact command\n```"
+	d := dialog.NewElicitationDialog(message, nil, nil)
+	_, _ = m.Update(dialog.OpenDialogMsg{Model: d})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 95, Height: 28})
+	_ = m.View()
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	view := ansi.Strip(m.View().Content)
+	var click tea.MouseClickMsg
+	found := false
+	for y, line := range strings.Split(view, "\n") {
+		before, _, ok := strings.Cut(line, markdown.CodeBlockCopyIcon)
+		if ok {
+			require.False(t, found, "expected a unique copy label")
+			click = tea.MouseClickMsg{X: ansi.StringWidth(before), Y: y, Button: tea.MouseLeft}
+			found = true
+		}
+	}
+	require.True(t, found, "copy label not visible in root view")
+	_, cmd := m.Update(click)
+	require.NotNil(t, cmd)
+	runCopyCommand(cmd)
+	assert.Equal(t, "exact command", copied)
+}
+
 func TestBackgroundElicitationCopyOverTabBar(t *testing.T) {
 	m, _, _ := wallClockRoot(t, 80, 30)
 	m.tabBar.SetTabs([]messages.TabInfo{{SessionID: "one", Title: "One"}, {SessionID: "two", Title: "Two"}}, 0)

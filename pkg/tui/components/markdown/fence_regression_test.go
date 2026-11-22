@@ -18,6 +18,10 @@ func TestClosingFenceRequiresContiguousCharacters(t *testing.T) {
 	}{
 		{"~~~", "~~~", true},
 		{"  ~~~~~ \t", "~~~", true},
+		{"   ~~~", "~~~", true},
+		{"    ~~~", "~~~", false},
+		{"\t~~~", "~~~", false},
+		{" \t```", "```", false},
 		{"~~", "~~~", false},
 		{"~~~ ~~~", "~~~", false},
 		{"~~~\t~", "~~~", false},
@@ -25,7 +29,7 @@ func TestClosingFenceRequiresContiguousCharacters(t *testing.T) {
 		{"```` \t", "```", true},
 		{"``` `", "```", false},
 	} {
-		assert.Equal(t, tc.want, closingFence(tc.line, tc.fence), "%q", tc.line)
+		assert.Equal(t, tc.want, closingFence(tc.line, tc.fence, 0), "%q", tc.line)
 	}
 }
 
@@ -37,6 +41,16 @@ func TestFenceCopyRegression(t *testing.T) {
 		{"separated fence", "~~~\none\n~~~ ~~~\ntwo\n~~~~", "one\n~~~ ~~~\ntwo"},
 		{"separated quote fence", "> ~~~\n> one\n> ~~~ ~~~\n> two\n> ~~~~", "one\n~~~ ~~~\ntwo"},
 		{"separated list fence", "- step\n  ```\n  one\n  ``` `\n  two\n  ````", "one\n``` `\ntwo"},
+		{"indented fence", "~~~\nfirst\n    ~~~\nsecond\n~~~", "first\n    ~~~\nsecond"},
+		{"tab fence", "```\nfirst\n\t```\nsecond\n```", "first\n\t```\nsecond"},
+		{"indented quote fence", "> ~~~\n> first\n>     ~~~\n> second\n> ~~~", "first\n    ~~~\nsecond"},
+		{"indented list fence", "- step\n  ~~~\n  first\n      ~~~\n  second\n  ~~~", "first\n    ~~~\nsecond"},
+		{"ordered list fence", "123. step\n     ~~~\n     first\n         ~~~\n     second\n     ~~~", "first\n    ~~~\nsecond"},
+		{"list fence with extra opener indent", "- step\n     ~~~\n     first\n      ~~~\n     second\n  ~~~", "first\n ~~~\nsecond"},
+		{"list quote fence", "- step\n  > ~~~\n  > first\n  >     ~~~\n  > second\n  > ~~~", "first\n    ~~~\nsecond"},
+		{"deep top-level opener", "    ~~~\n    first\n     ~~~\n    second\n    ~~~\n\nafter", "    first\n     ~~~\n    second"},
+		{"deep quote opener", ">     ~~~\n>     first\n>      ~~~\n>     second\n>     ~~~\n>\n> after", "    first\n     ~~~\n    second"},
+		{"deep list opener", "- step\n      ~~~\n      first\n       ~~~\n      second\n      ~~~\n\nafter", "first\n ~~~\nsecond"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			view, blocks, err := NewFastRenderer(60).RenderWithSourceCodeBlocks(tc.input)
@@ -55,6 +69,10 @@ func TestUnicodeFenceIncrementalMatchesFullRender(t *testing.T) {
 		"intro\n\u00a0~~~\ninside\n~~~\n\nafter",
 		"intro\n\n\u2003````\none\n``` `\n\ntwo\n````\n\nafter",
 		"\u00a0~~~\none\n\ntwo\n~~~\n\nafter",
+		"~~~\nfirst\n    ~~~\n\nsecond\n~~~\n\nafter",
+		"- step\n  ~~~\n  first\n      ~~~\n\n  second\n  ~~~\n\nafter",
+		"    ~~~\n    first\n     ~~~\n\n    second\n    ~~~\n\nafter",
+		"- step\n      ~~~\n      first\n       ~~~\n\n      second\n      ~~~\n\nafter",
 	} {
 		r := NewIncrementalRenderer(60)
 		for end := range len(input) + 1 {
