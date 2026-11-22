@@ -162,7 +162,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, nil
 
 	case *runtime.AgentInfoEvent:
-		sidebarCmd := p.sidebar.SetAgentInfo(msg.AgentName, msg.Model, msg.Description, msg.ContextLimit, msg.CompactionModel, msg.PrimaryContextLimit)
+		sidebarCmd := p.forwardToSidebar(msg)
 		if msg.WelcomeMessage != "" {
 			p.showStartupBanner = false
 		}
@@ -176,7 +176,16 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	case *runtime.AgentSwitchingEvent:
 		return true, p.handleAgentSwitching(msg)
 
+	case *runtime.RoutingDecisionEvent:
+		if p.routeCancelled() {
+			return true, nil
+		}
+		return true, p.messages.AddRoutingDecision(msg.Decision)
+
 	case *runtime.AgentRouteEvent:
+		if p.routeCancelled() {
+			return true, nil
+		}
 		return true, notification.InfoCmd(routeSummary(msg))
 
 	case *runtime.ToolsetInfoEvent:
@@ -641,6 +650,12 @@ func isSuccessfulStop(reason string) bool {
 	default:
 		return false
 	}
+}
+
+// Entry routes can arrive after a replacement has been accepted (msgCancel set)
+// but before its StreamStarted clears the previous stream's cancellation flag.
+func (p *chatPage) routeCancelled() bool {
+	return p.streamCancelled && p.msgCancel == nil
 }
 
 // routeSummary is the one-line, task-free description of a routing transition.

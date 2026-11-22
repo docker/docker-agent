@@ -240,7 +240,8 @@ func TestSkillDelegatesKeepLocalHandoffs(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, rt.Close()) })
 			parent := session.New(session.WithUserMessage("run"), session.WithToolsApproved(true))
-			result, err := rt.RunSkillFork(t.Context(), parent, skillstool.RunSkillArgs{Name: "test"}, NewChannelSink(make(chan Event, 512)))
+			var events []Event
+			result, err := rt.RunSkillFork(t.Context(), parent, skillstool.RunSkillArgs{Name: "test"}, EventSinkFunc(func(e Event) { events = append(events, e) }))
 			require.NoError(t, err)
 			assert.Equal(t, "root finished", result.Output)
 			assert.Equal(t, 1, targetModel.handoffCallCount())
@@ -251,6 +252,14 @@ func TestSkillDelegatesKeepLocalHandoffs(t *testing.T) {
 			require.NotNil(t, nested)
 			assert.True(t, nested.AllowsAgentHandoffs())
 			assert.Equal(t, "target", nested.HandoffAgent())
+			emitted := routingDecisionEvents(events)
+			if forced {
+				require.Len(t, emitted, 1)
+				assert.Equal(t, nested.ID, emitted[0].SessionID)
+				assert.Equal(t, []*session.RoutingDecision{emitted[0].Decision}, nested.RoutingDecisionHistory())
+			} else {
+				assert.Empty(t, emitted, "the explicit handoff already has a tool card")
+			}
 		})
 	}
 }

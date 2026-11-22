@@ -333,7 +333,7 @@ func TestReasoningBlockHeaderFooterLineDetection(t *testing.T) {
 	assert.False(t, block.IsToggleLine(1)) // Body line
 }
 
-func TestReasoningBlockAgentBadge(t *testing.T) {
+func TestReasoningBlockHasNoAgentBadge(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
@@ -344,25 +344,56 @@ func TestReasoningBlockAgentBadge(t *testing.T) {
 	// otherwise IsToggleLine would be false everywhere and prove nothing.
 	block.SetExpanded(true)
 
-	// Badge is off by default: the header sits on line 0 and toggles there.
-	assert.NotContains(t, ansi.Strip(block.View()), "developer")
+	// Reasoning is part of an ordinary reply: no agent badge, and the
+	// Thinking header sits on line 0 for rendering and hit-testing.
+	stripped := ansi.Strip(block.View())
+	assert.NotContains(t, stripped, "developer")
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(stripped), "Thinking"))
 	assert.True(t, block.IsHeaderLine(0))
 	assert.True(t, block.IsToggleLine(0))
+}
 
-	block.SetShowAgentBadge(true)
-	stripped := ansi.Strip(block.View())
-	badgeIdx := strings.Index(stripped, "developer")
-	thinkingIdx := strings.Index(stripped, "Thinking")
-	require.GreaterOrEqual(t, badgeIdx, 0, "badge should be rendered")
-	require.GreaterOrEqual(t, thinkingIdx, 0)
-	assert.Less(t, badgeIdx, thinkingIdx, "badge should render before the Thinking header")
+func TestReasoningBlockCollapsedFadesRejectedHandoff(t *testing.T) {
+	t.Parallel()
 
-	// The badge and its blank separator shift the header down by two lines,
-	// for hit-testing as well as rendering.
-	assert.False(t, block.IsHeaderLine(0))
-	assert.False(t, block.IsToggleLine(0))
-	assert.True(t, block.IsHeaderLine(2))
-	assert.True(t, block.IsToggleLine(2))
+	fakeNow := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	block := New(animation.NewRuntime(), "test-handoff", "root", &service.SessionState{}, WithToolRenderers(defaults.NewRegistry()))
+	block.now = func() time.Time { return fakeNow }
+	block.SetSize(80, 24)
+	block.SetExpanded(false)
+	block.SetReasoning("Considering a handoff.")
+
+	for _, tc := range []struct{ id, tool string }{{"rejected", "handoff"}, {"successful", "handoff"}, {"transfer", "transfer_task"}} {
+		block.AddToolCall(types.ToolCallMessage("root", tools.ToolCall{
+			ID:       tc.id,
+			Function: tools.FunctionCall{Name: tc.tool, Arguments: `{"agent":"developer","task":"help"}`},
+		}, tools.Tool{Name: tc.tool}, types.ToolStatusRunning))
+	}
+
+	const failure = "Target agent not in handoffs list."
+	const boundary = "root ─► developer"
+	block.UpdateToolResult("rejected", failure, types.ToolStatusError, tools.ResultError(failure))
+	out := strings.Join(strings.Fields(ansi.Strip(block.View())), " ")
+	assert.Contains(t, out, failure, "tool errors get a grace period")
+	assert.True(t, block.NeedsTick())
+	block.UpdateToolResult("successful", "done", types.ToolStatusCompleted, tools.ResultSuccess("done"))
+	block.UpdateToolResult("transfer", "done", types.ToolStatusCompleted, tools.ResultSuccess("done"))
+
+	fakeNow = fakeNow.Add(completedToolVisibleDuration + completedToolFadeDuration/2)
+	block.Update(animation.TickMsg{})
+	assert.InDelta(t, 0.5, block.GetToolFadeProgress("rejected"), 0.001)
+	assert.InDelta(t, 0.0, block.GetToolFadeProgress("successful"), 0.001)
+
+	fakeNow = fakeNow.Add(completedToolFadeDuration)
+	block.Update(animation.TickMsg{})
+	out = strings.Join(strings.Fields(ansi.Strip(block.View())), " ")
+	assert.NotContains(t, out, failure)
+	assert.Equal(t, 1, strings.Count(out, boundary), "only the successful handoff stays pinned")
+	assert.Contains(t, out, "root calls developer")
+	assert.False(t, block.NeedsTick())
+
+	block.SetExpanded(true)
+	assert.Contains(t, strings.Join(strings.Fields(ansi.Strip(block.View())), " "), failure, "the error is still available when expanded")
 }
 
 func TestReasoningBlockMultipleToolCalls(t *testing.T) {

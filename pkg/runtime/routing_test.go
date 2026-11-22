@@ -712,12 +712,15 @@ func TestRouting_UserMessageEventKeepsTheUserPosition(t *testing.T) {
 	sess := session.New(session.WithUserMessage("Diagnose this deadlock"), session.WithNonInteractive(true))
 	events := runRouted(t, f.rt, sess)
 
-	require.NotEmpty(t, routeEvents(events), "the conversation must have been routed")
-	var positions []int
+	routes := routeEvents(events)
+	require.NotEmpty(t, routes)
+	var prompts []*UserMessageEvent
 	for _, ev := range events {
 		if ue, ok := ev.(*UserMessageEvent); ok {
-			positions = append(positions, ue.SessionPosition)
+			prompts = append(prompts, ue)
 		}
 	}
-	assert.Equal(t, []int{0}, positions, "routing items appended before the event must not shift the user's position")
+	require.Len(t, prompts, 1)
+	assert.Equal(t, 0, prompts[0].SessionPosition)
+	assert.Less(t, slices.Index(events, Event(prompts[0])), slices.Index(events, Event(routes[0])))
 }

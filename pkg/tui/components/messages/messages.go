@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"encoding/json"
 	"slices"
 	"sort"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
+	handoff "github.com/docker/docker-agent/pkg/tools/builtin/handoff/types"
 	transfertask "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
@@ -112,6 +114,7 @@ type Model interface {
 	// delegation transition. It is never persisted, so it does not reappear
 	// when the session is reloaded.
 	AddAgentReturn(fromAgent, toAgent string) tea.Cmd
+	AddRoutingDecision(decision *session.RoutingDecision) tea.Cmd
 	// LoadFromSession rebuilds the list from a persisted session.
 	// generatedMedia carries the restored generated-media items to attach,
 	// keyed by the owning message's index in sess.Messages; nil when the
@@ -1760,20 +1763,40 @@ func (m *model) AddShellOutputMessage(content string) tea.Cmd {
 	return m.addMessage(types.ShellOutput(content))
 }
 
-// AddAgentReturn appends the delegation-return transition. A pending-response
-// spinner pinned at the tail is re-added (with its label) after the
-// transition so the "spinner is always last" invariant — relied on by
-// RemoveSpinner — keeps holding.
 func (m *model) AddAgentReturn(fromAgent, toAgent string) tea.Cmd {
 	if fromAgent == "" || toAgent == "" {
 		return nil
 	}
+	return m.addBeforePendingSpinner(types.AgentReturn(fromAgent, toAgent))
+}
+
+func (m *model) AddRoutingDecision(decision *session.RoutingDecision) tea.Cmd {
+	if msg := handoffMessage(decision); msg != nil {
+		return m.addBeforePendingSpinner(msg)
+	}
+	return nil
+}
+
+func handoffMessage(d *session.RoutingDecision) *types.Message {
+	if d == nil || d.FromAgent == "" || d.ToAgent == "" || d.FromAgent == d.ToAgent {
+		return nil
+	}
+	args, _ := json.Marshal(handoff.Args{Agent: d.ToAgent})
+	call := tools.ToolCall{
+		ID:       "route:" + d.ID,
+		Function: tools.FunctionCall{Name: handoff.ToolNameHandoff, Arguments: string(args)},
+	}
+	return types.ToolCallMessage(d.FromAgent, call, tools.Tool{Name: handoff.ToolNameHandoff}, types.ToolStatusCompleted)
+}
+
+// Keep any pending-response spinner at the tail, where RemoveSpinner expects it.
+func (m *model) addBeforePendingSpinner(msg *types.Message) tea.Cmd {
 	var trailingSpinner *types.Message
 	if last := m.lastMessage(); last != nil && last.Type == types.MessageTypeSpinner {
 		trailingSpinner = last
 		m.removeSpinner()
 	}
-	cmds := []tea.Cmd{m.addMessage(types.AgentReturn(fromAgent, toAgent))}
+	cmds := []tea.Cmd{m.addMessage(msg)}
 	if trailingSpinner != nil {
 		cmds = append(cmds, m.addMessage(types.SpinnerLabeled(trailingSpinner.Sender, trailingSpinner.Content)))
 	}
@@ -1859,7 +1882,6 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 
 		// Create new reasoning block
 		block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, reasoningblock.WithToolRenderers(m.toolRenderers))
-		block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 		block.SetSize(m.contentWidth(), 0)
 
 		blockMsg := &types.Message{
@@ -1888,10 +1910,8 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 	m.StopAnimations()
 	m.messages = nil
 	m.views = nil
-	m.renderedItems.Clear()
-	m.renderedLines = nil
+	m.invalidateAllItems()
 	m.scrollOffset = 0
-	m.totalHeight = 0
 	m.bottomSlack = 0
 	m.selectedMessageIndex = -1
 	m.hoveredMessageIndex = -1
@@ -1916,6 +1936,10 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 	}
 
 	for pos, item := range sess.Messages {
+		if msg := handoffMessage(item.RoutingDecision); msg != nil {
+			appendSessionMessage(msg, m.createToolCallView(msg))
+			continue
+		}
 		if item.IsError() {
 			errMsg := types.Error(item.Error.Message)
 			appendSessionMessage(errMsg, m.createMessageView(errMsg))
@@ -1975,6 +1999,9 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 					var toolDef tools.Tool
 					if i < len(smsg.Message.ToolDefinitions) {
 						toolDef = smsg.Message.ToolDefinitions[i]
+					}
+					if toolDef.Name == "" && tc.Function.Name == handoff.ToolNameHandoff {
+						toolDef.Name = tc.Function.Name
 					}
 
 					if attachToReasoning {
@@ -2278,27 +2305,6 @@ func (m *model) lastMessage() *types.Message {
 	return m.messages[len(m.messages)-1]
 }
 
-// showReasoningAgentBadge reports whether a new reasoning block for agentName
-// should render its agent badge. Mirrors message.sameAgentAsPrevious: the
-// badge is hidden only when the block visually continues content from the
-// same agent (assistant text, reasoning, or tool activity). In particular, a
-// transfer_task tool call is sent by the parent agent, so reasoning from the
-// sub-agent that follows it shows the sub-agent's badge.
-func showReasoningAgentBadge(previous *types.Message, agentName string) bool {
-	if previous == nil || previous.Sender != agentName {
-		return true
-	}
-	switch previous.Type {
-	case types.MessageTypeAssistant,
-		types.MessageTypeAssistantReasoningBlock,
-		types.MessageTypeToolCall,
-		types.MessageTypeToolResult:
-		return false
-	default:
-		return true
-	}
-}
-
 // addReasoningBlock creates a new reasoning block message.
 //
 // Reasoning blocks routinely interleave with an actively streaming assistant
@@ -2319,7 +2325,6 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	}
 
 	block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, reasoningblock.WithToolRenderers(m.toolRenderers))
-	block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 	block.SetReasoning(content)
 	block.SetSize(m.contentWidth(), 0)
 
@@ -2391,7 +2396,10 @@ func (m *model) createToolCallView(msg *types.Message) layout.Model {
 }
 
 func (m *model) createMessageView(msg *types.Message) layout.Model {
-	view := message.New(m.ar, msg, m.sessionState.PreviousMessage())
+	if msg.Type == types.MessageTypeToolCall {
+		return m.createToolCallView(msg)
+	}
+	view := message.New(m.ar, msg)
 	view.SetSize(m.contentWidth(), 0)
 	return view
 }

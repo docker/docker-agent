@@ -50,7 +50,7 @@ func TestCancelledStreamEveryUTF8MarkdownBoundaryMatchesOneShot(t *testing.T) {
 			beforeRendered := m.views[len(m.views)-1].View()
 			beforeBlocks := m.views[len(m.views)-1].(messagecomponent.Model).CodeBlocks()
 
-			expected := messagecomponent.New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", prefix), nil)
+			expected := messagecomponent.New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", prefix))
 			expected.SetSize(m.contentWidth(), 0)
 			expectedRendered := expected.View()
 			expectedBlocks := expected.CodeBlocks()

@@ -1403,6 +1403,10 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		m.stopSpinner() // Will only stop if no other state needs it
 		return m, nil
 	case *runtime.AgentInfoEvent:
+		if msg.SessionID != "" && msg.SessionID == m.activeSessionID() && m.workingAgent != "" && msg.AgentName != m.workingAgent {
+			m.workingAgent = msg.AgentName
+			m.invalidateCache()
+		}
 		cmd := m.SetAgentInfo(msg.AgentName, msg.Model, msg.Description, msg.ContextLimit, msg.CompactionModel, msg.PrimaryContextLimit)
 		return m, cmd
 	case *runtime.TeamInfoEvent:

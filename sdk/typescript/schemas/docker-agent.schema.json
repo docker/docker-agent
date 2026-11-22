@@ -551,6 +551,9 @@
           "type": "string",
           "format": "date-time"
         },
+        "session_id": {
+          "type": "string"
+        },
         "type": {
           "const": "agent_info"
         },

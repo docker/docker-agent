@@ -432,6 +432,10 @@ func clearTimestamps(event Event) {
 	}
 }
 
+func mockTurnInfo(sessionID string) *AgentInfoEvent {
+	return &AgentInfoEvent{Type: "agent_info", SessionID: sessionID, AgentName: "root", Model: "test/mock-model", AgentContext: newAgentContext("root")}
+}
+
 func TestSimple(t *testing.T) {
 	t.Parallel()
 
@@ -458,7 +462,7 @@ func TestSimple(t *testing.T) {
 		UserMessage("Hi", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
 		ToolsetInfo(0, false, "root"),
-		AgentInfo("root", "test/mock-model", "", ""),
+		mockTurnInfo(sess.ID),
 		AgentChoice("root", sess.ID, "Hello"),
 		MessageAdded(sess.ID, msgAdded.Message, "root"),
 		NewTokenUsageEvent(sess.ID, "root", &Usage{InputTokens: 3, OutputTokens: 2, ContextLength: 5, LastMessage: &MessageUsage{
@@ -500,7 +504,7 @@ func TestMultipleContentChunks(t *testing.T) {
 		UserMessage("Please greet me", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
 		ToolsetInfo(0, false, "root"),
-		AgentInfo("root", "test/mock-model", "", ""),
+		mockTurnInfo(sess.ID),
 		AgentChoice("root", sess.ID, "Hello "),
 		AgentChoice("root", sess.ID, "there, "),
 		AgentChoice("root", sess.ID, "how "),
@@ -544,7 +548,7 @@ func TestWithReasoning(t *testing.T) {
 		UserMessage("Hi", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
 		ToolsetInfo(0, false, "root"),
-		AgentInfo("root", "test/mock-model", "", ""),
+		mockTurnInfo(sess.ID),
 		AgentChoiceReasoning("root", sess.ID, "Let me think about this..."),
 		AgentChoiceReasoning("root", sess.ID, " I should respond politely."),
 		AgentChoice("root", sess.ID, "Hello, how can I help you?"),
@@ -587,7 +591,7 @@ func TestMixedContentAndReasoning(t *testing.T) {
 		UserMessage("Hi there", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
 		ToolsetInfo(0, false, "root"),
-		AgentInfo("root", "test/mock-model", "", ""),
+		mockTurnInfo(sess.ID),
 		AgentChoiceReasoning("root", sess.ID, "The user wants a greeting"),
 		AgentChoice("root", sess.ID, "Hello!"),
 		AgentChoiceReasoning("root", sess.ID, " I should be friendly"),

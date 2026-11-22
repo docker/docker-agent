@@ -17,12 +17,13 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 
 func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
 	params, err := toolcommon.ParseArgs[handoff.Args](msg.ToolCall.Function.Arguments)
-	if err != nil || params.Agent == "" {
-		hideResults := false
-		if sessionState != nil {
-			hideResults = sessionState.HideToolResults()
+	if msg.ToolStatus == types.ToolStatusError || err != nil || params.Agent == "" {
+		var result string
+		if msg.ToolStatus == types.ToolStatusError {
+			result = toolcommon.FormatToolResult(msg.Content, width)
 		}
-		return toolcommon.RenderTool(msg, s, "", "", width, hideResults)
+		hideResults := sessionState != nil && sessionState.HideToolResults()
+		return toolcommon.RenderTool(msg, s, "", result, width, hideResults)
 	}
 
 	return styles.AgentBadgeStyleFor(msg.Sender).MarginLeft(2).Render(msg.Sender) + " ─► " + styles.AgentBadgeStyleFor(params.Agent).Render(params.Agent)
