@@ -1307,6 +1307,19 @@ func parseListItem(line string) (listItem, bool) {
 	return listItem{}, false
 }
 
+// listSourceWidth counts the source columns through the marker's whitespace.
+// The caller has already recognized the line as a list item.
+func listSourceWidth(line string) int {
+	trimmed := strings.TrimLeft(line, " \t")
+	markerEnd := 1
+	if trimmed[0] != '-' && trimmed[0] != '*' && trimmed[0] != '+' {
+		markerEnd = strings.IndexByte(trimmed, '.') + 1
+	}
+	afterMarker := trimmed[markerEnd:]
+	whitespace := len(afterMarker) - len(strings.TrimLeft(afterMarker, " \t"))
+	return indentationWidth(line[:len(line)-len(trimmed)+markerEnd+whitespace])
+}
+
 // isListStart checks if a line starts a list item
 func isListStart(line string) bool {
 	_, ok := parseListItem(line)
@@ -1396,11 +1409,7 @@ func (p *parser) tryList(line string) bool {
 
 		// Store current list item's bullet width for code blocks
 		currentBulletWidth = bulletWidth
-		markerWidth := 2
-		if item.ordered {
-			markerWidth = strings.Index(ltrimmed, ".") + 2
-		}
-		currentSourceWidth = indentationWidth(l[:lindent]) + markerWidth
+		currentSourceWidth = listSourceWidth(l)
 
 		rendered := p.renderInline(item.content)
 		wrapped := p.wrapText(rendered, contentWidth)
