@@ -142,8 +142,7 @@ func TestQueueFullKeepsFinalEvents(t *testing.T) {
 	t.Parallel()
 
 	release := make(chan struct{})
-	var mu sync.Mutex
-	var kinds []string
+	received := make(chan string, 32)
 	webhook := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		<-release
 		var sr a2a.StreamResponse
@@ -154,9 +153,7 @@ func TestQueueFullKeepsFinalEvents(t *testing.T) {
 		if ev, ok := sr.Event.(*a2a.TaskStatusUpdateEvent); ok {
 			kind = string(ev.Status.State)
 		}
-		mu.Lock()
-		kinds = append(kinds, kind)
-		mu.Unlock()
+		received <- kind
 	}))
 	t.Cleanup(webhook.Close)
 
@@ -172,7 +169,12 @@ func TestQueueFullKeepsFinalEvents(t *testing.T) {
 	}
 	close(release)
 	closeSender(t, s)
+	close(received)
 
+	var kinds []string
+	for k := range received {
+		kinds = append(kinds, k)
+	}
 	assert.Contains(t, logs.String(), "queue full")
 	require.GreaterOrEqual(t, len(kinds), 3)
 	assert.Equal(t, []string{

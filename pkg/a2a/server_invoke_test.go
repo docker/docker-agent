@@ -383,9 +383,6 @@ func TestServer_InFlightTaskFailedAfterRestart(t *testing.T) {
 		t.Fatal("tool never started")
 	}
 	require.NoError(t, server1.Server.Close())
-	for len(received) > 0 {
-		<-received
-	}
 
 	// Restarted process.
 	store2 := openStore()
