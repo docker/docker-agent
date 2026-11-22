@@ -26,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/a2a/pushsender"
 	dagent "github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/servesafety"
@@ -319,10 +320,20 @@ func TestServer_PushConfigSurvivesRestart(t *testing.T) {
 	assert.Equal(t, a2a.TaskStateCompleted, restored.Status.State)
 }
 
-// A task still running when the server dies must not stay working forever:
-// the restarted server fails it and tells the webhook registered for it.
-func TestServer_InFlightTaskFailedAfterRestart(t *testing.T) {
-	t.Parallel()
+// liveTask is a task left working on a server backed by an a2astore.Store.
+type liveTask struct {
+	task     *a2a.Task
+	server   *echo.Echo
+	endpoint string
+	store    *a2astore.Store
+	received chan a2a.Event
+	unblock  func()
+}
+
+// startLiveTask opens the store in dir, serves it and leaves a task working
+// behind a blocking tool, with a webhook registered for it.
+func startLiveTask(t *testing.T, dir string) *liveTask {
+	t.Helper()
 
 	received := make(chan a2a.Event, 16)
 	webhook := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -335,7 +346,8 @@ func TestServer_InFlightTaskFailedAfterRestart(t *testing.T) {
 
 	running := make(chan struct{})
 	unblock := make(chan struct{})
-	t.Cleanup(func() { close(unblock) })
+	release := sync.OnceFunc(func() { close(unblock) })
+	t.Cleanup(release)
 	tool := tools.Tool{
 		Name:       "long_job",
 		Parameters: map[string]any{},
@@ -353,21 +365,13 @@ func TestServer_InFlightTaskFailedAfterRestart(t *testing.T) {
 		streams: []chat.MessageStream{toolCallStream(tool.Name), stopStream()},
 	}), dagent.WithTools(tool))
 
-	dir := a2astore.DirFor(filepath.Join(t.TempDir(), "session.db"))
-	openStore := func() *a2astore.Store {
-		store, err := a2astore.New(t.Context(), dir)
-		require.NoError(t, err)
-		t.Cleanup(func() { require.NoError(t, store.Close()) })
-		return store
-	}
-
-	// First process: leave the task working. Its store stays open, as after a crash.
-	store1 := openStore()
-	deps1 := newTestTaskDeps(t)
-	deps1.tasks = store1.Tasks(a2asrv.NewTaskStoreAuthenticator())
-	deps1.pushConfigs = store1
-	server1, endpoint1 := serveTeam(t, team.New(team.WithAgents(root)), deps1)
-	result, err := newA2AClient(t, endpoint1).SendMessage(t.Context(), &a2a.SendMessageRequest{
+	store, err := a2astore.New(t.Context(), dir)
+	require.NoError(t, err)
+	deps := newTestTaskDeps(t)
+	deps.tasks = store.Tasks(a2asrv.NewTaskStoreAuthenticator())
+	deps.pushConfigs = store
+	server, endpoint := serveTeam(t, team.New(team.WithAgents(root)), deps)
+	result, err := newA2AClient(t, endpoint).SendMessage(t.Context(), &a2a.SendMessageRequest{
 		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("run the long job")),
 		Config: &a2a.SendMessageConfig{
 			ReturnImmediately: true,
@@ -382,31 +386,86 @@ func TestServer_InFlightTaskFailedAfterRestart(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("tool never started")
 	}
-	require.NoError(t, server1.Server.Close())
+	return &liveTask{task: task, server: server, endpoint: endpoint, store: store, received: received, unblock: release}
+}
 
-	// Restarted process.
-	store2 := openStore()
+// waitPushState waits for the webhook to receive state.
+func waitPushState(t *testing.T, received <-chan a2a.Event, state a2a.TaskState) {
+	t.Helper()
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case ev := <-received:
+			if pushState(ev) == state {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("webhook never received %s", state)
+		}
+	}
+}
+
+// A task still running when the server dies must not stay working forever:
+// the restarted server fails it and tells the webhook registered for it.
+func TestServer_InFlightTaskFailedAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	dir := a2astore.DirFor(filepath.Join(t.TempDir(), "session.db"))
+	live := startLiveTask(t, dir)
+	// The process dies: the OS releases its store lock.
+	require.NoError(t, live.server.Server.Close())
+	require.NoError(t, live.store.Close())
+
+	store2, err := a2astore.New(t.Context(), dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store2.Close()) })
 	deps2 := newTestTaskDeps(t)
 	deps2.tasks = store2.Tasks(a2asrv.NewTaskStoreAuthenticator())
 	deps2.pushConfigs = store2
 	require.NoError(t, recoverInterruptedTasks(t.Context(), store2, deps2.pushSender))
 	_, endpoint2 := serveA2A(t, deps2)
 
-	got, err := newA2AClient(t, endpoint2).GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
+	got, err := newA2AClient(t, endpoint2).GetTask(t.Context(), &a2a.GetTaskRequest{ID: live.task.ID})
 	require.NoError(t, err)
 	assert.Equal(t, a2a.TaskStateFailed, got.Status.State)
+	waitPushState(t, live.received, a2a.TaskStateFailed)
+}
 
-	timeout := time.After(10 * time.Second)
-	for {
-		select {
-		case ev := <-received:
-			if pushState(ev) == a2a.TaskStateFailed {
-				return
-			}
-		case <-timeout:
-			t.Fatal("webhook never told the task failed")
-		}
+// A second server on the same session DB must not recover, and so fail, the
+// tasks a live server is running.
+func TestRun_SecondServerOnSameSessionDBLeavesLiveTasks(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "DUMMY")
+
+	sessionDB := filepath.Join(t.TempDir(), "session.db")
+	live := startLiveTask(t, a2astore.DirFor(sessionDB))
+	t.Cleanup(func() { require.NoError(t, live.store.Close()) })
+
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, "testdata/basic.yaml", "root", sessionDB, &config.RuntimeConfig{}, ln, RunOptions{PushAllowPrivateNetworks: true})
+	}()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, a2astore.ErrInUse)
+	case <-time.After(10 * time.Second):
+		cancel()
+		require.NoError(t, <-done)
+		t.Fatal("second server started on a store in use")
 	}
+
+	got, err := newA2AClient(t, live.endpoint).GetTask(t.Context(), &a2a.GetTaskRequest{ID: live.task.ID})
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateWorking, got.Status.State)
+
+	live.unblock()
+	waitPushState(t, live.received, a2a.TaskStateCompleted)
+	got, err = newA2AClient(t, live.endpoint).GetTask(t.Context(), &a2a.GetTaskRequest{ID: live.task.ID})
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateCompleted, got.Status.State)
 }
 
 func TestServer_TaskStoreScopedToSessionDB(t *testing.T) {

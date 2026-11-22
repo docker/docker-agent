@@ -101,7 +101,9 @@ to the session database, and survive a restart. Webhook tokens and credentials
 are stored in plaintext, so the directory is private to the user running the
 server (mode `0700` on Unix, an owner-only ACL on Windows). Each session
 database has its own directory, so servers using different `--session-db`
-files never share tasks.
+files never share tasks. A server holds an exclusive lock on that directory
+while it runs: a second `serve a2a` with the same `--session-db` fails to
+start instead of failing the first server's running tasks.
 
 A task still submitted or working when the server stops cannot finish. On the
 next start it is marked failed, and its webhooks are sent that final status on

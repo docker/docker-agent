@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -26,7 +27,8 @@ import (
 // shared with the TaskStore returned by Tasks. The zero value is not usable;
 // construct it with New.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	lock *os.File
 }
 
 // Ensure Store satisfies the SDK interface at compile time.
@@ -69,22 +71,29 @@ func DirFor(sessionDB string) string {
 // New opens (creating if necessary) the store in dir and ensures the
 // push-config and task tables exist. The database holds webhook callback
 // tokens and credentials in plaintext, so dir is made private to the current
-// user before SQLite creates or opens any file in it. The caller owns the
-// returned Store and must call Close.
+// user before SQLite creates or opens any file in it. Only one Store may be
+// open per dir: New fails with ErrInUse while another one holds it. The caller
+// owns the returned Store and must call Close.
 func New(ctx context.Context, dir string) (*Store, error) {
 	path := filepath.Join(dir, dbFile)
 	if err := preparePrivate(dir, path); err != nil {
 		return nil, fmt.Errorf("failed to secure a2a store directory: %w", err)
 	}
+	lock, err := acquireLock(dir)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sqliteutil.OpenDB(ctx, path)
 	if err != nil {
+		_ = lock.Close()
 		return nil, err
 	}
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		_ = db.Close()
+		_ = lock.Close()
 		return nil, fmt.Errorf("failed to create a2a tables: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, lock: lock}, nil
 }
 
 // sqliteFiles lists the database and every sidecar SQLite may create for it.
@@ -92,9 +101,9 @@ func sqliteFiles(path string) []string {
 	return []string{path, path + "-wal", path + "-shm", path + "-journal"}
 }
 
-// Close releases the underlying database handle.
+// Close releases the database handle, then the store lock.
 func (s *Store) Close() error {
-	return sqliteutil.CloseDB(s.db)
+	return errors.Join(sqliteutil.CloseDB(s.db), s.lock.Close())
 }
 
 // validateConfig rejects configs the sender could never deliver to, reporting

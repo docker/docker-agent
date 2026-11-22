@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -123,6 +124,9 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	// SDK checks the task exists before any push-config operation). The store
 	// is scoped to this session database: tasks carry no per-server owner.
 	a2aStore, err := a2astore.New(ctx, a2astore.DirFor(expandedSessionDB))
+	if errors.Is(err, a2astore.ErrInUse) {
+		return fmt.Errorf("%w; give each A2A server its own --session-db", err)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to open A2A task store: %w", err)
 	}
