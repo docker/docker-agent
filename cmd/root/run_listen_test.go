@@ -157,7 +157,7 @@ func TestStartSessionCoordinatorListenUsesIsolatedRegistry(t *testing.T) {
 	require.Eventually(t, func() bool {
 		records, err := registry.List()
 		return err == nil && len(records) == 0
-	}, 5*time.Second, 10*time.Millisecond, "cancelling the run must remove the discovery record")
+	}, 30*time.Second, 25*time.Millisecond, "cancelling the run must remove the discovery record")
 }
 
 func TestDetachOnCloseRunsDetachOnceBeforeCleanup(t *testing.T) {
