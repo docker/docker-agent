@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 
 	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/openai/openai-go/v3/responses"
@@ -43,8 +44,13 @@ type ResponseStreamAdapter struct {
 	// scalar field cannot distinguish absent from a legitimate 0), so streams
 	// omitting it cannot collide on the zero value.
 	outputIndexHasContent map[int64]bool
-	itemHasArgs           map[string]bool
-	pendingArgs           map[string]string
+	// partHasContent records which content parts of an output were streamed,
+	// so the output_item.done snapshot only adds the parts that were not.
+	// Keyed like itemHasContent and outputIndexHasContent; only events that
+	// carry a content_index participate.
+	partHasContent map[emittedPart]bool
+	itemHasArgs    map[string]bool
+	pendingArgs    map[string]string
 	// itemArgsFinal marks items whose complete final arguments were already
 	// received: emitted (function_call_arguments.done, output_item.done
 	// snapshot), buffered in pendingArgs, or streamed as deltas and confirmed
@@ -63,6 +69,7 @@ func newResponseStreamAdapter(stream responseEventStream, trackUsage bool) *Resp
 		itemCallIDMap:         make(map[string]string),
 		itemHasContent:        make(map[string]bool),
 		outputIndexHasContent: make(map[int64]bool),
+		partHasContent:        make(map[emittedPart]bool),
 		itemHasArgs:           make(map[string]bool),
 		pendingArgs:           make(map[string]string),
 		itemArgsFinal:         make(map[string]bool),
@@ -73,12 +80,29 @@ func isTextContentPart(partType string) bool {
 	return partType == "text" || partType == "output_text"
 }
 
+// emittedPart identifies one content part of an output, either by item ID or
+// by output_index (byOutput).
+type emittedPart struct {
+	item     string
+	output   int64
+	byOutput bool
+	part     int64
+}
+
 // markContentEmitted records that text was emitted for this output, keyed by
-// item ID and, when the event carries one, by output_index.
+// item ID and, when the event carries one, by output_index. When the event
+// also carries a content_index the part is recorded too.
 func (a *ResponseStreamAdapter) markContentEmitted(event responses.ResponseStreamEventUnion, itemID string) {
 	a.itemHasContent[itemID] = true
-	if event.JSON.OutputIndex.Valid() {
+	hasOutput := event.JSON.OutputIndex.Valid()
+	if hasOutput {
 		a.outputIndexHasContent[event.OutputIndex] = true
+	}
+	if event.JSON.ContentIndex.Valid() {
+		a.partHasContent[emittedPart{item: itemID, part: event.ContentIndex}] = true
+		if hasOutput {
+			a.partHasContent[emittedPart{output: event.OutputIndex, byOutput: true, part: event.ContentIndex}] = true
+		}
 	}
 }
 
@@ -87,6 +111,24 @@ func (a *ResponseStreamAdapter) markContentEmitted(event responses.ResponseStrea
 func (a *ResponseStreamAdapter) hasEmittedContent(event responses.ResponseStreamEventUnion, itemID string) bool {
 	return a.itemHasContent[itemID] ||
 		(event.JSON.OutputIndex.Valid() && a.outputIndexHasContent[event.OutputIndex])
+}
+
+// hasEmittedPart reports whether the content part at index was streamed.
+func (a *ResponseStreamAdapter) hasEmittedPart(event responses.ResponseStreamEventUnion, itemID string, index int64) bool {
+	return a.partHasContent[emittedPart{item: itemID, part: index}] ||
+		(event.JSON.OutputIndex.Valid() && a.partHasContent[emittedPart{output: event.OutputIndex, byOutput: true, part: index}])
+}
+
+// hasEmittedParts reports whether any streamed event of this output carried a
+// content_index. Without one the streamed text cannot be matched to a part, so
+// the whole output counts as emitted.
+func (a *ResponseStreamAdapter) hasEmittedParts(event responses.ResponseStreamEventUnion, itemID string, n int) bool {
+	for i := range int64(n) {
+		if a.hasEmittedPart(event, itemID, i) {
+			return true
+		}
+	}
+	return false
 }
 
 // Recv gets the next completion chunk
@@ -339,25 +381,36 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// item.id, so use the resolved itemID for deduplication. Others
 		// (GitHub Copilot) use different item IDs for the deltas and the done
 		// event of the same output, so also match on output_index.
-		if event.Item.Type == "message" && !a.hasEmittedContent(event, itemID) {
-			for _, content := range event.Item.Content {
-				text := content.Text
+		if event.Item.Type == "message" {
+			// Add only the parts that were not streamed, as one choice and in
+			// order: the runtime reads a single choice per chunk. Streamed
+			// events that carry no content_index cannot be matched to a part,
+			// so then the whole output counts as emitted.
+			content := event.Item.Content
+			emitted := a.hasEmittedContent(event, itemID) && !a.hasEmittedParts(event, itemID, len(content))
+			var text strings.Builder
+			for i, part := range content {
+				partText := part.Text
 				switch {
-				case content.Type == "refusal" && content.Refusal != "":
+				case part.Type == "refusal" && part.Refusal != "":
 					a.sawRefusal = true
-					text = content.Refusal
-				case !isTextContentPart(content.Type):
-					text = ""
+					partText = part.Refusal
+				case !isTextContentPart(part.Type):
+					partText = ""
 				}
-				if text != "" {
-					response.Choices = append(response.Choices, chat.MessageStreamChoice{
-						Delta: chat.MessageDelta{
-							Content: text,
-							Role:    "assistant",
-						},
-					})
-					a.markContentEmitted(event, itemID)
+				if emitted || a.hasEmittedPart(event, itemID, int64(i)) {
+					continue
 				}
+				text.WriteString(partText)
+			}
+			if text.Len() > 0 {
+				response.Choices = append(response.Choices, chat.MessageStreamChoice{
+					Delta: chat.MessageDelta{
+						Content: text.String(),
+						Role:    "assistant",
+					},
+				})
+				a.markContentEmitted(event, itemID)
 			}
 		}
 		// Last-resort fallback for function calls whose arguments were neither

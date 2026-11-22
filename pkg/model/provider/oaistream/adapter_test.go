@@ -399,3 +399,43 @@ func TestStreamAdapter_Refusal(t *testing.T) {
 		})
 	}
 }
+
+// provider_opts can ask for several completions (n > 1). A refusal in one
+// choice must not turn a different choice's normal stop into a refusal, and
+// the usage-only chunk must report the finish reason of the choice the
+// runtime reads (the lowest index).
+func TestStreamAdapter_RefusalPerChoice(t *testing.T) {
+	t.Parallel()
+
+	chunk := func(choices string) string {
+		return `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test","choices":[` + choices + `]}` + "\n\n"
+	}
+	text := `{"index":0,"delta":{"role":"assistant","content":"Fine."},"finish_reason":null}`
+	refusal := `{"index":1,"delta":{"role":"assistant","refusal":"No."},"finish_reason":null}`
+	stop := func(i int) string { return fmt.Sprintf(`{"index":%d,"delta":{},"finish_reason":"stop"}`, i) }
+
+	tests := []struct {
+		name string
+		sse  string
+		want string
+	}{
+		{"refusal in the other choice", chunk(text+","+refusal) + chunk(stop(0)+","+stop(1)) + chunkUsageOnly + chunkDone, "stop"},
+		{"refusal in the read choice", chunk(strings.Replace(refusal, `"index":1`, `"index":0`, 1)+","+strings.Replace(text, `"index":0`, `"index":1`, 1)) +
+			chunk(stop(0)+","+stop(1)) + chunkUsageOnly + chunkDone, "refusal"},
+		{"other choice finishes last", chunk(text+","+refusal) + chunk(stop(0)) + chunk(stop(1)) + chunkUsageOnly + chunkDone, "stop"},
+	}
+	for _, tt := range tests {
+		for _, trackUsage := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/track_usage=%t", tt.name, trackUsage), func(t *testing.T) {
+				t.Parallel()
+				adapter := NewStreamAdapter(newTestStream(t, tt.sse), trackUsage)
+				defer adapter.Close()
+
+				reasons, _, err := collectFinish(t, adapter)
+				require.ErrorIs(t, err, io.EOF)
+				require.NotEmpty(t, reasons)
+				assert.Equal(t, tt.want, reasons[len(reasons)-1])
+			})
+		}
+	}
+}

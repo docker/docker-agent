@@ -17,13 +17,16 @@ import (
 
 // StreamAdapter adapts the OpenAI stream to our interface
 type StreamAdapter struct {
-	stream           *ssestream.Stream[openai.ChatCompletionChunk]
-	lastFinishReason chat.FinishReason
+	stream *ssestream.Stream[openai.ChatCompletionChunk]
+	// The finish state is tracked per choice index: provider_opts can request
+	// several completions (n > 1), and one choice's finish reason or refusal
+	// must not decide another's.
+	lastFinishReason map[int]chat.FinishReason
 	// heldFinishReason is a stop/length held back until the usage chunk
 	// arrives; emitted at EOF if no usage chunk ever comes.
-	heldFinishReason chat.FinishReason
+	heldFinishReason map[int]chat.FinishReason
 	// sawRefusal records refusal text, which turns a stop into a refusal.
-	sawRefusal  bool
+	sawRefusal  map[int]bool
 	toolCalls   map[int]string
 	trackUsage  bool
 	serviceTier string
@@ -31,9 +34,12 @@ type StreamAdapter struct {
 
 func NewStreamAdapter(stream *ssestream.Stream[openai.ChatCompletionChunk], trackUsage bool) *StreamAdapter {
 	return &StreamAdapter{
-		stream:     stream,
-		toolCalls:  make(map[int]string),
-		trackUsage: trackUsage,
+		stream:           stream,
+		lastFinishReason: make(map[int]chat.FinishReason),
+		heldFinishReason: make(map[int]chat.FinishReason),
+		sawRefusal:       make(map[int]bool),
+		toolCalls:        make(map[int]string),
+		trackUsage:       trackUsage,
 	}
 }
 
@@ -44,8 +50,8 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if err != nil {
 			return chat.MessageStreamResponse{}, WrapOpenAIError(err)
 		}
-		if held := a.heldFinishReason; held != "" {
-			a.heldFinishReason = ""
+		if idx, held, ok := lowestHeld(a.heldFinishReason); ok {
+			delete(a.heldFinishReason, idx)
 			return chat.MessageStreamResponse{
 				Choices: []chat.MessageStreamChoice{{FinishReason: held}},
 			}, nil
@@ -77,21 +83,22 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if finishReason == "content_filter" {
 			finishReason = chat.FinishReasonRefusal
 		}
+		idx := int(choice.Index)
 		if choice.Delta.Refusal != "" {
-			a.sawRefusal = true
+			a.sawRefusal[idx] = true
 		}
-		if finishReason == chat.FinishReasonStop && a.sawRefusal {
+		if finishReason == chat.FinishReasonStop && a.sawRefusal[idx] {
 			finishReason = chat.FinishReasonRefusal
 		}
 		if a.trackUsage && !openaiResponse.JSON.Usage.Valid() &&
 			(finishReason == chat.FinishReasonStop || finishReason == chat.FinishReasonLength || finishReason == chat.FinishReasonRefusal) {
-			a.heldFinishReason = finishReason
+			a.heldFinishReason[idx] = finishReason
 			finishReason = ""
 		}
 
 		// Track the finish reason for when we get usage info
 		if finishReason != chat.FinishReasonNull && finishReason != "" {
-			a.lastFinishReason = finishReason
+			a.lastFinishReason[idx] = finishReason
 		}
 
 		// Extract reasoning text from ExtraFields since the OpenAI SDK does
@@ -197,14 +204,17 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// chunks must keep flowing through as content and must not be converted
 		// into a synthetic stop before the runtime sees the delta.
 		if len(openaiResponse.Choices) == 0 {
-			finishReason := a.lastFinishReason
-			if a.heldFinishReason != "" {
-				finishReason = a.heldFinishReason
-				a.heldFinishReason = ""
+			// The runtime reads one choice, the lowest index, so that
+			// choice's finish reason is the turn's.
+			idx := a.selectedChoice()
+			finishReason := a.lastFinishReason[idx]
+			if held, ok := a.heldFinishReason[idx]; ok {
+				finishReason = held
 			}
+			clear(a.heldFinishReason)
 			if finishReason == chat.FinishReasonNull || finishReason == "" {
 				finishReason = chat.FinishReasonStop
-				if a.sawRefusal {
+				if a.sawRefusal[idx] {
 					finishReason = chat.FinishReasonRefusal
 				}
 			}
@@ -220,4 +230,29 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 // Close closes the stream
 func (a *StreamAdapter) Close() {
 	_ = a.stream.Close()
+}
+
+// selectedChoice returns the index of the choice whose finish reason ends the
+// turn: the lowest one seen.
+func (a *StreamAdapter) selectedChoice() int {
+	lowest, found := 0, false
+	for _, m := range []map[int]chat.FinishReason{a.lastFinishReason, a.heldFinishReason} {
+		for idx := range m {
+			if !found || idx < lowest {
+				lowest, found = idx, true
+			}
+		}
+	}
+	return lowest
+}
+
+// lowestHeld returns the held finish reason of the lowest choice index.
+func lowestHeld(held map[int]chat.FinishReason) (int, chat.FinishReason, bool) {
+	lowest, found := 0, false
+	for idx := range held {
+		if !found || idx < lowest {
+			lowest, found = idx, true
+		}
+	}
+	return lowest, held[lowest], found
 }
