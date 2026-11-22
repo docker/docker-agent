@@ -2767,12 +2767,17 @@ func (m *appModel) canRestorePointerCache(msg tea.Msg) bool {
 
 // handleMouseClick routes mouse clicks to the appropriate component based on Y coordinate.
 func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
-	// Check if click hits a notification close button before handling body clicks.
-	if cmd := m.notification.HandleClick(msg.X, msg.Y); cmd != nil {
-		return m, cmd
-	}
-	if id, text, ok := m.notification.CopyHit(msg.X, msg.Y); ok {
-		return m, copyNotificationToClipboard(id, text)
+	if !m.leanMode && m.ready && m.err == nil {
+		if cmd := m.notification.HandleClick(msg.X, msg.Y); cmd != nil {
+			return m, cmd
+		}
+		if id, text, ok := m.notification.CopyHit(msg.X, msg.Y); ok {
+			return m, copyNotificationToClipboard(id, text)
+		}
+		// An unhovered body does not copy, but still covers controls behind it.
+		if _, _, hit := m.notification.BodyHit(msg.X, msg.Y); hit && msg.Button == tea.MouseLeft {
+			return m, nil
+		}
 	}
 
 	// Dialogs use full-window coordinates (they're positioned over the entire screen)
@@ -3255,9 +3260,7 @@ func (m *appModel) composeView() tea.View {
 			layers = append(layers, dialogLayers...)
 		}
 
-		if layer := m.notification.GetLayer(); layer != nil {
-			layers = append(layers, layer)
-		}
+		layers = append(layers, m.notification.GetLayers()...)
 
 		if m.completions.Open() {
 			layers = append(layers, m.completions.GetLayers()...)
