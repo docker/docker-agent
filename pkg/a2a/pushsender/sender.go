@@ -40,6 +40,10 @@ var (
 	errBlockedTarget       = errors.New("push notification target resolves to a blocked address range")
 	errCrossOriginRedirect = errors.New("redirect to another origin rejected")
 	errTooManyRedirects    = fmt.Errorf("stopped after %d redirects", maxRedirects)
+	errTimeout             = errors.New("timed out")
+	errDNS                 = errors.New("host lookup failed")
+	errConnect             = errors.New("connection failed")
+	errRequestFailed       = errors.New("request failed")
 
 	tokenHeader = http.CanonicalHeaderKey("A2A-Notification-Token")
 
@@ -402,9 +406,30 @@ func RedactURL(raw string) string {
 	return u.Scheme + "://" + u.Host
 }
 
+// redactError reduces a client error to its category: inner net/http errors
+// may embed the URL or a raw Location header with signed paths and queries.
 func redactError(err error) error {
+	op, target := "request", "<unknown>"
 	if urlErr, ok := errors.AsType[*url.Error](err); ok {
-		return fmt.Errorf("%s %s: %w", urlErr.Op, RedactURL(urlErr.URL), urlErr.Err)
+		op, target = urlErr.Op, RedactURL(urlErr.URL)
 	}
-	return err
+	return fmt.Errorf("%s %s: %w", op, target, errorCategory(err))
+}
+
+func errorCategory(err error) error {
+	for _, known := range []error{errBlockedTarget, errCrossOriginRedirect, errTooManyRedirects, context.Canceled} {
+		if errors.Is(err, known) {
+			return known
+		}
+	}
+	if netErr, ok := errors.AsType[net.Error](err); (ok && netErr.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
+		return errTimeout
+	}
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
+		return errDNS
+	}
+	if _, ok := errors.AsType[*net.OpError](err); ok {
+		return errConnect
+	}
+	return errRequestFailed
 }

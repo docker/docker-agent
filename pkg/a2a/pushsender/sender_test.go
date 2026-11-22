@@ -245,6 +245,30 @@ func TestDeliveryErrorsRedactURL(t *testing.T) {
 	}
 }
 
+// net/http quotes an unparsable Location header verbatim in its error.
+func TestDeliveryErrorsRedactMalformedRedirect(t *testing.T) {
+	t.Parallel()
+
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/hooks/path-secret%zz?sig=query-secret")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(webhook.Close)
+
+	logger, logs := testLogger()
+	s := New(Config{AllowPrivateNetworks: true, Logger: logger})
+	cfg := &a2a.PushConfig{ID: "c1", TaskID: "t1", URL: webhook.URL + "/hook"}
+	require.NoError(t, s.SendPush(t.Context(), cfg, statusEvent(a2a.TaskStateCompleted)))
+	closeSender(t, s)
+
+	out := logs.String()
+	assert.Contains(t, out, "Push notification delivery failed")
+	assert.Contains(t, out, errRequestFailed.Error())
+	for _, secret := range []string{"path-secret", "query-secret", "Location"} {
+		assert.NotContains(t, out, secret)
+	}
+}
+
 func TestRedirectsStayOnRegisteredOrigin(t *testing.T) {
 	t.Parallel()
 
