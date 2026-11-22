@@ -22,6 +22,7 @@ type ModelOptions struct {
 	structuredOutput     *latest.StructuredOutput
 	generatingTitle      bool
 	compacting           bool
+	textOnly             bool
 	noThinking           bool
 	disableAutoPull      bool
 	maxTokens            int64
@@ -49,6 +50,15 @@ func (c *ModelOptions) StructuredOutput() *latest.StructuredOutput {
 
 func (c *ModelOptions) GeneratingTitle() bool {
 	return c.generatingTitle
+}
+
+func (c *ModelOptions) TextOnly() bool { return c.textOnly }
+
+// WithTextOnly requests a text-only response, suppressing provider-side
+// image-output modalities for one-shot auxiliary requests (e.g. /btw) that
+// have no use for generated media.
+func WithTextOnly() Opt {
+	return func(cfg *ModelOptions) { cfg.textOnly = true }
 }
 
 func (c *ModelOptions) Compacting() bool {
@@ -303,6 +313,9 @@ func FromModelOptions(m ModelOptions) []Opt {
 	}
 	if m.generatingTitle {
 		out = append(out, WithGeneratingTitle())
+	}
+	if m.textOnly {
+		out = append(out, WithTextOnly())
 	}
 	if m.compacting {
 		out = append(out, WithCompacting())

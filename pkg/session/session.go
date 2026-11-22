@@ -149,6 +149,8 @@ type Item struct {
 	// Evaluation tracks evaluator usage separately from the conversation.
 	Evaluation *Evaluation `json:"evaluation,omitempty"`
 
+	AuxiliaryUsage *AuxiliaryUsage `json:"auxiliary_usage,omitempty"`
+
 	// RoutingDecision records a hook-driven control decision without storing
 	// the task text supplied to the selector.
 	RoutingDecision *RoutingDecision `json:"routing_decision,omitempty"`
@@ -780,6 +782,7 @@ func (s *Session) snapshotItems() []Item {
 		}
 		items[i].Compaction = item.Compaction.Clone()
 		items[i].Evaluation = cloneEvaluation(item.Evaluation)
+		items[i].AuxiliaryUsage = cloneAuxiliaryUsage(item.AuxiliaryUsage)
 		items[i].RoutingDecision = cloneRoutingDecision(item.RoutingDecision)
 	}
 	return items
@@ -1908,6 +1911,9 @@ func (s *Session) totalCostLocked() float64 {
 		}
 		if item.Evaluation != nil && item.Evaluation.Cost != nil {
 			cost += *item.Evaluation.Cost
+		}
+		if item.AuxiliaryUsage != nil && item.AuxiliaryUsage.Cost != nil {
+			cost += *item.AuxiliaryUsage.Cost
 		}
 		cost += item.Cost
 	}

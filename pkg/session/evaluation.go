@@ -69,7 +69,7 @@ func (s *Session) persistenceCostLocked() float64 {
 
 func (s *Session) hasEvaluationsLocked() bool {
 	for _, item := range s.Messages {
-		if item.Evaluation != nil {
+		if item.Evaluation != nil || item.AuxiliaryUsage != nil {
 			return true
 		}
 		if item.IsSubSession() {

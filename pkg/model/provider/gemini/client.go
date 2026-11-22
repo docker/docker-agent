@@ -843,7 +843,7 @@ func (c *Client) wantsImageResponseModalities(imageOutputEnabled bool) bool {
 	default:
 		return false
 	}
-	return imageOutputEnabled && !c.ModelOptions.GeneratingTitle() && !c.ModelOptions.Compacting()
+	return imageOutputEnabled && !c.ModelOptions.GeneratingTitle() && !c.ModelOptions.Compacting() && !c.ModelOptions.TextOnly()
 }
 
 // CreateChatCompletionStream creates a streaming chat completion request
