@@ -17,7 +17,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/docker/go-units"
 	"github.com/mattn/go-runewidth"
 	"github.com/rivo/uniseg"
@@ -28,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/internal/ansiline"
 	"github.com/docker/docker-agent/pkg/tui/internal/termfeatures"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -121,11 +121,12 @@ type historySearchState struct {
 
 // editor implements [Editor]
 type editor struct {
-	textarea textarea.Model
-	hist     *history.History
-	width    int
-	height   int
-	working  bool
+	textarea  textarea.Model
+	occupancy textOccupancyCache
+	hist      *history.History
+	width     int
+	height    int
+	working   bool
 	// completions are the available completions
 	completions []completions.Completion
 
@@ -325,7 +326,7 @@ func (e *editor) computeWrappedLines(text string, startOffset int) []string {
 // applySuggestionOverlay draws the inline suggestion on top of the textarea
 // view using the configured ghost style. The first character appears with
 // cursor styling (reverse video) so it's visible inside the cursor block.
-// Multi-line suggestions are rendered across multiple visual lines.
+// The preview is clipped to the visible textarea rows.
 func (e *editor) applySuggestionOverlay(view string) string {
 	lines := strings.Split(view, "\n")
 	value := e.textarea.Value()
@@ -418,15 +419,14 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	var overlays []overlay
 
 	for i, suggLine := range wrappedLines {
+		currentY := targetLine + i
+		if currentY >= len(lines) {
+			break
+		}
 		if suggLine == "" && i > 0 {
 			// Empty line in middle of suggestion - skip but keep line count
 			continue
 		}
-
-		currentY := targetLine + i
-		// Note: We intentionally don't skip lines beyond the view; the
-		// output is extended to accommodate overlays positioned beyond
-		// the base view's boundaries.
 
 		var xOffset int
 		if i == 0 {
@@ -468,37 +468,10 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	// the editor does not depend on canvas/compositor APIs that differ
 	// across lipgloss v2 pre-releases (it keeps the editor embeddable by
 	// consumers pinned to other lipgloss snapshots, e.g. Docker Sandboxes).
-	outLines := strings.Split(view, "\n")
 	for _, ov := range overlays {
-		for len(outLines) <= ov.y {
-			outLines = append(outLines, "")
-		}
-		outLines[ov.y] = spliceLine(outLines[ov.y], ov.content, ov.x)
+		lines[ov.y] = ansiline.Splice(lines[ov.y], ov.content, ov.x)
 	}
-	return strings.Join(outLines, "\n")
-}
-
-// spliceLine overwrites line content at column x with overlay, preserving
-// ANSI styling on both sides and padding when the line is shorter than x.
-func spliceLine(line, overlay string, x int) string {
-	left := ansi.Truncate(line, x, "")
-	if pad := x - ansi.StringWidth(left); pad > 0 {
-		left += strings.Repeat(" ", pad)
-	}
-	cut := x + ansi.StringWidth(overlay)
-	right := ""
-	if lineWidth := ansi.StringWidth(line); cut < lineWidth {
-		right = ansi.TruncateLeft(line, cut, "")
-		// A wide rune straddling the cut is kept whole by TruncateLeft,
-		// which would shift the rest of the line one cell to the right.
-		// Cut the straddled rune entirely and pad its uncovered cell with
-		// a space — what a terminal shows for a half-overwritten cell.
-		if extra := ansi.StringWidth(right) - (lineWidth - cut); extra > 0 {
-			right = ansi.TruncateLeft(right, extra+1, "")
-			right = strings.Repeat(" ", lineWidth-cut-ansi.StringWidth(right)) + right
-		}
-	}
-	return left + overlay + right
+	return strings.Join(lines, "\n")
 }
 
 // splitFirstRune splits a string into its first rune and the rest.
@@ -1368,17 +1341,15 @@ func (e *editor) SetSize(width, height int) tea.Cmd {
 }
 
 func (e *editor) updateTextareaHeight() {
-	available := e.height
-	if e.banner != nil {
-		available -= e.banner.Height()
-	}
+	e.textarea.SetHeight(max(e.height-e.chromeHeight(), 1))
+}
+
+func (e *editor) chromeHeight() int {
+	height := e.BannerHeight()
 	if e.historySearch.active {
-		available--
+		height++
 	}
-
-	available = max(available, 1)
-
-	e.textarea.SetHeight(available)
+	return height
 }
 
 // BannerHeight returns the current height of the attachment banner (0 if hidden)
@@ -1392,7 +1363,7 @@ func (e *editor) BannerHeight() int {
 // GetSize returns the rendered dimensions including EditorStyle padding.
 func (e *editor) GetSize() (width, height int) {
 	return e.width + styles.EditorStyle.GetHorizontalFrameSize(),
-		e.height + styles.EditorStyle.GetVerticalFrameSize()
+		max(e.height, 1+e.chromeHeight()) + styles.EditorStyle.GetVerticalFrameSize()
 }
 
 // AttachmentAt returns preview information for the attachment rendered at the given X position.
@@ -1785,6 +1756,7 @@ func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
 	e.textarea.Placeholder = ""
 	e.textarea.Blur()
 	e.clearSuggestion()
+	e.updateTextareaHeight()
 	return e, tea.Batch(
 		e.searchInput.Focus(),
 		core.CmdHandler(completion.CloseMsg{}),
@@ -1883,5 +1855,6 @@ func (e *editor) exitHistorySearch() tea.Cmd {
 	e.textarea.SetValue(e.historySearch.origTextValue)
 	e.textarea.Placeholder = e.historySearch.origTextPlaceholderValue
 	e.historySearch = historySearchState{matchIndex: -1}
+	e.updateTextareaHeight()
 	return e.textarea.Focus()
 }

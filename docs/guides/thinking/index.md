@@ -26,7 +26,7 @@ Docker Agent exposes this through a single `thinking_budget` field on any named 
 | OpenAI              | string     | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; `xhigh` on gpt-5.2+, `max` on gpt-5.6+; API-level `none` on GPT-5.x from 5.6 onward and GPT-6 Sol/Luna, `minimal` dropped on gpt-5.6+ | `medium` (API default) |
 | Anthropic           | int or str | Fixed budgets: ≥1024 and less than `max_tokens`; or `minimal`–`max`, `adaptive`, `adaptive/<effort>`, `none` | Model-dependent; Claude 5.x defaults to adaptive |
 | Gemini 2.5          | int        | `0` (off), `-1` (dynamic), or token count (max 24576 / 32768)                           | `-1` (dynamic)     |
-| Gemini 3            | string     | `minimal`, `low`, `medium`, `high`                                                      | API default (model-dependent) |
+| Gemini 3+           | string     | `minimal` (Gemini 3), `low`, `medium`, `high`, `xhigh` (`gemini-4-hydrogen` / `gemini-4-neon`) | API default (model-dependent) |
 | AWS Bedrock         | int or str | Fixed budgets: ≥1024 and less than `max_tokens`; `minimal`–`max` mapped to tokens on older models; adaptive on supported newer Claude models | Model-dependent; Claude 5.x defaults to adaptive |
 | Docker Model Runner | int or str | token count, `minimal`–`max` (mapped to tokens), `adaptive` (unlimited), `none`         | engine default     |
 
@@ -185,7 +185,7 @@ See the [Anthropic provider page](../../providers/anthropic/index.md#task-budget
 
 ## Google Gemini
 
-Gemini 2.5 and Gemini 3 use different formats.
+Gemini 2.5 and Gemini 3+ use different formats.
 
 ### Gemini 2.5 (token budget)
 
@@ -207,19 +207,24 @@ models:
     thinking_budget: 8192   # fixed token budget (max 24576 for Flash, 32768 for Pro)
 ```
 
-### Gemini 3 (level-based)
+### Gemini 3+ (level-based)
 
 ```yaml
 models:
+  gemini4-neon:
+    provider: google
+    model: gemini-4-neon
+    thinking_budget: xhigh    # low | medium | high | xhigh (Hydrogen and Neon)
+
+  gemini4-carbon:
+    provider: google
+    model: gemini-4-carbon
+    thinking_budget: high     # low | medium | high (Carbon and Argon)
+
   gemini3-flash:
     provider: google
     model: gemini-3-flash
     thinking_budget: medium   # minimal | low | medium | high
-
-  gemini3-pro:
-    provider: google
-    model: gemini-3-pro
-    thinking_budget: high     # low | high (Pro supports fewer levels)
 ```
 
 ## AWS Bedrock (Claude)
@@ -312,7 +317,7 @@ models:
     thinking_budget: 0
 ```
 
-On OpenAI o-series, gpt-5 through gpt-5.5, GPT-6 Astra, and Gemini 3, `none` and `0` clear the local budget and leave the API's default reasoning behavior in effect. GPT-5.x from 5.6 onward and GPT-6 Sol/Luna instead send `none` as an API value that disables reasoning. Claude models follow the [model-specific rules above](#disabling-thinking-claude).
+On OpenAI o-series, gpt-5 through gpt-5.5, GPT-6 Astra, and Gemini 3+, `none` and `0` clear the local budget and leave the API's default reasoning behavior in effect. GPT-5.x from 5.6 onward and GPT-6 Sol/Luna instead send `none` as an API value that disables reasoning. Claude models follow the [model-specific rules above](#disabling-thinking-claude).
 
 Local models and other OpenAI-compatible backends may reason by default even when
 `thinking_budget` is cleared. Use

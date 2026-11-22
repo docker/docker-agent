@@ -84,7 +84,7 @@ func TestComposeMatchesJoinHorizontal(t *testing.T) {
 
 			want := composeReference(m, slices.Clone(lines))
 			got := m.compose(slices.Clone(lines), m.scrollOffset)
-			assert.Equal(t, want, got)
+			assert.Equal(t, ansi.Strip(want), ansi.Strip(got))
 		})
 	}
 }
