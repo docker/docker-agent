@@ -18,10 +18,12 @@ type seqEvent struct {
 }
 
 // gapEvent is sent to a subscriber whose requested resume point has already
-// been evicted from the ring buffer. It is a per-connection control marker,
-// not part of the session's sequenced stream, so it carries no sequence
-// number. The client should re-snapshot (GET /snapshot) to resync, then
-// continue tailing from the snapshot's sequence number.
+// been evicted from the ring buffer, or whose cursor is above everything this
+// log has produced (so it belongs to a different log for the same session ID).
+// It is a per-connection control marker, not part of the session's sequenced
+// stream, so it carries no sequence number. The client should re-snapshot
+// (GET /snapshot) to resync, then continue tailing from the snapshot's sequence
+// number.
 type gapEvent struct {
 	Type string `json:"type"` // always "gap"
 }
@@ -64,11 +66,21 @@ type eventListener struct {
 }
 
 func newEventLog(capacity int) *eventLog {
+	return newEventLogAt(capacity, 0)
+}
+
+// newEventLogAt creates a log whose sequence numbers start at startSeq. A log
+// recreated for a session that is being reattached (see
+// SessionManager.RegisterEventSource) starts where the previous log for that
+// session ID stopped, so a client resuming with its last event ID still has a
+// valid cursor instead of silently filtering out the new log's events.
+func newEventLogAt(capacity int, startSeq uint64) *eventLog {
 	if capacity <= 0 {
 		capacity = defaultEventLogCapacity
 	}
 	return &eventLog{
 		capacity:  capacity,
+		seq:       startSeq,
 		listeners: make(map[*eventListener]struct{}),
 	}
 }
@@ -149,10 +161,13 @@ func (l *eventLog) lastSeq() uint64 {
 // delivered live: every event is seen exactly once, in order.
 func (l *eventLog) stream(ctx context.Context, since *uint64, send func(seq uint64, event any)) {
 	l.mu.Lock()
+	// Snapshot the log's last sequence number together with the backlog: a
+	// cursor above it cannot have been produced by this log (see gapped).
+	lastSeq := l.seq
 	if l.closed {
 		backlog := l.backlogLocked(since)
 		l.mu.Unlock()
-		l.replay(ctx, since, backlog, send)
+		l.replay(ctx, since, lastSeq, backlog, send)
 		return
 	}
 	backlog := l.backlogLocked(since)
@@ -166,7 +181,7 @@ func (l *eventLog) stream(ctx context.Context, since *uint64, send func(seq uint
 		delete(l.listeners, ln)
 	}()
 
-	if !l.replay(ctx, since, backlog, send) {
+	if !l.replay(ctx, since, lastSeq, backlog, send) {
 		return
 	}
 
@@ -202,10 +217,11 @@ func (l *eventLog) backlogLocked(since *uint64) []seqEvent {
 	return out
 }
 
-// replay sends a gap marker (when the resume point was evicted) followed by
-// the backlog. Returns false if ctx was cancelled mid-replay.
-func (l *eventLog) replay(ctx context.Context, since *uint64, backlog []seqEvent, send func(seq uint64, event any)) bool {
-	if since != nil && l.gapped(*since, backlog) {
+// replay sends a gap marker (when the resume point was evicted or belongs to a
+// previous log) followed by the backlog. Returns false if ctx was cancelled
+// mid-replay.
+func (l *eventLog) replay(ctx context.Context, since *uint64, lastSeq uint64, backlog []seqEvent, send func(seq uint64, event any)) bool {
+	if since != nil && l.gapped(*since, lastSeq, backlog) {
 		select {
 		case <-ctx.Done():
 			return false
@@ -224,11 +240,24 @@ func (l *eventLog) replay(ctx context.Context, since *uint64, backlog []seqEvent
 	return true
 }
 
-// gapped reports whether resuming at since lost events: the next expected
-// sequence number (since+1) is older than the oldest event we can still
-// replay. An empty backlog with a non-zero since is not a gap on its own
-// (the client is simply already caught up).
-func (l *eventLog) gapped(since uint64, backlog []seqEvent) bool {
+// gapped reports whether resuming at since lost events.
+//
+// A since above lastSeq cannot come from this log: sequence numbers only grow
+// within one log, so the cursor belongs to a different log for the same session
+// ID. Every event of this log would be filtered out by that cursor, so signal a
+// gap even when the backlog is still empty and tell the client to re-snapshot.
+// The usual same-ID reattachment path preserves the numbering instead (see
+// SessionManager.eventLogLastSeq); this is the defensive reset for a log whose
+// continuity could not be preserved.
+//
+// Otherwise the resume point is a gap when the next expected sequence number
+// (since+1) is older than the oldest event still replayable. An empty backlog
+// with a non-zero since is not a gap in that case (the client is simply already
+// caught up).
+func (l *eventLog) gapped(since, lastSeq uint64, backlog []seqEvent) bool {
+	if since > lastSeq {
+		return true
+	}
 	if len(backlog) == 0 {
 		return false
 	}

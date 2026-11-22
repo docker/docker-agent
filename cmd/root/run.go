@@ -31,6 +31,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/profiling"
+	"github.com/docker/docker-agent/pkg/runregistry"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/sandbox"
 	"github.com/docker/docker-agent/pkg/server"
@@ -149,6 +150,20 @@ type runExecFlags struct {
 	// clients can observe and drive every tab of the run — not just the
 	// initial session. Nil when --listen is off.
 	listenSM *server.SessionManager
+
+	// runRegistry writes the --listen discovery record. Nil means the
+	// process-wide runregistry.Default(); tests inject a temp-dir registry so
+	// they never advertise a fake live run in (or leave a stale record in) the
+	// user's real registry.
+	runRegistry *runregistry.Registry
+}
+
+// discoveryRegistry returns the registry used for --listen discovery records.
+func (f *runExecFlags) discoveryRegistry() *runregistry.Registry {
+	if f.runRegistry != nil {
+		return f.runRegistry
+	}
+	return runregistry.Default()
 }
 
 func newRunCmd() *cobra.Command {

@@ -110,7 +110,11 @@ func (c *Client) doRequestWithTimeout(ctx context.Context, method, endpoint stri
 	}
 
 	u := *c.baseURL
-	u.Path = path.Join(u.Path, endpoint)
+	// Keep an endpoint's query string out of the path: path.Join would escape
+	// the "?" into the path and drop the query.
+	endpointPath, endpointQuery, _ := strings.Cut(endpoint, "?")
+	u.Path = path.Join(u.Path, endpointPath)
+	u.RawQuery = endpointQuery
 
 	// Apply per-request timeout based on category
 	timeout := c.timeoutFor(timeoutCategory)
@@ -247,6 +251,15 @@ func (c *Client) DeleteAgent(ctx context.Context, filePath string) (*api.DeleteA
 func (c *Client) GetSessions(ctx context.Context) ([]api.SessionsResponse, error) {
 	var sessions []api.SessionsResponse
 	err := c.doRequest(ctx, http.MethodGet, "/api/sessions", nil, &sessions)
+	return sessions, err
+}
+
+// GetActiveSessions retrieves only the sessions currently attached to the
+// remote run (GET /api/sessions?active=true). Unlike GetSessions it never
+// includes historical sessions loaded from the store.
+func (c *Client) GetActiveSessions(ctx context.Context) ([]api.SessionsResponse, error) {
+	var sessions []api.SessionsResponse
+	err := c.doRequest(ctx, http.MethodGet, "/api/sessions?active=true", nil, &sessions)
 	return sessions, err
 }
 

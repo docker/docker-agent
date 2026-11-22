@@ -47,6 +47,7 @@ type activeRuntimes struct {
 	streaming        sync.Mutex  // Held while a RunStream is in progress; serialises concurrent requests
 	modelSwitch      sync.Mutex  // Serialises model changes with manager-owned session persistence
 	deleting         atomic.Bool // Set before deletion waits for an in-flight model transaction
+	closing          atomic.Bool // Set when the owning view detached; the entry stays registered until the stream releases streaming (see RuntimeAttachment.Detach).
 }
 
 // SessionManager manages sessions for the HTTP API server and the --listen
@@ -103,6 +104,14 @@ type SessionManager struct {
 	// session is far cheaper than the leaked event log it prevents. Guarded
 	// by eventLogsMu.
 	deletedEventLogs map[string]struct{}
+
+	// eventLogLastSeq remembers the last sequence number each session's
+	// detached event log reached, so a same-ID reattachment continues the
+	// numbering instead of restarting at zero: a client reconnecting with its
+	// previous Last-Event-ID must keep a valid cursor and not silently filter
+	// out the replacement's startup events (#4909 review). Guarded by
+	// eventLogsMu; entries are dropped with the session (dropEventLog).
+	eventLogLastSeq map[string]uint64
 
 	// sessionReady is closed once the first session is attached or created,
 	// signalling that the server is ready to accept session-scoped requests.
@@ -180,6 +189,7 @@ func NewSessionManager(ctx context.Context, sources config.Sources, sessionStore
 		deletedSessions:       concurrent.NewMap[string, *activeRuntimes](),
 		eventLogs:             concurrent.NewMap[string, *pumpedEventLog](),
 		deletedEventLogs:      make(map[string]struct{}),
+		eventLogLastSeq:       make(map[string]uint64),
 		followUpInjectors:     concurrent.NewMap[string, FollowUpInjector](),
 		followUpKeys:          concurrent.NewMap[string, *idempotencyCache](),
 		pendingSafetyDefaults: concurrent.NewMap[string, struct{}](),
@@ -260,10 +270,18 @@ func (sm *SessionManager) RegisterEventSource(sessionID string, src EventSource)
 		return
 	}
 	var log *eventLog
-	if pe, ok := sm.eventLogs.Load(sessionID); ok && pe.lazy {
-		log = pe.log
-	} else {
-		log = newEventLog(defaultEventLogCapacity)
+	// Continue the sequence of the session's previous log, if it had one: a
+	// reattached session must not restart a reconnecting client's cursor.
+	startSeq := sm.eventLogLastSeq[sessionID]
+	if pe, ok := sm.eventLogs.Load(sessionID); ok {
+		if pe.lazy {
+			log = pe.log
+		} else if seq := pe.log.lastSeq(); seq > startSeq {
+			startSeq = seq
+		}
+	}
+	if log == nil {
+		log = newEventLogAt(defaultEventLogCapacity, startSeq)
 	}
 	pumpCtx, cancel := context.WithCancel(context.Background())
 	sm.eventLogs.Store(sessionID, &pumpedEventLog{log: log, cancel: cancel})
@@ -320,7 +338,7 @@ func (sm *SessionManager) ensureEventLog(sessionID string) *pumpedEventLog {
 	if pe, ok := sm.eventLogs.Load(sessionID); ok {
 		return pe
 	}
-	log := newEventLog(defaultEventLogCapacity)
+	log := newEventLogAt(defaultEventLogCapacity, sm.eventLogLastSeq[sessionID])
 	pe := &pumpedEventLog{log: log, cancel: func() { log.close("session ended") }, lazy: true}
 	sm.eventLogs.Store(sessionID, pe)
 	return pe
@@ -335,6 +353,7 @@ func (sm *SessionManager) dropEventLog(sessionID string) {
 	sm.eventLogsMu.Lock()
 	defer sm.eventLogsMu.Unlock()
 	sm.deletedEventLogs[sessionID] = struct{}{}
+	delete(sm.eventLogLastSeq, sessionID)
 	if pe, ok := sm.eventLogs.Load(sessionID); ok {
 		pe.cancel()
 		sm.eventLogs.Delete(sessionID)
@@ -434,21 +453,24 @@ func (sm *SessionManager) StreamEvents(ctx context.Context, sessionID string, si
 // building one from agentFilename. This is what lets a single in-process
 // runtime be shared between the TUI and an HTTP control plane.
 //
-// The internal cancellation signal is fired by [SessionManager.DeleteSession];
-// SSE streams and other lifetime-bound consumers use it (via
-// [SessionManager.StreamEvents]) to terminate when the session is detached.
+// The internal cancellation signal is fired by [SessionManager.DeleteSession]
+// and by [RuntimeAttachment.Detach]; SSE streams and other lifetime-bound
+// consumers use it (via [SessionManager.StreamEvents]) to terminate when the
+// session is detached.
 //
-// It returns the same lock RunSession and AddMessage/UpdateMessage already
-// use (via TryLock) to detect and reject concurrent mutations while a stream
-// is active. Callers that stream the attached runtime directly — bypassing
-// RunSession entirely, e.g. the TUI's App.Run/Retry/RunWithMessage calling
-// rt.RunStream itself — previously left that lock unheld for the whole
-// attached/TUI stream, so a concurrent AddMessage/UpdateMessage or
-// RunSession wrongly observed the session as idle instead of 409ing (#3590).
-// The caller must hold this lock for the duration of every direct RunStream
-// call (see the pkg/app WithStreamGuard option) so the busy check sees
-// attached streams too.
-func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, rt runtime.Runtime, sess *session.Session) sync.Locker {
+// The returned [RuntimeAttachment] is the same lock RunSession and
+// AddMessage/UpdateMessage already use (via TryLock) to detect and reject
+// concurrent mutations while a stream is active. Callers that stream the
+// attached runtime directly — bypassing RunSession entirely, e.g. the TUI's
+// App.Run/Retry/RunWithMessage calling rt.RunStream itself — previously left
+// that lock unheld for the whole attached/TUI stream, so a concurrent
+// AddMessage/UpdateMessage or RunSession wrongly observed the session as idle
+// instead of 409ing (#3590). The caller must hold this lock for the duration of
+// every direct RunStream call (see the pkg/app WithStreamGuard option) so the
+// busy check sees attached streams too. The same handle owns the detach path
+// (see RuntimeAttachment.Detach), so a view closing must detach through the
+// handle it attached rather than through the session ID.
+func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, rt runtime.Runtime, sess *session.Session) *RuntimeAttachment {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	rs := &activeRuntimes{
 		runtime: rt,
@@ -456,44 +478,121 @@ func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, r
 		cancel:  cancel,
 		session: sess,
 	}
+	// Serialise the registration with Detach/finishDetach: a detach for a
+	// previous attachment must observe either the old entry or this one, never
+	// a half-swapped state where it clears the replacement's per-ID state.
+	sm.mux.Lock()
 	sm.runtimeSessions.Store(sessionID, rs)
+	sm.mux.Unlock()
 	sm.registerRecallHandler(sessionID, rt)
 	sm.markReady()
-	return &rs.streaming
+	return &RuntimeAttachment{sm: sm, sessionID: sessionID, rs: rs}
 }
 
-// DetachRuntime removes the runtime attached for sessionID without deleting the
-// session. It is symmetric with [SessionManager.AttachRuntime]: the attach context
-// is cancelled and the follow-up injector, recall handler and event log are
-// unregistered, while the persisted session and its history are left alone. The
-// owner of a closed view (a TUI tab) calls it instead of DeleteSession, so the
-// runtime, session and context do not accumulate for the process lifetime.
-func (sm *SessionManager) DetachRuntime(sessionID string) {
-	sessionRuntime, ok := sm.runtimeSessions.Load(sessionID)
-	if !ok {
-		return
+// RuntimeAttachment is the handle returned by [SessionManager.AttachRuntime]. It
+// is the [sync.Locker] callers hold for the duration of every direct RunStream
+// call (#3590), and it identifies the attachment for
+// [RuntimeAttachment.Detach], so a cleanup that races a same-ID replacement can
+// only ever tear down the attachment it owns.
+type RuntimeAttachment struct {
+	sm        *SessionManager
+	sessionID string
+	rs        *activeRuntimes
+}
+
+// Lock implements [sync.Locker] on the attachment's stream guard.
+func (a *RuntimeAttachment) Lock() { a.rs.streaming.Lock() }
+
+// Unlock releases the attachment's stream guard. When the attachment was
+// detached while its stream was still running, this is where the manager can
+// finally drop the registration: the #3590 busy guard is no longer needed once
+// the stream has stopped.
+func (a *RuntimeAttachment) Unlock() {
+	a.rs.streaming.Unlock()
+	a.sm.finishDetach(a.sessionID, a.rs)
+}
+
+// Detach releases this attachment: the attach context is cancelled, the recall
+// handler and the follow-up injector/key cache are unregistered, and the event
+// log is torn down, while the persisted session and its history are left alone.
+// It is idempotent.
+//
+// Detach is scoped to the attachment it is called on. A same-ID
+// [SessionManager.AttachRuntime] replaces the registration, so a stale cleanup
+// for the old attachment must not touch the replacement: Detach no-ops unless
+// this attachment is still the one registered for the session ID.
+//
+// The runtimeSessions entry is not dropped until the attachment's stream has
+// stopped. AddMessage and UpdateMessage take their #3590 busy decision from that
+// entry, so deleting it while the old stream still holds the guard would let a
+// REST edit interleave with the very stream it has to be rejected against (an
+// HTTP-started stream is not stopped by canceling the attach context: RunSession
+// uses the request context). Until teardown the entry is marked closing, which
+// also makes the owning run reject new work (see runtimeActive).
+func (a *RuntimeAttachment) Detach() {
+	sm := a.sm
+	sm.mux.Lock()
+	if current, ok := sm.runtimeSessions.Load(a.sessionID); !ok || current != a.rs {
+		sm.mux.Unlock()
+		return // stale cleanup: the ID now belongs to a replacement attachment.
 	}
-	// Delete only our entry: a concurrent AttachRuntime may have replaced it.
-	if current, ok := sm.runtimeSessions.Load(sessionID); ok && current == sessionRuntime {
-		sm.runtimeSessions.Delete(sessionID)
+	if !a.rs.closing.CompareAndSwap(false, true) {
+		sm.mux.Unlock()
+		return // an earlier Detach is already waiting for the stream to stop.
 	}
-	if sessionRuntime.cancel != nil {
-		sessionRuntime.cancel()
+	if a.rs.cancel != nil {
+		a.rs.cancel()
 	}
-	if setter, ok := sessionRuntime.runtime.(recallHandlerSetter); ok {
+	if setter, ok := a.rs.runtime.(recallHandlerSetter); ok {
 		setter.SetRecallHandler(nil)
 	}
-	sm.followUpInjectors.Delete(sessionID)
-	sm.followUpKeys.Delete(sessionID)
-	sm.detachEventLog(sessionID)
+	sm.followUpInjectors.Delete(a.sessionID)
+	sm.followUpKeys.Delete(a.sessionID)
+	sm.detachEventLog(a.sessionID)
+	sm.mux.Unlock()
+
+	// With no stream in progress the attachment is gone right away; otherwise the
+	// stream's Unlock finishes the detach once the guard is released.
+	sm.finishDetach(a.sessionID, a.rs)
+}
+
+// finishDetach drops a closing attachment's runtimeSessions entry once no stream
+// holds its guard anymore. The identity check keeps a late finish for a replaced
+// attachment from deleting its replacement.
+func (sm *SessionManager) finishDetach(sessionID string, rs *activeRuntimes) {
+	if !rs.closing.Load() {
+		return
+	}
+	if !rs.streaming.TryLock() {
+		return // a stream is still running; its release calls finishDetach again.
+	}
+	defer rs.streaming.Unlock()
+	sm.mux.Lock()
+	defer sm.mux.Unlock()
+	if current, ok := sm.runtimeSessions.Load(sessionID); ok && current == rs {
+		sm.runtimeSessions.Delete(sessionID)
+	}
+}
+
+// unlockStream releases the attachment's stream guard and completes a pending
+// detach once the stream has stopped.
+func (rs *activeRuntimes) unlockStream(sm *SessionManager, sessionID string) {
+	rs.streaming.Unlock()
+	sm.finishDetach(sessionID, rs)
 }
 
 // detachEventLog removes the session's event log without marking the session as
-// deleted, so a later AttachRuntime can register a fresh one.
+// deleted, so a later AttachRuntime can register a fresh one. The log's last
+// sequence number is remembered so a same-ID reattachment continues the
+// numbering (see eventLogLastSeq).
 func (sm *SessionManager) detachEventLog(sessionID string) {
 	sm.eventLogsMu.Lock()
 	defer sm.eventLogsMu.Unlock()
 	if pe, ok := sm.eventLogs.Load(sessionID); ok {
+		if sm.eventLogLastSeq == nil {
+			sm.eventLogLastSeq = make(map[string]uint64)
+		}
+		sm.eventLogLastSeq[sessionID] = pe.log.lastSeq()
 		pe.cancel()
 		sm.eventLogs.Delete(sessionID)
 	}
@@ -1110,6 +1209,14 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		sm.registerRecallHandler(sessionID, rt)
 		sm.markReady()
 	} else {
+		if runtimeSession.closing.Load() {
+			// The owning view was closed and the entry is only kept until its
+			// stream stops (see RuntimeAttachment.Detach): do not start a new
+			// turn on a session that is being detached.
+			sm.mux.Unlock()
+			cancel()
+			return nil, ErrSessionNotRunning
+		}
 		titleGen = runtimeSession.titleGen
 	}
 
@@ -1140,7 +1247,7 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	defer runtimeSession.modelSwitch.Unlock()
 
 	if !sm.runtimeActive(sessionID, runtimeSession) {
-		runtimeSession.streaming.Unlock()
+		runtimeSession.unlockStream(sm, sessionID)
 		cancel()
 		return nil, ErrSessionNotRunning
 	}
@@ -1155,7 +1262,7 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	// runtime, persisted snapshot, live session, and rollback in one transaction.
 	undoModelOverride, err := sm.applyRunModelOverride(ctx, runtimeSession, modelOverride)
 	if err != nil {
-		runtimeSession.streaming.Unlock()
+		runtimeSession.unlockStream(sm, sessionID)
 		cancel()
 		return nil, err
 	}
@@ -1163,14 +1270,14 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	if modelOverride != "" {
 		if err := ctx.Err(); err != nil {
 			undoModelOverride(context.WithoutCancel(ctx))
-			runtimeSession.streaming.Unlock()
+			runtimeSession.unlockStream(sm, sessionID)
 			cancel()
 			return nil, err
 		}
 	}
 	if err := sm.applyAgentSwitchCommands(ctx, runtimeSession.runtime, messages); err != nil {
 		undoModelOverride(context.WithoutCancel(ctx))
-		runtimeSession.streaming.Unlock()
+		runtimeSession.unlockStream(sm, sessionID)
 		cancel()
 		return nil, err
 	}
@@ -1187,7 +1294,7 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 
 	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
 		undoModelOverride(context.WithoutCancel(ctx))
-		runtimeSession.streaming.Unlock()
+		runtimeSession.unlockStream(sm, sessionID)
 		cancel()
 		return nil, err
 	}
@@ -1211,7 +1318,7 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		// see ErrSessionBusy.
 		defer close(streamChan)
 		defer cancel()
-		defer runtimeSession.streaming.Unlock()
+		defer runtimeSession.unlockStream(sm, sessionID)
 
 		var titleEvents <-chan runtime.Event
 		if needsTitle {
@@ -1282,7 +1389,7 @@ func sendStreamEvent(ctx context.Context, events chan<- runtime.Event, event run
 }
 
 func (sm *SessionManager) runtimeActive(sessionID string, rs *activeRuntimes) bool {
-	if rs.deleting.Load() {
+	if rs.deleting.Load() || rs.closing.Load() {
 		return false
 	}
 	active, ok := sm.runtimeSessions.Load(sessionID)
@@ -1346,7 +1453,7 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 // is not actively running or if the steer buffer is full.
 func (sm *SessionManager) SteerSession(ctx context.Context, sessionID string, messages []api.Message) error {
 	rt, exists := sm.runtimeSessions.Load(sessionID)
-	if !exists {
+	if !exists || rt.closing.Load() {
 		return ErrSessionNotRunning
 	}
 
@@ -1384,7 +1491,7 @@ func (sm *SessionManager) SteerSession(ctx context.Context, sessionID string, me
 // stream; the returned boolean indicates whether a stream is active.
 func (sm *SessionManager) FollowUpSession(ctx context.Context, sessionID string, messages []api.Message, idempotencyKey string) (streaming, duplicate bool, err error) {
 	rt, exists := sm.runtimeSessions.Load(sessionID)
-	if !exists {
+	if !exists || rt.closing.Load() {
 		return false, false, ErrSessionNotRunning
 	}
 
@@ -1437,7 +1544,7 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 	}
 
 	rt, exists := sm.runtimeSessions.Load(sessionID)
-	if !exists {
+	if !exists || rt.closing.Load() {
 		return ErrSessionNotRunning
 	}
 	rt.snapshotBoundary.Lock()
@@ -1451,7 +1558,7 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 	rt.modelSwitch.Lock()
 	if !sm.runtimeActive(sessionID, rt) {
 		rt.modelSwitch.Unlock()
-		rt.streaming.Unlock()
+		rt.unlockStream(sm, sessionID)
 		runCancel()
 		return ErrSessionNotRunning
 	}
@@ -1461,7 +1568,7 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 		sess, err = sm.sessionStore.GetSession(ctx, sessionID)
 		if err != nil {
 			rt.modelSwitch.Unlock()
-			rt.streaming.Unlock()
+			rt.unlockStream(sm, sessionID)
 			runCancel()
 			return err
 		}
@@ -1469,7 +1576,7 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 	sess.AddMessage(session.UserMessage(msg.Content, msg.MultiContent...))
 	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
 		rt.modelSwitch.Unlock()
-		rt.streaming.Unlock()
+		rt.unlockStream(sm, sessionID)
 		runCancel()
 		return err
 	}
@@ -1484,7 +1591,7 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 	sm.ensureEventLog(sessionID)
 	_, skipMirroredElicitation := rt.runtime.(elicitationSinkMirror)
 	go func() {
-		defer rt.streaming.Unlock()
+		defer rt.unlockStream(sm, sessionID)
 		defer runCancel()
 		// Merge before appending so replay sequence numbers name merged events.
 		// The log must still get the events emitted while the run is torn

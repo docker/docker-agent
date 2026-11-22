@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -122,5 +124,25 @@ func (f *mcpFlags) runAttach(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return mcp.StartAttachStdio(ctx, rec.Addr, rec.SessionID)
+	// The discovery record keeps naming the session the run started with, but
+	// that tab can be closed while the run stays alive. Resolve a session that
+	// is actually attached before starting the proxy; an explicitly named
+	// closed session fails instead of being silently redirected.
+	sessionID, err := mcp.ResolveAttachSession(ctx, rec.Addr, rec.SessionID, attachTargetIsSessionID(target))
+	if err != nil {
+		return err
+	}
+	return mcp.StartAttachStdio(ctx, rec.Addr, sessionID)
+}
+
+// attachTargetIsSessionID reports whether a --attach value names a session ID
+// explicitly rather than discovering the run by pid, address, or "latest".
+func attachTargetIsSessionID(target string) bool {
+	if target == "" || target == "latest" {
+		return false
+	}
+	if _, err := strconv.Atoi(target); err == nil {
+		return false
+	}
+	return !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://")
 }

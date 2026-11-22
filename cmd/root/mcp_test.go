@@ -83,3 +83,16 @@ func TestMCPKeepAliveAcceptedForStdio(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "--mcp-keepalive")
 }
+
+func TestAttachTargetIsSessionID(t *testing.T) {
+	t.Parallel()
+
+	// Explicit session IDs are the only attach targets that must not be
+	// silently redirected when the session's tab has closed.
+	for _, target := range []string{"abc123", "0f9a-session", "PerryLink/session"} {
+		assert.True(t, attachTargetIsSessionID(target), "target %q names a session", target)
+	}
+	for _, target := range []string{"", "latest", "4242", "http://127.0.0.1:8080", "https://example.test"} {
+		assert.False(t, attachTargetIsSessionID(target), "target %q discovers a run", target)
+	}
+}

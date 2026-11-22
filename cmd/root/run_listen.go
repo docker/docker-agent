@@ -41,15 +41,14 @@ func (f *runExecFlags) recallCoordinatorOpt(ctx context.Context, rt runtime.Runt
 	if !exposed {
 		sm = server.NewSessionManager(ctx, nil, rt.SessionStore(), 0, &f.runConfig, server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
 	}
-	guard := sm.AttachRuntime(ctx, sess.ID, rt, sess)
-	detach := func() { sm.DetachRuntime(sess.ID) }
+	attachment := sm.AttachRuntime(ctx, sess.ID, rt, sess)
 	return func(a *app.App) {
-		app.WithStreamGuard(guard)(a)
+		app.WithStreamGuard(attachment)(a)
 		if exposed {
 			registerAppEventSource(sm, sess.ID, a)
 		}
 		sm.RegisterFollowUpInjector(sess.ID, a.InjectUserMessage)
-	}, detach
+	}, attachment.Detach
 }
 
 // registerAppEventSource exposes an App's runtime events on the control
@@ -76,7 +75,7 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 	}
 
 	sm := server.NewSessionManager(ctx, nil, rt.SessionStore(), 0, &f.runConfig, server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
-	guard := sm.AttachRuntime(ctx, sess.ID, rt, sess)
+	attachment := sm.AttachRuntime(ctx, sess.ID, rt, sess)
 	// Publish the serving manager so sessions spawned later (TUI tabs) attach
 	// to it too (see recallCoordinatorOpt). Set before the TUI starts, so no
 	// spawn can race it.
@@ -92,7 +91,7 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 	}
 	context.AfterFunc(ctx, func() { _ = ln.Close() })
 
-	cleanup, err := runregistry.Default().Write(runregistry.Record{
+	cleanup, err := f.discoveryRegistry().Write(runregistry.Record{
 		PID:       os.Getpid(),
 		Addr:      "http://" + ln.Addr().String(),
 		SessionID: sess.ID,
@@ -115,12 +114,12 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 	}()
 
 	return func(a *app.App) {
-		app.WithStreamGuard(guard)(a)
+		app.WithStreamGuard(attachment)(a)
 		registerAppEventSource(sm, sess.ID, a)
 		// Route control-plane follow-ups and idle recalls into the TUI App so
 		// each starts a real turn and streams events to every subscriber.
 		sm.RegisterFollowUpInjector(sess.ID, a.InjectUserMessage)
-	}, func() { sm.DetachRuntime(sess.ID) }, nil
+	}, attachment.Detach, nil
 }
 
 // detachOnClose runs detach before cleanup, once, so a closed tab stops being
