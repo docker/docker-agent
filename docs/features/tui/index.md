@@ -729,3 +729,5 @@ The TUI displays transient notification banners for agent warnings, errors, and 
 | Hover       | Pauses auto-dismiss; the notification stays visible until the mouse moves away |
 | Click       | Copies the notification text to the clipboard |
 | × (close)   | Dismisses immediately; the glyph turns red when hovered |
+
+Notifications normally sit in the bottom-right corner. While you type, the stack moves up just far enough to avoid covering the text in the prompt editor, and returns to its usual position when the input is empty.
