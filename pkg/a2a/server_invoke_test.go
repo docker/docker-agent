@@ -188,10 +188,14 @@ func serveA2A(t *testing.T, deps taskDeps) (*echo.Echo, string) {
 		id:      modelsdev.NewID("test", "mock-model"),
 		streams: []chat.MessageStream{stopStream()},
 	}))
+	return serveTeam(t, team.New(team.WithAgents(root)), deps)
+}
 
+func serveTeam(t *testing.T, tm *team.Team, deps taskDeps) (*echo.Echo, string) {
+	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	e, err := newServer(team.New(team.WithAgents(root)), "test.yaml", "root",
+	e, err := newServer(tm, "test.yaml", "root",
 		session.NewInMemorySessionStore(), deps,
 		servesafety.Resolved{Policy: session.SafetyPolicyAutonomous},
 		testWorkspaceRoot, ln.Addr().String(), RunOptions{})
@@ -313,6 +317,99 @@ func TestServer_PushConfigSurvivesRestart(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, task.ContextID, restored.ContextID)
 	assert.Equal(t, a2a.TaskStateCompleted, restored.Status.State)
+}
+
+// A task still running when the server dies must not stay working forever:
+// the restarted server fails it and tells the webhook registered for it.
+func TestServer_InFlightTaskFailedAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	received := make(chan a2a.Event, 16)
+	webhook := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		var sr a2a.StreamResponse
+		if assert.NoError(t, json.NewDecoder(r.Body).Decode(&sr)) {
+			received <- sr.Event
+		}
+	}))
+	t.Cleanup(webhook.Close)
+
+	running := make(chan struct{})
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	tool := tools.Tool{
+		Name:       "long_job",
+		Parameters: map[string]any{},
+		Handler: func(ctx context.Context, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+			close(running)
+			select {
+			case <-unblock:
+			case <-ctx.Done():
+			}
+			return tools.ResultSuccess("done"), nil
+		},
+	}
+	root := dagent.New("root", "You are a test agent", dagent.WithModel(&sequentialMockProvider{
+		id:      modelsdev.NewID("test", "mock-model"),
+		streams: []chat.MessageStream{toolCallStream(tool.Name), stopStream()},
+	}), dagent.WithTools(tool))
+
+	dir := a2astore.DirFor(filepath.Join(t.TempDir(), "session.db"))
+	openStore := func() *a2astore.Store {
+		store, err := a2astore.New(t.Context(), dir)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, store.Close()) })
+		return store
+	}
+
+	// First process: leave the task working. Its store stays open, as after a crash.
+	store1 := openStore()
+	deps1 := newTestTaskDeps(t)
+	deps1.tasks = store1.Tasks(a2asrv.NewTaskStoreAuthenticator())
+	deps1.pushConfigs = store1
+	server1, endpoint1 := serveTeam(t, team.New(team.WithAgents(root)), deps1)
+	result, err := newA2AClient(t, endpoint1).SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("run the long job")),
+		Config: &a2a.SendMessageConfig{
+			ReturnImmediately: true,
+			PushConfig:        &a2a.PushConfig{URL: webhook.URL, Token: "tok"},
+		},
+	})
+	require.NoError(t, err)
+	task, ok := result.(*a2a.Task)
+	require.True(t, ok)
+	select {
+	case <-running:
+	case <-time.After(10 * time.Second):
+		t.Fatal("tool never started")
+	}
+	require.NoError(t, server1.Server.Close())
+	for len(received) > 0 {
+		<-received
+	}
+
+	// Restarted process.
+	store2 := openStore()
+	deps2 := newTestTaskDeps(t)
+	deps2.tasks = store2.Tasks(a2asrv.NewTaskStoreAuthenticator())
+	deps2.pushConfigs = store2
+	require.NoError(t, recoverInterruptedTasks(t.Context(), store2, deps2.pushSender))
+	_, endpoint2 := serveA2A(t, deps2)
+
+	got, err := newA2AClient(t, endpoint2).GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateFailed, got.Status.State)
+
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case ev := <-received:
+			if pushState(ev) == a2a.TaskStateFailed {
+				return
+			}
+		case <-timeout:
+			t.Fatal("webhook never told the task failed")
+		}
+	}
 }
 
 func TestServer_TaskStoreScopedToSessionDB(t *testing.T) {

@@ -141,6 +141,9 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 			slog.WarnContext(ctx, "Pending push notifications dropped on shutdown", "error", err)
 		}
 	}()
+	if err := recoverInterruptedTasks(ctx, a2aStore, pushSender); err != nil {
+		return err
+	}
 
 	baseURL := &url.URL{Scheme: "http", Host: routableAddr(ln.Addr().String())}
 	slog.DebugContext(ctx, "A2A server listening", "url", baseURL.String())
@@ -171,6 +174,32 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 		return err
 	}
 
+	return nil
+}
+
+// interruptedReason is the status message of tasks failed on startup.
+const interruptedReason = "Task interrupted by an A2A server restart"
+
+// recoverInterruptedTasks fails the tasks a previous process was still running
+// and notifies their webhooks: nothing would ever complete them.
+func recoverInterruptedTasks(ctx context.Context, store *a2astore.Store, sender push.Sender) error {
+	tasks, err := store.FailInterrupted(ctx, interruptedReason)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		slog.InfoContext(ctx, "Failed A2A task interrupted by restart", "task_id", task.ID)
+		configs, err := store.List(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		event := &a2a.TaskStatusUpdateEvent{TaskID: task.ID, ContextID: task.ContextID, Status: task.Status}
+		for _, cfg := range configs {
+			if err := sender.SendPush(ctx, cfg, event); err != nil {
+				slog.WarnContext(ctx, "Failed to notify interrupted task", "task_id", task.ID, "error", err)
+			}
+		}
+	}
 	return nil
 }
 

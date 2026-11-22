@@ -147,6 +147,50 @@ func TestTaskListFiltersAndPaginates(t *testing.T) {
 	require.ErrorIs(t, err, a2a.ErrParseError)
 }
 
+func TestFailInterrupted(t *testing.T) {
+	ctx := asUser(t.Context(), "alice")
+	s, err := New(ctx, t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	tasks := s.Tasks(testAuth)
+
+	states := map[a2a.TaskID]a2a.TaskState{
+		"submitted": a2a.TaskStateSubmitted,
+		"working":   a2a.TaskStateWorking,
+		"input":     a2a.TaskStateInputRequired,
+		"completed": a2a.TaskStateCompleted,
+	}
+	for id, state := range states {
+		_, err := tasks.Create(ctx, newTask(id, "c1", state))
+		require.NoError(t, err)
+	}
+
+	failed, err := s.FailInterrupted(ctx, "restarted")
+	require.NoError(t, err)
+	var ids []a2a.TaskID
+	for _, task := range failed {
+		ids = append(ids, task.ID)
+	}
+	assert.ElementsMatch(t, []a2a.TaskID{"submitted", "working"}, ids)
+
+	for id, before := range states {
+		got, err := tasks.Get(ctx, id)
+		require.NoError(t, err)
+		if id == "submitted" || id == "working" {
+			assert.Equal(t, a2a.TaskStateFailed, got.Task.Status.State)
+			assert.Equal(t, taskstore.TaskVersion(2), got.Version)
+			assert.Equal(t, "alice", got.User)
+			require.NotNil(t, got.Task.Status.Message)
+			continue
+		}
+		assert.Equal(t, before, got.Task.Status.State)
+	}
+
+	again, err := s.FailInterrupted(ctx, "restarted")
+	require.NoError(t, err)
+	assert.Empty(t, again)
+}
+
 func TestTaskPersistenceAcrossReopen(t *testing.T) {
 	ctx := asUser(t.Context(), "alice")
 	path := t.TempDir()
