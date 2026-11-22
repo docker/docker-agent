@@ -3,6 +3,7 @@ package testutil
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,8 +45,10 @@ func TestRunWithTempHome(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, entries)
 
-		assert.Equal(t, filepath.Join(home, ".config", "cagent"), paths.GetConfigDir())
-		assert.Equal(t, filepath.Join(home, ".cagent"), paths.GetDataDir())
+		config, data, cache := expectedDirs(runtime.GOOS, home)
+		assert.Equal(t, config, paths.GetConfigDir())
+		assert.Equal(t, data, paths.GetDataDir())
+		assert.Equal(t, cache, paths.GetCacheDir())
 
 		// pkg/path prefers HOME over os.UserHomeDir on every platform.
 		expanded, err := pathx.ExpandHomeDir("~")
@@ -128,4 +131,22 @@ func TestSetenvRestoresUnsetVariable(t *testing.T) {
 	restore()
 	_, set := os.LookupEnv(name)
 	assert.False(t, set)
+}
+
+func expectedDirs(goos, home string) (config, data, cache string) {
+	switch goos {
+	case "darwin":
+		support := filepath.Join(home, "Library", "Application Support")
+		return filepath.Join(support, "cagent"),
+			filepath.Join(support, "cagent"),
+			filepath.Join(home, "Library", "Caches", "cagent")
+	case "windows":
+		return filepath.Join(home, "AppData", "Roaming", "cagent"),
+			filepath.Join(home, "AppData", "Local", "cagent"),
+			filepath.Join(home, "AppData", "Local", "cagent")
+	default:
+		return filepath.Join(home, ".config", "cagent"),
+			filepath.Join(home, ".local", "share", "cagent"),
+			filepath.Join(home, ".cache", "cagent")
+	}
 }

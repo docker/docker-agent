@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 // TestMain swaps the SSRF-safe HTTP client for the loopback-allowing
@@ -13,6 +14,9 @@ import (
 // Its private pool is unaffected by parallel httptest server cleanup.
 // Production code keeps the safe client.
 func TestMain(m *testing.M) {
+	// Skills tests isolate HOME; XDG variables would redirect their state.
+	testutil.ClearXDG()
+
 	skillsHTTPClient = httpclient.NewSafeClient(remoteHTTPTimeout, true)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	skillsHTTPClient.Transport = transport

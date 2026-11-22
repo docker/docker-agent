@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -55,6 +56,8 @@ func TestDataDir_RootCommand(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
 			t.Setenv("USERPROFILE", home)
+			t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+			t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 			t.Setenv(envConfigDir, t.TempDir())
 			t.Setenv(cagentEnvConfigDir, "")
 			t.Setenv(envDataDir, "")
@@ -65,7 +68,7 @@ func TestDataDir_RootCommand(t *testing.T) {
 				paths.SetConfigDir("")
 			})
 
-			expected := filepath.Join(home, ".cagent")
+			expected := defaultDataDir(runtime.GOOS, home)
 			if tt.preset {
 				expected = t.TempDir()
 				paths.SetDataDir(expected)
@@ -135,5 +138,16 @@ func TestDataDir_RootCommand(t *testing.T) {
 			root.SetArgs(args)
 			require.NoError(t, root.Execute())
 		})
+	}
+}
+
+func defaultDataDir(goos, home string) string {
+	switch goos {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "cagent")
+	case "windows":
+		return filepath.Join(home, "AppData", "Local", "cagent")
+	default:
+		return filepath.Join(home, ".local", "share", "cagent")
 	}
 }

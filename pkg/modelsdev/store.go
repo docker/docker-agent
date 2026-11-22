@@ -115,7 +115,7 @@ func WithKnownProvider(fn func(string) bool) Opt {
 }
 
 // NewStore creates a new Store backed by an on-disk cache. By default the
-// cache lives at ~/.cagent/models_dev.json; use WithCache to override the
+// cache lives at <cache-dir>/models_dev.json; use WithCache to override the
 // location. A cache/network miss uses WithFallback when configured, otherwise
 // an empty catalog.
 // Callers should create one Store and share it rather than calling NewStore

@@ -31,7 +31,7 @@ func TestNew(t *testing.T) {
 	h, err := New("")
 	require.NoError(t, err)
 
-	assert.Equal(t, filepath.Join(home, ".cagent", "history"), h.path)
+	assert.Equal(t, filepath.Join(paths.GetDataDir(), "history"), h.path)
 	assert.Equal(t, 0, h.current)
 	assert.Empty(t, h.Messages)
 }

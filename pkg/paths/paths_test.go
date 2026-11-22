@@ -3,13 +3,21 @@ package paths_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
+
+func TestMain(m *testing.M) {
+	// Keeps XDG variables from the host from redirecting state outside the
+	// temporary home used by these tests.
+	os.Exit(testutil.RunWithTempHome(m.Run))
+}
 
 func TestOverrides(t *testing.T) {
 	t.Parallel()
@@ -55,15 +63,39 @@ func TestGetHomeDirUsesPlatformNativeHome(t *testing.T) {
 	// HOME and USERPROFILE deliberately differ: if a HOME preference is
 	// ever reintroduced, GetHomeDir diverges from os.UserHomeDir on
 	// Windows and this test fails there.
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 
-	home, err := os.UserHomeDir()
+	userHome, err := os.UserHomeDir()
 	require.NoError(t, err)
 
-	assert.Equal(t, filepath.Clean(home), paths.GetHomeDir())
-	assert.Equal(t, filepath.Join(home, ".config", "cagent"), paths.GetConfigDir())
-	assert.Equal(t, filepath.Join(home, ".cagent"), paths.GetDataDir())
+	assert.Equal(t, filepath.Clean(userHome), paths.GetHomeDir())
+
+	config, data, cache := expectedDefaults(runtime.GOOS, home)
+	assert.Equal(t, config, paths.GetConfigDir())
+	assert.Equal(t, data, paths.GetDataDir())
+	assert.Equal(t, cache, paths.GetCacheDir())
+}
+
+func expectedDefaults(goos, home string) (config, data, cache string) {
+	switch goos {
+	case "darwin":
+		support := filepath.Join(home, "Library", "Application Support")
+		return filepath.Join(support, "cagent"),
+			filepath.Join(support, "cagent"),
+			filepath.Join(home, "Library", "Caches", "cagent")
+	case "windows":
+		return filepath.Join(home, "AppData", "Roaming", "cagent"),
+			filepath.Join(home, "AppData", "Local", "cagent"),
+			filepath.Join(home, "AppData", "Local", "cagent")
+	default:
+		return filepath.Join(home, ".config", "cagent"),
+			filepath.Join(home, ".local", "share", "cagent"),
+			filepath.Join(home, ".cache", "cagent")
+	}
 }
 
 func TestSetRoot(t *testing.T) {
@@ -83,4 +115,11 @@ func TestSetRoot(t *testing.T) {
 	assert.Equal(t, defaultData, paths.GetDataDir())
 	assert.Equal(t, defaultConfig, paths.GetConfigDir())
 	assert.Equal(t, defaultCache, paths.GetCacheDir())
+}
+
+func TestEnsureRootsIsIdempotent(t *testing.T) {
+	require.NoError(t, paths.EnsureRoots())
+	dir := paths.GetDataDir()
+	require.NoError(t, paths.EnsureRoots())
+	assert.Equal(t, dir, paths.GetDataDir())
 }

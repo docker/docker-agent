@@ -86,6 +86,13 @@ New to docker agent? Take the hands-on tour: docker agent getting-started`,
 				paths.SetDataDir(dataDir)
 			}
 
+			// Adopt the XDG/native roots (or keep an existing legacy install)
+			// before anything writes state: the first-run marker, the debug
+			// log, telemetry, sessions, caches.
+			if err := paths.EnsureRoots(); err != nil {
+				return fmt.Errorf("initializing state directories: %w", err)
+			}
+
 			// Set the version for automatic telemetry initialization
 			telemetry.SetGlobalTelemetryVersion(version.Version)
 
@@ -171,10 +178,10 @@ We collect anonymous usage data to help improve docker agent. To disable:
 	// Add persistent debug flag available to all commands
 	cmd.PersistentFlags().BoolVarP(&flags.debugMode, "debug", "d", false, "Enable debug logging")
 	cmd.PersistentFlags().BoolVarP(&flags.enableOtel, "otel", "o", false, "Enable OpenTelemetry tracing")
-	cmd.PersistentFlags().StringVar(&flags.logFilePath, "log-file", "", "Path to debug log file (default: ~/.cagent/cagent.debug.log; only used with --debug)")
-	cmd.PersistentFlags().StringVar(&flags.cacheDir, "cache-dir", "", "Override the cache directory (default: ~/Library/Caches/cagent on macOS)")
-	cmd.PersistentFlags().StringVar(&flags.configDir, "config-dir", "", "Override the config directory (default: ~/.config/cagent)")
-	cmd.PersistentFlags().StringVar(&flags.dataDir, "data-dir", "", "Override the data directory (default: ~/.cagent; env: DOCKER_AGENT_DATA_DIR)")
+	cmd.PersistentFlags().StringVar(&flags.logFilePath, "log-file", "", "Path to debug log file (default: <data-dir>/cagent.debug.log; only used with --debug)")
+	cmd.PersistentFlags().StringVar(&flags.cacheDir, "cache-dir", "", "Override the cache directory (default: $XDG_CACHE_HOME/cagent, or the OS-native cache dir)")
+	cmd.PersistentFlags().StringVar(&flags.configDir, "config-dir", "", "Override the config directory (default: $XDG_CONFIG_HOME/cagent, or the OS-native config dir)")
+	cmd.PersistentFlags().StringVar(&flags.dataDir, "data-dir", "", "Override the data directory (default: $XDG_DATA_HOME/cagent, or the OS-native data dir; env: DOCKER_AGENT_DATA_DIR)")
 
 	// Define groups
 	cmd.AddGroup(

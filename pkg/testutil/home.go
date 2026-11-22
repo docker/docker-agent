@@ -3,11 +3,24 @@ package testutil
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 )
 
 // tempHomeEnv marks a process tree that already runs with a temporary home.
 const tempHomeEnv = "TESTUTIL_TEMP_HOME"
+
+// xdgVariables redirect state away from HOME when set by the host.
+var xdgVariables = []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"}
+
+// ClearXDG unsets the XDG base-directory variables so tests that isolate state
+// via HOME keep resolving under it. Call it from TestMain in packages with a
+// custom TestMain; RunWithTempHome already does this.
+func ClearXDG() {
+	for _, name := range xdgVariables {
+		_ = os.Unsetenv(name)
+	}
+}
 
 // RunWithTempHome runs a test suite with the home directory pointing at an
 // empty temporary directory, so tests neither read nor write the developer's
@@ -28,6 +41,17 @@ func RunWithTempHome(run func() int) int {
 	restores := []func(){setenv(tempHomeEnv, home)}
 	for _, name := range homeVariables(runtime.GOOS, os.Getenv("HOME")) {
 		restores = append(restores, setenv(name, home))
+	}
+	if runtime.GOOS == "windows" {
+		restores = append(restores,
+			setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")),
+			setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local")),
+		)
+	}
+	// XDG variables would otherwise point state at the developer's directories
+	// instead of the temporary home with which these tests are isolated.
+	for _, name := range xdgVariables {
+		restores = append(restores, unsetenv(name))
 	}
 	defer func() {
 		for _, restore := range restores {
@@ -64,6 +88,20 @@ func setenv(name, value string) (restore func()) {
 			_ = os.Setenv(name, previous)
 		} else {
 			_ = os.Unsetenv(name)
+		}
+	}
+}
+
+// unsetenv removes an environment variable and returns a function that
+// restores its previous value, if any.
+func unsetenv(name string) (restore func()) {
+	previous, wasSet := os.LookupEnv(name)
+	if err := os.Unsetenv(name); err != nil {
+		panic(err)
+	}
+	return func() {
+		if wasSet {
+			_ = os.Setenv(name, previous)
 		}
 	}
 }
