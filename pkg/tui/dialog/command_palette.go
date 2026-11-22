@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -77,6 +78,10 @@ func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
+
+	case messages.ThemeChangedMsg:
+		d.refreshInputStyles()
+		return d, nil
 
 	case tea.PasteMsg:
 		cmd := d.updateInput(msg, d.filterCommands)

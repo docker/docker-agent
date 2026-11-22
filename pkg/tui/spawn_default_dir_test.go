@@ -15,13 +15,11 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
-	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/statusbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
-	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // spySpawner records the working directories it was asked to spawn in and
@@ -44,7 +42,7 @@ func newSpawnTestModel(t *testing.T, spy *spySpawner, opts ...Option) *appModel 
 	m.ar = animation.NewRuntime()
 	m.buildCommandCategories = func(context.Context, tea.Model) []commands.Category { return nil }
 	m.application = app.New(t.Context(), stubRuntime{}, session.New())
-	m.workingSpinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)
+	m.workingSpinner = newWorkingSpinner(m.ar)
 	m.tabBar = tabbar.New(m.ar, 0)
 	m.statusBar = statusbar.New(m)
 	m.supervisor = supervisor.New(spy.spawn)

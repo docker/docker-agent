@@ -108,6 +108,12 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case messages.ThemeChangedMsg:
+		for i := range d.inputs {
+			d.inputs[i].SetStyles(styles.DialogInputStyle)
+		}
+		return d, nil
+
 	case tea.PasteMsg:
 		// Forward paste to current text input
 		if d.currentInput < len(d.inputs) {

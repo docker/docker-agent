@@ -410,6 +410,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// Theme changed - invalidate all render caches
 		m.invalidateAllItems()
 		m.toolRenderers.InvalidateCaches()
+		if m.inlineEditMsgIndex >= 0 {
+			m.inlineEditTextarea.SetStyles(inlineEditTextareaStyles())
+		}
 		for i, view := range m.views {
 			updatedView, cmd := view.Update(msg)
 			m.views[i] = updatedView
@@ -1492,6 +1495,22 @@ func (m *model) renderItem(index int, view layout.Model) renderedItem {
 	}
 
 	return item
+}
+
+func inlineEditTextareaStyles() textarea.Styles {
+	return textarea.Styles{
+		Focused: textarea.StyleState{
+			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
+			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
+		},
+		Blurred: textarea.StyleState{
+			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
+			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
+		},
+		Cursor: textarea.CursorStyle{
+			Color: styles.Accent,
+		},
+	}
 }
 
 // renderInlineEditTextarea renders the inline editing textarea with user message styling.
@@ -2823,21 +2842,7 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0 // No limit
 
-	// Set custom styles with background color matching the user message style
-	inlineEditStyle := textarea.Styles{
-		Focused: textarea.StyleState{
-			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
-			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
-		},
-		Blurred: textarea.StyleState{
-			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
-			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
-		},
-		Cursor: textarea.CursorStyle{
-			Color: styles.Accent,
-		},
-	}
-	ta.SetStyles(inlineEditStyle)
+	ta.SetStyles(inlineEditTextareaStyles())
 
 	// Mirror the composer's configurable newline keys (ctrl+j by default),
 	// always offering shift+enter for terminals with keyboard enhancements.
