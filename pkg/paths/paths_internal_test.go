@@ -356,3 +356,41 @@ func TestSharedTargetDoesNotAdoptOtherRootsLegacyState(t *testing.T) {
 		})
 	}
 }
+
+// A directory squatting on the marker path is not a marker: O_EXCL reports
+// EEXIST for it, but the root must not be treated as adopted.
+func TestEnsureRootsMarkerPathIsDirectory(t *testing.T) {
+	setup := func(t *testing.T) (home, target string) {
+		resetRootState(t)
+		clearXDG(t)
+		home = setTestHome(t)
+		base := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", base)
+		target = filepath.Join(base, "cagent")
+		require.NoError(t, os.MkdirAll(filepath.Join(target, dataRoot.marker()), 0o700))
+		return home, target
+	}
+
+	t.Run("createMarker reports failure", func(t *testing.T) {
+		_, target := setup(t)
+		require.Error(t, createMarker(target, dataRoot.marker()))
+		assert.False(t, markerExists(target, dataRoot.marker()))
+	})
+
+	t.Run("falls back to an existing legacy root", func(t *testing.T) {
+		home, target := setup(t)
+		legacy := filepath.Join(home, ".cagent")
+		require.NoError(t, os.MkdirAll(legacy, 0o700))
+
+		require.NoError(t, EnsureRoots())
+		assert.Equal(t, legacy, GetDataDir())
+		assert.NotEqual(t, target, GetDataDir())
+	})
+
+	t.Run("fails startup without a legacy root", func(t *testing.T) {
+		setup(t)
+		err := EnsureRoots()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "data root marker")
+	})
+}

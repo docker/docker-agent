@@ -241,8 +241,8 @@ func createMarker(target, name string) error {
 	marker := filepath.Join(target, name)
 	f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		// Another process won the race; the marker is established either way.
-		if os.IsExist(err) {
+		// Another process won the race; a directory at the path is not a marker.
+		if os.IsExist(err) && markerExists(target, name) {
 			return nil
 		}
 		return err

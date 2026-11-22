@@ -133,6 +133,25 @@ func TestSetenvRestoresUnsetVariable(t *testing.T) {
 	assert.False(t, set)
 }
 
+func TestUnsetenvRestoresPreviousState(t *testing.T) {
+	const name = "TESTUTIL_UNSETENV_VARIABLE"
+	t.Setenv(name, "") // Restores the variable after the test.
+
+	require.NoError(t, os.Unsetenv(name))
+	restore := unsetenv(name)
+	require.NoError(t, os.Setenv(name, "set-during-run"))
+	restore()
+	_, set := os.LookupEnv(name)
+	assert.False(t, set, "a variable that was unset must be unset again")
+
+	require.NoError(t, os.Setenv(name, "original"))
+	restore = unsetenv(name)
+	_, set = os.LookupEnv(name)
+	assert.False(t, set)
+	restore()
+	assert.Equal(t, "original", os.Getenv(name))
+}
+
 func expectedDirs(goos, home string) (config, data, cache string) {
 	switch goos {
 	case "darwin":

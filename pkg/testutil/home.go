@@ -102,6 +102,8 @@ func unsetenv(name string) (restore func()) {
 	return func() {
 		if wasSet {
 			_ = os.Setenv(name, previous)
+		} else {
+			_ = os.Unsetenv(name)
 		}
 	}
 }
