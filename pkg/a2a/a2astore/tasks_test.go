@@ -2,7 +2,6 @@ package a2astore
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -150,7 +149,7 @@ func TestTaskListFiltersAndPaginates(t *testing.T) {
 
 func TestTaskPersistenceAcrossReopen(t *testing.T) {
 	ctx := asUser(t.Context(), "alice")
-	path := filepath.Join(t.TempDir(), "a2a.db")
+	path := t.TempDir()
 
 	s1, err := New(ctx, path)
 	require.NoError(t, err)

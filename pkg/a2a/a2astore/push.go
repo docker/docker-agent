@@ -13,7 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
+	"path/filepath"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/push"
@@ -57,10 +57,25 @@ CREATE TABLE IF NOT EXISTS a2a_tasks (
 
 CREATE INDEX IF NOT EXISTS a2a_tasks_owner_updated ON a2a_tasks (owner, updated_at, task_id);`
 
-// New opens (creating if necessary) a SQLite database at path and ensures the
-// push-config and task tables exist. Pass ":memory:" for an ephemeral store (useful in
-// tests). The caller owns the returned Store and must call Close.
-func New(ctx context.Context, path string) (*Store, error) {
+// dbFile is the database New opens inside its directory.
+const dbFile = "a2a.db"
+
+// DirFor returns the store directory for a session database, so servers using
+// different session databases in the same directory never share tasks.
+func DirFor(sessionDB string) string {
+	return sessionDB + "-a2a"
+}
+
+// New opens (creating if necessary) the store in dir and ensures the
+// push-config and task tables exist. The database holds webhook callback
+// tokens and credentials in plaintext, so dir is made private to the current
+// user before SQLite creates or opens any file in it. The caller owns the
+// returned Store and must call Close.
+func New(ctx context.Context, dir string) (*Store, error) {
+	path := filepath.Join(dir, dbFile)
+	if err := preparePrivate(dir, path); err != nil {
+		return nil, fmt.Errorf("failed to secure a2a store directory: %w", err)
+	}
 	db, err := sqliteutil.OpenDB(ctx, path)
 	if err != nil {
 		return nil, err
@@ -69,34 +84,12 @@ func New(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to create a2a tables: %w", err)
 	}
-	// This database holds webhook callback tokens and auth credentials in
-	// plaintext. sqliteutil.OpenDB creates the file with the process umask
-	// (often world-readable) and does not tighten a pre-existing data
-	// directory, so enforce owner-only access on the database and the WAL
-	// sidecars the schema write above has just materialized.
-	if path != ":memory:" {
-		if err := restrictToOwner(path); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-	}
 	return &Store{db: db}, nil
 }
 
-// restrictToOwner forces owner-only (0600) permissions on the database file and
-// any of its SQLite sidecars that exist. Missing sidecars are not an error:
-// which ones are present depends on the journal mode (-wal/-shm in WAL mode,
-// a transient -journal in DELETE mode).
-func restrictToOwner(path string) error {
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("failed to secure a2a database permissions: %w", err)
-	}
-	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-		if err := os.Chmod(path+suffix, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("failed to secure a2a database permissions: %w", err)
-		}
-	}
-	return nil
+// sqliteFiles lists the database and every sidecar SQLite may create for it.
+func sqliteFiles(path string) []string {
+	return []string{path, path + "-wal", path + "-shm", path + "-journal"}
 }
 
 // Close releases the underlying database handle.

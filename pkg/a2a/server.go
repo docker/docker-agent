@@ -119,10 +119,10 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 		}
 	}()
 
-	// Tasks and their push configs live in a sibling database so webhooks
-	// registered via tasks/pushNotificationConfig/set survive a restart: the
-	// SDK checks the task exists before any push-config operation.
-	a2aStore, err := a2astore.New(ctx, filepath.Join(filepath.Dir(expandedSessionDB), "a2a.db"))
+	// Tasks and their push configs persist so webhooks survive a restart (the
+	// SDK checks the task exists before any push-config operation). The store
+	// is scoped to this session database: tasks carry no per-server owner.
+	a2aStore, err := a2astore.New(ctx, a2astore.DirFor(expandedSessionDB))
 	if err != nil {
 		return fmt.Errorf("failed to open A2A task store: %w", err)
 	}

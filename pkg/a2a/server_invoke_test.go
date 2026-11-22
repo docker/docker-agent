@@ -271,7 +271,7 @@ func pushState(event a2a.Event) a2a.TaskState {
 func TestServer_PushConfigSurvivesRestart(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "a2a.db")
+	dbPath := t.TempDir()
 	start := func() (*a2astore.Store, *echo.Echo, *a2aclient.Client) {
 		store, err := a2astore.New(t.Context(), dbPath)
 		require.NoError(t, err)
@@ -313,6 +313,40 @@ func TestServer_PushConfigSurvivesRestart(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, task.ContextID, restored.ContextID)
 	assert.Equal(t, a2a.TaskStateCompleted, restored.Status.State)
+}
+
+func TestServer_TaskStoreScopedToSessionDB(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	start := func(sessionDB string) *a2aclient.Client {
+		store, err := a2astore.New(t.Context(), a2astore.DirFor(sessionDB))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, store.Close()) })
+		deps := newTestTaskDeps(t)
+		deps.tasks = store.Tasks(a2asrv.NewTaskStoreAuthenticator())
+		deps.pushConfigs = store
+		_, endpoint := serveA2A(t, deps)
+		return newA2AClient(t, endpoint)
+	}
+	clientA := start(filepath.Join(dir, "a.db"))
+	clientB := start(filepath.Join(dir, "b.db"))
+
+	result, err := clientA.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello")),
+	})
+	require.NoError(t, err)
+	task, ok := result.(*a2a.Task)
+	require.True(t, ok)
+	saved, err := clientA.CreateTaskPushConfig(t.Context(), &a2a.PushConfig{
+		TaskID: task.ID, URL: "https://hook.example/cb", Token: "sekret",
+	})
+	require.NoError(t, err)
+
+	_, err = clientB.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
+	require.ErrorIs(t, err, a2a.ErrTaskNotFound)
+	_, err = clientB.GetTaskPushConfig(t.Context(), &a2a.GetTaskPushConfigRequest{TaskID: task.ID, ID: saved.ID})
+	require.ErrorIs(t, err, a2a.ErrTaskNotFound)
 }
 
 func startInvokeServer(t *testing.T, tm *team.Team, store session.Store, safety servesafety.Resolved) net.Listener {

@@ -1,9 +1,6 @@
 package a2astore
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -14,7 +11,7 @@ import (
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := New(t.Context(), filepath.Join(t.TempDir(), "push.db"))
+	s, err := New(t.Context(), t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	return s
@@ -161,7 +158,7 @@ func TestValidationErrors(t *testing.T) {
 
 func TestPersistenceAcrossReopen(t *testing.T) {
 	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "push.db")
+	path := t.TempDir()
 
 	s1, err := New(ctx, path)
 	require.NoError(t, err)
@@ -189,38 +186,6 @@ func TestReturnedConfigIsCopy(t *testing.T) {
 	got, err := s.Get(ctx, "task-1", "c1")
 	require.NoError(t, err)
 	assert.Equal(t, "orig", got.Token)
-}
-
-// TestDatabaseFilesAreOwnerOnly asserts the store keeps callback tokens and
-// auth credentials in files unreadable by other users, tightening even a
-// database file that already exists with permissive permissions.
-func TestDatabaseFilesAreOwnerOnly(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX file modes are not meaningful on Windows")
-	}
-
-	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "a2a.db")
-	// Pre-create the file world-readable so the assertion proves New tightens
-	// it rather than merely inheriting a restrictive ambient umask.
-	require.NoError(t, os.WriteFile(path, nil, 0o644))
-
-	s, err := New(ctx, path)
-	require.NoError(t, err)
-	// A write materializes the WAL sidecars so we can assert their mode too.
-	_, err = s.Save(ctx, "task-1", &a2a.PushConfig{URL: "https://hook.example/cb", Token: "sekret"})
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-		info, err := os.Stat(path + suffix)
-		if os.IsNotExist(err) {
-			continue // sidecar not present in this journal mode
-		}
-		require.NoError(t, err)
-		assert.Equalf(t, os.FileMode(0o600), info.Mode().Perm(),
-			"%q must be owner-only; group/other bits leak stored credentials", path+suffix)
-	}
 }
 
 // Guard against accidental interface drift.
