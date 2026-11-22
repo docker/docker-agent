@@ -25,11 +25,14 @@ access; inference runs locally after the model is downloaded.
 
    ```bash
    $ brew install rapid-mlx
-   # or
-   $ python3.12 -m venv ~/.venvs/rapid-mlx
+   # Or use your installed Python 3.12+ executable, for example:
+   $ python3.13 -m venv ~/.venvs/rapid-mlx
    $ ~/.venvs/rapid-mlx/bin/pip install rapid-mlx
    $ export PATH="$HOME/.venvs/rapid-mlx/bin:$PATH"
    ```
+
+   If you have no Python 3.12 or newer, run `brew install python@3.12` and
+   use `python3.12` to create the venv.
 
 2. Start the server with a model. For a small first download on an 8 GB Mac,
    use the `qwen3-1.7b-4bit` text chat alias
@@ -109,11 +112,13 @@ requests, so the thinking override above applies only to Chat Completions.
 
 To enable authentication, add `token_key: RAPID_MLX_API_KEY` under
 `providers.rapid-mlx`. Stop the setup server with Ctrl+C, then restart it
-with the `RAPID_MLX_API_KEY` environment variable. This keeps the key out of
-the server's process arguments:
+with the `RAPID_MLX_API_KEY` environment variable. Store the key once in the
+macOS Keychain; the first command prompts for it interactively. Load it in
+the server terminal to keep it out of shell history and process arguments:
 
 ```bash
-$ export RAPID_MLX_API_KEY=your-server-api-key
+$ security add-generic-password -a "$USER" -s rapid-mlx-api-key -w
+$ export RAPID_MLX_API_KEY="$(security find-generic-password -a "$USER" -s rapid-mlx-api-key -w)"
 $ rapid-mlx serve qwen3-1.7b-4bit --port 8000
 ```
 
@@ -121,8 +126,7 @@ $ rapid-mlx serve qwen3-1.7b-4bit --port 8000
 for the client commands:
 
 ```bash
-$ export RAPID_MLX_API_KEY=your-server-api-key
-$ curl http://127.0.0.1:8000/v1/models -H "Authorization: Bearer $RAPID_MLX_API_KEY"
+$ export RAPID_MLX_API_KEY="$(security find-generic-password -a "$USER" -s rapid-mlx-api-key -w)"
 $ docker agent run rapid-mlx.yaml --exec "Hello"
 ```
 
@@ -161,10 +165,11 @@ parameter schemas clear, and retain tool approvals. See
   refer to your Mac. On Docker Desktop, use
   `http://host.docker.internal:8000/v1` and start the server with a host
   reachable from the container, an API key, and the Docker hostname in the
-  Host allowlist. Stop the previous server before restarting:
+  Host allowlist. Store the key in the macOS Keychain as described in
+  [Authentication](#authentication). Stop the previous server before restarting:
 
   ```bash
-  $ export RAPID_MLX_API_KEY=your-server-api-key
+  $ export RAPID_MLX_API_KEY="$(security find-generic-password -a "$USER" -s rapid-mlx-api-key -w)"
   $ rapid-mlx serve qwen3-1.7b-4bit --port 8000 --host 0.0.0.0 --trusted-hosts host.docker.internal
   ```
 
@@ -175,7 +180,7 @@ parameter schemas clear, and retain tool approvals. See
   running the Docker Agent image:
 
   ```bash
-  $ export RAPID_MLX_API_KEY=your-server-api-key
+  $ export RAPID_MLX_API_KEY="$(security find-generic-password -a "$USER" -s rapid-mlx-api-key -w)"
   $ docker run --rm -e RAPID_MLX_API_KEY -v "$PWD:/work" docker/docker-agent run /work/rapid-mlx.yaml --exec "Hello"
   ```
 
