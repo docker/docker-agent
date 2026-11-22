@@ -137,6 +137,10 @@ func (p *pickerCore) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
 	return dialogWidth, maxHeight, contentWidth
 }
 
+func (p *pickerCore) refreshInputStyles() {
+	p.textInput.SetStyles(styles.DialogInputStyle)
+}
+
 // regionWidth returns the scrollview region width (content + reserved cols).
 func (p *pickerCore) regionWidth(contentWidth int) int {
 	return contentWidth + p.scrollview.ReservedCols()

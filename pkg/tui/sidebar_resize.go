@@ -15,8 +15,9 @@ import (
 // there are overlays. Guide frames can then reuse the exact same stacking
 // without asking any component to render again.
 type viewForeground struct {
-	base   string
-	layers []*lipgloss.Layer
+	base       string
+	layers     []*lipgloss.Layer
+	helpBounds image.Rectangle
 }
 
 func (f viewForeground) compose(base string) string {
@@ -28,10 +29,14 @@ func (f viewForeground) compose(base string) string {
 func foregroundBounds(layers []*lipgloss.Layer) []image.Rectangle {
 	bounds := make([]image.Rectangle, 0, len(layers))
 	for _, layer := range layers {
-		x, y := layer.GetX(), layer.GetY()
-		bounds = append(bounds, image.Rect(x, y, x+layer.Width(), y+layer.Height()))
+		bounds = append(bounds, foregroundLayerBounds(layer))
 	}
 	return bounds
+}
+
+func foregroundLayerBounds(layer *lipgloss.Layer) image.Rectangle {
+	x, y := layer.GetX(), layer.GetY()
+	return image.Rect(x, y, x+layer.Width(), y+layer.Height())
 }
 
 func (m *appModel) clearSidebarResizeGuide() {

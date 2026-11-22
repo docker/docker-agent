@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/elicitform"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -202,6 +203,13 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
+	case messages.ThemeChangedMsg:
+		d.responseInput.SetStyles(styles.DialogInputStyle)
+		for i := range d.inputs {
+			d.inputs[i].SetStyles(styles.DialogInputStyle)
+		}
+		return d, nil
+
 	case tea.PasteMsg:
 		// Forward paste to the active text input
 		if d.hasFreeFormInput() {

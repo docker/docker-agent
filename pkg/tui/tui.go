@@ -567,7 +567,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		dialogMgr:                     dialog.NewWithAnimation(ar),
 		completions:                   completion.New(),
 		tour:                          tour.New(),
-		workingSpinner:                spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
+		workingSpinner:                newWorkingSpinner(ar),
 		focusedPanel:                  PanelEditor,
 		editorLines:                   minEditorLines,
 		layoutSettings:                layoutSettingsFromConfig(userSettings.GetLayout()),
@@ -1254,6 +1254,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Dialog lifecycle ---
 
 	case dialog.OpenDialogMsg:
+		if !m.leanMode && dialog.IsHelpDialog(msg.Model) && m.dialogMgr.HasDialog(dialog.IsHelpDialog) {
+			return m, nil
+		}
 		m.cancelSidebarPlanEdit()
 		return m.forwardDialog(msg)
 	case dialog.CloseDialogMsg:
@@ -2160,7 +2163,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	// Sync editor working state and reset working spinner.
 	m.activeTab.editor.SetWorking(m.activeTab.chatPage.IsWorking())
 	m.workingSpinner.Stop()
-	m.workingSpinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)
+	m.workingSpinner = newWorkingSpinner(m.ar)
 
 	var cmds []tea.Cmd
 
@@ -2360,111 +2363,13 @@ func (m *appModel) Help() help.KeyMap {
 	return core.NewSimpleHelp(m.Bindings())
 }
 
-// AllBindings returns ALL available key bindings for the help dialog (comprehensive list).
-func (m *appModel) AllBindings() []key.Binding {
-	keys := core.GetKeys()
-	quitBinding := keys.Quit
-
-	if m.leanMode {
-		return []key.Binding{quitBinding}
-	}
-
-	tabBinding := keys.SwitchFocus
-
-	bindings := []key.Binding{quitBinding, tabBinding}
-	bindings = append(bindings, m.tabBar.Bindings()...)
-
-	// Additional global shortcuts. shift+tab is not user-configurable.
-	bindings = append(bindings,
-		keys.Commands,
-		keys.Help,
-		keys.ToggleYolo,
-		keys.ToggleHideToolResults,
-		keys.CycleAgent,
-		keys.ModelPicker,
-		keys.ClearQueue,
-		keys.Suspend,
-		key.NewBinding(
-			key.WithKeys("shift+tab"),
-			key.WithHelp("Shift+Tab", "cycle thinking level"),
-		),
-	)
-
-	// leanMode already returned above, so only hideSidebar matters here.
-	if !m.hideSidebar {
-		bindings = append(bindings, keys.ToggleSidebar)
-	}
-
-	// Show newline help based on keyboard enhancement support. shift+enter is
-	// detected at runtime; otherwise fall back to the configured newline key.
-	if m.keyboardEnhancementsSupported {
-		bindings = append(bindings, key.NewBinding(
-			key.WithKeys("shift+enter"),
-			key.WithHelp("Shift+Enter", "newline"),
-		))
-	} else {
-		nl := keys.EditorNewline
-		bindings = append(bindings, key.NewBinding(
-			key.WithKeys(nl.Keys()...),
-			key.WithHelp(nl.Help().Key, "newline"),
-		))
-	}
-
-	if m.focusedPanel == PanelContent {
-		bindings = append(bindings, m.activeTab.chatPage.Bindings()...)
-	} else {
-		editorName := editorname.FromEnv(os.Getenv("VISUAL"), os.Getenv("EDITOR"))
-		editExternal := keys.EditExternal
-		// Keep the binding's capitalized key label; only swap the description.
-		editExternal.SetHelp(editExternal.Help().Key, "edit in "+editorName)
-		bindings = append(bindings,
-			editExternal,
-			keys.HistorySearch,
-		)
-	}
-	return bindings
-}
-
-// Bindings returns the key bindings shown in the status bar (a curated subset).
-// This filters AllBindings() to show only the most essential commands.
+// Bindings returns the single shortcut advertised by the status bar.
 func (m *appModel) Bindings() []key.Binding {
-	all := m.AllBindings()
-
-	// Define which keys should appear in the status bar
 	keys := core.GetKeys()
-	statusBarKeys := map[string]bool{
-		keys.Quit.Keys()[0]:          true, // quit
-		keys.SwitchFocus.Keys()[0]:   true, // switch focus
-		"ctrl+t":                     true, // new tab (from tabBar)
-		"ctrl+w":                     true, // close tab (from tabBar)
-		"ctrl+p":                     true, // prev tab (from tabBar)
-		"ctrl+n":                     true, // next tab (from tabBar)
-		keys.Commands.Keys()[0]:      true, // commands
-		keys.Help.Keys()[0]:          true, // help
-		"shift+enter":                true, // newline
-		keys.EditorNewline.Keys()[0]: true, // newline fallback
-		keys.EditExternal.Keys()[0]:  true, // edit in external editor (editor context)
-		keys.HistorySearch.Keys()[0]: true, // history search (editor context)
-		// Content panel bindings (↑↓, c, e, d) are always included
-		"up":   true,
-		"down": true,
-		"c":    true,
-		"e":    true,
-		"d":    true,
+	if m.leanMode {
+		return []key.Binding{keys.Quit}
 	}
-
-	// Filter to only include status bar keys
-	var filtered []key.Binding
-	for _, binding := range all {
-		if len(binding.Keys()) > 0 {
-			bindingKey := binding.Keys()[0]
-			if statusBarKeys[bindingKey] {
-				filtered = append(filtered, binding)
-			}
-		}
-	}
-
-	return filtered
+	return []key.Binding{keys.Help}
 }
 
 var (
@@ -2518,6 +2423,10 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// pending elicitations) which let tab-navigation keys keep working so
 	// the user can switch to another conversation while the prompt waits.
 	if m.dialogMgr.Open() {
+		// Only F1 is intercepted in modals: Ctrl+H is also a text-editing key.
+		if !m.leanMode && msg.String() == "f1" {
+			return m.openHelp()
+		}
 		if m.dialogMgr.TopIsBackground() && !m.leanMode && !m.activeTab.editor.IsHistorySearchActive() {
 			m.tabBar.SetCloseTabEnabled(true)
 			if cmd := m.tabBar.Update(msg); cmd != nil {
@@ -2538,8 +2447,11 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Completion popup gets priority when open
+	// Help is also available without dismissing the completion popup.
 	if m.completions.Open() {
+		if !m.leanMode && key.Matches(msg, keys.Help) {
+			return m.openHelp()
+		}
 		if core.IsNavigationKey(msg) {
 			return m.forwardCompletions(msg)
 		}
@@ -2574,10 +2486,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, core.CmdHandler(messages.ClearQueueMsg{})
 
 	case key.Matches(msg, keys.Help):
-		// Show contextual help dialog with ALL available key bindings
-		return m, core.CmdHandler(dialog.OpenDialogMsg{
-			Model: dialog.NewHelpDialog(m.AllBindings()),
-		})
+		return m.openHelp()
 	}
 
 	// History search is a modal state — capture all remaining keys before normal routing
@@ -2769,8 +2678,17 @@ func (m *appModel) canRestorePointerCache(msg tea.Msg) bool {
 	return ok && page.PointerTargetsMessages(x, y)
 }
 
+// helpCovers uses the painted bounds, including any dialog drag offset.
+func (m *appModel) helpCovers(x, y int) bool {
+	return !m.leanMode && m.ready && m.err == nil &&
+		dialog.IsHelpDialog(m.dialogMgr.TopDialog()) && image.Pt(x, y).In(m.foreground.helpBounds)
+}
+
 // handleMouseClick routes mouse clicks to the appropriate component based on Y coordinate.
 func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	if m.helpCovers(msg.X, msg.Y) {
+		return m.forwardDialog(msg)
+	}
 	if !m.leanMode && m.ready && m.err == nil {
 		if cmd := m.notification.HandleClick(msg.X, msg.Y); cmd != nil {
 			return m, cmd
@@ -2873,10 +2791,20 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 	}
 
 	if !m.leanMode {
-		updated, cmd := m.notification.HandleMouseMotion(msg.X, msg.Y)
+		x, y := msg.X, msg.Y
+		covered := m.helpCovers(x, y)
+		if covered {
+			// Moving from a visible toast into Help is a hover leave.
+			x, y = -1, -1
+		}
+		updated, cmd := m.notification.HandleMouseMotion(x, y)
 		m.notification = updated
 		if cmd != nil {
 			cmds = append(cmds, cmd)
+		}
+		if covered {
+			model, cmd := m.forwardDialog(msg)
+			return model, batchWith(cmd)
 		}
 	}
 
@@ -3088,6 +3016,10 @@ func (m *appModel) handleEditorResize(y int) tea.Cmd {
 	return nil
 }
 
+func newWorkingSpinner(ar *animation.Runtime) spinner.Spinner {
+	return spinner.NewThemed(ar, spinner.ModeSpinnerOnly, func() lipgloss.Style { return styles.SpinnerDotsHighlightStyle })
+}
+
 // renderLeanWorkingIndicator renders a single-line working/pause indicator for
 // lean mode.
 func (m *appModel) renderLeanWorkingIndicator() string {
@@ -3267,17 +3199,30 @@ func (m *appModel) composeView() tea.View {
 			layers = append(layers, tourLayer)
 		}
 
-		if m.dialogMgr.Open() {
-			dialogLayers := m.dialogMgr.GetLayers()
-			layers = append(layers, dialogLayers...)
+		dialogLayers := m.dialogMgr.GetLayers()
+		var helpLayer *lipgloss.Layer
+		if dialog.IsHelpDialog(m.dialogMgr.TopDialog()) {
+			helpLayer = dialogLayers[len(dialogLayers)-1]
+			dialogLayers = dialogLayers[:len(dialogLayers)-1]
 		}
-
-		layers = append(layers, m.notification.GetLayers()...)
-
+		var completionLayers []*lipgloss.Layer
 		if m.completions.Open() {
-			layers = append(layers, m.completions.GetLayers()...)
+			completionLayers = m.completions.GetLayers()
+			// Keep completion below Help even when another dialog is stacked above it.
+			if helpLayer == nil && m.dialogMgr.HasDialog(dialog.IsHelpDialog) {
+				layers = append(layers, completionLayers...)
+				completionLayers = nil
+			}
 		}
+		layers = append(layers, dialogLayers...)
+		layers = append(layers, m.notification.GetLayers()...)
+		layers = append(layers, completionLayers...)
 
+		// Help covers the completion it describes, without changing its state.
+		if helpLayer != nil {
+			layers = append(layers, helpLayer)
+			m.foreground.helpBounds = foregroundLayerBounds(helpLayer)
+		}
 		m.foreground.layers = layers
 	}
 
