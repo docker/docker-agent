@@ -9,10 +9,12 @@ import (
 	"sync/atomic"
 )
 
-// markerName records that a root lives at its XDG/native location. It is
-// never written into a legacy root, so its presence is a durable "adopted"
-// decision shared with older binaries that still know only the legacy paths.
-const markerName = ".cagent-root"
+// markerPrefix starts the per-root marker file name (".cagent-root-data").
+// A marker records that a root lives at its XDG/native location and is never
+// written into a legacy root, so its presence is a durable "adopted" decision
+// shared with older binaries that still know only the legacy paths. Markers are
+// per root because roots can share a directory (config and data on macOS).
+const markerPrefix = ".cagent-root-"
 
 // currentOS is a test seam: defaults are OS-native, but the tests run on one
 // host and still exercise every platform branch.
@@ -56,6 +58,8 @@ type root struct {
 	target   func() string
 	legacy   func() string
 }
+
+func (r *root) marker() string { return markerPrefix + r.name }
 
 var (
 	cacheDirOverride  overridable
@@ -135,7 +139,7 @@ func EnsureRoots() error {
 		target := filepath.Clean(r.target())
 		legacy := r.legacy()
 
-		if markerExists(target) {
+		if markerExists(target, r.marker()) {
 			r.mode.Store(int32(modeMarked))
 			continue
 		}
@@ -143,7 +147,7 @@ func EnsureRoots() error {
 			r.mode.Store(int32(modeLegacy))
 			continue
 		}
-		if err := createMarker(target); err != nil {
+		if err := createMarker(target, r.marker()); err != nil {
 			if legacy != "" && dirExists(legacy) {
 				r.mode.Store(int32(modeLegacy))
 				continue
@@ -221,7 +225,7 @@ func resolve(r *root) string {
 	// Honour a marker created by an earlier run even before EnsureRoots is
 	// called: an old binary recreating the legacy directory must not make a
 	// marked installation switch roots.
-	if markerExists(target) {
+	if markerExists(target, r.marker()) {
 		return target
 	}
 	if legacy != "" && legacy != target && dirHasEntries(legacy) {
@@ -230,11 +234,11 @@ func resolve(r *root) string {
 	return target
 }
 
-func createMarker(target string) error {
+func createMarker(target, name string) error {
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		return err
 	}
-	marker := filepath.Join(target, markerName)
+	marker := filepath.Join(target, name)
 	f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		// Another process won the race; the marker is established either way.
@@ -252,8 +256,8 @@ func createMarker(target string) error {
 	return writeErr
 }
 
-func markerExists(target string) bool {
-	info, err := os.Lstat(filepath.Join(target, markerName))
+func markerExists(target, name string) bool {
+	info, err := os.Lstat(filepath.Join(target, name))
 	return err == nil && !info.IsDir()
 }
 

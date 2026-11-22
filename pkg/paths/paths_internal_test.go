@@ -97,9 +97,9 @@ func TestEnsureRootsFreshInstall(t *testing.T) {
 	require.NoError(t, EnsureRoots())
 
 	config, data, cache := expectedDefaults(runtime.GOOS, home)
-	for _, dir := range []string{config, data, cache} {
+	for r, dir := range map[*root]string{configRoot: config, dataRoot: data, cacheRoot: cache} {
 		assert.DirExists(t, dir)
-		assert.FileExists(t, filepath.Join(dir, markerName))
+		assert.FileExists(t, filepath.Join(dir, r.marker()))
 	}
 	assert.Equal(t, config, GetConfigDir())
 	assert.Equal(t, data, GetDataDir())
@@ -134,7 +134,7 @@ func TestEnsureRootsKeepsNonEmptyLegacyRoots(t *testing.T) {
 	for i, get := range getters {
 		assert.Equal(t, legacy[i], get(), "root %d should stay on its legacy path", i)
 		assert.NoDirExists(t, targets[i], "root %d target must not be created", i)
-		assert.NoFileExists(t, filepath.Join(targets[i], markerName))
+		assert.NoFileExists(t, filepath.Join(targets[i], allRoots[i].marker()))
 		assert.FileExists(t, stateFiles[i], "existing state must not be moved or deleted")
 	}
 }
@@ -144,8 +144,8 @@ func TestMarkerPrecedenceOverLegacy(t *testing.T) {
 	home := setTestHome(t)
 	targets := xdgTargets(t, home)
 
-	for _, target := range targets {
-		require.NoError(t, createMarker(target))
+	for i, target := range targets {
+		require.NoError(t, createMarker(target, allRoots[i].marker()))
 	}
 	// An older binary has recreated the legacy directories in the meantime.
 	legacyFiles := []string{
@@ -176,7 +176,7 @@ func TestEmptyLegacyRootDoesNotBlockAdoption(t *testing.T) {
 	require.NoError(t, EnsureRoots())
 	_, data, _ := expectedDefaults(runtime.GOOS, home)
 	assert.Equal(t, data, GetDataDir())
-	assert.FileExists(t, filepath.Join(data, markerName))
+	assert.FileExists(t, filepath.Join(data, dataRoot.marker()))
 	assert.DirExists(t, legacy, "empty legacy directory is never removed")
 }
 
@@ -192,7 +192,7 @@ func TestAbsoluteXDGValuesAreHonoured(t *testing.T) {
 
 	require.NoError(t, EnsureRoots())
 	assert.Equal(t, targets[1], GetDataDir())
-	assert.FileExists(t, filepath.Join(targets[1], markerName))
+	assert.FileExists(t, filepath.Join(targets[1], dataRoot.marker()))
 }
 
 func TestRelativeXDGValuesAreIgnored(t *testing.T) {
@@ -211,7 +211,7 @@ func TestRelativeXDGValuesAreIgnored(t *testing.T) {
 
 	require.NoError(t, EnsureRoots())
 	assert.Equal(t, data, GetDataDir())
-	assert.FileExists(t, filepath.Join(data, markerName))
+	assert.FileExists(t, filepath.Join(data, dataRoot.marker()))
 	assert.NoDirExists(t, filepath.Join("relative-data", "cagent"))
 }
 
@@ -235,7 +235,7 @@ func TestCrossPlatformDefaults(t *testing.T) {
 			assert.Equal(t, config, GetConfigDir())
 			assert.Equal(t, data, GetDataDir())
 			assert.Equal(t, cache, GetCacheDir())
-			assert.FileExists(t, filepath.Join(data, markerName))
+			assert.FileExists(t, filepath.Join(data, dataRoot.marker()))
 		})
 	}
 }
@@ -286,7 +286,7 @@ func TestEnsureRootsSkipsOverrides(t *testing.T) {
 	assert.Equal(t, override, GetDataDir())
 	assert.Equal(t, override, GetConfigDir())
 	assert.Equal(t, override, GetCacheDir())
-	assert.NoFileExists(t, filepath.Join(override, markerName))
+	assert.NoFileExists(t, filepath.Join(override, dataRoot.marker()))
 }
 
 func TestEnsureRootsSkipsSetRoot(t *testing.T) {
@@ -302,5 +302,57 @@ func TestEnsureRootsSkipsSetRoot(t *testing.T) {
 	assert.Equal(t, filepath.Join(root, "data"), GetDataDir())
 	assert.Equal(t, filepath.Join(root, "config"), GetConfigDir())
 	assert.Equal(t, filepath.Join(root, "cache"), GetCacheDir())
-	assert.NoFileExists(t, filepath.Join(root, "data", markerName))
+	assert.NoFileExists(t, filepath.Join(root, "data", dataRoot.marker()))
+}
+
+// Config and data share one directory on macOS: a marker created for one root
+// must not make the other adopt it and abandon its legacy state.
+func TestSharedTargetDoesNotAdoptOtherRootsLegacyState(t *testing.T) {
+	original := currentOS
+	t.Cleanup(func() { currentOS = original })
+
+	tests := []struct {
+		name         string
+		legacyConfig bool
+		legacyData   bool
+	}{
+		{"legacy data only", false, true},
+		{"legacy config only", true, false},
+		{"legacy config and data", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetRootState(t)
+			clearXDG(t)
+			home := setTestHome(t)
+			currentOS = "darwin"
+
+			wantConfig, wantData, _ := expectedDefaults("darwin", home)
+			var files []string
+			if tt.legacyConfig {
+				wantConfig = filepath.Join(home, ".config", "cagent")
+				files = append(files, writeState(t, wantConfig))
+			}
+			if tt.legacyData {
+				wantData = filepath.Join(home, ".cagent")
+				files = append(files, writeState(t, wantData))
+			}
+
+			// Run twice, resetting in-memory decisions in between, to model two
+			// separate process launches.
+			for range 2 {
+				require.NoError(t, EnsureRoots())
+				assert.Equal(t, wantConfig, GetConfigDir())
+				assert.Equal(t, wantData, GetDataDir())
+				for _, r := range allRoots {
+					r.mode.Store(int32(modeUndecided))
+				}
+			}
+			assert.Equal(t, wantConfig, GetConfigDir())
+			assert.Equal(t, wantData, GetDataDir())
+			for _, f := range files {
+				assert.FileExists(t, f)
+			}
+		})
+	}
 }
