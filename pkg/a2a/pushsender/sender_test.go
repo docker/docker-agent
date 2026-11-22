@@ -1,10 +1,12 @@
 package pushsender
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -384,6 +386,42 @@ func TestRedirectDroppingBodyFails(t *testing.T) {
 			require.ErrorIs(t, err, errMethodRedirect)
 			assert.Zero(t, reached.Load(), "redirect target must not be reached")
 		})
+	}
+}
+
+// net/http servers cannot send a custom reason phrase, so answer from raw TCP.
+func TestDeliveryErrorsRedactReasonPhrase(t *testing.T) {
+	t.Parallel()
+
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				if _, err := http.ReadRequest(bufio.NewReader(conn)); err != nil {
+					return
+				}
+				_, _ = io.WriteString(conn, "HTTP/1.1 502 /hooks/path-secret?sig=query-secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+			}()
+		}
+	}()
+
+	logger, logs := testLogger()
+	s := New(Config{AllowPrivateNetworks: true, Logger: logger})
+	cfg := &a2a.PushConfig{ID: "c1", TaskID: "t1", URL: "http://" + ln.Addr().String() + "/hook"}
+	require.NoError(t, s.SendPush(t.Context(), cfg, statusEvent(a2a.TaskStateCompleted)))
+	closeSender(t, s)
+
+	out := logs.String()
+	assert.Contains(t, out, "non-success status 502")
+	for _, secret := range []string{"path-secret", "query-secret"} {
+		assert.NotContains(t, out, secret)
 	}
 }
 

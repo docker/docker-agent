@@ -372,7 +372,8 @@ func (s *Sender) deliver(ctx context.Context, d *delivery) error {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseDrain))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook returned non-success status: %s", resp.Status)
+		// resp.Status carries the peer's reason phrase, which may echo the URL.
+		return fmt.Errorf("webhook returned non-success status %d", resp.StatusCode)
 	}
 	return nil
 }
