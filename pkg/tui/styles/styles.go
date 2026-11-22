@@ -362,13 +362,23 @@ var (
 	// words are unmistakable.
 	DiffAddEmphStyle = BaseStyle.
 				Background(DiffAddEmphBg).
-				Foreground(DiffAddFg).
-				Bold(true)
+				Foreground(DiffAddFg)
 
 	DiffRemoveEmphStyle = BaseStyle.
 				Background(DiffRemoveEmphBg).
-				Foreground(DiffRemoveFg).
-				Bold(true)
+				Foreground(DiffRemoveFg)
+
+	DiffAddGutterStyle = BaseStyle.
+				Foreground(LineNumber).
+				Background(DiffAddBg)
+
+	DiffRemoveGutterStyle = BaseStyle.
+				Foreground(LineNumber).
+				Background(DiffRemoveBg)
+
+	DiffHunkHeaderStyle = BaseStyle.
+				Foreground(LineNumber).
+				Background(BackgroundAlt)
 )
 
 // Syntax highlighting UI element styles

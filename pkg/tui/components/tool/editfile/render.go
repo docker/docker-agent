@@ -23,9 +23,11 @@ import (
 )
 
 const (
-	tabWidth     = 4
-	lineNumWidth = 5
-	minWidth     = 80
+	tabWidth            = 4
+	minLineNumWidth     = 4
+	signWidth           = 2 // "- ", "+ ", or "  "
+	unifiedDualMinWidth = 60
+	minWidth            = 80
 
 	// renderCacheSize bounds the number of cached edit_file renderings to
 	// avoid unbounded memory growth in long sessions where the agent makes
@@ -322,9 +324,19 @@ func emphasisStyleFor(kind udiff.OpKind) lipgloss.Style {
 
 func renderDiffWithSyntaxHighlight(diff []*udiff.Hunk, filePath string, width int) string {
 	var output strings.Builder
-	contentWidth := width - lineNumWidth
+	numWidth := maxLineNumWidth(diff)
+	dualNumbers := width >= unifiedDualMinWidth
+	gutterWidth := numWidth + 1 + signWidth
+	if dualNumbers {
+		gutterWidth = 2*(numWidth+1) + signWidth
+	}
+	contentWidth := max(width-gutterWidth, 1)
 
-	for _, hunk := range diff {
+	for hi, hunk := range diff {
+		if hi > 0 {
+			output.WriteString(renderHunkHeader(hunk, width) + "\n")
+		}
+
 		// Build word-diff lookups for paired delete/insert lines so we can
 		// emphasize the precise tokens that changed.
 		wordDiffs := buildLineWordDiffs(hunk.Lines)
@@ -333,7 +345,7 @@ func renderDiffWithSyntaxHighlight(diff []*udiff.Hunk, filePath string, width in
 		newLineNum := hunk.ToLine
 
 		for li, line := range hunk.Lines {
-			lineNum := getDisplayLineNumber(&line, &oldLineNum, &newLineNum)
+			oldNum, newNum := advanceLineNumbers(&line, &oldLineNum, &newLineNum)
 			content := prepareContent(line.Content)
 			tokens := syntaxHighlight(content, filePath)
 			if wd, ok := wordDiffs[li]; ok {
@@ -348,17 +360,10 @@ func renderDiffWithSyntaxHighlight(diff []*udiff.Hunk, filePath string, width in
 			wrappedTokens := wrapTokens(tokens, contentWidth)
 
 			for i, tokenLine := range wrappedTokens {
-				var lineNumStr string
-				if i == 0 {
-					// Show line number only on first wrapped line
-					lineNumStr = styles.LineNumberStyle.Render(fmt.Sprintf("%4d ", lineNum))
-				} else {
-					// Use continuation indicator for wrapped lines
-					lineNumStr = styles.LineNumberStyle.Render("   → ")
-				}
+				gutter := renderUnifiedGutter(line.Kind, oldNum, newNum, numWidth, i > 0, dualNumbers)
 				rendered := renderTokensWithStyle(tokenLine, lineStyle, line.Kind)
 				padded := padToWidth(rendered, contentWidth, lineStyle)
-				output.WriteString(lineNumStr + padded + "\n")
+				output.WriteString(gutter + padded + "\n")
 			}
 		}
 	}
@@ -368,9 +373,11 @@ func renderDiffWithSyntaxHighlight(diff []*udiff.Hunk, filePath string, width in
 
 func renderSplitDiffWithSyntaxHighlight(diff []*udiff.Hunk, filePath string, width int) string {
 	// Fall back to unified diff if terminal is too narrow
-	separator := styles.SeparatorStyle.Render(" │ ")
+	numWidth := maxLineNumWidth(diff)
+	gutterWidth := numWidth + 1 + signWidth
+	separator := styles.SeparatorStyle.Render("│")
 	separatorWidth := lipgloss.Width(separator)
-	contentWidth := (width - separatorWidth - (lineNumWidth * 2)) / 2
+	contentWidth := (width - separatorWidth - (gutterWidth * 2)) / 2
 
 	if width < minWidth || contentWidth < 10 {
 		return renderDiffWithSyntaxHighlight(diff, filePath, width)
@@ -378,34 +385,38 @@ func renderSplitDiffWithSyntaxHighlight(diff []*udiff.Hunk, filePath string, wid
 
 	var output strings.Builder
 
-	for _, hunk := range diff {
+	for hi, hunk := range diff {
+		if hi > 0 {
+			output.WriteString(renderHunkHeader(hunk, width) + "\n")
+		}
+
 		for _, pair := range pairDiffLines(hunk.Lines, hunk.FromLine, hunk.ToLine) {
 			// Word-diff is only meaningful when both halves are present
-			// and represent a delete/insert pair. Inputs go through
+			// and represent a similar delete/insert pair. Inputs go through
 			// prepareContent so the segment byte offsets line up with the
 			// chroma tokens produced for rendering (which also receive
 			// tab-expanded content).
 			var oldSegs, newSegs []wordSegment
 			if pair.old != nil && pair.new != nil &&
 				pair.old.Kind == udiff.Delete && pair.new.Kind == udiff.Insert {
-				oldSegs, newSegs = diffWords(
+				oldSegs, newSegs = diffWordsForDisplay(
 					prepareContent(pair.old.Content),
 					prepareContent(pair.new.Content),
 				)
 			}
 
-			leftLines := renderSplitSide(pair.old, pair.oldLineNum, filePath, contentWidth, oldSegs)
-			rightLines := renderSplitSide(pair.new, pair.newLineNum, filePath, contentWidth, newSegs)
+			leftLines := renderSplitSide(pair.old, pair.oldLineNum, numWidth, filePath, contentWidth, oldSegs)
+			rightLines := renderSplitSide(pair.new, pair.newLineNum, numWidth, filePath, contentWidth, newSegs)
 
 			// Ensure both sides have the same number of lines for alignment
 			maxLines := max(len(rightLines), len(leftLines))
 
 			// Pad shorter side with empty lines
 			for len(leftLines) < maxLines {
-				leftLines = append(leftLines, renderEmptySplitSide(contentWidth))
+				leftLines = append(leftLines, renderEmptySplitSide(numWidth, contentWidth))
 			}
 			for len(rightLines) < maxLines {
-				rightLines = append(rightLines, renderEmptySplitSide(contentWidth))
+				rightLines = append(rightLines, renderEmptySplitSide(numWidth, contentWidth))
 			}
 
 			for i := range maxLines {
@@ -435,7 +446,10 @@ func buildLineWordDiffs(lines []udiff.Line) map[int]lineWordDiff {
 		if pair.old == nil || pair.new == nil || pair.old.Kind != udiff.Delete || pair.new.Kind != udiff.Insert {
 			continue
 		}
-		oldSegs, newSegs := diffWords(prepareContent(pair.old.Content), prepareContent(pair.new.Content))
+		oldSegs, newSegs := diffWordsForDisplay(prepareContent(pair.old.Content), prepareContent(pair.new.Content))
+		if len(oldSegs) == 0 && len(newSegs) == 0 {
+			continue
+		}
 		wd := lineWordDiff{old: oldSegs, new: newSegs}
 		out[indices[pair.old]] = wd
 		out[indices[pair.new]] = wd
@@ -443,23 +457,135 @@ func buildLineWordDiffs(lines []udiff.Line) map[int]lineWordDiff {
 	return out
 }
 
-func getDisplayLineNumber(line *udiff.Line, oldLineNum, newLineNum *int) int {
+func advanceLineNumbers(line *udiff.Line, oldLineNum, newLineNum *int) (oldNum, newNum int) {
 	switch line.Kind {
 	case udiff.Delete:
-		num := *oldLineNum
+		oldNum = *oldLineNum
 		*oldLineNum++
-		return num
 	case udiff.Insert:
-		num := *newLineNum
+		newNum = *newLineNum
 		*newLineNum++
-		return num
 	case udiff.Equal:
-		num := *newLineNum
+		oldNum = *oldLineNum
+		newNum = *newLineNum
 		*oldLineNum++
 		*newLineNum++
-		return num
 	}
-	return 0
+	return oldNum, newNum
+}
+
+func renderHunkHeader(hunk *udiff.Hunk, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	var fromCount, toCount int
+	for _, l := range hunk.Lines {
+		switch l.Kind {
+		case udiff.Delete:
+			fromCount++
+		case udiff.Insert:
+			toCount++
+		case udiff.Equal:
+			fromCount++
+			toCount++
+		}
+	}
+	header := fmt.Sprintf(" @@ -%d,%d +%d,%d @@", hunk.FromLine, fromCount, hunk.ToLine, toCount)
+	header = runewidth.Truncate(header, width, "…")
+	return padToWidth(styles.DiffHunkHeaderStyle.Render(header), width, styles.DiffHunkHeaderStyle)
+}
+
+func maxLineNumWidth(diff []*udiff.Hunk) int {
+	maxNum := 0
+	for _, hunk := range diff {
+		oldNum, newNum := hunk.FromLine, hunk.ToLine
+		for _, line := range hunk.Lines {
+			switch line.Kind {
+			case udiff.Delete:
+				maxNum = max(maxNum, oldNum)
+				oldNum++
+			case udiff.Insert:
+				maxNum = max(maxNum, newNum)
+				newNum++
+			case udiff.Equal:
+				maxNum = max(maxNum, oldNum, newNum)
+				oldNum++
+				newNum++
+			}
+		}
+	}
+	width := minLineNumWidth
+	for n := maxNum; n >= 10000; n /= 10 {
+		width++
+	}
+	return width
+}
+
+func renderUnifiedGutter(kind udiff.OpKind, oldNum, newNum, numWidth int, continuation, dual bool) string {
+	gutterStyle := getGutterStyle(kind)
+	lineStyle := getLineStyle(kind)
+
+	var numPart string
+	switch {
+	case continuation && dual:
+		numPart = strings.Repeat(" ", 2*numWidth) + "↪ "
+	case continuation:
+		numPart = strings.Repeat(" ", numWidth-1) + "↪ "
+	case dual:
+		blank := strings.Repeat(" ", numWidth+1)
+		oldStr, newStr := blank, blank
+		if oldNum > 0 {
+			oldStr = fmt.Sprintf("%*d ", numWidth, oldNum)
+		}
+		if newNum > 0 {
+			newStr = fmt.Sprintf("%*d ", numWidth, newNum)
+		}
+		numPart = oldStr + newStr
+	default:
+		n := newNum
+		if kind == udiff.Delete {
+			n = oldNum
+		}
+		numPart = fmt.Sprintf("%*d ", numWidth, n)
+	}
+
+	sign := "  "
+	if !continuation {
+		sign = diffSign(kind)
+	}
+	return gutterStyle.Render(numPart) + lineStyle.Render(sign)
+}
+
+func renderSplitGutter(kind udiff.OpKind, lineNum, numWidth int, continuation bool) string {
+	gutterStyle := getGutterStyle(kind)
+	lineStyle := getLineStyle(kind)
+
+	if continuation {
+		return gutterStyle.Render(strings.Repeat(" ", numWidth-1)+"↪ ") + lineStyle.Render("  ")
+	}
+	return gutterStyle.Render(fmt.Sprintf("%*d ", numWidth, lineNum)) + lineStyle.Render(diffSign(kind))
+}
+
+func diffSign(kind udiff.OpKind) string {
+	switch kind {
+	case udiff.Delete:
+		return "- "
+	case udiff.Insert:
+		return "+ "
+	default:
+		return "  "
+	}
+}
+
+func getGutterStyle(kind udiff.OpKind) lipgloss.Style {
+	switch kind {
+	case udiff.Delete:
+		return styles.DiffRemoveGutterStyle
+	case udiff.Insert:
+		return styles.DiffAddGutterStyle
+	default:
+		return styles.LineNumberStyle
+	}
 }
 
 func prepareContent(content string) string {
@@ -544,9 +670,9 @@ func wrapTokens(tokens []chromaToken, maxWidth int) [][]chromaToken {
 // When wordSegs is non-nil and the line is part of a delete/insert pair, the
 // chroma tokens are re-tagged so the changed substrings render with a
 // stronger background tint.
-func renderSplitSide(line *udiff.Line, lineNum int, filePath string, width int, wordSegs []wordSegment) []string {
+func renderSplitSide(line *udiff.Line, lineNum, numWidth int, filePath string, width int, wordSegs []wordSegment) []string {
 	if line == nil {
-		return []string{renderEmptySplitSide(width)}
+		return []string{renderEmptySplitSide(numWidth, width)}
 	}
 
 	content := prepareContent(line.Content)
@@ -559,27 +685,20 @@ func renderSplitSide(line *udiff.Line, lineNum int, filePath string, width int, 
 
 	var result []string
 	for i, tokenLine := range wrappedTokens {
-		var lineNumStr string
-		if i == 0 {
-			// Show line number only on first wrapped line
-			lineNumStr = formatLineNum(line, lineNum)
-		} else {
-			// Use continuation indicator for wrapped lines
-			lineNumStr = "   → "
-		}
+		gutter := renderSplitGutter(line.Kind, lineNum, numWidth, i > 0)
 		rendered := renderTokensWithStyle(tokenLine, lineStyle, line.Kind)
 		padded := padToWidth(rendered, width, lineStyle)
-		result = append(result, styles.LineNumberStyle.Render(lineNumStr)+padded)
+		result = append(result, gutter+padded)
 	}
 
 	return result
 }
 
 // renderEmptySplitSide renders an empty line for split view alignment
-func renderEmptySplitSide(width int) string {
-	lineNumStr := strings.Repeat(" ", lineNumWidth)
+func renderEmptySplitSide(numWidth, width int) string {
+	gutter := styles.LineNumberStyle.Render(strings.Repeat(" ", numWidth+1+signWidth))
 	emptySpace := styles.DiffUnchangedStyle.Render(strings.Repeat(" ", width))
-	return styles.LineNumberStyle.Render(lineNumStr) + emptySpace
+	return gutter + emptySpace
 }
 
 func renderTokensWithStyle(tokens []chromaToken, lineStyle lipgloss.Style, kind udiff.OpKind) string {
@@ -588,10 +707,7 @@ func renderTokensWithStyle(tokens []chromaToken, lineStyle lipgloss.Style, kind 
 	emph := emphasisStyleFor(kind)
 	for _, token := range tokens {
 		if token.Emphasized && (kind == udiff.Delete || kind == udiff.Insert) {
-			// Keep the chroma foreground so syntax colors carry through into
-			// the emphasized block, but override the background with the
-			// stronger emphasis tint and add bold for extra weight.
-			style := token.Style.Background(emph.GetBackground()).Bold(true)
+			style := token.Style.Background(emph.GetBackground())
 			output.WriteString(style.Render(token.Text))
 			continue
 		}
@@ -628,13 +744,6 @@ func getLineStyle(kind udiff.OpKind) lipgloss.Style {
 	default:
 		return styles.DiffUnchangedStyle
 	}
-}
-
-func formatLineNum(line *udiff.Line, lineNum int) string {
-	if line == nil {
-		return strings.Repeat(" ", lineNumWidth)
-	}
-	return fmt.Sprintf("%4d ", lineNum)
 }
 
 func pairDiffLines(lines []udiff.Line, fromLine, toLine int) []linePair {
