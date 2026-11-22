@@ -3,6 +3,7 @@ package pushsender
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -322,26 +323,68 @@ func TestRedirectsStayOnRegisteredOrigin(t *testing.T) {
 func TestRedirectWithinOriginKeepsCredentialsDropsReferer(t *testing.T) {
 	t.Parallel()
 
-	got := make(chan http.Header, 1)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/old", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/new", http.StatusTemporaryRedirect)
-	})
-	mux.HandleFunc("/new", func(_ http.ResponseWriter, r *http.Request) { got <- r.Header.Clone() })
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-
-	s := New(Config{AllowPrivateNetworks: true})
-	t.Cleanup(func() { _ = s.Close(t.Context()) })
-	cfg := a2a.PushConfig{
-		URL: srv.URL + "/old?sig=secret", Token: "tok",
-		Auth: &a2a.PushAuthInfo{Scheme: "Bearer", Credentials: "cred"},
+	type hit struct {
+		method string
+		body   string
+		header http.Header
 	}
-	require.NoError(t, s.deliver(t.Context(), &delivery{config: cfg, body: []byte("{}")}))
-	h := <-got
-	assert.Equal(t, "tok", h.Get("A2A-Notification-Token"))
-	assert.Equal(t, "Bearer cred", h.Get("Authorization"))
-	assert.Empty(t, h.Get("Referer"))
+	for _, code := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			t.Parallel()
+
+			got := make(chan hit, 1)
+			mux := http.NewServeMux()
+			mux.HandleFunc("/old", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/new", code)
+			})
+			mux.HandleFunc("/new", func(_ http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				got <- hit{method: r.Method, body: string(body), header: r.Header.Clone()}
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			s := New(Config{AllowPrivateNetworks: true})
+			t.Cleanup(func() { _ = s.Close(t.Context()) })
+			cfg := a2a.PushConfig{
+				URL: srv.URL + "/old?sig=secret", Token: "tok",
+				Auth: &a2a.PushAuthInfo{Scheme: "Bearer", Credentials: "cred"},
+			}
+			require.NoError(t, s.deliver(t.Context(), &delivery{config: cfg, body: []byte(`{"event":1}`)}))
+			h := <-got
+			assert.Equal(t, http.MethodPost, h.method)
+			assert.JSONEq(t, `{"event":1}`, h.body)
+			assert.Equal(t, "tok", h.header.Get("A2A-Notification-Token"))
+			assert.Equal(t, "Bearer cred", h.header.Get("Authorization"))
+			assert.Empty(t, h.header.Get("Referer"))
+		})
+	}
+}
+
+// Go follows 301/302/303 with a bodiless GET: a 200 there is not a delivery.
+func TestRedirectDroppingBodyFails(t *testing.T) {
+	t.Parallel()
+
+	for _, code := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			t.Parallel()
+
+			var reached atomic.Int32
+			mux := http.NewServeMux()
+			mux.HandleFunc("/old", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/new", code)
+			})
+			mux.HandleFunc("/new", func(http.ResponseWriter, *http.Request) { reached.Add(1) })
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			s := New(Config{AllowPrivateNetworks: true})
+			t.Cleanup(func() { _ = s.Close(t.Context()) })
+			err := s.deliver(t.Context(), &delivery{config: a2a.PushConfig{URL: srv.URL + "/old"}, body: []byte("{}")})
+			require.ErrorIs(t, err, errMethodRedirect)
+			assert.Zero(t, reached.Load(), "redirect target must not be reached")
+		})
+	}
 }
 
 func TestSendAfterCloseIsDropped(t *testing.T) {

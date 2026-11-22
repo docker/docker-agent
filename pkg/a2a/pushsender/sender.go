@@ -39,6 +39,7 @@ const (
 var (
 	errBlockedTarget       = errors.New("push notification target resolves to a blocked address range")
 	errCrossOriginRedirect = errors.New("redirect to another origin rejected")
+	errMethodRedirect      = errors.New("redirect that drops the POST body rejected")
 	errTooManyRedirects    = fmt.Errorf("stopped after %d redirects", maxRedirects)
 	errTimeout             = errors.New("timed out")
 	errDNS                 = errors.New("host lookup failed")
@@ -200,13 +201,17 @@ func isBlockedIP(ip netip.Addr) bool {
 
 // checkRedirect keeps deliveries on the registered origin. Elsewhere Go would
 // still send the custom headers, Authorization to subdomains or across
-// schemes, and a Referer holding the signed path and query.
+// schemes, and a Referer holding the signed path and query. Only 307/308 are
+// followed: on 301/302/303 Go replays the POST as a bodiless GET.
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return errTooManyRedirects
 	}
 	if !sameOrigin(req.URL, via[0].URL) {
 		return errCrossOriginRedirect
+	}
+	if req.Method != http.MethodPost {
+		return errMethodRedirect
 	}
 	req.Header.Del("Referer")
 	return nil
@@ -417,7 +422,7 @@ func redactError(err error) error {
 }
 
 func errorCategory(err error) error {
-	for _, known := range []error{errBlockedTarget, errCrossOriginRedirect, errTooManyRedirects, context.Canceled} {
+	for _, known := range []error{errBlockedTarget, errCrossOriginRedirect, errMethodRedirect, errTooManyRedirects, context.Canceled} {
 		if errors.Is(err, known) {
 			return known
 		}
