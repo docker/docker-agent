@@ -867,3 +867,19 @@ func TestDoctorEvaluatorGatewayCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestDoctorCommand_GlobalCompactionCredentials(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("agents:\n  root:\n    model: dmr/local\n    instruction: test\n"), 0o600))
+	output, err := executeDoctor(t, []string{path}, withDoctorTestEnv(nil, []string{"local"}, nil), func(f *doctorFlags) {
+		f.loadUserConfig = func() (*userconfig.Config, error) {
+			return &userconfig.Config{
+				Settings:  &userconfig.Settings{CompactionModel: "corp/small"},
+				Providers: map[string]latest.ProviderConfig{"corp": {Provider: "openai", BaseURL: "https://corp.example.com", TokenKey: "CORP_SUMMARY_KEY"}},
+			}, nil
+		}
+	})
+	require.Error(t, err)
+	assert.Contains(t, output, "CORP_SUMMARY_KEY")
+}

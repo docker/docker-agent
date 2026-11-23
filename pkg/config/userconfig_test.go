@@ -206,3 +206,60 @@ agents:
 		assert.Equal(t, "2m0s", cfg.Runtime.StreamIdleTimeout.String())
 	})
 }
+
+func TestWithUserConfig_Compaction(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+	userCfg := &userconfig.Config{
+		Settings: &userconfig.Settings{
+			SessionCompaction:   new(false),
+			CompactionThreshold: new(0.8),
+			CompactionModel:     "openai/gpt-4o-mini",
+		},
+	}
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(userCfg))
+	require.NoError(t, err)
+	assert.False(t, cfg.Agents[0].SessionCompactionEnabled())
+	require.NotNil(t, cfg.Agents[0].CompactionThreshold)
+	assert.InDelta(t, 0.8, *cfg.Agents[0].CompactionThreshold, 1e-9)
+	assert.Empty(t, cfg.Agents[0].CompactionModel)
+	ApplyDeferredUserSettings(cfg, userCfg)
+	assert.Equal(t, "openai/gpt-4o-mini", cfg.Agents[0].CompactionModel)
+}
+
+func TestWithUserConfig_CompactionModelDeferredForFirstAvailable(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`models:
+  pick:
+    first_available:
+      - primary
+  primary:
+    provider: openai
+    model: gpt-4o
+    compaction_model: openai/gpt-4.1-mini
+agents:
+  root:
+    model: pick
+    instruction: test
+`)
+	userCfg := &userconfig.Config{
+		Settings: &userconfig.Settings{CompactionModel: "openai/gpt-4o-mini"},
+	}
+
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(userCfg))
+	require.NoError(t, err)
+	// Must not promote global compaction_model onto the agent before first_available resolves.
+	assert.Empty(t, cfg.Agents[0].CompactionModel)
+
+	// Simulate first_available resolving "pick" to "primary".
+	cfg.Models["pick"] = cfg.Models["primary"]
+	ApplyDeferredUserSettings(cfg, userCfg)
+	assert.Equal(t, "openai/gpt-4.1-mini", EffectiveCompactionModelRef(cfg, &cfg.Agents[0]))
+}
+}

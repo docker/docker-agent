@@ -65,6 +65,30 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 			rt.StreamIdleTimeout = new(*settings.StreamIdleTimeout)
 		}
 	}
+
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if settings.SessionCompaction != nil && a.SessionCompaction == nil {
+			a.SessionCompaction = new(*settings.SessionCompaction)
+		}
+		if settings.CompactionThreshold != nil && a.CompactionThreshold == nil {
+			a.CompactionThreshold = new(*settings.CompactionThreshold)
+		}
+	}
+}
+
+// ApplyDeferredUserSettings applies global settings whose precedence depends on
+// dynamic model resolution (e.g. first_available selectors), after resolution runs.
+func ApplyDeferredUserSettings(cfg *latest.Config, userCfg *userconfig.Config) {
+	if cfg == nil || userCfg == nil || userCfg.Settings == nil || userCfg.Settings.CompactionModel == "" {
+		return
+	}
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Harness == nil && EffectiveCompactionModelRef(cfg, a) == "" {
+			a.CompactionModel = userCfg.Settings.CompactionModel
+		}
+	}
 }
 
 func ensureRuntime(cfg *latest.Config) *latest.RuntimeDefaults {
@@ -84,4 +108,12 @@ func visitToolsets(cfg *latest.Config, fn func(*latest.Toolset)) {
 		fn(&ts)
 		cfg.Toolsets[name] = ts
 	}
+}
+
+// UserTitleModelRef returns the title-model fallback used even by auto and CLI models.
+func UserTitleModelRef(userCfg *userconfig.Config) string {
+	if userCfg == nil || userCfg.Settings == nil {
+		return ""
+	}
+	return userCfg.Settings.TitleModel
 }

@@ -379,7 +379,7 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 	report.AutoModel = autoStatus
 
 	if agentCfg != nil {
-		f.checkAgentFile(ctx, agentRef, agentCfg, env, sources, report)
+		f.checkAgentFile(ctx, agentRef, agentCfg, env, sources, report, userCfg)
 	}
 
 	return report, nil
@@ -389,20 +389,33 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 // requires (models and tools), whether each one is set, and from which
 // source. The configuration was already loaded by buildReport (which also
 // needs it for the harness-only check), so the file is never loaded twice.
-func (f *doctorFlags) checkAgentFile(ctx context.Context, ref string, cfg *latest.Config, env environment.Provider, sources []environment.Source, report *doctorReport) {
+func (f *doctorFlags) checkAgentFile(ctx context.Context, ref string, cfg *latest.Config, env environment.Provider, sources []environment.Source, report *doctorReport, userConfigs ...*userconfig.Config) {
 	status := &doctorAgentFileStatus{Ref: ref}
 
 	// first_available selectors resolve to the first candidate with
 	// credentials; when none has any, surface it as an issue and keep
 	// reporting the rest of the file's requirements. Only the error's first
 	// line is kept: the full message repeats the secret-sources guidance.
-	if err := config.ResolveFirstAvailableModels(ctx, cfg, f.runConfig.ModelsGateway, env); err != nil {
-		firstLine, _, _ := strings.Cut(err.Error(), "\n")
-		report.Issues = append(report.Issues, fmt.Sprintf("%s: %s", ref, firstLine))
+	var userCfg *userconfig.Config
+	if len(userConfigs) > 0 {
+		userCfg = userConfigs[0]
 	}
+	titleRef := config.UserTitleModelRef(userCfg)
+	resolve := func() {
+		if err := config.ResolveFirstAvailableModels(ctx, cfg, f.runConfig.ModelsGateway, env, titleRef); err != nil {
+			firstLine, _, _ := strings.Cut(err.Error(), "\n")
+			issue := fmt.Sprintf("%s: %s", ref, firstLine)
+			if !slices.Contains(report.Issues, issue) {
+				report.Issues = append(report.Issues, issue)
+			}
+		}
+	}
+	resolve()
+	config.ApplyDeferredUserSettings(cfg, userCfg)
+	resolve()
 
 	requiredBy := map[string][]string{}
-	for _, name := range config.RequiredModelEnvVars(ctx, cfg, f.runConfig.ModelsGateway, env) {
+	for _, name := range config.RequiredModelEnvVars(ctx, cfg, f.runConfig.ModelsGateway, env, titleRef) {
 		requiredBy[name] = append(requiredBy[name], "models")
 	}
 	evaluatorOpts := append([]options.Opt{options.WithGateway(f.runConfig.ModelsGateway)}, f.runConfig.EvaluatorOptions...)

@@ -127,6 +127,15 @@ type Settings struct {
 	BackgroundCompaction bool `yaml:"background_compaction,omitempty"`
 	// BackgroundCompactionThreshold is a context-window percentage (1–99).
 	BackgroundCompactionThreshold int `yaml:"background_compaction_threshold,omitempty"`
+	// SessionCompaction toggles automatic session compaction globally when not
+	// explicitly set on an agent. Defaults to true when unset.
+	SessionCompaction *bool `yaml:"session_compaction,omitempty"`
+	// CompactionThreshold is the default context-window fraction (0, 1] at
+	// which proactive auto-compaction triggers.
+	CompactionThreshold *float64 `yaml:"compaction_threshold,omitempty"`
+	// CompactionModel is the default model used to summarize conversations
+	// during compaction (named model or "provider/model").
+	CompactionModel string `yaml:"compaction_model,omitempty"`
 	// WarnOnCacheMiss shows a warning when a model call after the first one in
 	// a session reports no cached input tokens. Defaults to false.
 	WarnOnCacheMiss *bool `yaml:"warn_on_cache_miss,omitempty"`
@@ -571,6 +580,12 @@ func (c *Config) validateSettings() error {
 	}
 	if err := c.Settings.StreamIdleTimeout.Validate(); err != nil {
 		return fmt.Errorf("settings.stream_idle_timeout: %w", err)
+	}
+	if c.Settings.CompactionThreshold != nil {
+		v := *c.Settings.CompactionThreshold
+		if !(v > 0 && v <= 1) {
+			return fmt.Errorf("settings.compaction_threshold must be greater than 0 and at most 1, got %v", v)
+		}
 	}
 	return nil
 }

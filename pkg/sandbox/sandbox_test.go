@@ -13,7 +13,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/sandbox"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -620,4 +623,20 @@ func TestGuestBuiltinDoesNotResolveAnotherAlias(t *testing.T) {
 			assert.NotEqual(t, other, guest.Name())
 		})
 	}
+}
+
+func TestEnvForSource_UserModels(t *testing.T) {
+	t.Parallel()
+	source := config.NewBytesSource("agent.yaml", []byte("agents:\n  root:\n    model: pick\n    instruction: test\n"))
+	rc := &config.RuntimeConfig{UserConfig: &userconfig.Config{
+		Models: map[string]latest.ModelConfig{
+			"pick":       {FirstAvailable: []string{"dmr/local"}},
+			"summarizer": {FirstAvailable: []string{"corp/small"}},
+		},
+		Providers: map[string]latest.ProviderConfig{"corp": {Provider: "openai", TokenKey: "CORP_SUMMARY_KEY", BaseURL: "https://corp.example.com"}},
+		Settings:  &userconfig.Settings{CompactionModel: "summarizer"},
+	}}
+	flags, values := sandbox.EnvForSource(t.Context(), source, environment.NewMapEnvProvider(map[string]string{"CORP_SUMMARY_KEY": "secret"}), nil, rc)
+	assert.Contains(t, flags, "CORP_SUMMARY_KEY")
+	assert.Contains(t, values, "CORP_SUMMARY_KEY=secret")
 }

@@ -1855,3 +1855,27 @@ func TestSettings_StreamIdleTimeoutRoundTrip(t *testing.T) {
 	require.NotNil(t, loaded.GetSettings().StreamIdleTimeout)
 	assert.Equal(t, "5m0s", loaded.GetSettings().StreamIdleTimeout.String())
 }
+
+func TestSettings_CompactionValidation(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	require.NoError(t, os.WriteFile(configFile, []byte("settings:\n  compaction_threshold: 1.5\n"), 0o600))
+	_, err := loadFrom(configFile, "")
+	require.ErrorContains(t, err, "compaction_threshold")
+
+	require.NoError(t, os.WriteFile(configFile, []byte("settings:\n  compaction_threshold: .nan\n"), 0o600))
+	_, err = loadFrom(configFile, "")
+	require.ErrorContains(t, err, "compaction_threshold")
+
+	require.NoError(t, os.WriteFile(configFile, []byte("settings:\n  session_compaction: false\n  compaction_threshold: 0.75\n  compaction_model: openai/gpt-4o-mini\n"), 0o600))
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	require.NotNil(t, loaded.GetSettings().SessionCompaction)
+	assert.False(t, *loaded.GetSettings().SessionCompaction)
+	require.NotNil(t, loaded.GetSettings().CompactionThreshold)
+	assert.InDelta(t, 0.75, *loaded.GetSettings().CompactionThreshold, 1e-9)
+	assert.Equal(t, "openai/gpt-4o-mini", loaded.GetSettings().CompactionModel)
+}

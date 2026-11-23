@@ -385,7 +385,11 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	// Resolve `first_available` model selectors into concrete provider/model
 	// definitions now that the environment is available, so the rest of the
 	// pipeline sees regular model definitions.
-	if err := config.ResolveFirstAvailableModels(ctx, cfg, runConfig.ModelsGateway, env); err != nil {
+	if err := config.ResolveFirstAvailableModels(ctx, cfg, runConfig.ModelsGateway, env, config.UserTitleModelRef(runConfig.UserConfig)); err != nil {
+		return nil, err
+	}
+	config.ApplyDeferredUserSettings(cfg, runConfig.UserConfig)
+	if err := config.ResolveFirstAvailableModels(ctx, cfg, runConfig.ModelsGateway, env, config.UserTitleModelRef(runConfig.UserConfig)); err != nil {
 		return nil, err
 	}
 

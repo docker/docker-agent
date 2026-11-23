@@ -53,8 +53,8 @@ func gatherMissingEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway
 	return missing, missingModelCreds, toolErr
 }
 
-func GatherEnvVarsForModels(ctx context.Context, cfg *latest.Config, env environment.Provider) []string {
-	return RequiredModelEnvVars(ctx, cfg, "", env)
+func GatherEnvVarsForModels(ctx context.Context, cfg *latest.Config, env environment.Provider, extraRefs ...string) []string {
+	return RequiredModelEnvVars(ctx, cfg, "", env, extraRefs...)
 }
 
 // RequiredModelEnvVars returns the env vars the config's models need under
@@ -62,8 +62,12 @@ func GatherEnvVarsForModels(ctx context.Context, cfg *latest.Config, env environ
 // every model credential when no models gateway is set, and only those of
 // models that bypass the gateway otherwise (the gateway supplies credentials
 // for routed models).
-func RequiredModelEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway string, env environment.Provider) []string {
-	return sortedKeys(gatherEnvVarsForModels(ctx, cfg, modelsGateway, env))
+func RequiredModelEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway string, env environment.Provider, extraRefs ...string) []string {
+	required := gatherEnvVarsForModels(ctx, cfg, modelsGateway, env)
+	for _, ref := range extraRefs {
+		gatherEnvVarsForModelRef(ctx, cfg, ref, required, env, modelsGateway != "")
+	}
+	return sortedKeys(required)
 }
 
 // gatherEnvVarsForModels collects the env vars required by model-backed agents.
@@ -81,6 +85,7 @@ func gatherEnvVarsForModels(ctx context.Context, cfg *latest.Config, modelsGatew
 		for modelName := range modelNames {
 			modelName = strings.TrimSpace(modelName)
 			gatherEnvVarsForModel(ctx, cfg, modelName, requiredEnv, env, bypassOnly)
+			gatherEnvVarsForModelRef(ctx, cfg, cfg.Models[modelName].TitleModel, requiredEnv, env, bypassOnly)
 		}
 		gatherEnvVarsForCompactionModel(ctx, cfg, &agent, requiredEnv, env, bypassOnly)
 	}
@@ -96,7 +101,10 @@ func gatherEnvVarsForModels(ctx context.Context, cfg *latest.Config, modelsGatew
 // inline "provider/model" spec is parsed directly. Invalid references are
 // ignored here — they fail with a dedicated error when the model is built.
 func gatherEnvVarsForCompactionModel(ctx context.Context, cfg *latest.Config, agent *latest.AgentConfig, requiredEnv map[string]bool, env environment.Provider, bypassOnly bool) {
-	ref := EffectiveCompactionModelRef(cfg, agent)
+	gatherEnvVarsForModelRef(ctx, cfg, EffectiveCompactionModelRef(cfg, agent), requiredEnv, env, bypassOnly)
+}
+
+func gatherEnvVarsForModelRef(ctx context.Context, cfg *latest.Config, ref string, requiredEnv map[string]bool, env environment.Provider, bypassOnly bool) {
 	if ref == "" {
 		return
 	}

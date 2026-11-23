@@ -24,27 +24,30 @@ import (
 // require none and therefore make reliable final fallbacks. When a models
 // gateway is configured, the first candidate is selected since the gateway
 // supplies the credentials.
-func ResolveFirstAvailableModels(ctx context.Context, cfg *latest.Config, modelsGateway string, env environment.Provider) error {
-	// Snapshot which models are selectors before mutating the map, so the
-	// nested-selector check is independent of map iteration order.
-	selectors := map[string]bool{}
-	for name, m := range cfg.Models {
-		if m.IsFirstAvailable() {
-			selectors[name] = true
+func ResolveFirstAvailableModels(ctx context.Context, cfg *latest.Config, modelsGateway string, env environment.Provider, extraRefs ...string) error {
+	for {
+		// Snapshot which models are selectors before mutating the map, so the
+		// nested-selector check is independent of map iteration order.
+		selectors := map[string]bool{}
+		for name, m := range cfg.Models {
+			if m.IsFirstAvailable() {
+				selectors[name] = true
+			}
+		}
+		if len(selectors) == 0 {
+			return nil
+		}
+
+		reachable := reachableFirstAvailableModels(cfg, selectors, extraRefs...)
+		if len(reachable) == 0 {
+			return nil
+		}
+		for _, name := range sortedKeys(reachable) {
+			if err := resolveFirstAvailableModel(ctx, cfg, name, selectors, modelsGateway, env); err != nil {
+				return err
+			}
 		}
 	}
-	if len(selectors) == 0 {
-		return nil
-	}
-
-	reachable := reachableFirstAvailableModels(cfg, selectors)
-	for _, name := range sortedKeys(reachable) {
-		if err := resolveFirstAvailableModel(ctx, cfg, name, selectors, modelsGateway, env); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func resolveFirstAvailableModel(ctx context.Context, cfg *latest.Config, name string, selectors map[string]bool, modelsGateway string, env environment.Provider) error {
@@ -71,7 +74,7 @@ func resolveFirstAvailableModel(ctx context.Context, cfg *latest.Config, name st
 	return nil
 }
 
-func reachableFirstAvailableModels(cfg *latest.Config, selectors map[string]bool) map[string]bool {
+func reachableFirstAvailableModels(cfg *latest.Config, selectors map[string]bool, extraRefs ...string) map[string]bool {
 	reachable := map[string]bool{}
 	seen := map[string]bool{}
 
@@ -100,6 +103,9 @@ func reachableFirstAvailableModels(cfg *latest.Config, selectors map[string]bool
 		}
 	}
 
+	for _, ref := range extraRefs {
+		visit(ref)
+	}
 	for _, agent := range cfg.Agents {
 		if agent.Harness == nil {
 			for ref := range strings.SplitSeq(agent.Model, ",") {
