@@ -62,7 +62,7 @@ type Opt func(*HTTPOptions)
 // the encrypted config in a config-fetch response (stripped before parsing).
 // The Docker gateway proxy reads and removes this field; it is never forwarded
 // to any upstream provider, regardless of provider. Must stay in sync with the
-// Docker gateway (gordon proxy pkg/agents/handler.go).
+// Docker gateway.
 const EncryptedConfigBodyField = "encrypted_agent_config"
 
 // EncryptedConfigDigestHeader carries a short SHA-256 fingerprint (hex,

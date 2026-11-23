@@ -897,7 +897,7 @@ const testConfigBody = "version: \"2\"\n"
 
 // writeConfigWithEncrypted writes a 200 response carrying the agent YAML with
 // the encrypted config injected as a top-level `encrypted_agent_config` field,
-// plus the digest header, mirroring the Docker gateway (gordon proxy).
+// plus the digest header, mirroring the Docker gateway.
 func writeConfigWithEncrypted(w http.ResponseWriter, enc string) {
 	w.Header().Set(httpclient.EncryptedConfigDigestHeader, digestOf(enc))
 	_, _ = w.Write([]byte(testConfigBody + "encrypted_agent_config: " + enc + "\n"))
