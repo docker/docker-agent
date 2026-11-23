@@ -537,7 +537,7 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Shift+Enter | Insert a newline |
 | Up/Down    | Navigate message history                        |
 
-The status bar shows only the <kbd>Ctrl</kbd>+<kbd>H</kbd> help hint rather than a list of shortcuts. Press <kbd>Ctrl</kbd>+<kbd>H</kbd> to open the **Help** dialog, which groups shortcuts into sections with those for your current context (for example the focused dialog or the editor) listed first. Type in the search box to filter shortcuts by key or description; press <kbd>Esc</kbd> or <kbd>Enter</kbd> to close the dialog. The dialog reflects any [custom keybindings](#custom-keybindings) you have configured.
+The status bar shows only the <kbd>Ctrl</kbd>+<kbd>H</kbd> help hint rather than a list of shortcuts. Press <kbd>Ctrl</kbd>+<kbd>H</kbd> (or <kbd>F1</kbd>) to open the **Help** dialog. While another dialog is open, use <kbd>F1</kbd> to open Help over it: <kbd>Ctrl</kbd>+<kbd>H</kbd> is passed to that dialog as a text-editing key (for example, it deletes a character in the command palette filter). Help groups shortcuts into sections with those for your current context (for example the focused dialog or the editor) listed first. Type in the search box to filter shortcuts by key or description; press <kbd>Esc</kbd> or <kbd>Enter</kbd> to close the dialog. The dialog reflects any [custom keybindings](#custom-keybindings) you have configured.
 
 ### Custom Keybindings
 
