@@ -22,12 +22,15 @@ func SupportedThinkingLevels(provider, modelID string) []effort.Level {
 // [effort.SupportedLevels].
 func thinkingLevelMap(provider, modelID string) effort.LevelMap {
 	family := providerFamily(provider)
-	if family != "openai" && IsOpenAIVendor(provider, modelID) {
+	switch {
+	case family != "openai" && IsOpenAIVendor(provider, modelID):
 		// A gateway (Vercel AI Gateway, OpenRouter, ...) fronts many vendors'
 		// models under one provider name; an explicit "openai/" qualifier on
 		// the model id pins its effort vocabulary to OpenAI's regardless of
 		// which gateway provider name is configured.
 		family = "openai"
+	case family != "google" && HasGoogleQualifier(modelID):
+		family = "google"
 	}
 	switch family {
 	case "anthropic":

@@ -48,7 +48,7 @@
   {
     "name": "google",
     "api_type": "google",
-    "default_model": "gemini-3.8-flash",
+    "default_model": "gemini-4-hydrogen",
     "base_url": "https://generativelanguage.googleapis.com",
     "token_env_vars": [
       "GOOGLE_API_KEY",

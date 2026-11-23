@@ -606,3 +606,67 @@ func TestStore_ResolveModelAlias_LegacyProviders(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_GetModel_GoogleVertexRegionSuffix(t *testing.T) {
+	t.Parallel()
+
+	db := &Database{Providers: map[string]Provider{
+		"google": {Models: map[string]Model{
+			"gemini-4-hydrogen": {
+				Name:       "Gemini 4 Hydrogen",
+				Cost:       &Cost{Input: 1.5, Output: 7.5},
+				Modalities: Modalities{Input: []string{"text", "image", "pdf"}},
+			},
+			"gemini-4-neon": {
+				Name:       "Gemini 4 Neon",
+				Cost:       &Cost{Input: 3.0, Output: 15.0},
+				Modalities: Modalities{Input: []string{"text", "image", "pdf"}},
+			},
+		}},
+		"google-vertex": {Models: map[string]Model{
+			"gemini-4-hydrogen@eu": {
+				Name:       "Gemini 4 Hydrogen (EU)",
+				Cost:       &Cost{Input: 1.65, Output: 8.25},
+				Modalities: Modalities{Input: []string{"text", "image", "video", "audio", "pdf"}},
+			},
+			"gemini-4-carbon": {
+				Name: "Gemini 4 Carbon (Vertex only)",
+				Cost: &Cost{Input: 2.0, Output: 10.0},
+			},
+		}},
+	}}
+	store := NewDatabaseStore(db)
+
+	t.Run("exact google-vertex regional match preserves regional cost and modalities", func(t *testing.T) {
+		t.Parallel()
+		got, err := store.GetModel(t.Context(), NewID("google", "gemini-4-hydrogen@eu"))
+		require.NoError(t, err)
+		assert.Equal(t, "Gemini 4 Hydrogen (EU)", got.Name)
+		require.NotNil(t, got.Cost)
+		assert.InDelta(t, 1.65, got.Cost.Input, 1e-9)
+		assert.Equal(t, []string{"text", "image", "video", "audio", "pdf"}, got.Modalities.Input)
+	})
+
+	t.Run("uncataloged regional suffix falls back to bare google entry", func(t *testing.T) {
+		t.Parallel()
+		got, err := store.GetModel(t.Context(), NewID("google", "gemini-4-neon@us"))
+		require.NoError(t, err)
+		assert.Equal(t, "Gemini 4 Neon", got.Name)
+		require.NotNil(t, got.Cost)
+		assert.InDelta(t, 3.0, got.Cost.Input, 1e-9)
+	})
+
+	t.Run("uncataloged regional suffix falls back to bare google-vertex entry", func(t *testing.T) {
+		t.Parallel()
+		got, err := store.GetModel(t.Context(), NewID("google", "gemini-4-carbon@us"))
+		require.NoError(t, err)
+		assert.Equal(t, "Gemini 4 Carbon (Vertex only)", got.Name)
+	})
+
+	t.Run("unknown model with regional suffix still errors", func(t *testing.T) {
+		t.Parallel()
+		got, err := store.GetModel(t.Context(), NewID("google", "unknown@eu"))
+		require.Error(t, err)
+		assert.Nil(t, got)
+	})
+}

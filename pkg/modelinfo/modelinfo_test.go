@@ -624,6 +624,7 @@ func TestUsesThinkingLevel(t *testing.T) {
 		"GEMINI-3-PRO", "GEMINI-4-HYDROGEN", // case-insensitive
 		"  gemini-3-pro  ", "  gemini-4-neon  ",
 		"google/gemini-3-pro", "google/gemini-4-carbon", // provider-qualified id
+		"gemini-3.1-flash-image", "google/gemini-3.1-flash-image",
 	}
 	noMatch := []string{
 		"gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash",
@@ -654,6 +655,53 @@ func TestUsesThinkingLevel(t *testing.T) {
 		t.Run("no:"+m, func(t *testing.T) {
 			t.Parallel()
 			assert.Falsef(t, UsesThinkingLevel(m), "%q should not match", m)
+		})
+	}
+}
+
+func TestGeminiRejectsThinkingBudget(t *testing.T) {
+	t.Parallel()
+
+	match := []string{
+		"gemini-4-hydrogen", "gemini-4-neon", "gemini-4-carbon", "gemini-4-argon",
+		"gemini-4.1-neon", "gemini-4-hydrogen@eu", "google/gemini-4-neon", "gemini-5-foo",
+	}
+	noMatch := []string{
+		"gemini-3-pro", "gemini-3-flash-preview", "gemini-3.8-flash",
+		"gemini-2.5-flash", "gemini-2.5-pro", "openai/gemini-4-hydrogen", "",
+	}
+	for _, m := range match {
+		t.Run(m, func(t *testing.T) {
+			t.Parallel()
+			assert.Truef(t, GeminiRejectsThinkingBudget(m), "%q should reject thinkingBudget", m)
+		})
+	}
+	for _, m := range noMatch {
+		t.Run("no:"+m, func(t *testing.T) {
+			t.Parallel()
+			assert.Falsef(t, GeminiRejectsThinkingBudget(m), "%q should not reject thinkingBudget", m)
+		})
+	}
+}
+
+func TestHasGoogleQualifier(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		modelID string
+		want    bool
+	}{
+		{"google/gemini-4-neon", true},
+		{"GOOGLE/gemini-4-carbon", true},
+		{"  gemini/gemini-4-argon  ", true},
+		{"gemini-4-neon", false},
+		{"openai/gemini-4-neon", false},
+		{"anthropic/claude-sonnet-4.5", false},
+		{"", false},
+	} {
+		t.Run(tc.modelID, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, HasGoogleQualifier(tc.modelID))
 		})
 	}
 }

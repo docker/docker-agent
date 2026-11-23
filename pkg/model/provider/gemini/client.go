@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"google.golang.org/genai"
 
@@ -43,6 +44,9 @@ type Client struct {
 	// request-shape diagnostics. Never exposed to the model or logged
 	// alongside anything provider-supplied.
 	apiSurface string
+
+	clampWarnOnce       sync.Once
+	tokenBudgetWarnOnce sync.Once
 }
 
 // NewClient creates a new Gemini client from the provided configuration
@@ -521,19 +525,23 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 	// Apply thinking configuration for Gemini models.
 	// See https://ai.google.dev/gemini-api/docs/thinking
 	if c.ModelOptions.NoThinking() {
-		if modelinfo.ResolveReasoningSupport(ctx, c.ModelOptions.ModelsDevStore(), c.ID()) != modelinfo.ReasoningUnsupported {
-			// NoThinking requested (e.g. title generation, MCP sampling). For
-			// Gemini 3+ models that always think, use the lowest level and bump
-			// MaxOutputTokens so internal reasoning doesn't consume the entire
-			// budget. Gemini 2.5 and older can fully disable thinking with
-			// ThinkingBudget=0.
-			if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
+		usesLevel := modelinfo.UsesThinkingLevel(c.ModelConfig.Model)
+		if c.ModelOptions.GeneratingTitle() && !usesLevel {
+			return config
+		}
+
+		if c.supportsThinking(ctx) {
+			// NoThinking requested (e.g. MCP sampling, title generation). For Gemini 3+
+			// models that always think, use the lowest level and bump a small explicit
+			// MaxOutputTokens cap so internal reasoning doesn't starve visible output.
+			// Gemini 2.5 and older can fully disable thinking with ThinkingBudget=0.
+			if usesLevel {
 				config.ThinkingConfig = &genai.ThinkingConfig{
 					IncludeThoughts: false,
 					ThinkingLevel:   genai.ThinkingLevelLow,
 				}
 				const minOutputTokens int32 = 512
-				if config.MaxOutputTokens < minOutputTokens {
+				if config.MaxOutputTokens > 0 && config.MaxOutputTokens < minOutputTokens {
 					config.MaxOutputTokens = minOutputTokens
 				}
 			} else {
@@ -546,7 +554,7 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 	} else if c.ModelConfig.ThinkingBudget != nil {
 		config.ThinkingConfig = &genai.ThinkingConfig{IncludeThoughts: true}
 		if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
-			c.applyGemini3ThinkingLevel(config)
+			c.applyGemini3ThinkingLevel(ctx, config)
 		} else {
 			c.applyGemini25ThinkingBudget(config)
 		}
@@ -560,15 +568,43 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 	return config
 }
 
+func (c *Client) supportsThinking(ctx context.Context) bool {
+	return modelinfo.ResolveGeminiThinkingSupport(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), c.ModelConfig.Model)
+}
+
 // applyGemini3ThinkingLevel applies level-based thinking for Gemini 3+ models.
-func (c *Client) applyGemini3ThinkingLevel(config *genai.GenerateContentConfig) {
-	level, ok := c.gemini3ThinkingLevel(c.ModelConfig.ThinkingBudget.Effort)
+func (c *Client) applyGemini3ThinkingLevel(ctx context.Context, config *genai.GenerateContentConfig) {
+	b := c.ModelConfig.ThinkingBudget
+	if b.IsAdaptive() {
+		norm := strings.ToLower(strings.TrimSpace(b.Effort))
+		if sub, ok := strings.CutPrefix(norm, "adaptive/"); ok {
+			if level, ok := c.gemini3ThinkingLevel(ctx, sub); ok {
+				config.ThinkingConfig.ThinkingLevel = level
+			}
+		}
+		// Plain "adaptive" leaves ThinkingLevel unset so the model uses its native default.
+		slog.DebugContext(ctx, "Gemini request using adaptive thinking",
+			"model", c.ModelConfig.Model,
+			"level", config.ThinkingConfig.ThinkingLevel,
+		)
+		return
+	}
+
+	level, ok := c.gemini3ThinkingLevel(ctx, b.Effort)
 	if !ok {
-		// No recognized effort string — fall back to token-based if tokens are set.
-		if c.ModelConfig.ThinkingBudget.Tokens != 0 {
-			slog.Warn("Gemini 3+ models use thinkingLevel, not thinkingBudget tokens; falling back to token-based config",
+		if b.Tokens != 0 {
+			if modelinfo.GeminiRejectsThinkingBudget(c.ModelConfig.Model) {
+				c.tokenBudgetWarnOnce.Do(func() {
+					slog.WarnContext(ctx, "Gemini 4+ models reject token-based thinking_budget; omitting token budget so model default thinkingLevel applies",
+						"model", c.ModelConfig.Model,
+						"tokens", b.Tokens,
+					)
+				})
+				return
+			}
+			slog.WarnContext(ctx, "Gemini 3+ models use thinkingLevel, not thinkingBudget tokens; falling back to token-based config",
 				"model", c.ModelConfig.Model,
-				"tokens", c.ModelConfig.ThinkingBudget.Tokens,
+				"tokens", b.Tokens,
 			)
 			c.applyGemini25ThinkingBudget(config)
 			return
@@ -577,25 +613,27 @@ func (c *Client) applyGemini3ThinkingLevel(config *genai.GenerateContentConfig) 
 	}
 
 	config.ThinkingConfig.ThinkingLevel = level
-	slog.Debug("Gemini request using thinkingLevel",
+	slog.DebugContext(ctx, "Gemini request using thinkingLevel",
 		"model", c.ModelConfig.Model,
 		"level", level,
 	)
 }
 
 // gemini3ThinkingLevel maps an effort string to a model-supported Gemini ThinkingLevel.
-func (c *Client) gemini3ThinkingLevel(effortStr string) (genai.ThinkingLevel, bool) {
+func (c *Client) gemini3ThinkingLevel(ctx context.Context, effortStr string) (genai.ThinkingLevel, bool) {
 	l, ok := effort.Parse(effortStr)
 	if !ok || l == effort.None {
 		return "", false
 	}
 	clamped := effort.Clamp(modelinfo.SupportedThinkingLevels("google", c.ModelConfig.Model), l)
 	if clamped != l {
-		slog.Debug("Clamped Gemini thinking level to model-supported value",
-			"model", c.ModelConfig.Model,
-			"requested", l,
-			"effective", clamped,
-		)
+		c.clampWarnOnce.Do(func() {
+			slog.WarnContext(ctx, "Gemini: clamped unsupported thinking_budget effort to nearest model-supported level",
+				"model", c.ModelConfig.Model,
+				"requested", l,
+				"effective", clamped,
+			)
+		})
 	}
 	s, ok := effort.ForGemini(clamped)
 	if !ok {
@@ -604,9 +642,52 @@ func (c *Client) gemini3ThinkingLevel(effortStr string) (genai.ThinkingLevel, bo
 	return genai.ThinkingLevel(strings.ToUpper(s)), true
 }
 
+func gemini25Tokens(l effort.Level) (int32, bool) {
+	switch l {
+	case effort.Minimal:
+		return 1024, true
+	case effort.Low:
+		return 2048, true
+	case effort.Medium:
+		return 8192, true
+	case effort.High:
+		return 16384, true
+	case effort.XHigh, effort.Max:
+		// Capped at 24576 so it stays within both 2.5 Flash (24576) and 2.5 Pro (32768).
+		return 24576, true
+	default:
+		return 0, false
+	}
+}
+
 // applyGemini25ThinkingBudget applies token-based thinking for Gemini 2.5 and other models.
 func (c *Client) applyGemini25ThinkingBudget(config *genai.GenerateContentConfig) {
-	tokens := c.ModelConfig.ThinkingBudget.Tokens
+	b := c.ModelConfig.ThinkingBudget
+	if b.Effort != "" {
+		if b.IsAdaptive() {
+			norm := strings.ToLower(strings.TrimSpace(b.Effort))
+			if sub, ok := strings.CutPrefix(norm, "adaptive/"); ok {
+				if l, ok := effort.Parse(sub); ok {
+					if tokens, ok := gemini25Tokens(l); ok {
+						config.ThinkingConfig.ThinkingBudget = new(tokens)
+						slog.Debug("Gemini request using thinking_budget from adaptive effort", "effort", l, "budget_tokens", tokens)
+						return
+					}
+				}
+			}
+			config.ThinkingConfig.ThinkingBudget = new(int32(-1))
+			slog.Debug("Gemini request using dynamic thinking_budget", "budget_tokens", -1)
+			return
+		}
+		if l, ok := b.EffortLevel(); ok {
+			if tokens, ok := gemini25Tokens(l); ok {
+				config.ThinkingConfig.ThinkingBudget = new(tokens)
+				slog.Debug("Gemini request using thinking_budget from effort", "effort", l, "budget_tokens", tokens)
+				return
+			}
+		}
+	}
+	tokens := b.Tokens
 	config.ThinkingConfig.ThinkingBudget = new(int32(tokens)) //nolint:gosec // user-configured thinking budget fits in int32
 	slog.Debug("Gemini request using thinking_budget", "budget_tokens", tokens)
 }
@@ -968,26 +1049,7 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		"required": []string{"scores"},
 	}
 
-	// Start with standard config from model definition (respects max_tokens,
-	// temperature, top_p, etc. from the model config).
-	// If the user hasn't configured these, we rely on Gemini API defaults.
-	cfg := c.buildConfig(ctx)
-
-	// Override with reranking-specific structured output schema.
-	cfg.ResponseMIMEType = "application/json"
-	cfg.ResponseJsonSchema = schema
-
-	// For reranking, default temperature to 0 for deterministic scoring if not explicitly set.
-	if c.ModelConfig.Temperature == nil {
-		cfg.Temperature = new(float32(0.0))
-	}
-
-	// Disable thinking for reranking - we want quick, deterministic scoring
-	// without wasting tokens on internal reasoning. This overrides any
-	// thinking_budget from the model config for this specific use case.
-	cfg.ThinkingConfig = &genai.ThinkingConfig{
-		IncludeThoughts: false,
-	}
+	cfg := c.buildRerankConfig(ctx, schema)
 
 	resp, err := client.Models.GenerateContent(ctx, c.ModelConfig.Model, []*genai.Content{content}, cfg)
 	if err != nil {
@@ -1017,6 +1079,40 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		"num_scores", len(scores))
 
 	return scores, nil
+}
+
+func (c *Client) buildRerankConfig(ctx context.Context, schema map[string]any) *genai.GenerateContentConfig {
+	cfg := c.buildConfig(ctx)
+	cfg.ResponseMIMEType = "application/json"
+	cfg.ResponseJsonSchema = schema
+
+	if !c.supportsThinking(ctx) {
+		cfg.ThinkingConfig = nil
+		if c.ModelConfig.Temperature == nil {
+			cfg.Temperature = new(float32(0.0))
+		}
+		return cfg
+	}
+
+	if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
+		// Gemini 3+ always think and are tuned for default temperature 1.0; keep it unset unless configured.
+		cfg.ThinkingConfig = &genai.ThinkingConfig{
+			IncludeThoughts: false,
+			ThinkingLevel:   genai.ThinkingLevelLow,
+		}
+		return cfg
+	}
+
+	if c.ModelConfig.Temperature == nil {
+		cfg.Temperature = new(float32(0.0))
+	}
+	cfg.ThinkingConfig = &genai.ThinkingConfig{
+		IncludeThoughts: false,
+	}
+	if strings.HasPrefix(strings.ToLower(c.ModelConfig.Model), "gemini-2.5-flash") {
+		cfg.ThinkingConfig.ThinkingBudget = new(int32(0))
+	}
+	return cfg
 }
 
 // extractGeminiStructuredJSON extracts the JSON string from a
