@@ -1913,3 +1913,17 @@ func TestSettings_LoopAndContextLimitsValidation(t *testing.T) {
 	_, err := loadFrom(configFile, "")
 	require.ErrorContains(t, err, "settings.max_iterations")
 }
+
+func TestSettings_CodeModeToolsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	cfg := &Config{Settings: &Settings{CodeModeTools: true}}
+	require.NoError(t, cfg.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	assert.True(t, loaded.GetSettings().CodeModeTools)
+}

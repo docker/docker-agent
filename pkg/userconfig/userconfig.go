@@ -169,6 +169,8 @@ type Settings struct {
 	MaxOldToolCallTokens int `yaml:"max_old_tool_call_tokens,omitempty"`
 	// NumHistoryItems sets the default number of history items kept when unset on an agent.
 	NumHistoryItems int `yaml:"num_history_items,omitempty"`
+	// CodeModeTools enables code-mode tool wrapping across all agents by default.
+	CodeModeTools bool `yaml:"code_mode_tools,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.

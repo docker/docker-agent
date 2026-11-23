@@ -93,6 +93,9 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 		if settings.NumHistoryItems > 0 && a.NumHistoryItems == 0 {
 			a.NumHistoryItems = settings.NumHistoryItems
 		}
+		if settings.CodeModeTools {
+			a.CodeModeTools = true
+		}
 	}
 }
 

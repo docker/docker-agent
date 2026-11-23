@@ -319,3 +319,18 @@ func TestWithUserConfig_LoopAndContextLimits(t *testing.T) {
 	assert.Equal(t, 2000, cfg.Agents[0].MaxOldToolCallTokens)
 	assert.Equal(t, 40, cfg.Agents[0].NumHistoryItems)
 }
+
+func TestWithUserConfig_CodeModeTools(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+		Settings: &userconfig.Settings{CodeModeTools: true},
+	}))
+	require.NoError(t, err)
+	assert.True(t, cfg.Agents[0].CodeModeTools)
+}
