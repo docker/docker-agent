@@ -960,6 +960,32 @@
         "confirmation"
       ]
     },
+    "AuxiliaryUsage": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "cost": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/session/auxiliary.go AuxiliaryUsage",
+      "required": [
+        "id",
+        "purpose",
+        "model"
+      ]
+    },
     "BackgroundAgentStatusEvent": {
       "type": "object",
       "properties": {
@@ -3495,6 +3521,9 @@
         },
         "evaluation": {
           "$ref": "#/$defs/Evaluation"
+        },
+        "auxiliary_usage": {
+          "$ref": "#/$defs/AuxiliaryUsage"
         },
         "routing_decision": {
           "$ref": "#/$defs/RoutingDecision"

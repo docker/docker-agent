@@ -160,6 +160,26 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 	return m.handleSwitchTab(forkedSession.ID)
 }
 
+// handleAskSideQuestion opens the /btw dialog: an isolated, tool-free,
+// non-persisted side request that never touches the running conversation or
+// its foreground operation lifecycle. Context is captured once, at open
+// time, from the session as it stands; a later retry reuses that snapshot
+// rather than recapturing it.
+func (m *appModel) handleAskSideQuestion(question string) (tea.Model, tea.Cmd) {
+	query, err := m.application.PrepareSideQuery(m.ctx())
+	if err != nil {
+		return m, notification.ErrorCmd(err.Error())
+	}
+	status := func() string {
+		if m.activeTab != nil && m.activeTab.chatPage != nil && m.activeTab.chatPage.IsWorking() {
+			return "working"
+		}
+		return "idle"
+	}
+	d := dialog.NewSideQueryDialog(m.ctx(), question, query.Run, status)
+	return m, core.CmdHandler(dialog.OpenDialogMsg{Model: d})
+}
+
 func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd) {
 	store := m.application.SessionStore()
 	if store == nil {

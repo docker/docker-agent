@@ -350,6 +350,22 @@ func (d *costDialog) gatherCostData() costData {
 					storedChatSessions[sess.ID] = true
 					addRecord(msg.AgentName, msg.Message.Model, msg.Message.Cost, msg.Message.Usage)
 				}
+			case item.AuxiliaryUsage != nil:
+				record := item.AuxiliaryUsage
+				var cost float64
+				if record.Cost != nil {
+					cost = *record.Cost
+				}
+				data.hasPerMessageData = true
+				data.total.add(cost, record.Usage)
+				byModel := addGroupedUsage(modelMap, record.Model, cost, record.Usage)
+				byPurpose := addGroupedUsage(agentMap, record.Purpose, cost, record.Usage)
+				if record.Cost == nil {
+					data.total.unknownCost, byModel.unknownCost, byPurpose.unknownCost = true, true, true
+				}
+				entry := totalUsage{label: record.Purpose + " (" + record.Model + ")", model: record.Model, cost: cost, unknownCost: record.Cost == nil}
+				entry.Add(record.Usage)
+				data.messages = append(data.messages, entry)
 			case item.Evaluation != nil:
 				addEvaluation(item.Evaluation)
 			case item.IsSubSession():

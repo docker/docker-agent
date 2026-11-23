@@ -171,6 +171,17 @@ func builtInSessionCommands() []commands.Item {
 			},
 		},
 		{
+			ID:           "session.btw",
+			Label:        "By the way",
+			SlashCommand: "/btw",
+			Description:  "Ask a side question without affecting the conversation (usage: /btw [question])",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(arg string) tea.Cmd {
+				return core.CmdHandler(messages.AskSideQuestionMsg{Question: strings.TrimSpace(arg)})
+			},
+		},
+		{
 			ID:           "session.exit",
 			Label:        "Exit",
 			SlashCommand: "/exit",

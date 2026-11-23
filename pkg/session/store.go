@@ -959,6 +959,13 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 			}
 			items = append(items, item)
 
+		case "auxiliary_usage":
+			var record AuxiliaryUsage
+			if err := json.Unmarshal([]byte(row.messageJSON.String), &record); err != nil {
+				return nil, fmt.Errorf("unmarshaling auxiliary usage at position %d: %w", row.position, err)
+			}
+			items = append(items, Item{AuxiliaryUsage: &record})
+
 		case "evaluation":
 			var evaluation Evaluation
 			if err := json.Unmarshal([]byte(row.messageJSON.String), &evaluation); err != nil {
@@ -1542,6 +1549,16 @@ func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionI
 			`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json, message_json)
 			 VALUES (?, ?, 'summary', ?, ?, ?, ?, ?, ?)`,
 			sessionID, position, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON, compactionJSON)
+		return err
+
+	case item.AuxiliaryUsage != nil:
+		data, err := json.Marshal(item.AuxiliaryUsage)
+		if err != nil {
+			return fmt.Errorf("marshaling auxiliary usage: %w", err)
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO session_items (session_id, position, item_type, message_json) VALUES (?, ?, 'auxiliary_usage', ?)`,
+			sessionID, position, string(data))
 		return err
 
 	case item.Evaluation != nil:

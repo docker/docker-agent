@@ -25,6 +25,15 @@ export interface AssertionsCheck {
   results: AssertionResult[] | null;
 }
 
+/** Go: pkg/session/auxiliary.go AuxiliaryUsage */
+export interface AuxiliaryUsage {
+  id: string;
+  purpose: string;
+  model: string;
+  usage?: Usage;
+  cost?: number;
+}
+
 /** Go: pkg/session/session.go EvalCriteria */
 export interface EvalCriteria {
   relevance: string[] | null;
@@ -97,6 +106,7 @@ export interface Item {
   sub_session?: Session;
   error?: SessionError;
   evaluation?: Evaluation;
+  auxiliary_usage?: AuxiliaryUsage;
   routing_decision?: RoutingDecision;
   termination?: Termination;
   summary?: string;

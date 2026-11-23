@@ -1417,6 +1417,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.ForkSessionMsg:
 		return m.handleForkSession()
 
+	case messages.AskSideQuestionMsg:
+		return m.handleAskSideQuestion(msg.Question)
+
 	// --- Session commands (slash commands, command palette) ---
 
 	case messages.ToggleYoloMsg:
