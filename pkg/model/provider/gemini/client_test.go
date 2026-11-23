@@ -87,11 +87,11 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 			wantMaxTokens: 128,
 		},
 		{
-			name:          "title generation on gemini-2.5-flash omits thinking config",
+			name:          "title generation on gemini-2.5-flash disables thinking with budget 0",
 			model:         "gemini-2.5-flash",
 			maxTokens:     new(int64(128)),
 			opts:          []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
-			wantThinking:  false,
+			wantThinking:  true,
 			wantMaxTokens: 128,
 		},
 		{

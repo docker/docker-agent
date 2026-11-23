@@ -525,17 +525,13 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 	// Apply thinking configuration for Gemini models.
 	// See https://ai.google.dev/gemini-api/docs/thinking
 	if c.ModelOptions.NoThinking() {
-		usesLevel := modelinfo.UsesThinkingLevel(c.ModelConfig.Model)
-		if c.ModelOptions.GeneratingTitle() && !usesLevel {
-			return config
-		}
-
 		if c.supportsThinking(ctx) {
-			// NoThinking requested (e.g. MCP sampling, title generation). For Gemini 3+
-			// models that always think, use the lowest level and bump a small explicit
-			// MaxOutputTokens cap so internal reasoning doesn't starve visible output.
-			// Gemini 2.5 and older can fully disable thinking with ThinkingBudget=0.
-			if usesLevel {
+			// NoThinking requested (e.g. title generation, MCP sampling). For
+			// Gemini 3+ models that always think, use the lowest level and bump
+			// a small explicit MaxOutputTokens cap so internal reasoning doesn't
+			// starve visible output. Gemini 2.5 and older can fully disable
+			// thinking with ThinkingBudget=0.
+			if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
 				config.ThinkingConfig = &genai.ThinkingConfig{
 					IncludeThoughts: false,
 					ThinkingLevel:   genai.ThinkingLevelLow,

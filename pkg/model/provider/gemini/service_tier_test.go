@@ -55,7 +55,7 @@ func TestBuildConfig_ServiceTier(t *testing.T) {
 func TestBuildConfig_ServiceTier_NoThinkingTitle(t *testing.T) {
 	t.Parallel()
 
-	t.Run("gemini-2.5-flash omits thinking config", func(t *testing.T) {
+	t.Run("gemini-2.5-flash disables thinking with budget 0", func(t *testing.T) {
 		t.Parallel()
 		client := &Client{Config: base.Config{
 			ModelConfig:  latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash", MaxTokens: new(int64(128)), ProviderOpts: map[string]any{"service_tier": "flex"}},
@@ -63,7 +63,10 @@ func TestBuildConfig_ServiceTier_NoThinkingTitle(t *testing.T) {
 		}}
 
 		config := client.buildConfig(t.Context())
-		assert.Nil(t, config.ThinkingConfig)
+		require.NotNil(t, config.ThinkingConfig)
+		assert.False(t, config.ThinkingConfig.IncludeThoughts)
+		require.NotNil(t, config.ThinkingConfig.ThinkingBudget)
+		assert.Zero(t, *config.ThinkingConfig.ThinkingBudget)
 		assert.Equal(t, int32(128), config.MaxOutputTokens)
 		assert.Equal(t, genai.ServiceTierFlex, config.ServiceTier)
 	})
