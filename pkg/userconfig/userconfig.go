@@ -508,6 +508,10 @@ type Config struct {
 	// configurations. Merged into every loaded agent config (agent definitions
 	// win on name conflicts), allowing global tool_guard hooks to reference them.
 	Evaluators map[string]latest.EvaluatorConfig `yaml:"evaluators,omitempty"`
+	// MCPs maps user-defined MCP server names to reusable MCP definitions.
+	// Merged into every loaded agent config; definitions in the agent file win
+	// on name conflicts.
+	MCPs map[string]latest.MCPToolset `yaml:"mcps,omitempty"`
 	// Settings contains global user settings
 	Settings *Settings `yaml:"settings,omitempty"`
 	// Board configures the `docker agent board` Kanban TUI.
@@ -949,6 +953,17 @@ func (c *Config) GetModels() map[string]latest.ModelConfig {
 		out[name] = cloned
 	}
 	return out
+}
+
+// GetMCPs returns a copy of the user-defined MCP server configurations.
+func (c *Config) GetMCPs() map[string]latest.MCPToolset {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.MCPs) == 0 {
+		return nil
+	}
+	return maps.Clone(c.MCPs)
 }
 
 // SetProvider creates or updates a user-defined provider configuration.

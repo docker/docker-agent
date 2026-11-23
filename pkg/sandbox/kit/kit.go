@@ -1113,33 +1113,28 @@ func resolveToolInstallHosts(ctx context.Context, cfg *latestcfg.Config) ([]stri
 	return hosts, errs
 }
 
-// collectAutoInstallable returns every toolset in cfg whose Command
-// the in-sandbox runtime would push through
-// [toolinstall.EnsureCommand]. Order is deterministic (top-level
-// MCPs by map-key, then per-agent toolsets in declaration order)
-// so the resolution loop's slog output is reproducible.
+// collectAutoInstallable includes only commands reachable through agents or fork skills.
 func collectAutoInstallable(cfg *latestcfg.Config) []latestcfg.Toolset {
 	var out []latestcfg.Toolset
-
-	names := make([]string, 0, len(cfg.MCPs))
-	for name := range cfg.MCPs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		ts := cfg.MCPs[name].Toolset
+	add := func(ts latestcfg.Toolset) {
 		if isAutoInstallable(ts) {
 			out = append(out, ts)
 		}
 	}
-
 	for _, agent := range cfg.Agents {
 		for _, ts := range agent.Toolsets {
-			if isAutoInstallable(ts) {
-				out = append(out, ts)
+			add(ts)
+		}
+		for _, skill := range agent.Skills.Inline {
+			if skill.Context != "fork" {
+				continue
+			}
+			for _, name := range skill.Toolsets {
+				if ts, ok := cfg.Toolsets[name]; ok {
+					add(ts)
+				}
 			}
 		}
 	}
-
 	return out
 }

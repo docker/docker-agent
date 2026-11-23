@@ -71,6 +71,27 @@ func mergeUserConfigDefinitions(cfg *latest.Config, userCfg *userconfig.Config) 
 	MergeGlobalProviders(cfg, userCfg.GetProviders())
 	mergeGlobalModels(cfg, userCfg.GetModels())
 	mergeGlobalEvaluators(cfg, userCfg.GetEvaluators())
+	mergeGlobalMCPs(cfg, userCfg.GetMCPs())
+}
+
+func mergeGlobalMCPs(cfg *latest.Config, global map[string]latest.MCPToolset) {
+	for name, def := range global {
+		if _, exists := cfg.MCPs[name]; exists {
+			continue
+		}
+		if strings.TrimSpace(name) == "" {
+			slog.Warn("Ignoring MCP with empty name from user config")
+			continue
+		}
+		if err := validateMCPDefinition(name, &def.Toolset); err != nil {
+			slog.Warn("Ignoring invalid MCP from user config", "mcp", name, "error", err)
+			continue
+		}
+		if cfg.MCPs == nil {
+			cfg.MCPs = map[string]latest.MCPToolset{}
+		}
+		cfg.MCPs[name] = def
+	}
 }
 
 func mergeGlobalModels(cfg *latest.Config, global map[string]latest.ModelConfig) {

@@ -1980,3 +1980,29 @@ func TestConfig_ModelsRoundTrip(t *testing.T) {
 	_, err = loadFrom(configFile, "")
 	require.ErrorContains(t, err, "compaction_threshold")
 }
+
+func TestConfig_MCPsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	cfg := &Config{
+		MCPs: map[string]latest.MCPToolset{
+			"github": {
+				Toolset: latest.Toolset{
+					Type:    "mcp",
+					Command: "npx",
+					Args:    []string{"-y", "@modelcontextprotocol/server-github"},
+				},
+			},
+		},
+	}
+	require.NoError(t, cfg.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	mcps := loaded.GetMCPs()
+	require.Contains(t, mcps, "github")
+	assert.Equal(t, "npx", mcps["github"].Command)
+}

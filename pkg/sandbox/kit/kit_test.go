@@ -942,6 +942,14 @@ func TestCollectAutoInstallable(t *testing.T) {
 	}{
 		{"empty cfg", &latestcfg.Config{}, nil},
 		{
+			name: "fork skill uses named toolset",
+			cfg: &latestcfg.Config{
+				Toolsets: map[string]latestcfg.Toolset{"skill-tool": mcpInstallable},
+				Agents:   latestcfg.Agents{{Name: "root", Skills: latestcfg.SkillsConfig{Inline: []latestcfg.InlineSkill{{Name: "skill", Context: "fork", Toolsets: []string{"skill-tool"}}}}}},
+			},
+			want: []latestcfg.Toolset{mcpInstallable},
+		},
+		{
 			name: "agent has installable lsp",
 			cfg: &latestcfg.Config{
 				Agents: latestcfg.Agents{{Name: "root", Toolsets: []latestcfg.Toolset{lspInstallable}}},
@@ -949,13 +957,12 @@ func TestCollectAutoInstallable(t *testing.T) {
 			want: []latestcfg.Toolset{lspInstallable},
 		},
 		{
-			name: "top-level mcps entry",
+			name: "unused top-level mcps entry",
 			cfg: &latestcfg.Config{
 				MCPs: map[string]latestcfg.MCPToolset{
 					"x": {Toolset: mcpInstallable},
 				},
 			},
-			want: []latestcfg.Toolset{mcpInstallable},
 		},
 		{
 			name: "auto-install disabled per toolset",

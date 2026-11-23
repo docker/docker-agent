@@ -440,3 +440,33 @@ agents:
 	assert.Equal(t, "https://corp.example.com", cfg.Providers["corp"].BaseURL)
 	assert.Equal(t, "manager", cfg.Agents.First().Name)
 }
+
+func TestWithUserConfig_MCPs(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    toolsets:
+      - type: mcp
+        ref: github
+`)
+	userCfg := &userconfig.Config{
+		MCPs: map[string]latest.MCPToolset{
+			"github": {
+				Toolset: latest.Toolset{
+					Type:    "mcp",
+					Command: "npx",
+					Args:    []string{"-y", "@modelcontextprotocol/server-github"},
+				},
+			},
+		},
+	}
+
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(userCfg))
+	require.NoError(t, err)
+	require.Len(t, cfg.Agents[0].Toolsets, 1)
+	assert.Equal(t, "npx", cfg.Agents[0].Toolsets[0].Command)
+	assert.Equal(t, []string{"-y", "@modelcontextprotocol/server-github"}, cfg.Agents[0].Toolsets[0].Args)
+}
