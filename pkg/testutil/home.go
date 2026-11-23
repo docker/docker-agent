@@ -4,6 +4,7 @@ package testutil
 import (
 	"os"
 	"runtime"
+	"testing"
 )
 
 // tempHomeEnv marks a process tree that already runs with a temporary home.
@@ -36,6 +37,17 @@ func RunWithTempHome(run func() int) int {
 	}()
 
 	return run()
+}
+
+// RequireTempHome fails unless the test binary runs under
+// [RunWithTempHome]. State-touching packages call it from a test so that
+// dropping the isolated TestMain fails loudly instead of writing to the
+// developer's real home directory again.
+func RequireTempHome(tb testing.TB) {
+	tb.Helper()
+	if os.Getenv(tempHomeEnv) == "" {
+		tb.Fatal("tests must run with testutil.RunWithTempHome from TestMain")
+	}
 }
 
 // homeVariables lists the environment variables that locate the home

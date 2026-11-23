@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 // TestMain swaps the SSRF-safe HTTP client for the loopback-allowing
@@ -16,7 +17,11 @@ func TestMain(m *testing.M) {
 	skillsHTTPClient = httpclient.NewSafeClient(remoteHTTPTimeout, true)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	skillsHTTPClient.Transport = transport
-	code := m.Run()
+	code := testutil.RunWithTempHome(m.Run)
 	transport.CloseIdleConnections()
 	os.Exit(code)
+}
+
+func TestTempHomeIsolation(t *testing.T) {
+	testutil.RequireTempHome(t)
 }
