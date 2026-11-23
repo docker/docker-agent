@@ -133,6 +133,10 @@ type Settings struct {
 	// TitleModel is the default model used to generate session titles across
 	// agents (named model or "provider/model"). Wins over model-level title_model.
 	TitleModel string `yaml:"title_model,omitempty"`
+	// RedactSecrets controls secret redaction globally. When true, redaction is
+	// enforced even if an agent config sets redact_secrets: false. When false,
+	// it changes the default to off unless an agent explicitly sets true.
+	RedactSecrets *bool `yaml:"redact_secrets,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.

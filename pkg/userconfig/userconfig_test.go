@@ -1797,3 +1797,18 @@ func TestSettings_TitleModelRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "openai/gpt-4o-mini", loaded.GetSettings().TitleModel)
 }
+
+func TestSettings_RedactSecretsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	cfg := &Config{Settings: &Settings{RedactSecrets: new(false)}}
+	require.NoError(t, cfg.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	require.NotNil(t, loaded.GetSettings().RedactSecrets)
+	assert.False(t, *loaded.GetSettings().RedactSecrets)
+}

@@ -35,4 +35,12 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 			cfg.Models[name] = m
 		}
 	}
+
+	if settings.RedactSecrets != nil {
+		for i := range cfg.Agents {
+			if *settings.RedactSecrets || cfg.Agents[i].RedactSecrets == nil {
+				cfg.Agents[i].RedactSecrets = new(*settings.RedactSecrets)
+			}
+		}
+	}
 }

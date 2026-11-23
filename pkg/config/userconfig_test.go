@@ -68,3 +68,48 @@ agents:
 	require.NoError(t, err)
 	assert.Equal(t, "openai/gpt-4o-mini", cfg.Models["primary"].TitleModel)
 }
+
+func TestWithUserConfig_RedactSecrets(t *testing.T) {
+	t.Parallel()
+
+	t.Run("global true overrides agent false", func(t *testing.T) {
+		agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    redact_secrets: false
+`)
+		cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+			Settings: &userconfig.Settings{RedactSecrets: new(true)},
+		}))
+		require.NoError(t, err)
+		assert.True(t, cfg.Agents[0].RedactSecretsEnabled())
+	})
+
+	t.Run("global false disables default when unset", func(t *testing.T) {
+		agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+		cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+			Settings: &userconfig.Settings{RedactSecrets: new(false)},
+		}))
+		require.NoError(t, err)
+		assert.False(t, cfg.Agents[0].RedactSecretsEnabled())
+	})
+
+	t.Run("agent true tightens global false", func(t *testing.T) {
+		agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    redact_secrets: true
+`)
+		cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+			Settings: &userconfig.Settings{RedactSecrets: new(false)},
+		}))
+		require.NoError(t, err)
+		assert.True(t, cfg.Agents[0].RedactSecretsEnabled())
+	})
+}
