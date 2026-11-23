@@ -537,7 +537,7 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Shift+Enter | Insert a newline |
 | Up/Down    | Navigate message history                        |
 
-Press <kbd>Ctrl</kbd>+<kbd>H</kbd> to view the complete list of all available keyboard shortcuts.
+The status bar shows only the <kbd>Ctrl</kbd>+<kbd>H</kbd> help hint rather than a list of shortcuts. Press <kbd>Ctrl</kbd>+<kbd>H</kbd> to open the **Help** dialog, which groups shortcuts into sections with those for your current context (for example the focused dialog or the editor) listed first. Type in the search box to filter shortcuts by key or description; press <kbd>Esc</kbd> or <kbd>Enter</kbd> to close the dialog. The dialog reflects any [custom keybindings](#custom-keybindings) you have configured.
 
 ### Custom Keybindings
 
