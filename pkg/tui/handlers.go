@@ -963,6 +963,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		HideToolResults:               settings.HideToolResults,
 		RenderImages:                  settings.GetRenderImages(),
 		ShowBanner:                    settings.GetShowBanner(),
+		TopMargin:                     m.showTopMargin,
 		FadeScrollEdges:               settings.GetFadeScrollEdges(),
 		YOLO:                          settings.YOLO,
 		RestoreTabs:                   settings.GetRestoreTabs(),
@@ -1016,7 +1017,15 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 		cmd = tea.Batch(cmd, m.syncImageRendering(before))
 	}
 	m.tabBar.SetMaxTitleLength(preferences.TabTitleMaxLength)
-	cmd = tea.Batch(cmd, m.updateChatCmd(messages.SessionToggleChangedMsg{}), m.resizeAll())
+	cmd = tea.Batch(cmd, m.updateChatCmd(messages.SessionToggleChangedMsg{}))
+	oldMargin := m.topMargin()
+	terminalHeight := m.height + oldMargin
+	m.showTopMargin = preferences.TopMargin
+	if m.ready && oldMargin != m.topMarginForHeight(terminalHeight) {
+		cmd = tea.Batch(cmd, m.handleWindowResize(m.width, terminalHeight))
+	} else {
+		cmd = tea.Batch(cmd, m.resizeAll())
+	}
 
 	if err := savePreferences(preferences); err != nil {
 		slog.Warn("Failed to save settings to user config", "error", err)
@@ -1101,6 +1110,7 @@ func savePreferences(p messages.Preferences) error {
 		s.HideToolResults = p.HideToolResults
 		s.RenderImages = boolPreference(p.RenderImages, true)
 		s.ShowBanner = boolPreference(p.ShowBanner, true)
+		s.TopMargin = p.TopMargin
 		s.FadeScrollEdges = boolPreference(p.FadeScrollEdges, true)
 		s.YOLO = p.YOLO
 		s.Lean = p.Lean
@@ -1164,6 +1174,7 @@ func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.Send
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
+		TopMargin:       settings.GetTopMargin(),
 		FadeScrollEdges: settings.GetFadeScrollEdges(),
 		YOLO:            settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
 		BackgroundCompaction:          settings.BackgroundCompaction,

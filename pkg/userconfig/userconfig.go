@@ -77,6 +77,8 @@ type Settings struct {
 	// ShowBanner displays the ASCII-art startup banner in the TUI.
 	// Defaults to true when not set.
 	ShowBanner *bool `yaml:"show_banner,omitempty"`
+	// TopMargin adds a blank row above the TUI in terminals taller than 24 rows.
+	TopMargin bool `yaml:"top_margin,omitempty"`
 	// FadeScrollEdges dims viewport edges when content is hidden.
 	// Defaults to true when not set.
 	FadeScrollEdges *bool `yaml:"fade_scroll_edges,omitempty"`
@@ -271,6 +273,11 @@ func (s *Settings) GetRenderImages() bool {
 		return true
 	}
 	return *s.RenderImages
+}
+
+// GetTopMargin returns whether the optional top margin is enabled.
+func (s *Settings) GetTopMargin() bool {
+	return s != nil && s.TopMargin
 }
 
 // GetShowBanner returns whether the startup banner is displayed, defaulting to true.

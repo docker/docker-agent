@@ -33,6 +33,7 @@ type Writer struct {
 
 	mu        sync.Mutex
 	base      []overlay
+	rowOffset int
 	occlusion image.Rectangle
 	overlays  []overlay
 	uploaded  map[uint32]bool
@@ -121,6 +122,16 @@ func (w *Writer) Invalidate() {
 	clear(w.uploaded)
 	w.active = false
 	w.dirty = true
+}
+
+// SetRowOffset moves placements without discarding uploaded image data.
+func (w *Writer) SetRowOffset(rowOffset int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.rowOffset != rowOffset {
+		w.rowOffset = rowOffset
+		w.dirty = true
+	}
 }
 
 // SetContent extracts placements from the text frame and clips them around foreground layers.
@@ -241,7 +252,7 @@ func (w *Writer) Write(p []byte) (int, error) {
 			writeTransmission(&b, image.id, image.png)
 			newUploads = append(newUploads, image.id)
 		}
-		fmt.Fprintf(&b, "\x1b[%d;%dH", image.y+1, image.x+1)
+		fmt.Fprintf(&b, "\x1b[%d;%dH", w.rowOffset+image.y+1, image.x+1)
 		fmt.Fprintf(&b, "\x1b_Ga=p,i=%d,p=%d,q=2,C=1,c=%d,r=%d", image.id, index+1, image.cols, image.rows)
 		if image.sourceX > 0 || image.sourceY > 0 || image.sourceW < image.pixelW || image.sourceH < image.pixelH {
 			fmt.Fprintf(&b, ",x=%d,y=%d,w=%d,h=%d", image.sourceX, image.sourceY, image.sourceW, image.sourceH)

@@ -282,33 +282,7 @@ func (d *manager) adjustMouseMsg(msg tea.Msg) tea.Msg {
 		return msg
 	}
 	e := d.stack[len(d.stack)-1]
-	if e.offsetX == 0 && e.offsetY == 0 {
-		return msg
-	}
-
-	switch m := msg.(type) {
-	case tea.MouseClickMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	case tea.MouseMotionMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	case tea.MouseReleaseMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	case messages.WheelCoalescedMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	case tea.MouseWheelMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	}
-	return msg
+	return messages.LocalMouse(msg, e.offsetX, e.offsetY)
 }
 
 // handleOpen processes dialog opening requests and adds to stack

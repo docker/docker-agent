@@ -69,10 +69,10 @@ func (m *appModel) withSidebarResizeGuide(view tea.View) tea.View {
 		}
 		cache.guide = guide
 		if len(m.foreground.layers) == 0 {
-			cache.content = ansiline.PaintColumn(view.Content, glyph, guide.X, guide.Start, guide.End)
+			cache.content = ansiline.PaintColumn(view.Content, glyph, guide.X, guide.Start+m.topMargin(), guide.End+m.topMargin())
 		} else {
 			base := ansiline.PaintColumn(m.foreground.base, glyph, guide.X, guide.Start, guide.End)
-			cache.content = m.foreground.compose(base)
+			cache.content = m.topRow + m.foreground.compose(base)
 		}
 	}
 	view.Content = cache.content
