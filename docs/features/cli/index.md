@@ -30,7 +30,7 @@ $ docker agent run [config] [message...] [flags]
 | `--safety <mode>`                       | Safety mode for tool approval: `strict` (ask for everything), `balanced` (auto-approve safe calls), `restricted` (auto-approve safe calls, deny the rest — fail-closed for unattended runs), or `autonomous` (approve everything). Wins over `--yolo` when both are given. Without the flag, the mode falls back to alias/user-config defaults, then the agent YAML's `agents.<name>.safety` / `runtime.safety`; a resumed session keeps its stored mode unless `--safety`/`--yolo` is passed explicitly. See [Safety Modes](../../configuration/permissions/index.md#safety-modes). |
 | `--model <ref>`                         | Override model(s). Use `provider/model` for all agents, or `agent=provider/model` for specific agents. Repeat the flag or comma-separate multiple overrides — the comma form only works when every segment is agent-scoped (`root=a,other=b`); a mixed `global,agent=spec` list is not split (one spec may legitimately contain commas, e.g. an alloy/`first_available` list) and should use repeated `--model` flags instead. Inline overrides inherit each agent's explicit `parallel_tool_calls` setting only from a concrete, provider-qualified configured model. Existing named targets are authoritative on every invocation, including an omitted setting; harness, router, alloy/comma-list, `first_available`, providerless, and unresolved source models do not inherit it. |
 | `--session <id>`                        | Resume a previous session. Supports relative refs (`-1` = newest by creation time, `-2` = second-newest, … — creation order, not last-used). An explicit ID that does not exist yet is created with that ID, so a supervisor can own the session ID upfront and reuse it across runs. |
-| `-s, --session-db <path>`               | Path to the SQLite session database (default: `<data-dir>/session.db`, so `~/.cagent/session.db` unless `--data-dir` is set)              |
+| `-s, --session-db <path>`               | Path to the SQLite session database (default: `<data-dir>/session.db`)              |
 | `--session-read-only`                   | Open the TUI in read-only mode: conversation history is displayed but no new messages can be sent to the LLM. Cannot be used with `--exec`. |
 | `--prompt-file <path>`                  | Include file contents as additional system context (repeatable)                                                                           |
 | `--attach <path>`                       | Attach an image file to the initial message                                                                                               |
@@ -773,7 +773,7 @@ $ docker agent plans delete release --expected-version 3
 $ docker agent plans delete scratch --force
 ```
 
-Plans live under the data directory (`~/.cagent/plans/` by default), so `--data-dir` selects which store the commands operate on.
+Plans live under the data directory (`<data-dir>/plans/`), so `--data-dir` selects which store the commands operate on.
 
 ### `docker agent debug`
 
@@ -875,12 +875,12 @@ These flags are available on every `docker agent` command:
 
 | Flag                      | Description                                                                            |
 | ------------------------- | -------------------------------------------------------------------------------------- |
-| `-d, --debug`             | Enable debug logging (default location: `~/.cagent/cagent.debug.log`)                  |
+| `-d, --debug`             | Enable debug logging (default location: `<data-dir>/cagent.debug.log`)                  |
 | `--log-file <path>`       | Custom debug log location (only used with `--debug`)                                   |
 | `-o, --otel`              | Enable OpenTelemetry observability: traces, metrics, and logs. Requires `OTEL_EXPORTER_OTLP_ENDPOINT` to export to a collector. |
-| `--cache-dir <path>`      | Override the cache directory (default: `~/Library/Caches/cagent` on macOS)             |
-| `--config-dir <path>`     | Override the config directory (default: `~/.config/cagent`). Also reads `DOCKER_AGENT_CONFIG_DIR` (legacy `CAGENT_CONFIG_DIR`) env var. |
-| `--data-dir <path>`       | Override the data directory (default: `~/.cagent`; holds `session.db`, prompt `history`, worktrees, plans, …). Also reads `DOCKER_AGENT_DATA_DIR`; the flag takes precedence.            |
+| `--cache-dir <path>`      | Override the cache directory. See [State Directories](../../configuration/directories/index.md) for the default.             |
+| `--config-dir <path>`     | Override the config directory. See [State Directories](../../configuration/directories/index.md) for the default. Also reads `DOCKER_AGENT_CONFIG_DIR` (legacy `CAGENT_CONFIG_DIR`) env var. |
+| `--data-dir <path>`       | Override the data directory (see [State Directories](../../configuration/directories/index.md) for the default; holds `session.db`, prompt `history`, worktrees, plans, …). Also reads `DOCKER_AGENT_DATA_DIR`; the flag takes precedence.            |
 | `--help`                  | Show help for any command                                                              |
 
 Data-directory overrides expand a leading `~` to your home directory. Other

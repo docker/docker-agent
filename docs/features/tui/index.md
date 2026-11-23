@@ -645,10 +645,10 @@ At startup the terminal background is queried (OSC 11) to pick the dark or light
 
 ### Custom Themes
 
-Create theme files in `~/.cagent/themes/` as YAML. Theme files are **partial overrides** — you only need to specify the colors you want to change. Any omitted keys fall back to the built-in default theme values.
+Create theme files in `<data-dir>/themes/` as YAML (see [State Directories](../../configuration/directories/index.md) for where `<data-dir>` is). Theme files are **partial overrides** — you only need to specify the colors you want to change. Any omitted keys fall back to the built-in default theme values.
 
 ```yaml
-# ~/.cagent/themes/my-theme.yaml
+# <data-dir>/themes/my-theme.yaml
 name: "My Custom Theme"
 
 colors:
@@ -691,7 +691,7 @@ markdown:
 
 ```yaml
 settings:
-  theme: my-theme # References ~/.cagent/themes/my-theme.yaml
+  theme: my-theme # References <data-dir>/themes/my-theme.yaml
 ```
 
 **At launch:** Pass `--theme <name>` to `docker agent run` to preselect a theme for that session. This overrides `settings.theme` in your config but is not saved. Invalid theme names print an error at startup listing the available options. Has no effect in `--exec` mode. `--theme auto` enables the [auto theme](#auto-theme-match-the-terminal) for the session.
@@ -706,7 +706,7 @@ settings:
 > [!WARNING]
 > **Partial overrides**
 >
-> All user themes are applied on top of the `default` theme. If you want to customize a built-in theme (e.g., `dracula`), copy its full YAML from the [built-in themes on GitHub](https://github.com/docker/docker-agent/tree/main/pkg/tui/styles/themes) into `~/.cagent/themes/` and edit the copy. Otherwise, omitted values will use `default` colors, not the original theme's colors.
+> All user themes are applied on top of the `default` theme. If you want to customize a built-in theme (e.g., `dracula`), copy its full YAML from the [built-in themes on GitHub](https://github.com/docker/docker-agent/tree/main/pkg/tui/styles/themes) into `<data-dir>/themes/` and edit the copy. Otherwise, omitted values will use `default` colors, not the original theme's colors.
 
 ## Tool Permissions
 

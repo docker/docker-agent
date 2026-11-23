@@ -83,7 +83,7 @@ when snapshots are turned off.
 
 - **Shadow repository.** The first time a snapshot is taken for a worktree,
   Docker Agent initializes a separate shadow git directory under the data
-  directory (`~/.cagent/snapshot/...` by default), keyed by a hash of the
+  directory (`<data-dir>/snapshot/...`), keyed by a hash of the
   worktree path. The shadow repo stores tree objects only — it never writes
   commits and never touches your source repository's `.git`.
 - **Ignore rules are mirrored.** Before each capture, the source repository's

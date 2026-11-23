@@ -144,13 +144,13 @@ See [Provider Credentials](../../providers/overview/index.md#provider-credential
 | Variable              | Description                                                     |
 | --------------------- | --------------------------------------------------------------- |
 | `DOCKER_AGENT_AUTO_INSTALL` | Set to `false` to disable automatic tool installation           |
-| `DOCKER_AGENT_TOOLS_DIR`    | Override the base directory for installed tools (default: `~/.cagent/tools/`) |
+| `DOCKER_AGENT_TOOLS_DIR`    | Override the base directory for installed tools (default: `<data-dir>/tools/`) |
 
 **Runtime overrides:**
 
 | Variable                            | Description                                                                                          |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `DOCKER_AGENT_DATA_DIR`             | Override the data directory (default: `~/.cagent`), including sessions and prompt history. The `--data-dir` flag takes precedence. |
+| `DOCKER_AGENT_DATA_DIR`             | Override the [data directory](../directories/index.md), including sessions and prompt history. The `--data-dir` flag takes precedence. |
 | `DOCKER_AGENT_DEFAULT_MODEL`        | Default model used when none is specified, in `provider/model` form (e.g. `openai/gpt-5`).      |
 | `DOCKER_AGENT_MODELS_GATEWAY`       | Route model traffic through a gateway. Equivalent to the `--models-gateway` flag.                    |
 | `DOCKER_AGENT_HIDE_TELEMETRY_BANNER`| Set to `1` to suppress the first-run telemetry notice.                                               |

@@ -16,10 +16,10 @@ A session is only persisted to disk once it has content (the first message added
 
 ## Where Sessions Are Stored
 
-Sessions live in a SQLite database, `session.db`, under the [data directory](../cli/index.md#global-flags) (`~/.cagent` by default):
+Sessions live in a SQLite database, `session.db`, under the [data directory](../../configuration/directories/index.md). On Linux that is `~/.local/share/cagent` for a new installation, or `~/.cagent` if you already had one:
 
 ```bash
-$ ls ~/.cagent/session.db
+$ ls ~/.local/share/cagent/session.db
 ```
 
 Override the location with `-s`/`--session-db`, or by overriding the data directory itself with `--data-dir` or `DOCKER_AGENT_DATA_DIR` (`--data-dir` takes precedence):
