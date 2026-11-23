@@ -1812,3 +1812,18 @@ func TestSettings_RedactSecretsRoundTrip(t *testing.T) {
 	require.NotNil(t, loaded.GetSettings().RedactSecrets)
 	assert.False(t, *loaded.GetSettings().RedactSecrets)
 }
+
+func TestSettings_SudoAskpassRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	cfg := &Config{Settings: &Settings{SudoAskpass: new(true)}}
+	require.NoError(t, cfg.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	require.NotNil(t, loaded.GetSettings().SudoAskpass)
+	assert.True(t, *loaded.GetSettings().SudoAskpass)
+}

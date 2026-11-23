@@ -137,6 +137,10 @@ type Settings struct {
 	// enforced even if an agent config sets redact_secrets: false. When false,
 	// it changes the default to off unless an agent explicitly sets true.
 	RedactSecrets *bool `yaml:"redact_secrets,omitempty"`
+	// SudoAskpass controls SUDO_ASKPASS prompts for shell toolsets globally.
+	// When false, agent configs cannot enable it. When true, it enables
+	// sudo_askpass by default unless a toolset explicitly sets false.
+	SudoAskpass *bool `yaml:"sudo_askpass,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.

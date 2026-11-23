@@ -113,3 +113,42 @@ func TestWithUserConfig_RedactSecrets(t *testing.T) {
 		assert.True(t, cfg.Agents[0].RedactSecretsEnabled())
 	})
 }
+
+func TestWithUserConfig_SudoAskpass(t *testing.T) {
+	t.Parallel()
+
+	t.Run("global false overrides toolset true", func(t *testing.T) {
+		agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    toolsets:
+      - type: shell
+        sudo_askpass: true
+`)
+		cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+			Settings: &userconfig.Settings{SudoAskpass: new(false)},
+		}))
+		require.NoError(t, err)
+		require.NotNil(t, cfg.Agents[0].Toolsets[0].SudoAskpass)
+		assert.False(t, *cfg.Agents[0].Toolsets[0].SudoAskpass)
+	})
+
+	t.Run("global true enables default on shell only", func(t *testing.T) {
+		agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    toolsets:
+      - type: shell
+      - type: filesystem
+`)
+		cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+			Settings: &userconfig.Settings{SudoAskpass: new(true)},
+		}))
+		require.NoError(t, err)
+		require.NotNil(t, cfg.Agents[0].Toolsets[0].SudoAskpass)
+		assert.True(t, *cfg.Agents[0].Toolsets[0].SudoAskpass)
+		assert.Nil(t, cfg.Agents[0].Toolsets[1].SudoAskpass)
+	})
+}

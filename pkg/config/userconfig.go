@@ -43,4 +43,27 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 			}
 		}
 	}
+
+	if settings.SudoAskpass != nil {
+		visitToolsets(cfg, func(ts *latest.Toolset) {
+			if ts.Type != "shell" {
+				return
+			}
+			if !*settings.SudoAskpass || ts.SudoAskpass == nil {
+				ts.SudoAskpass = new(*settings.SudoAskpass)
+			}
+		})
+	}
+}
+
+func visitToolsets(cfg *latest.Config, fn func(*latest.Toolset)) {
+	for i := range cfg.Agents {
+		for j := range cfg.Agents[i].Toolsets {
+			fn(&cfg.Agents[i].Toolsets[j])
+		}
+	}
+	for name, ts := range cfg.Toolsets {
+		fn(&ts)
+		cfg.Toolsets[name] = ts
+	}
 }
