@@ -133,6 +133,15 @@ var openAIAliasProviders = []openAIAliasProvider{
 		liveOptInEnvVar:      "DOCKER_AGENT_RUN_HOPBASE_LIVE_TEST",
 	},
 	{
+		provider:             "straitly",
+		envVar:               "STRAITLY_API_KEY",
+		testKey:              "test-straitly-key",
+		model:                "deepseek/deepseek-v4-1-flash",
+		greeting:             "Hello from Straitly",
+		mergesSystemMessages: true,
+		liveOptInEnvVar:      "DOCKER_AGENT_RUN_STRAITLY_LIVE_TEST",
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",
