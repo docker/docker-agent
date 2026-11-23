@@ -86,6 +86,9 @@ func applyMCPDefaults(ts, def *latest.Toolset) {
 	if ts.Defer.IsEmpty() {
 		ts.Defer = def.Defer
 	}
+	if ts.Experimental == nil {
+		ts.Experimental = def.Experimental
+	}
 	if ts.AllowPrivateIPs == nil {
 		ts.AllowPrivateIPs = def.AllowPrivateIPs
 	}
