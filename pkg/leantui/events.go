@@ -146,6 +146,11 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 	case *runtime.TeamInfoEvent:
 		m.applyTeamInfo(ctx, e)
+	case *runtime.SessionTitleEvent:
+		if e.SessionID != "" && m.contentSession("") != "" && e.SessionID != m.contentSession("") {
+			return
+		}
+		m.applySessionTitle(e.Title)
 	case *runtime.SessionCompactionEvent:
 		m.handleSessionCompaction(ctx, e)
 	case *runtime.ErrorEvent:
