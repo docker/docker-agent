@@ -1927,3 +1927,28 @@ func TestSettings_CodeModeToolsRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, loaded.GetSettings().CodeModeTools)
 }
+
+func TestConfig_EvaluatorsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	cfg := &Config{
+		Evaluators: map[string]latest.EvaluatorConfig{
+			"risk": {
+				Provider:     "openai",
+				Model:        "gpt-4o-mini",
+				Type:         "boolean",
+				Instructions: "Is this command risky?",
+			},
+		},
+	}
+	require.NoError(t, cfg.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	evals := loaded.GetEvaluators()
+	require.Contains(t, evals, "risk")
+	assert.Equal(t, "boolean", evals["risk"].Type)
+}

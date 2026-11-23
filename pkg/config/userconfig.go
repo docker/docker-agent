@@ -1,6 +1,9 @@
 package config
 
 import (
+	"log/slog"
+	"strings"
+
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -21,6 +24,27 @@ func mergeUserConfigDefinitions(cfg *latest.Config, userCfg *userconfig.Config) 
 		return
 	}
 	MergeGlobalProviders(cfg, userCfg.GetProviders())
+	mergeGlobalEvaluators(cfg, userCfg.GetEvaluators())
+}
+
+func mergeGlobalEvaluators(cfg *latest.Config, global map[string]latest.EvaluatorConfig) {
+	for name, def := range global {
+		if _, exists := cfg.Evaluators[name]; exists {
+			continue
+		}
+		if strings.TrimSpace(name) == "" {
+			slog.Warn("Ignoring evaluator with empty name from user config")
+			continue
+		}
+		if err := def.Validate(); err != nil {
+			slog.Warn("Ignoring invalid evaluator from user config", "evaluator", name, "error", err)
+			continue
+		}
+		if cfg.Evaluators == nil {
+			cfg.Evaluators = map[string]latest.EvaluatorConfig{}
+		}
+		cfg.Evaluators[name] = def
+	}
 }
 
 func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {

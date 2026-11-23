@@ -72,6 +72,10 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 	raw.Version = cmp.Or(raw.Version, latest.Version)
 
 	parsers, upgraders := versions(loadOpts.versions)
+	deferValidate := raw.Version == latest.Version && loadOpts.userConfig != nil
+	if deferValidate {
+		parsers[latest.Version] = func(d []byte) (any, error) { return latest.ParseRaw(d) }
+	}
 	oldConfig, err := parseCurrentVersion(data, raw.Version, parsers)
 	if err != nil {
 		msg := yaml.FormatError(err, true, true)
@@ -95,6 +99,11 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 	}
 
 	mergeUserConfigDefinitions(&config, loadOpts.userConfig)
+	if loadOpts.userConfig != nil {
+		if err := config.Validate(); err != nil {
+			return nil, fmt.Errorf("parsing config file\n%w", err)
+		}
+	}
 
 	if err := validateConfig(&config); err != nil {
 		return nil, err

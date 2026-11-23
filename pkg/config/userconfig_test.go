@@ -334,3 +334,60 @@ func TestWithUserConfig_CodeModeTools(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, cfg.Agents[0].CodeModeTools)
 }
+
+func TestWithUserConfig_Evaluators(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    hooks:
+      tool_guard:
+        - matcher: "shell"
+          hooks:
+            - type: evaluator
+              evaluator: risk
+              evaluator_policy:
+                min_probability: 0.7
+                fallback: ask
+                decisions:
+                  "true": deny
+                  "false": allow
+`)
+	userCfg := &userconfig.Config{
+		Evaluators: map[string]latest.EvaluatorConfig{
+			"risk": {
+				Provider:     "openai",
+				Model:        "gpt-4o-mini",
+				Type:         "boolean",
+				Instructions: "Flag risky shell commands",
+			},
+		},
+	}
+
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(userCfg))
+	require.NoError(t, err)
+	require.Contains(t, cfg.Evaluators, "risk")
+	assert.Equal(t, "gpt-4o-mini", cfg.Evaluators["risk"].Model)
+
+	// Post-merge validation must also run for historical agent config versions.
+	v15YAML := []byte("version: \"15\"\nagents:\n  root:\n    model: bad\n    instruction: test\n")
+	v15Registrar := func(parsers map[string]func([]byte) (any, error), upgraders *[]func(any, []byte) (any, error)) {
+		parsers["15"] = func(_ []byte) (any, error) {
+			return latest.Config{
+				Version: "15",
+				Agents:  latest.Agents{{Name: "root", Model: "bad", Instruction: "test"}},
+			}, nil
+		}
+	}
+	_, err = Load(t.Context(), NewBytesSource("v15.yaml", v15YAML),
+		WithVersions(v15Registrar),
+		WithUserConfig(&userconfig.Config{
+			Models: map[string]latest.ModelConfig{
+				"bad": {Provider: "openai", Model: "gpt-4o", CompactionThreshold: new(1.5)},
+			},
+		}),
+	)
+	require.ErrorContains(t, err, "compaction_threshold")
+}

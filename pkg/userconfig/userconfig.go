@@ -498,6 +498,10 @@ type Config struct {
 	// section of an agent file and are merged into every loaded agent config;
 	// definitions in the agent file win on name conflicts.
 	Providers map[string]latest.ProviderConfig `yaml:"providers,omitempty"`
+	// Evaluators maps user-defined evaluator names to reusable evaluator
+	// configurations. Merged into every loaded agent config (agent definitions
+	// win on name conflicts), allowing global tool_guard hooks to reference them.
+	Evaluators map[string]latest.EvaluatorConfig `yaml:"evaluators,omitempty"`
 	// Settings contains global user settings
 	Settings *Settings `yaml:"settings,omitempty"`
 	// Board configures the `docker agent board` Kanban TUI.
@@ -853,6 +857,17 @@ func (c *Config) GetProviders() map[string]latest.ProviderConfig {
 		return nil
 	}
 	return maps.Clone(c.Providers)
+}
+
+// GetEvaluators returns a copy of the user-defined evaluator configurations.
+func (c *Config) GetEvaluators() map[string]latest.EvaluatorConfig {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.Evaluators) == 0 {
+		return nil
+	}
+	return maps.Clone(c.Evaluators)
 }
 
 // SetProvider creates or updates a user-defined provider configuration.
