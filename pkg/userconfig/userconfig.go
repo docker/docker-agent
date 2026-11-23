@@ -159,6 +159,16 @@ type Settings struct {
 	// Budget caps spend (cost, tokens, time) across every run. Acts as a
 	// ceiling: an agent config can tighten limits further, never raise them.
 	Budget *latest.BudgetConfig `yaml:"budget,omitempty"`
+	// MaxIterations sets the default maximum agent loop iterations when unset on an agent.
+	MaxIterations int `yaml:"max_iterations,omitempty"`
+	// MaxConsecutiveToolCalls sets the default consecutive tool-call cap when unset on an agent.
+	MaxConsecutiveToolCalls int `yaml:"max_consecutive_tool_calls,omitempty"`
+	// MaxToolResultTokens sets the default per-tool-result token cap when unset on an agent.
+	MaxToolResultTokens int `yaml:"max_tool_result_tokens,omitempty"`
+	// MaxOldToolCallTokens sets the default token cap for older tool calls when unset on an agent.
+	MaxOldToolCallTokens int `yaml:"max_old_tool_call_tokens,omitempty"`
+	// NumHistoryItems sets the default number of history items kept when unset on an agent.
+	NumHistoryItems int `yaml:"num_history_items,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.
@@ -586,6 +596,20 @@ func (c *Config) validateSettings() error {
 	}
 	if err := c.Settings.Budget.Validate(); err != nil {
 		return fmt.Errorf("settings.budget: %w", err)
+	}
+	for _, limit := range []struct {
+		name  string
+		value int
+	}{
+		{"max_iterations", c.Settings.MaxIterations},
+		{"max_consecutive_tool_calls", c.Settings.MaxConsecutiveToolCalls},
+		{"max_tool_result_tokens", c.Settings.MaxToolResultTokens},
+		{"max_old_tool_call_tokens", c.Settings.MaxOldToolCallTokens},
+		{"num_history_items", c.Settings.NumHistoryItems},
+	} {
+		if limit.value < 0 {
+			return fmt.Errorf("settings.%s must not be negative, got %d", limit.name, limit.value)
+		}
 	}
 	if c.Settings.CompactionThreshold != nil {
 		v := *c.Settings.CompactionThreshold

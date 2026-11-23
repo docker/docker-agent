@@ -78,6 +78,21 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 		if settings.CompactionThreshold != nil && a.CompactionThreshold == nil {
 			a.CompactionThreshold = new(*settings.CompactionThreshold)
 		}
+		if settings.MaxIterations > 0 && a.MaxIterations == 0 {
+			a.MaxIterations = settings.MaxIterations
+		}
+		if settings.MaxConsecutiveToolCalls > 0 && a.MaxConsecutiveToolCalls == 0 {
+			a.MaxConsecutiveToolCalls = settings.MaxConsecutiveToolCalls
+		}
+		if settings.MaxToolResultTokens > 0 && a.MaxToolResultTokens == 0 {
+			a.MaxToolResultTokens = settings.MaxToolResultTokens
+		}
+		if settings.MaxOldToolCallTokens > 0 && a.MaxOldToolCallTokens == 0 {
+			a.MaxOldToolCallTokens = settings.MaxOldToolCallTokens
+		}
+		if settings.NumHistoryItems > 0 && a.NumHistoryItems == 0 {
+			a.NumHistoryItems = settings.NumHistoryItems
+		}
 	}
 }
 

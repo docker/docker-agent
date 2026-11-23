@@ -1902,3 +1902,14 @@ func TestSettings_BudgetValidation(t *testing.T) {
 	assert.Equal(t, int64(50000), loaded.GetSettings().Budget.MaxTokens)
 	assert.Equal(t, "10m0s", loaded.GetSettings().Budget.MaxTime.String())
 }
+
+func TestSettings_LoopAndContextLimitsValidation(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	require.NoError(t, os.WriteFile(configFile, []byte("settings:\n  max_iterations: -5\n"), 0o600))
+	_, err := loadFrom(configFile, "")
+	require.ErrorContains(t, err, "settings.max_iterations")
+}

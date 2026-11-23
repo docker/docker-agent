@@ -293,4 +293,29 @@ agents:
 	merged := mergeBudgetCeiling(&latest.BudgetConfig{MaxCost: math.NaN()}, &latest.BudgetConfig{MaxCost: 2.0})
 	assert.InDelta(t, 2.0, merged.MaxCost, 1e-9)
 }
+
+func TestWithUserConfig_LoopAndContextLimits(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    max_iterations: 15
+`)
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+		Settings: &userconfig.Settings{
+			MaxIterations:           50,
+			MaxConsecutiveToolCalls: 12,
+			MaxToolResultTokens:     4000,
+			MaxOldToolCallTokens:    2000,
+			NumHistoryItems:         40,
+		},
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, 15, cfg.Agents[0].MaxIterations)
+	assert.Equal(t, 12, cfg.Agents[0].MaxConsecutiveToolCalls)
+	assert.Equal(t, 4000, cfg.Agents[0].MaxToolResultTokens)
+	assert.Equal(t, 2000, cfg.Agents[0].MaxOldToolCallTokens)
+	assert.Equal(t, 40, cfg.Agents[0].NumHistoryItems)
 }
