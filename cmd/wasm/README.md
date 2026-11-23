@@ -94,18 +94,13 @@ See `examples/cloud-bedrock.yaml` and `examples/cloud-vertex.yaml`.
 ### Small profile
 
 Most of the default binary is what it links, not the runtime. The small
-profile keeps the shared runtime and trades features for size: about 36 MiB
-(Go 1.27.4), against 162 MiB for the default build with the same `go build`
-flags.
+profile keeps the shared runtime and trades features for size: about 28 MiB
+uncompressed with Go 1.27.4 and Binaryen 132, compared to 162 MiB for the
+stripped default build. The small build requires [Binaryen](https://github.com/WebAssembly/binaryen/releases/tag/version_132)
+(`wasm-opt` on `PATH`; e.g. `brew install binaryen`). CI uses version 132.
 
 ```sh
-task build-wasm-small
-
-# which runs:
-GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" \
-  -tags docker_agent_wasm_small,docker_agent_no_hook_templates,docker_agent_no_js_expansion,nethttpomithttp2 \
-  -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
-go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
+task build-wasm-small  # writes cmd/wasm/web/docker-agent.wasm
 ```
 
 | | Default | Small |
@@ -131,11 +126,11 @@ swap goja and `text/template` out, and `small_tags.go` refuses to build the
 profile without them. `nethttpomithttp2` drops net/http's HTTP/2 client,
 unused because requests go through `fetch`.
 
-`scripts/wasmpack` then takes 7 MiB off the linked binary. On wasm the
-linker's `runtime.findfunctab` costs 320 bytes per function, all of them
-predictable: the tool removes the table and adds a start function that
-writes it back at instantiation, which leaves memory byte for byte the same.
-It works on any Go js/wasm binary.
+The small build disables Go inlining (`-gcflags=all=-l`) to reduce duplicated
+code, then runs `scripts/wasmpack`. On wasm the linker's `runtime.findfunctab`
+costs 320 bytes per function: the tool removes the table and adds a start
+function that writes it back at instantiation, leaving memory byte for byte
+unchanged. Finally, `wasm-opt -Oz` optimizes the packed binary for size.
 
 `e2e/dependencies_test.go` guards the profile's dependency closure and
 `node/small_test.js` its size.
@@ -152,7 +147,7 @@ node cmd/wasm/smoke_test.js
 # JS bridge tests against the default build: session handles, chat(), failure modes.
 node --test cmd/wasm/node/bridge_test.js
 
-# Build and test both default and RAG-enabled JavaScript APIs.
+# Build and test the default, small, and RAG-enabled JavaScript APIs (requires Binaryen).
 task test-wasm-bridge
 ```
 

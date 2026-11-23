@@ -7,9 +7,9 @@ const path = require("node:path");
 const { before, it } = require("node:test");
 const { bootDockerAgent } = require("./boot.js");
 
-// The packed binary is 35.7 MiB. Linking a second provider SDK, or an engine
-// that defeats the linker's method pruning, costs far more than the headroom.
-const sizeBudget = 38 * 1024 * 1024;
+// The packed, optimized binary is about 28 MiB. The budget also catches a
+// build that skips wasm-opt (about 34 MiB).
+const sizeBudget = 31 * 1024 * 1024;
 
 const yaml = `
 agents:

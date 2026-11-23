@@ -236,8 +236,10 @@ jobs:
       - name: WASM runtime, tools and providers
         run: task test-wasm-js
 
+      - uses: $/.github/actions/setup-binaryen
+
       - name: WASM JavaScript bridge
-        run: task test-wasm-bridge
+        run: PATH="$RUNNER_TEMP/binaryen:$PATH" task test-wasm-bridge
 
   # The TypeScript SDK is generated from Go types: fail when it is stale.
   typescript:
