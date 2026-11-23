@@ -114,11 +114,20 @@ func (b *BudgetConfig) IsZero() bool {
 	return b == nil || (b.MaxCost == 0 && b.MaxTokens == 0 && b.MaxTime.Duration == 0)
 }
 
-// validate rejects negative limits. All-zero is valid and simply means
+// Validate rejects negative limits. All-zero is valid and simply means
+// "no limit", which keeps `budget: {}` from being an error.
+func (b *BudgetConfig) Validate() error {
+	return b.validate()
+}
+
+// validate rejects negative, NaN, or infinite limits. All-zero is valid and simply means
 // "no limit", which keeps `budget: {}` from being an error.
 func (b *BudgetConfig) validate() error {
 	if b == nil {
 		return nil
+	}
+	if math.IsNaN(b.MaxCost) || math.IsInf(b.MaxCost, 0) {
+		return fmt.Errorf("max_cost must be finite, got %v", b.MaxCost)
 	}
 	if b.MaxCost < 0 {
 		return fmt.Errorf("max_cost must not be negative, got %v", b.MaxCost)

@@ -1879,3 +1879,26 @@ func TestSettings_CompactionValidation(t *testing.T) {
 	assert.InDelta(t, 0.75, *loaded.GetSettings().CompactionThreshold, 1e-9)
 	assert.Equal(t, "openai/gpt-4o-mini", loaded.GetSettings().CompactionModel)
 }
+
+func TestSettings_BudgetValidation(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	require.NoError(t, os.WriteFile(configFile, []byte("settings:\n  budget:\n    max_cost: -1\n"), 0o600))
+	_, err := loadFrom(configFile, "")
+	require.ErrorContains(t, err, "settings.budget")
+
+	require.NoError(t, os.WriteFile(configFile, []byte("settings:\n  budget:\n    max_cost: .nan\n"), 0o600))
+	_, err = loadFrom(configFile, "")
+	require.ErrorContains(t, err, "settings.budget")
+
+	require.NoError(t, os.WriteFile(configFile, []byte("settings:\n  budget:\n    max_cost: 2.5\n    max_tokens: 50000\n    max_time: 10m\n"), 0o600))
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	require.NotNil(t, loaded.GetSettings().Budget)
+	assert.InDelta(t, 2.5, loaded.GetSettings().Budget.MaxCost, 1e-9)
+	assert.Equal(t, int64(50000), loaded.GetSettings().Budget.MaxTokens)
+	assert.Equal(t, "10m0s", loaded.GetSettings().Budget.MaxTime.String())
+}

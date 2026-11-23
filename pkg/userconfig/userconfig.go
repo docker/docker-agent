@@ -156,6 +156,9 @@ type Settings struct {
 	// StreamIdleTimeout sets the default stream silence timeout across all
 	// agents and models (positive Go duration or -1 to disable).
 	StreamIdleTimeout *latest.StreamIdleTimeout `yaml:"stream_idle_timeout,omitempty"`
+	// Budget caps spend (cost, tokens, time) across every run. Acts as a
+	// ceiling: an agent config can tighten limits further, never raise them.
+	Budget *latest.BudgetConfig `yaml:"budget,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.
@@ -580,6 +583,9 @@ func (c *Config) validateSettings() error {
 	}
 	if err := c.Settings.StreamIdleTimeout.Validate(); err != nil {
 		return fmt.Errorf("settings.stream_idle_timeout: %w", err)
+	}
+	if err := c.Settings.Budget.Validate(); err != nil {
+		return fmt.Errorf("settings.budget: %w", err)
 	}
 	if c.Settings.CompactionThreshold != nil {
 		v := *c.Settings.CompactionThreshold

@@ -66,6 +66,10 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 		}
 	}
 
+	if !settings.Budget.IsZero() {
+		cfg.Budget = mergeBudgetCeiling(cfg.Budget, settings.Budget)
+	}
+
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		if settings.SessionCompaction != nil && a.SessionCompaction == nil {
@@ -96,6 +100,23 @@ func ensureRuntime(cfg *latest.Config) *latest.RuntimeDefaults {
 		cfg.Runtime = &latest.RuntimeDefaults{}
 	}
 	return cfg.Runtime
+}
+
+func mergeBudgetCeiling(agentBudget, globalBudget *latest.BudgetConfig) *latest.BudgetConfig {
+	merged := latest.BudgetConfig{}
+	if agentBudget != nil {
+		merged = *agentBudget
+	}
+	if globalBudget.MaxCost > 0 && !(merged.MaxCost > 0 && merged.MaxCost <= globalBudget.MaxCost) {
+		merged.MaxCost = globalBudget.MaxCost
+	}
+	if globalBudget.MaxTokens > 0 && (merged.MaxTokens == 0 || globalBudget.MaxTokens < merged.MaxTokens) {
+		merged.MaxTokens = globalBudget.MaxTokens
+	}
+	if globalBudget.MaxTime.Duration > 0 && (merged.MaxTime.Duration == 0 || globalBudget.MaxTime.Duration < merged.MaxTime.Duration) {
+		merged.MaxTime = globalBudget.MaxTime
+	}
+	return &merged
 }
 
 func visitToolsets(cfg *latest.Config, fn func(*latest.Toolset)) {

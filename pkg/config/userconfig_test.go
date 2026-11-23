@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -261,5 +262,35 @@ agents:
 	cfg.Models["pick"] = cfg.Models["primary"]
 	ApplyDeferredUserSettings(cfg, userCfg)
 	assert.Equal(t, "openai/gpt-4.1-mini", EffectiveCompactionModelRef(cfg, &cfg.Agents[0]))
+}
+
+func TestWithUserConfig_BudgetCeiling(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`budget:
+  max_cost: 10.0
+  max_tokens: 10000
+agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+		Settings: &userconfig.Settings{
+			Budget: &latest.BudgetConfig{
+				MaxCost:   2.0,
+				MaxTokens: 50000,
+			},
+		},
+	}))
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Budget)
+	// Global ceiling tightens agent's higher max_cost; agent's stricter max_tokens stays.
+	assert.InDelta(t, 2.0, cfg.Budget.MaxCost, 1e-9)
+	assert.Equal(t, int64(10000), cfg.Budget.MaxTokens)
+
+	// Non-positive or NaN agent max_cost must not bypass a finite global ceiling.
+	merged := mergeBudgetCeiling(&latest.BudgetConfig{MaxCost: math.NaN()}, &latest.BudgetConfig{MaxCost: 2.0})
+	assert.InDelta(t, 2.0, merged.MaxCost, 1e-9)
 }
 }
