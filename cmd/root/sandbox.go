@@ -49,7 +49,7 @@ import (
 // second time. cfg is nil when agentRef is empty or fails to load.
 func resolveSandboxDefault(ctx context.Context, agentRef string, current bool, flavors []string) (bool, *latestcfg.Config) {
 	if agentRef == "" {
-		return current, nil
+		return current || userconfig.Get().Sandbox, nil
 	}
 	cfg := loadAgentConfig(ctx, agentRef, flavors)
 	if current {

@@ -1827,3 +1827,17 @@ func TestSettings_SudoAskpassRoundTrip(t *testing.T) {
 	require.NotNil(t, loaded.GetSettings().SudoAskpass)
 	assert.True(t, *loaded.GetSettings().SudoAskpass)
 }
+
+func TestSettings_SandboxRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	cfg := &Config{Settings: &Settings{Sandbox: true}}
+	require.NoError(t, cfg.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	assert.True(t, loaded.GetSettings().Sandbox)
+}

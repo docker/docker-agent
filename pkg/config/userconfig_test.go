@@ -152,3 +152,19 @@ func TestWithUserConfig_SudoAskpass(t *testing.T) {
 		assert.Nil(t, cfg.Agents[0].Toolsets[1].SudoAskpass)
 	})
 }
+
+func TestWithUserConfig_Sandbox(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+		Settings: &userconfig.Settings{Sandbox: true},
+	}))
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Runtime)
+	assert.True(t, cfg.Runtime.Sandbox)
+}

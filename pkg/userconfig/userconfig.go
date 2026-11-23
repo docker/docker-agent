@@ -141,6 +141,9 @@ type Settings struct {
 	// When false, agent configs cannot enable it. When true, it enables
 	// sudo_askpass by default unless a toolset explicitly sets false.
 	SudoAskpass *bool `yaml:"sudo_askpass,omitempty"`
+	// Sandbox runs agents inside a Docker sandbox by default when true.
+	// Equivalent to passing --sandbox unless overridden on the CLI.
+	Sandbox bool `yaml:"sandbox,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.

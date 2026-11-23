@@ -54,6 +54,17 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 			}
 		})
 	}
+
+	if settings.Sandbox {
+		ensureRuntime(cfg).Sandbox = true
+	}
+}
+
+func ensureRuntime(cfg *latest.Config) *latest.RuntimeDefaults {
+	if cfg.Runtime == nil {
+		cfg.Runtime = &latest.RuntimeDefaults{}
+	}
+	return cfg.Runtime
 }
 
 func visitToolsets(cfg *latest.Config, fn func(*latest.Toolset)) {
