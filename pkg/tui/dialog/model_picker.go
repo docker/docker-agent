@@ -118,7 +118,7 @@ func newModelPickerDialog(models []modelcatalog.ModelChoice, query string) Dialo
 	return d
 }
 
-// modelSortKeys derives the sort key tuple from a runtime.ModelChoice.
+// modelSortKeys derives the sort key tuple from a modelcatalog.ModelChoice.
 func modelSortKeys(m modelcatalog.ModelChoice) pickerSortKeys {
 	section := 0
 	switch {

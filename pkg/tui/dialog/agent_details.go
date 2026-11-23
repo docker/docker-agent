@@ -14,7 +14,7 @@ import (
 )
 
 // Single-width, non-emoji status glyphs for the toolset section. They mirror
-// the lifecycle buckets in runtime.ToolsetState: serving, not running, broken.
+// the lifecycle buckets in inspection.ToolsetState: serving, not running, broken.
 const (
 	toolsetGlyphStarted = "●"
 	toolsetGlyphStopped = "○"
