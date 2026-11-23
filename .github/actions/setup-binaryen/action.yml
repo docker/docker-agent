@@ -14,5 +14,5 @@ runs:
         archive="${RUNNER_TEMP}/${release}-x86_64-linux.tar.gz"
         curl -fsSLo "$archive" "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/${archive##*/}"
         echo "${BINARYEN_SHA256}  ${archive}" | sha256sum -c -
-        tar -xzf "$archive" -C "$RUNNER_TEMP" "$release/bin/wasm-opt"
-        echo "$RUNNER_TEMP/$release/bin" >> "$GITHUB_PATH"
+        mkdir -p "$RUNNER_TEMP/binaryen"
+        tar -xzf "$archive" -C "$RUNNER_TEMP/binaryen" --strip-components=2 "$release/bin/wasm-opt"
