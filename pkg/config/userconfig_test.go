@@ -46,3 +46,25 @@ func TestWithUserConfig_NilIsNoop(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, cfg.Agents, 1)
 }
+
+func TestWithUserConfig_TitleModel(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`models:
+  primary:
+    provider: anthropic
+    model: claude-sonnet-4-5
+    title_model: openai/gpt-4o
+agents:
+  root:
+    model: primary
+    instruction: test
+`)
+	userCfg := &userconfig.Config{
+		Settings: &userconfig.Settings{TitleModel: "openai/gpt-4o-mini"},
+	}
+
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(userCfg))
+	require.NoError(t, err)
+	assert.Equal(t, "openai/gpt-4o-mini", cfg.Models["primary"].TitleModel)
+}

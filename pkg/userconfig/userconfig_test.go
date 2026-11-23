@@ -1783,3 +1783,17 @@ func TestConfig_AliasSafetyRoundTrip(t *testing.T) {
 	assert.Equal(t, latest.SafetyModeStrict, alias.Safety)
 	assert.Equal(t, latest.SafetyModeBalanced, loaded.GetSettings().Safety)
 }
+
+func TestSettings_TitleModelRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	cfg := &Config{Settings: &Settings{TitleModel: "openai/gpt-4o-mini"}}
+	require.NoError(t, cfg.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	assert.Equal(t, "openai/gpt-4o-mini", loaded.GetSettings().TitleModel)
+}

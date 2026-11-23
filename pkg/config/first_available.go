@@ -64,6 +64,9 @@ func resolveFirstAvailableModel(ctx context.Context, cfg *latest.Config, name st
 	if m.Description != "" {
 		chosen.Description = m.Description
 	}
+	if m.TitleModel != "" {
+		chosen.TitleModel = m.TitleModel
+	}
 	cfg.Models[name] = chosen
 	return nil
 }
@@ -87,6 +90,7 @@ func reachableFirstAvailableModels(cfg *latest.Config, selectors map[string]bool
 		if !exists {
 			return
 		}
+		visit(model.TitleModel)
 		if selectors[ref] {
 			reachable[ref] = true
 			return

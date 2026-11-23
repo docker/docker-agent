@@ -130,6 +130,9 @@ type Settings struct {
 	// WarnOnCacheMiss shows a warning when a model call after the first one in
 	// a session reports no cached input tokens. Defaults to false.
 	WarnOnCacheMiss *bool `yaml:"warn_on_cache_miss,omitempty"`
+	// TitleModel is the default model used to generate session titles across
+	// agents (named model or "provider/model"). Wins over model-level title_model.
+	TitleModel string `yaml:"title_model,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.

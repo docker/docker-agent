@@ -814,6 +814,9 @@ func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.Ag
 			break
 		}
 	}
+	if titleRef == "" && runConfig.UserConfig != nil && runConfig.UserConfig.Settings != nil {
+		titleRef = runConfig.UserConfig.Settings.TitleModel
+	}
 	if titleRef == "" {
 		return nil, nil
 	}

@@ -27,4 +27,12 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 	if cfg == nil || userCfg == nil || userCfg.Settings == nil {
 		return
 	}
+	settings := userCfg.Settings
+
+	if settings.TitleModel != "" {
+		for name, m := range cfg.Models {
+			m.TitleModel = settings.TitleModel
+			cfg.Models[name] = m
+		}
+	}
 }
