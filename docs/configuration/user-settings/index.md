@@ -28,7 +28,7 @@ settings:
 You rarely need to hand-edit this file. Most fields are managed from the TUI's `/settings` dialog (**Appearance**, **Behavior**, **Notifications** tabs) — press <kbd>Enter</kbd> there to apply and persist a change. The lean TUI has a smaller inline `/settings` panel with only relevant behavior settings: steering or queueing messages, default tool auto-approval, automatic snapshots, cache-stable prompts, cache-miss warnings, lean UI by default, completion sounds and their duration threshold, image rendering, the startup banner, split diffs, and full or last-10-line written-file previews. It has no theme, sidebar, or tab settings. Use the arrow keys or <kbd>Space</kbd> to change a value, <kbd>Enter</kbd> to save, or <kbd>Esc</kbd> to cancel. Settings marked **next launch** do not change the current session. A few fields (`permissions`, `hooks`, `keybindings`) have no dialog UI and are only set by editing the file directly.
 
 > [!NOTE]
-> This page documents `settings:`. The user config file also has top-level sections outside `settings:` — `aliases:`, `providers:`, `board:`, `credential_helper:`, `sandbox_allowlist:` — which are not covered here.
+> This page documents `settings:`. The user config file also has top-level sections outside `settings:` — `aliases:`, `providers:`, `models:`, `evaluators:`, `mcps:`, `board:`, `credential_helper:`, `sandbox_allowlist:` — which apply across every loaded agent config (agent-file definitions win on name conflicts).
 
 ## Settings Reference
 
@@ -61,11 +61,31 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `interrupt_confirmation` | string | `always` | Controls how the <kbd>Esc</kbd> key interrupts a running stream: `always` (default) shows a confirmation dialog; `double-tap` requires pressing <kbd>Esc</kbd> twice within 1 second; `none` interrupts immediately without confirmation. Managed from the **Behavior** tab of `/settings`. |
 | `permissions` | object | _unset_ | Global tool-permission rules (`allow` / `ask` / `deny`), merged with agent-level and session-level permissions. See [Permissions](../permissions/index.md#global-permissions). |
 | `hooks` | object | _unset_ | Global lifecycle hooks applied to every agent, additive with agent-config and CLI hooks. See [Global (user-level) hooks](../hooks/index.md#global-user-level-hooks). |
+| `title_model` | string | _unset_ | Default model used to generate session titles across agents (named model or `provider/model`). Takes precedence over model-level `title_model`. |
+| `redact_secrets` | boolean | _unset_ | Controls secret redaction globally. `true` enforces redaction even if an agent config sets `redact_secrets: false`; `false` changes the default to off unless an agent explicitly sets `true`. |
+| `sudo_askpass` | boolean | _unset_ | Controls `SUDO_ASKPASS` prompts for `shell` toolsets globally. `false` prevents agent configs from enabling it; `true` enables it by default unless a toolset explicitly sets `false`. |
+| `sandbox` | boolean | `false` | Run agents inside a Docker sandbox by default unless overridden on the CLI. |
+| `stream_idle_timeout` | duration / `-1` | _unset_ | Default stream silence timeout across agents and models (positive Go duration or `-1` to disable) when unset in the agent config. |
+| `session_compaction` | boolean | _unset_ | Default automatic session compaction toggle when unset on an agent. |
+| `compaction_threshold` | number | _unset_ | Default context-window fraction `(0, 1]` at which proactive compaction triggers when unset on an agent. |
+| `compaction_model` | string | _unset_ | Default model used for compaction summaries (named model or `provider/model`) when unset on the agent, model, and provider. |
+| `budget` | object | _unset_ | Global spend ceiling (`max_cost`, `max_tokens`, `max_time`) across every run. Agent configs can tighten limits further, never raise them. |
+| `max_iterations` | int | `0` | Default maximum agent loop iterations when unset on an agent. |
+| `max_consecutive_tool_calls` | int | `0` | Default consecutive tool-call cap when unset on an agent. |
+| `max_tool_result_tokens` | int | `0` | Default per-tool-result token cap when unset on an agent. |
+| `max_old_tool_call_tokens` | int | `0` | Default token cap for older tool calls when unset on an agent. |
+| `num_history_items` | int | `0` | Default number of history items kept when unset on an agent. |
+| `code_mode_tools` | boolean | `false` | Enable code-mode tool wrapping across all agents by default. |
+| `tools` | object | _unset_ | Global tool trust boundaries (`allow_private_ips`, `filesystem.allow_list`/`deny_list`, `fetch.allowed_domains`/`blocked_domains`, `mcp_catalog.allowed_servers`/`blocked_servers`). Agent allow-lists must select a subset of the exact global rules; other entries are rejected (including differently spelled or narrower paths/patterns). Omitted allow-lists inherit the global rules. Deny/block lists are always unioned; `allow_private_ips: false` acts as a hard ceiling. |
 | `keybindings` | array | _unset_ | Remap TUI keyboard shortcuts. See [Custom Keybindings](../../features/tui/index.md#custom-keybindings) for the full list of actions and syntax. |
 | `layout` | object | _unset_ | Sidebar position and section visibility. See [Layout Settings](#layout-settings) below. |
 | `experimental.mcp_events` | boolean | `false` | Enable experimental MCP Events push subscriptions (proposed SEP-3415) over stdio and Streamable HTTP. |
 | `experimental.mcp_skills` | boolean | `false` | Enable experimental MCP Skills discovery and verified loading (`io.modelcontextprotocol/skills`, SEP-2640). |
 | `experimental.mcp_tasks` | boolean | `false` | Enable experimental MCP Tasks asynchronous tool execution (`io.modelcontextprotocol/tasks`, SEP-2663) over stdio and Streamable HTTP. |
+
+`debug config` exports the effective title and compaction defaults as top-level
+`title_model` and `compaction_model` fields. These preserve the same precedence
+without resolving environment-dependent model selectors at export time.
 
 ## Layout Settings
 

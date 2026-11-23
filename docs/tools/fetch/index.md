@@ -29,8 +29,8 @@ toolsets:
 | ------------------- | ------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `timeout`           | int           | `30`    | Default request timeout in seconds (overridable per tool call).                                                                                                                                                                                                                                                  |
 | `escape_html`       | boolean       | `false` | Restore legacy HTML escaping of `<`, `>` and `&` in multi-URL JSON results. Decoded content is identical; single-URL results are unaffected. See [JSON output compatibility](#json-output-compatibility). |
-| `allowed_domains`   | array[string] | _none_  | Allow-list of hosts the tool may fetch. When set, every URL whose host is **not** in the list is rejected before any network call is made. Mutually exclusive with `blocked_domains`.                                                                                                                            |
-| `blocked_domains`   | array[string] | _none_  | Deny-list of hosts the tool must not fetch. URLs whose host matches one of these patterns are rejected before any network call (including `robots.txt`) is made. Mutually exclusive with `allowed_domains`.                                                                                                      |
+| `allowed_domains`   | array[string] | _none_  | Allow-list of hosts the tool may fetch. When set, every URL whose host is **not** in the list is rejected before any network call is made. Blocked domains take precedence.                                                                                                                            |
+| `blocked_domains`   | array[string] | _none_  | Deny-list of hosts the tool must not fetch. URLs whose host matches one of these patterns are rejected before any network call (including `robots.txt`) is made. Blocked domains take precedence.                                                                                                      |
 | `allow_private_ips` | boolean       | `false` | Opt in to dialling **non-public** IP addresses (loopback, RFC1918, link-local — including the cloud-metadata endpoint at `169.254.169.254` — multicast, and the unspecified address). Required to reach `localhost` / internal services. See [SSRF protection](#ssrf-protection-and-reaching-localhost) below. |
 | `headers`           | map[string]string | _none_ | Static HTTP headers attached to **every** request the toolset issues (including `robots.txt`). Values support `${env.VAR}` for secrets. Caller-supplied entries override the default `User-Agent` and the format-driven `Accept` header. Headers are stripped on cross-host redirects so credentials never leak to a third-party host. See [Custom headers](#custom-headers) below. |
 
@@ -45,7 +45,7 @@ Domain patterns in `allowed_domains` and `blocked_domains` use the following rul
 - **CIDR range** — `169.254.0.0/16`, `10.0.0.0/8`, `::1/128`, `fc00::/7`. Matches when the URL's host parses as an IP inside the network. Hostname hosts never match a CIDR pattern. Malformed CIDRs are rejected at config-load time.
 - **Trailing dots** in FQDN-form URLs (`http://example.com./`) are stripped before matching, so they cannot bypass a deny-list entry.
 
-The lists are mutually exclusive: a single fetch toolset may set either `allowed_domains` or `blocked_domains`, but not both.
+The lists can be combined: a URL must match the allow-list (when set) and must not match the block-list.
 
 When a list is configured, every redirect target is re-checked against the same list. A request to an allowed origin that redirects to a forbidden host is rejected before any data is read from the redirect.
 
@@ -191,7 +191,7 @@ The `allowed_domains`, `blocked_domains`, and `allow_private_ips` options let yo
 **Key points:**
 
 - `allowed_domains` — allow-list; only listed hosts (and their subdomains for bare-domain entries) are reachable
-- `blocked_domains` — deny-list; mutually exclusive with `allowed_domains` (a config error is thrown if both are set)
+- `blocked_domains` — deny-list; takes precedence over `allowed_domains`
 - `allow_private_ips` — defaults to `false`; set to `true` to reach loopback / RFC-1918 / link-local addresses
 - The same `allow_private_ips` flag is also supported on `api`, `openapi`, `a2a`, and remote `mcp` toolsets
 
