@@ -6,7 +6,7 @@
 //
 // Today the package contains only the server-side decode/encode
 // scaffolding plus an in-process round-trip test. There is no client
-// (a future commit adds wire.Client driving runtime.RemoteRuntime),
+// (a future commit adds wire.Client driving remote.Runtime),
 // no streaming endpoint (a future commit adds /v1/session/run), and
 // no authentication (deliberately out of scope for the scaffold).
 package wire
@@ -111,7 +111,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // writeError translates errors into status codes. ErrUnsupported maps
-// to 501 so a client driving RemoteRuntime can surface a clear
+// to 501 so a client driving remote.Runtime can surface a clear
 // 'feature not supported by the server' message; everything else
 // becomes 500.
 func writeError(w http.ResponseWriter, err error) {

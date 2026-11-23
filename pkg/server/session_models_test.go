@@ -985,7 +985,7 @@ func TestAttachedServer_RunAgent_StoreFailureReturns500(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 }
 
-// runtime.DecorateModelChoices is exercised end-to-end through the GET
+// modelcatalog.DecorateModelChoices is exercised end-to-end through the GET
 // handler tests above; unit-level corner cases live in pkg/runtime
 // (see model_switcher_test.go).
 

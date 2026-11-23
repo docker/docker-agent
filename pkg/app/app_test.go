@@ -1036,11 +1036,11 @@ func (m *composedElicitationMockRuntime) RunStream(_ context.Context, sess *sess
 	return ch
 }
 
-// remoteLikeMockRuntime mirrors RemoteRuntime's elicitation contract: its
+// remoteLikeMockRuntime mirrors remote.Runtime's elicitation contract: its
 // OnElicitationRequest sink is a no-op (mockRuntime's default; see
-// pkg/runtime/remote_runtime.go's OnElicitationRequest) and every
+// pkg/runtime/remote/remote_runtime.go's OnElicitationRequest) and every
 // elicitation request arrives ONLY as a *runtime.ElicitationRequestEvent on
-// the RunStream channel, exactly like remote_runtime.go's RunStream
+// the RunStream channel, exactly like remote/remote_runtime.go's RunStream
 // forwarding loop. It deliberately does NOT implement
 // elicitationSinkMirror, so App must not skip this event for it.
 type remoteLikeMockRuntime struct {
@@ -1090,7 +1090,7 @@ func countElicitationDeliveries(t *testing.T, events <-chan tea.Msg) int {
 // made App.Run/Retry/RunWithMessage skip every
 // *runtime.ElicitationRequestEvent read off RunStream UNCONDITIONALLY, which
 // also silently dropped elicitations for runtimes whose OnElicitationRequest
-// sink is a no-op and that deliver ONLY via RunStream (RemoteRuntime) — a
+// sink is a no-op and that deliver ONLY via RunStream (remote.Runtime) — a
 // remote-backed session showed zero dialogs instead of one. A runtime that
 // does not mirror sink deliveries onto RunStream must have that event pass
 // through to a.events untouched.
@@ -1142,11 +1142,11 @@ func TestReview_ForegroundElicitationIsNotDeliveredTwice(t *testing.T) {
 // production runtimes, not just marker-shaped mocks. The composed/remote
 // regression tests above exercise independent mock types that each
 // hand-declare whether they implement elicitationSinkMirror; they never
-// touch runtime.LocalRuntime or runtime.RemoteRuntime, so an inverted
+// touch runtime.LocalRuntime or remote.Runtime, so an inverted
 // production mapping (marker removed from LocalRuntime, or added to
-// RemoteRuntime) would leave every other test in this file green (#3584
+// remote.Runtime) would leave every other test in this file green (#3584
 // review — mutation testing proof). *runtime.LocalRuntime and
-// *runtime.RemoteRuntime are asserted directly here; a nil pointer of each
+// *remote.Runtime are asserted directly here; a nil pointer of each
 // concrete type is enough since mustSkipMirroredElicitation only performs a
 // type assertion and never calls a method on rt.
 func TestMustSkipMirroredElicitation_ConcreteRuntimeClassification(t *testing.T) {
@@ -1155,7 +1155,7 @@ func TestMustSkipMirroredElicitation_ConcreteRuntimeClassification(t *testing.T)
 	assert.True(t, mustSkipMirroredElicitation((*runtime.LocalRuntime)(nil)),
 		"LocalRuntime mirrors OnElicitationRequest sink deliveries onto RunStream; App must skip the duplicate RunStream copy")
 	assert.False(t, mustSkipMirroredElicitation((*remote.Runtime)(nil)),
-		"RemoteRuntime delivers elicitations ONLY via RunStream (its OnElicitationRequest sink is a no-op); App must not skip that copy")
+		"remote.Runtime delivers elicitations ONLY via RunStream (its OnElicitationRequest sink is a no-op); App must not skip that copy")
 }
 
 // elicitationEntryPoint names one of App's three RunStream-forwarding entry
