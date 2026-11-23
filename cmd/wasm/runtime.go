@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -111,7 +112,16 @@ func (h host) newSession(ctx context.Context, opts sessionOptions) (*embeddedcha
 		runtimeOpts = append(runtimeOpts, runtime.WithCurrentAgent(opts.AgentName))
 	}
 
-	var sessionOpts []session.Opt
+	entry, ok := cfg.Agents.Lookup(cmp.Or(opts.AgentName, "root"))
+	if !ok {
+		entry = cfg.Agents.First()
+	}
+	sessionOpts := []session.Opt{
+		session.WithMaxIterations(entry.MaxIterations),
+		session.WithMaxToolResultTokens(entry.MaxToolResultTokens),
+		session.WithMaxOldToolCallTokens(entry.MaxOldToolCallTokens),
+		session.WithMaxConsecutiveToolCalls(entry.MaxConsecutiveToolCalls),
+	}
 	if opts.AutoApprove {
 		sessionOpts = append(sessionOpts, session.WithToolsApproved(true))
 	}

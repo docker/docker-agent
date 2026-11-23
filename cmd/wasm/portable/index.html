@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>docker-agent · portable Wasm</title>
+<h1>Portable docker-agent</h1>
+<label>Config<br><textarea id="yaml" rows="13" cols="72">providers:
+  openrouter:
+    provider: openai
+    base_url: https://openrouter.ai/api/v1
+    token_key: OPENROUTER_API_KEY
+agents:
+  root:
+    model: openrouter/openai/gpt-4o-mini
+    instruction: Answer briefly.
+    toolsets:
+      - type: think
+      - type: calculator
+      - type: user_prompt</textarea></label><br>
+<label>OpenRouter key <input id="key" type="password" autocomplete="off"></label>
+<label>Trusted HTTPS tool proxy (optional) <input id="proxy" type="url" placeholder="https://proxy.example/egress"></label>
+<button id="start" disabled>Start session</button>
+<form id="chat"><label>Message <input id="prompt" required></label>
+<button id="send" disabled>Send</button><button type="button" id="stop" disabled>Stop</button></form>
+<pre id="transcript" aria-live="polite"></pre>
+<script type="module">
+import { loadDockerAgent } from './agent.mjs';
+const $ = id => document.getElementById(id);
+const log = text => $('transcript').append(document.createTextNode(text));
+let session;
+try {
+  const api = globalThis.dockerAgent = await loadDockerAgent();
+  $('start').disabled = false;
+  $('start').onclick = async () => {
+    $('start').disabled = $('send').disabled = true;
+    try {
+      await session?.close();
+      session = null;
+      session = await api.createSession({ yaml: $('yaml').value, env: { OPENROUTER_API_KEY: $('key').value }, toolProxy: $('proxy').value || undefined }, ev => {
+        if (ev.type === 'delta' && ev.content) log(ev.content);
+        if (ev.type === 'tool_call') log(`\n[${ev.name}]\n`);
+        if (ev.type === 'tool_confirmation') {
+          return session.confirm(window.confirm(`Allow ${ev.name}?\n${ev.args}`));
+        }
+        if (ev.type === 'elicitation' && ev.mode === 'url') {
+          // The demo has no trusted redirect receiver; an embedding host can supply one.
+          log('\nURL authorization needs an embedding host; declined.\n');
+          return session.respondToElicitation({ id: ev.id, action: 'decline' });
+        }
+        if (ev.type === 'elicitation') {
+          const text = window.prompt(`${ev.message}\nEnter a JSON object, or Cancel to decline.`);
+          let reply = { action: 'decline' };
+          if (text !== null) {
+            try {
+              const content = JSON.parse(text);
+              if (!content || typeof content !== 'object' || Array.isArray(content)) throw new Error('expected a JSON object');
+              reply = { action: 'accept', content };
+            } catch (e) { log(`\nInvalid answer: ${e.message}; declined.\n`); }
+          }
+          return session.respondToElicitation({ id: ev.id, ...reply });
+        }
+      });
+      $('transcript').textContent = 'Session ready.\n';
+      $('send').disabled = false;
+    } catch (e) { log(`\n${e.message}\n`); }
+    finally { $('start').disabled = false; }
+  };
+  $('chat').onsubmit = async event => {
+    event.preventDefault();
+    if ($('send').disabled) return;
+    const prompt = $('prompt').value;
+    log(`\nYou: ${prompt}\nAgent: `);
+    $('prompt').value = '';
+    $('start').disabled = $('send').disabled = true;
+    $('stop').disabled = false;
+    try { await session.send(prompt); } catch (e) { log(`\n${e.message}`); }
+    finally { $('stop').disabled = true; $('start').disabled = $('send').disabled = false; }
+  };
+  $('stop').onclick = () => session?.abort();
+} catch (e) { log(`Could not load Wasm: ${e.message}`); }
+</script></html>

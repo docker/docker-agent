@@ -190,7 +190,7 @@ tasks:
       - node cmd/wasm/smoke_test.js
       - node --test cmd/wasm/node/rag_test.js
       - task: build-wasm-small
-      - node --test cmd/wasm/node/small_test.js
+      - node --test cmd/wasm/node/small_test.js cmd/wasm/node/config_projection_test.js
       - GOOS=js GOARCH=wasm go build -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
       - node --test cmd/wasm/web/events_test.js
       - node cmd/wasm/smoke_test.js
@@ -199,8 +199,37 @@ tasks:
   build-wasm-small:
     desc: Build the size-optimised browser binary (the cmd/wasm small profile)
     cmds:
-      - GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
-      - go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
+      - mkdir -p bin/wasm-small
+      - GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o bin/wasm-small/unpacked.wasm ./cmd/wasm
+      - go run ./scripts/wasmpack -o cmd/wasm/web/docker-agent.wasm bin/wasm-small/unpacked.wasm
+
+  generate-wasm-portable-tools:
+    desc: Refresh the portable tool instructions and OpenAI schemas from their Go implementations
+    cmds:
+      - go run ./cmd/wasm/portable/gen > cmd/wasm/portable/src/tool_catalog.json
+      - go run ./cmd/wasm/portable/gen json-errors > cmd/wasm/portable/testdata/go-json-errors.json
+
+  test-wasm-parity:
+    desc: Replay identical provider streams against Go small and Rust in headless Chrome
+    deps: [build-wasm-small, build-wasm-portable]
+    cmds:
+      - node cmd/wasm/portable/parity/compare.mjs
+
+  build-wasm-portable:
+    desc: Build the Go-runtime-free Rust browser agent (requires the wasm32-unknown-unknown Rust target and Binaryen)
+    cmds:
+      - cargo build --locked --release --manifest-path cmd/wasm/portable/Cargo.toml --target wasm32-unknown-unknown --target-dir bin/portable-target
+      - mkdir -p bin/wasm-portable
+      - wasm-opt -Oz --all-features bin/portable-target/wasm32-unknown-unknown/release/docker_agent_portable.wasm -o bin/wasm-portable/docker-agent.wasm
+      - find cmd/wasm/portable -maxdepth 1 -name '*.mjs' ! -name '*_test.mjs' -exec cp {} bin/wasm-portable/ \;
+      - cp cmd/wasm/portable/index.html bin/wasm-portable/
+
+  test-wasm-portable:
+    desc: Test the standalone Rust browser agent against the small-profile contract (requires Rust and Node)
+    cmds:
+      - cargo test --locked --manifest-path cmd/wasm/portable/Cargo.toml --target-dir bin/portable-target
+      - task: build-wasm-portable
+      - DOCKER_AGENT_TEST_PORTABLE=1 DOCKER_AGENT_TEST_WASM=bin/wasm-portable/docker-agent.wasm node --test cmd/wasm/node/small_test.js cmd/wasm/node/config_projection_test.js cmd/wasm/portable/*_test.mjs
 
   test-wasm-browser:
     desc: Test real browser fetch, tools and RAG (requires Chrome and openssl)

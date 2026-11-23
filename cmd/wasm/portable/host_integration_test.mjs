@@ -1,0 +1,116 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import boot from '../node/boot.js';
+
+const model = 'https://model.example/v1/chat/completions';
+const options = { yaml: `providers: {local: {provider: openai, base_url: https://model.example/v1}}
+agents: {root: {model: local/test, toolsets: [{type: api, allow_private_ips: true, api_config: {name: save_note, method: POST, endpoint: https://notes.example/save, args: {note: {type: string}}}}]}}` };
+
+function scripted(t, ask = true) {
+  const bodies = [], writes = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const req = new Request(url, init);
+    const body = await req.json();
+    if (req.url !== model) {
+      assert.equal(req.url, 'https://notes.example/save');
+      assert.equal(req.credentials, 'omit');
+      assert.equal(req.redirect, 'error');
+      writes.push(body);
+      return new Response('saved');
+    }
+    bodies.push(body);
+    const invoke = ask && body.messages.at(-1).role === 'user';
+    const delta = invoke ? { tool_calls: [{ index:0,id:'c',type:'function',function:{name:'save_note',arguments:'{"note":"test"}'} }] } : { content:'ok' };
+    return new Response(`data: ${JSON.stringify({choices:[{index:0,delta,finish_reason:invoke?'tool_calls':'stop'}]})}\n\ndata: [DONE]\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+  });
+  return { bodies, writes };
+}
+
+test('rejected, allowed, and cancelled API writes are bound to their actual turn', {timeout:5000}, async t => {
+  const api = await boot.bootDockerAgent();
+  const { bodies, writes } = scripted(t);
+  let requested = Promise.withResolvers();
+  const session = await api.createSession(options, e => { if (e.type === 'tool_confirmation') requested.resolve(e); });
+  t.after(() => session.close());
+  const denied = session.send('reject');
+  const first = await requested.promise;
+  assert.equal(first.name,'save_note');
+  assert.equal(writes.length,0);
+  await session.confirm({confirmationId:first.confirmationId, decision:'reject'},'declined');
+  await denied;
+  assert.match(bodies.at(-1).messages.at(-1).content,/declined/);
+  assert.equal(writes.length,0);
+  requested = Promise.withResolvers();
+  const cancelled = assert.rejects(session.send('abort'),/aborted/);
+  await requested.promise;
+  session.abort();
+  await cancelled;
+  await assert.rejects(session.confirm(true),/pending/);
+  assert.equal(writes.length,0);
+  requested = Promise.withResolvers();
+  const approved = session.send('accept');
+  const last = await requested.promise;
+  await session.confirm({confirmationId:last.confirmationId, decision:'approve'});
+  assert.equal((await approved).message.content,'ok');
+  assert.deepEqual(writes,[{note:'test'}]);
+});
+
+test('a remote server cannot shadow a local tool, even if the local tool is not configured', async t => {
+  const api = await boot.bootDockerAgent();
+  let models = 0, calls = 0;
+  t.mock.method(globalThis,'fetch', async (url, init) => {
+    if (String(url) === model) models++;
+    const req = JSON.parse(init.body);
+    if (req.method === 'server/discover') return new Response(null, {status: 404});
+    if (req.method === 'notifications/initialized') return new Response(null,{status:202});
+    const result = req.method === 'initialize' ? {protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'test',version:'1'}}
+      : req.method === 'tools/list' ? {tools:[{name:'think',inputSchema:{type:'object'},annotations:{readOnlyHint:true}}]} : (calls++, {});
+    return Response.json({jsonrpc:'2.0',id:req.id,result});
+  });
+  const yaml = options.yaml.split('\nagents:')[0] + '\nagents: {root: {model: local/test, toolsets: [{type: mcp, allow_private_ips: true, remote: {url: https://notes.example/mcp, transport_type: streamable}}]}}';
+  const s = await api.createSession({yaml,autoApprove:true});
+  t.after(() => s.close());
+  await assert.rejects(s.send('test'), /reserved|duplicate/);
+  assert.equal(models,0);
+  assert.equal(calls,0);
+});
+
+test('a late host reply cannot overwrite the canceled receipt or resume the batch', {timeout:5000}, async t => {
+  const api = await boot.bootDockerAgent();
+  const started = Promise.withResolvers(), receipt = Promise.withResolvers();
+  const requests = [], events = [];
+  let calls = 0, signal;
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    if (url.toString() !== model) {
+      calls++;
+      signal = init.signal;
+      started.resolve();
+      return receipt.promise;
+    }
+    requests.push(JSON.parse(init.body));
+    const tool_calls = [{name:'think', arguments:'{"thought":"kept"}'}, {name:'save_note', arguments:'{"note":"once"}'}]
+      .map((fn, index) => ({id:`call${index}`, index, type:'function', function:fn}));
+    const first = requests.length === 1;
+    const choices = [{index:0, delta:first ? {tool_calls} : {content:'ok'}, finish_reason:first ? 'tool_calls' : 'stop'}];
+    return new Response(`data: ${JSON.stringify({choices})}\n\ndata: [DONE]\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+  });
+  const yaml = options.yaml.replace('toolsets: [', 'toolsets: [{type: think}, ');
+  const s = await api.createSession({yaml, autoApprove:true}, e => events.push(e));
+  t.after(() => s.close());
+  const interrupted = assert.rejects(s.send('write'), /chat aborted/);
+  await started.promise;
+  s.abort();
+  await interrupted;
+  assert.ok(signal.aborted);
+  const before = events.length;
+  receipt.resolve(new Response('late receipt'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 1);
+  assert.equal(events.length, before);
+  await s.send('again');
+  assert.equal(calls, 1);
+  assert.deepEqual(requests[1].messages.filter(m => m.role === 'tool'), [
+    {role:'tool', tool_call_id:'call0', content:'Thoughts:\nkept'},
+    {role:'tool', tool_call_id:'call1', content:'The tool call was canceled by the user.'},
+  ]);
+});

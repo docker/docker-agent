@@ -239,6 +239,13 @@ jobs:
       - name: WASM JavaScript bridge
         run: task test-wasm-bridge
 
+      - name: Portable Rust WASM contract and size
+        run: |
+          sudo apt-get update -qq && sudo apt-get install --yes --no-install-recommends binaryen
+          rustup target add wasm32-unknown-unknown
+          task test-wasm-portable
+          task test-wasm-parity
+
   # The TypeScript SDK is generated from Go types: fail when it is stale.
   typescript:
     needs: changes

@@ -1,0 +1,2057 @@
+use crate::permission::{Permissions, Policy, Safety};
+use crate::providers::{self, Options, Transport, OPENAI_BASE};
+use crate::structured_output::OutputTool;
+use indexmap::IndexMap;
+use serde::{de::Error, Deserialize, Deserializer, Serialize};
+use serde_json::{json, Map, Number, Value};
+use std::collections::BTreeMap;
+
+mod definitions;
+mod reasoning;
+use reasoning::{responses as supports_responses_api, Budget, Reasoning};
+
+const VERSION: &str = "16";
+const MAX_SAFE_INTEGER: i64 = (1_i64 << 53) - 1;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    #[serde(default)]
+    version: Option<Value>,
+    agents: IndexMap<String, Agent>,
+    #[serde(default)]
+    toolsets: BTreeMap<String, Toolset>,
+    #[serde(default)]
+    mcps: BTreeMap<String, Toolset>,
+    #[serde(default)]
+    permissions: Permissions,
+    #[serde(default, deserialize_with = "runtime_defaults")]
+    runtime: Runtime,
+    #[serde(default)]
+    models: BTreeMap<String, Model>,
+    #[serde(default)]
+    providers: BTreeMap<String, Provider>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Runtime {
+    safety: Safety,
+}
+
+fn runtime_defaults<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Runtime, D::Error> {
+    let value = serde_yaml_ng::Value::deserialize(d)?;
+    if !matches!(value, serde_yaml_ng::Value::Mapping(_)) {
+        return Err(serde::de::Error::custom("runtime must be a mapping"));
+    }
+    serde_yaml_ng::from_value(value).map_err(serde::de::Error::custom)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Agent {
+    #[serde(flatten)]
+    limits: crate::limits::Limits,
+    model: String,
+    session_compaction: Option<bool>,
+    #[serde(default)]
+    compaction_model: String,
+    redact_secrets: Option<bool>,
+    compaction_threshold: Option<f64>,
+    structured_output: Option<StructuredOutput>,
+    #[serde(default)]
+    fallback: crate::fallback::Config,
+    #[serde(default)]
+    description: String,
+    // Neither Go browser projection exposes the welcome message.
+    #[serde(rename = "welcome_message")]
+    _welcome_message: Option<String>,
+    #[serde(default, deserialize_with = "load_instruction")]
+    instruction: String,
+    #[serde(default)]
+    toolsets: Vec<Toolset>,
+    #[serde(default)]
+    use_toolsets: Vec<String>,
+    #[serde(default)]
+    sub_agents: Vec<String>,
+    #[serde(default)]
+    handoffs: Vec<String>,
+    #[serde(default)]
+    force_handoff: String,
+    #[serde(default)]
+    add_date: bool,
+    #[serde(default)]
+    add_environment_info: bool,
+    #[serde(default)]
+    readonly: bool,
+    #[serde(default)]
+    hooks: crate::hooks::Hooks,
+    #[serde(default)]
+    safety: Safety,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructuredOutput {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    strict: bool,
+    #[serde(default)]
+    mode: OutputMode,
+    #[serde(deserialize_with = "output_schema")]
+    schema: Value,
+}
+
+impl StructuredOutput {
+    fn check_session(&self, id: &str) -> Result<(), String> {
+        if self.name.is_empty()
+            || self.name.len() > 64
+            || !self
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        {
+            return Err("name must be 1-64 ASCII letters, digits, hyphens or underscores".into());
+        }
+        if matches!(self.mode, OutputMode::Native) {
+            if id.contains(',') && id.split(',').any(is_claude) {
+                return Err("Claude structured output requires a single model per target".into());
+            }
+            if is_claude(id) {
+                crate::structured_output::check_prompt_schema(
+                    &self.name,
+                    &self.description,
+                    &self.schema,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum OutputMode {
+    #[default]
+    #[serde(alias = "")]
+    Native,
+    Tool,
+}
+
+fn output_schema<'de, D: Deserializer<'de>>(de: D) -> Result<Value, D::Error> {
+    use serde_yaml_ng::Value as Yaml;
+
+    // serde_json maps non-finite YAML numbers to null, and the JS host rounds large integers.
+    fn check(value: &Yaml) -> Result<(), &'static str> {
+        match value {
+            Yaml::Mapping(map) => {
+                for (key, value) in map {
+                    let Yaml::String(key) = key else {
+                        return Err("schema keys must be strings");
+                    };
+                    if key == "<<" {
+                        return Err("YAML merge keys are unsupported");
+                    }
+                    check(value)?;
+                }
+            }
+            Yaml::Sequence(seq) => seq.iter().try_for_each(check)?,
+            Yaml::Number(n) if !n.is_finite() => return Err("schema numbers must be finite"),
+            Yaml::Number(n)
+                if n.as_f64()
+                    .is_some_and(|v| v.abs() > MAX_SAFE_INTEGER as f64) =>
+            {
+                return Err("schema number exceeds the JavaScript safe integer range");
+            }
+            Yaml::Tagged(_) => return Err("tagged schema values are unsupported"),
+            _ => (),
+        }
+        Ok(())
+    }
+
+    let yaml = Yaml::deserialize(de)?;
+    check(&yaml).map_err(|e| D::Error::custom(format!("structured_output.schema: {e}")))?;
+    let schema: Value = serde_yaml_ng::from_value(yaml).map_err(D::Error::custom)?;
+    if schema["type"] != "object" || !schema["properties"].is_object() {
+        return Err(D::Error::custom(
+            "structured_output.schema requires type: object and a properties map",
+        ));
+    }
+    if schema.get("required").is_some_and(|v| {
+        !v.as_array()
+            .is_some_and(|keys| keys.iter().all(Value::is_string))
+    }) {
+        return Err(D::Error::custom(
+            "structured_output.schema.required must be an array of strings",
+        ));
+    }
+    if schema
+        .get("additionalProperties")
+        .is_some_and(|v| !v.is_boolean())
+    {
+        return Err(D::Error::custom(
+            "structured_output.schema.additionalProperties must be a boolean",
+        ));
+    }
+    Ok(schema)
+}
+
+// modelinfo.IsClaude(nil, id) uses the model name, not the transport provider.
+pub fn is_claude(id: &str) -> bool {
+    claude_name(&id.trim().to_ascii_lowercase()).is_some()
+}
+
+pub fn claude_name(normalized: &str) -> Option<&str> {
+    let mut segments = normalized.rsplit('/');
+    let name = segments.next().unwrap();
+    if segments.next() == Some("openai") {
+        return None;
+    }
+    [
+        Some(name),
+        name.strip_prefix("anthropic."),
+        name.split_once('.')
+            .filter(|(region, _)| !region.is_empty())
+            .and_then(|(_, rest)| rest.strip_prefix("anthropic.")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|s| s.starts_with("claude-"))
+}
+
+fn load_instruction<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Instruction {
+        Text(String),
+        Paragraphs(Vec<String>),
+        // Go reads a key without a value as empty text.
+        Nothing(()),
+    }
+    Ok(match Instruction::deserialize(d)? {
+        Instruction::Text(text) => text,
+        Instruction::Paragraphs(parts) => parts.join("\n\n"),
+        Instruction::Nothing(()) => String::new(),
+    })
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Toolset {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
+    #[serde(
+        default,
+        deserialize_with = "tool_filter",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub readonly: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instruction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    #[serde(default, skip_serializing)]
+    pub defer: Defer,
+    #[serde(default, skip_serializing)]
+    pub toon: crate::discovery::ToonSpec,
+    #[serde(flatten)]
+    pub options: BTreeMap<String, Value>,
+}
+
+// The typed YAML sequence decoder treats null as an empty (unrestricted) allow-list.
+fn tool_filter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let serde_yaml_ng::Value::Sequence(names) = serde_yaml_ng::Value::deserialize(d)? else {
+        return Err(serde::de::Error::custom("tools must be a list of names"));
+    };
+    names
+        .into_iter()
+        .map(|name| match name {
+            serde_yaml_ng::Value::String(name) => Ok(name),
+            _ => Err(serde::de::Error::custom("invalid tool filter name")),
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Defer {
+    All(bool),
+    Names(Vec<String>),
+}
+
+impl Default for Defer {
+    fn default() -> Self {
+        Self::All(false)
+    }
+}
+
+impl Defer {
+    pub fn parts(&self) -> (bool, &[String]) {
+        match self {
+            Self::All(all) => (*all, &[]),
+            Self::Names(names) => (false, names),
+        }
+    }
+}
+
+impl Toolset {
+    fn validate(&self) -> Result<(), String> {
+        if self.shared && self.kind != "todo" {
+            return Err("shared can only be used with type 'todo'".into());
+        }
+        let allowed: &[&str] = match self.kind.as_str() {
+            "fetch" => &[
+                "allow_private_ips",
+                "headers",
+                "timeout",
+                "allowed_domains",
+                "blocked_domains",
+                "escape_html",
+            ],
+            "api" => &["allow_private_ips", "api_config", "timeout"],
+            "mcp" => &["allow_private_ips", "remote", "name", "ref"],
+            _ => &[],
+        };
+        for (name, val) in &self.options {
+            if !allowed.contains(&name.as_str()) {
+                return Err(format!("unsupported {} option {name:?}", self.kind));
+            }
+            let valid = match name.as_str() {
+                "name" | "ref" => val.is_string(),
+                "allow_private_ips" | "escape_html" => val.is_boolean(),
+                "headers" => val
+                    .as_object()
+                    .is_some_and(|obj| obj.values().all(Value::is_string)),
+                "timeout" => val.as_i64().is_some_and(|n| n <= 300),
+                "allowed_domains" | "blocked_domains" => val
+                    .as_array()
+                    .is_some_and(|a| a.iter().all(Value::is_string)),
+                "remote" | "api_config" => val.is_object(),
+                _ => false,
+            };
+            if !valid {
+                return Err(format!("invalid {} option {name:?}", self.kind));
+            }
+        }
+        if self
+            .options
+            .get("allowed_domains")
+            .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+            && self
+                .options
+                .get("blocked_domains")
+                .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+        {
+            return Err("allowed_domains and blocked_domains are mutually exclusive".into());
+        }
+        match self.kind.as_str() {
+            "mcp" => definitions::validate_mcp(self)?,
+            "api" => {
+                let api = self
+                    .options
+                    .get("api_config")
+                    .and_then(Value::as_object)
+                    .ok_or("api requires api_config")?;
+                if api.keys().any(|k| {
+                    !matches!(
+                        k.as_str(),
+                        "endpoint"
+                            | "method"
+                            | "name"
+                            | "instruction"
+                            | "required"
+                            | "args"
+                            | "headers"
+                            | "output_schema"
+                    )
+                }) {
+                    return Err("unsupported api_config field".into());
+                }
+                if ["name", "endpoint"].iter().any(|k| {
+                    api.get(*k)
+                        .and_then(Value::as_str)
+                        .is_none_or(|s| s.is_empty())
+                }) {
+                    return Err("api needs a name and endpoint".into());
+                }
+            }
+            _ => {}
+        }
+        if self.kind == "model_picker" && self.models.as_ref().is_none_or(Vec::is_empty) {
+            return Err("model_picker requires a non-empty models list".into());
+        }
+        if self.kind != "model_picker" && self.models.is_some() {
+            return Err("models can only be used with type 'model_picker'".into());
+        }
+        match self.kind.as_str() {
+            "api" | "mcp" | "calculator" | "datetime" | "fetch" | "file" | "filesystem"
+            | "memory" | "plan" | "random" | "session_context" | "shell" | "tasks" | "think"
+            | "todo" | "user_prompt" | "model_picker" => Ok(()),
+            _ => Err(format!("unsupported toolset type {:?}", self.kind)),
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Model {
+    #[serde(default)]
+    compaction_model: String,
+    context_window: Option<u32>,
+    compaction_threshold: Option<f64>,
+    #[serde(rename = "description")]
+    _description: Option<String>,
+    provider: String,
+    model: String,
+    capabilities: Option<crate::media::Capabilities>,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    token_key: String,
+    #[serde(default)]
+    provider_opts: Options,
+    temperature: Option<Number>,
+    top_p: Option<Number>,
+    frequency_penalty: Option<Number>,
+    presence_penalty: Option<Number>,
+    max_tokens: Option<i64>,
+    parallel_tool_calls: Option<bool>,
+    thinking_budget: Option<Budget>,
+    track_usage: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Provider {
+    compaction_model: String,
+    provider_opts: Options,
+    provider: String,
+    base_url: String,
+    token_key: String,
+    api_type: String,
+    temperature: Option<Number>,
+    top_p: Option<Number>,
+    frequency_penalty: Option<Number>,
+    presence_penalty: Option<Number>,
+    max_tokens: Option<i64>,
+    parallel_tool_calls: Option<bool>,
+    thinking_budget: Option<Budget>,
+    track_usage: Option<bool>,
+}
+
+#[derive(Default)]
+pub struct Selected {
+    pub output_tool: Option<OutputTool>,
+    pub separate_model_attempts: bool,
+    pub checkpoint_tools: bool,
+    pub selected_fallback_chain: bool,
+    pub tool_policy: Policy,
+    pub name: String,
+    pub team_prompts: Vec<String>,
+    pub sub_agents: Vec<String>,
+    pub handoffs: Vec<String>,
+    pub force_handoff: String,
+    pub limits: crate::limits::Limits,
+    pub tool_models: BTreeMap<String, RequestModel>,
+    pub hooks: crate::hooks::Hooks,
+    pub picker: crate::model_picker::Picker,
+    pub models: Vec<Target>,
+    pub summary_model: Option<Target>,
+    pub policy: crate::fallback::Policy,
+    pub instruction: String,
+    pub toolsets: Vec<Toolset>,
+}
+
+#[cfg_attr(test, derive(Default))]
+pub struct RequestModel {
+    pub id: String,
+    pub model_params: Map<String, Value>,
+    pub schema_instruction: Option<String>,
+    pub reasoning: Reasoning,
+    pub cap: Option<i64>,
+    pub cache_breakpoints: bool,
+    pub replay_reasoning: bool,
+}
+
+pub struct Target {
+    pub request: RequestModel,
+    pub transport: Transport,
+    pub compaction: crate::compaction::Policy,
+    capabilities: Option<crate::media::Capabilities>,
+    pub key_base: Option<String>,
+    pub responses: bool,
+    pub merge_messages: bool,
+}
+
+impl Selected {
+    pub fn has_schema_instruction(&self) -> bool {
+        self.models
+            .iter()
+            .any(|m| m.request.schema_instruction.is_some())
+    }
+
+    pub fn targets(&self) -> impl Iterator<Item = &Target> {
+        self.models.iter().chain(&self.summary_model)
+    }
+
+    pub fn summary_target(&self) -> (usize, &Target) {
+        // Summary-only transports come last in the host table, outside the fallback chain.
+        match &self.summary_model {
+            Some(target) => (self.models.len(), target),
+            None => (0, &self.models[0]),
+        }
+    }
+
+    pub fn routed_summary(&self) -> bool {
+        self.summary_model.is_some() || self.models.len() > 1
+    }
+
+    pub fn context_window(&self) -> u32 {
+        let (_, summary) = self.summary_target();
+        self.models[0]
+            .compaction
+            .effective_window(summary.compaction)
+    }
+}
+
+impl RequestModel {
+    pub fn apply_reasoning(&self, body: &mut Map<String, Value>, tools: bool, cap: Option<i64>) {
+        self.reasoning.apply(body, tools, cap);
+        if !self.replay_reasoning {
+            body.get_mut("messages")
+                .and_then(Value::as_array_mut)
+                .unwrap()
+                .retain_mut(|m| {
+                    if m["role"] != "assistant" {
+                        return true;
+                    }
+                    m.as_object_mut().unwrap().remove("reasoning_content");
+                    !m["tool_calls"].is_null()
+                        || m["content"].as_str().is_none_or(|s| !s.trim().is_empty())
+                });
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        self.model_params["model"]
+            .as_str()
+            .expect("configured model")
+    }
+}
+
+impl Target {
+    pub(super) fn media_projection(&self) -> crate::media::Projection {
+        crate::media::Projection::new(self.capabilities, self.request.name(), self.responses)
+    }
+}
+
+fn load(yaml: &str) -> Result<Config, String> {
+    // Reading as YAML values first also rejects duplicate keys in named maps,
+    // rather than letting IndexMap/BTreeMap silently replace the first entry.
+    // Go's parser skips a leading byte order mark.
+    let yaml = yaml.strip_prefix('\u{feff}').unwrap_or(yaml);
+    let doc = serde_yaml_ng::from_str(yaml).map_err(|e| e.to_string())?;
+    let mut cfg: Config = serde_yaml_ng::from_value(doc).map_err(|e| e.to_string())?;
+    if let Some(v) = &cfg.version {
+        if v.as_str() != Some(VERSION)
+            && v.as_u64().map(|n| n.to_string()).as_deref() != Some(VERSION)
+        {
+            return Err(format!("unsupported config version {v}"));
+        }
+    }
+    if cfg.agents.is_empty() {
+        return Err("at least one agent must be configured".into());
+    }
+    definitions::resolve(&mut cfg)?;
+    for (name, a) in &cfg.agents {
+        if name.trim().is_empty() {
+            return Err("empty agent name".into());
+        }
+        a.limits.validate()?;
+        validate_threshold(a.compaction_threshold)?;
+        for (kind, targets) in [("sub-agent", &a.sub_agents), ("handoff agent", &a.handoffs)] {
+            for target in targets {
+                if target.contains('/') {
+                    return Err(format!(
+                        "external agent reference {target:?} is not supported"
+                    ));
+                }
+                if !cfg.agents.contains_key(target) {
+                    return Err(format!(
+                        "agent {name:?} references non-existent {kind} {target:?}"
+                    ));
+                }
+            }
+        }
+        if !cfg.models.contains_key(&a.model) {
+            let m = inline_model(&a.model).ok_or_else(|| {
+                format!("agent {name:?} references non-existent model {:?}", a.model)
+            })?;
+            cfg.models.insert(a.model.clone(), m);
+        }
+    }
+    let mut finished = std::collections::BTreeSet::new();
+    for start in cfg.agents.keys() {
+        let mut path = std::collections::BTreeSet::new();
+        let mut node = start.as_str();
+        while !node.is_empty() && !finished.contains(node) {
+            if !path.insert(node) {
+                return Err(format!("force_handoff cycle involving agent {node:?}"));
+            }
+            node = &cfg
+                .agents
+                .get(node)
+                .ok_or_else(|| format!("unknown force_handoff agent {node:?}"))?
+                .force_handoff;
+        }
+        finished.extend(path);
+    }
+    for model in cfg.models.values() {
+        validate_threshold(model.compaction_threshold)?;
+        if model.context_window == Some(0) {
+            return Err("context_window must be greater than 0".into());
+        }
+        if model.model.trim().is_empty() || model.provider.trim().is_empty() {
+            return Err("model and provider must be set".into());
+        }
+    }
+    Ok(cfg)
+}
+
+fn inline_model(name: &str) -> Option<Model> {
+    let (provider, model) = name
+        .split_once('/')
+        .filter(|(p, m)| !p.is_empty() && !m.is_empty())?;
+    Some(Model {
+        provider: provider.into(),
+        model: model.into(),
+        ..Model::default()
+    })
+}
+
+fn validate_threshold(value: Option<f64>) -> Result<(), String> {
+    if value.is_some_and(|v| !(v > 0.0 && v <= 1.0)) {
+        return Err("compaction_threshold must be greater than 0 and at most 1".into());
+    }
+    Ok(())
+}
+
+fn agent_list(cfg: &Config, full: bool) -> Vec<Value> {
+    cfg.agents.iter().map(|(name, a)| {
+        let mut v = json!({"name":name, "model":a.model, "description":a.description, "instruction":a.instruction});
+        if full {
+            v["sub_agents"] = json!(a.sub_agents);
+            v["handoffs"] = json!(a.handoffs);
+            v["add_date"] = a.add_date.into();
+            v["add_env_info"] = a.add_environment_info.into();
+        }
+        v
+    }).collect()
+}
+
+pub fn parse(yaml: &str) -> Result<Value, String> {
+    let cfg = load(yaml)?;
+    let models: BTreeMap<_, _> = cfg
+        .models
+        .iter()
+        .map(|(name, m)| {
+            (
+                name,
+                json!({"provider":m.provider, "model":m.model, "base_url":m.base_url}),
+            )
+        })
+        .collect();
+    Ok(json!({"version": VERSION, "agents": agent_list(&cfg, true), "models":models}))
+}
+
+pub fn list(yaml: &str) -> Result<Value, String> {
+    Ok(Value::Array(agent_list(&load(yaml)?, false)))
+}
+
+// Only expand top-level ${env.NAME} placeholders. Never evaluate JavaScript or
+// expand the inner placeholder of an otherwise unsupported expression.
+fn instruction(text: &str, env: &BTreeMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some((before, tail)) = rest.split_once("${") {
+        out.push_str(before);
+        let Some(end) = closing_brace(tail) else {
+            out.push_str("${");
+            out.push_str(tail);
+            return out;
+        };
+        let expr = &tail[..end];
+        if let Some(key) = js_env_name(expr.trim_matches([' ', '\t', '\r', '\n', '\x0c'])) {
+            if let Some(value) = env.get(key) {
+                out.push_str(value);
+            }
+        } else {
+            out.push_str("${");
+            out.push_str(expr);
+            out.push('}');
+        }
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn closing_brace(tail: &str) -> Option<usize> {
+    let mut depth = 1;
+    let mut quote = None;
+    let mut bytes = tail.bytes().enumerate();
+    loop {
+        let (i, b) = bytes.next()?;
+        if let Some(q) = quote {
+            if b == b'\\' {
+                bytes.next();
+            } else if b == q {
+                quote = None;
+            }
+        } else {
+            match b {
+                b'"' | b'\'' | b'`' => quote = Some(b),
+                b'{' => depth += 1,
+                b'}' if depth == 1 => return Some(i),
+                b'}' => depth -= 1,
+                _ => (),
+            }
+        }
+    }
+}
+
+fn js_env_name(expr: &str) -> Option<&str> {
+    expr.strip_prefix("env.").filter(|v| {
+        !v.is_empty()
+            && !v.as_bytes()[0].is_ascii_digit()
+            && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    })
+}
+
+// ModelConfig.ExpandEnv uses shell references, unlike instruction expansion.
+fn expand_model_field(text: &str, env: &BTreeMap<String, String>) -> Result<String, String> {
+    expand_field(text, |key| {
+        env.get(key)
+            .map(String::as_str)
+            .ok_or_else(|| format!("environment variable {key:?} not set"))
+    })
+}
+
+fn expand_field<'a>(
+    mut text: &str,
+    lookup: impl Fn(&str) -> Result<&'a str, String>,
+) -> Result<String, String> {
+    let mut out = String::with_capacity(text.len());
+    while let Some((before, tail)) = text.split_once('$') {
+        out.push_str(before);
+        let (name, rest) = if let Some(braced) = tail.strip_prefix('{') {
+            let (name, rest) = braced
+                .split_once('}')
+                .ok_or("unclosed environment reference")?;
+            if name.is_empty() {
+                return Err("empty environment reference".into());
+            }
+            (js_env_name(name.trim_ascii()).unwrap_or(name), rest)
+        } else {
+            let n = match tail.as_bytes().first() {
+                Some(b'0'..=b'9' | b'*' | b'#' | b'$' | b'@' | b'!' | b'?' | b'-') => 1,
+                _ => tail
+                    .bytes()
+                    .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                    .count(),
+            };
+            if n == 0 {
+                out.push('$');
+                text = tail;
+                continue;
+            }
+            tail.split_at(n)
+        };
+        out.push_str(lookup(name)?);
+        text = rest;
+    }
+    out.push_str(text);
+    Ok(out)
+}
+
+pub fn cap_key(model: &str) -> &'static str {
+    if supports_responses_api(model) {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }
+}
+
+fn model_params(
+    id: String,
+    m: &Model,
+    p: &Provider,
+    tools: bool,
+    policy: crate::compaction::Policy,
+) -> Result<Map<String, Value>, String> {
+    let mut params = Map::new();
+    if let Some(tier) = m
+        .provider_opts
+        .service_tier
+        .as_ref()
+        .or(p.provider_opts.service_tier.as_ref())
+        .filter(|s| !s.is_empty())
+    {
+        params.insert("service_tier".into(), tier.clone().into());
+    }
+    for (key, model, provider) in [
+        ("temperature", &m.temperature, &p.temperature),
+        ("top_p", &m.top_p, &p.top_p),
+        (
+            "frequency_penalty",
+            &m.frequency_penalty,
+            &p.frequency_penalty,
+        ),
+        ("presence_penalty", &m.presence_penalty, &p.presence_penalty),
+    ] {
+        if let Some(n) = model.as_ref().or(provider.as_ref()) {
+            params.insert(key.into(), Value::Number(n.clone()));
+        }
+    }
+    if let Some(cap) = m.max_tokens.or(p.max_tokens).filter(|&n| n > 0) {
+        // The JS host parses and re-encodes this request before fetch.
+        if cap > MAX_SAFE_INTEGER {
+            return Err("max_tokens exceeds the JavaScript safe integer range".into());
+        }
+        params.insert(cap_key(&id).into(), policy.clamp(cap).into());
+    }
+    if tools {
+        params.insert("tool_choice".into(), "auto".into());
+        if let Some(parallel) = m.parallel_tool_calls.or(p.parallel_tool_calls) {
+            params.insert("parallel_tool_calls".into(), parallel.into());
+        }
+    }
+    params.insert("model".into(), Value::String(id));
+    Ok(params)
+}
+
+fn first_nonempty(values: [&str; 3]) -> &str {
+    values.into_iter().find(|s| !s.is_empty()).unwrap_or("")
+}
+
+pub fn team(
+    yaml: &str,
+    entry: &str,
+    env: &BTreeMap<String, String>,
+    stateless: bool,
+) -> Result<(String, Vec<Selected>, bool), String> {
+    let cfg = load(yaml)?;
+    let mut output_tools = BTreeMap::new();
+    for (name, a) in &cfg.agents {
+        let primary = &cfg.models[&a.model];
+        a.limits.check_round_limit()?;
+        let overrides = a.toolsets.iter().any(|ts| !ts.model.is_empty());
+        if a.limits.limits_history() || a.limits.max_iterations > 0 || overrides {
+            if primary.context_window.is_some() && a.session_compaction != Some(false) {
+                return Err("history/iteration limits and tool model overrides require session_compaction: false when a context_window is declared".into());
+            }
+            if a.model.contains(',') || primary.model.contains(',') {
+                return Err("history/iteration limits and tool model overrides require a single primary model".into());
+            }
+        }
+        if a.limits.limits_history() && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
+            return Err("history limits are not supported with session_context".into());
+        }
+        if let Some(output) = &a.structured_output {
+            if matches!(output.mode, OutputMode::Tool) {
+                let tool = OutputTool::new(&output.name, &output.description, &output.schema)
+                    .map_err(|e| format!("agents.{name}.structured_output: {e}"))?;
+                output_tools.insert(name.as_str(), tool);
+            }
+            expand_model_field(&primary.model, env)
+                .and_then(|id| output.check_session(&id))
+                .map_err(|e| format!("agents.{name}.structured_output: {e}"))?;
+        }
+        for ts in &a.toolsets {
+            if !matches!(
+                ts.kind.as_str(),
+                "think"
+                    | "user_prompt"
+                    | "calculator"
+                    | "todo"
+                    | "datetime"
+                    | "random"
+                    | "plan"
+                    | "memory"
+                    | "api"
+                    | "mcp"
+                    | "fetch"
+                    | "model_picker"
+                    | "session_context"
+            ) {
+                return Err(format!("unsupported toolset type {:?}", ts.kind));
+            }
+        }
+    }
+    for p in cfg.providers.values() {
+        let underlying = providers::lookup(&p.provider);
+        p.provider_opts.validate(underlying)?;
+        if !(p.provider.is_empty()
+            || underlying.is_some()
+            || matches!(
+                p.provider.as_str(),
+                "openai_chatcompletions" | "openai_responses"
+            ))
+            || !matches!(
+                p.api_type.as_str(),
+                "" | "openai_chatcompletions" | "openai_responses"
+            )
+        {
+            return Err("portable providers must use an OpenAI API".into());
+        }
+    }
+    for m in cfg.models.values() {
+        check_provider(cfg.providers.get(&m.provider), m)?;
+    }
+    let entry = if entry.is_empty() {
+        if cfg.agents.contains_key("root") {
+            "root"
+        } else {
+            cfg.agents.first().unwrap().0
+        }
+    } else {
+        entry
+    };
+    let root = cfg
+        .agents
+        .get(entry)
+        .ok_or_else(|| format!("agent {entry:?} not found"))?;
+    let team =
+        !root.sub_agents.is_empty() || !root.handoffs.is_empty() || !root.force_handoff.is_empty();
+    let mut pending = vec![entry];
+    let mut agents = IndexMap::new();
+    while let Some(name) = pending.pop() {
+        if agents.contains_key(name) {
+            continue;
+        }
+        let a = &cfg.agents[name];
+        if !a.force_handoff.is_empty() {
+            pending.push(&a.force_handoff);
+        }
+        pending.extend(a.sub_agents.iter().chain(&a.handoffs).map(String::as_str));
+        agents.insert(
+            name,
+            resolve(&cfg, name, a, env, team, output_tools.remove(name))?,
+        );
+    }
+    if team {
+        check_team_frames(&cfg, entry, stateless, &agents)?;
+    }
+    // Standard YAML tags and raw NEL can be lost before serde exposes the schema.
+    if agents.values().any(Selected::has_schema_instruction)
+        && (yaml.contains('\u{85}') || ["!!", "!<", "%TAG"].iter().any(|tag| yaml.contains(tag)))
+    {
+        return Err(
+            "Claude schema instructions do not support YAML tag syntax or raw NEL in the config"
+                .into(),
+        );
+    }
+    let plain_history = team
+        && agents.iter().any(|(&name, a)| {
+            a.output_tool.is_some() || cfg.agents[name].redact_secrets == Some(false)
+        });
+    Ok((entry.into(), agents.into_values().collect(), plain_history))
+}
+
+// Handoffs keep session limits; each transfer opens a fresh frame, including nested transfers.
+fn check_team_frames(
+    cfg: &Config,
+    entry: &str,
+    stateless: bool,
+    agents: &IndexMap<&str, Selected>,
+) -> Result<(), String> {
+    let redacting = agents.values().any(|a| a.hooks.redact_messages);
+    let mut pending = vec![(entry, None)];
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some((name, delegate)) = pending.pop() {
+        let opener = delegate.unwrap_or(entry);
+        let frame = cfg.agents[opener].limits;
+        let cap = frame.max_iterations;
+        let safe_delegate = cap > 0
+            && cap as usize <= crate::structured_output::MAX_REMINDERS
+            && cap < frame.repetition_limit();
+        let truncated = frame.max_tool_result_tokens > 0;
+        let bounded = frame.limits_history() || cap > 0;
+        // Visit each effective policy once even when many openers hand off to the same agent.
+        if !visited.insert((name, delegate.is_some(), safe_delegate, truncated, bounded)) {
+            continue;
+        }
+        let a = &agents[name];
+        if delegate.is_some() && a.hooks.max_calls.is_some() {
+            return Err(format!("the max_iterations hook on {name:?}, which can run inside transfer_task, is not supported"));
+        }
+        if truncated && !a.hooks.redact_messages && redacting {
+            return Err("mixed team redaction with max_tool_result_tokens can split a secret before redaction".into());
+        }
+        if a.output_tool.is_some() {
+            if bounded && cfg.agents[name].session_compaction != Some(false) {
+                return Err("tool-mode structured output with team frame limits requires session_compaction: false".into());
+            }
+            if truncated && a.hooks.redact_messages {
+                return Err("tool-mode structured output with max_tool_result_tokens cannot safely truncate results before secret redaction".into());
+            }
+            // A child's ErrorEvent rejects send while its parent continues unobserved.
+            if delegate.is_some()
+                && (!safe_delegate
+                    || crate::structured_output::stop_error(a.models[0].request.name(), 0)
+                        .is_some())
+            {
+                return Err(format!("tool-mode structured output inside transfer_task requires a remindable model and a frame capped before reminder exhaustion or repetition ({name:?} in {opener:?})"));
+            }
+        }
+        pending.extend(a.sub_agents.iter().map(|n| (n.as_str(), Some(n.as_str()))));
+        for next in a
+            .handoffs
+            .iter()
+            .chain((!a.force_handoff.is_empty()).then_some(&a.force_handoff))
+        {
+            // An abort may roll back a foreground handoff that Go has already committed.
+            if !stateless
+                && delegate.is_none()
+                && next != name
+                && (cfg.agents[name].redact_secrets == Some(false)
+                    || cfg.agents[next].redact_secrets == Some(false))
+            {
+                return Err("foreground handoffs with redaction disabled require one-shot chat; an interrupted send cannot safely resume on the previous agent".into());
+            }
+            pending.push((next, delegate));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn select(yaml: &str, agent: &str, env: &BTreeMap<String, String>) -> Result<Selected, String> {
+    Ok(team(yaml, agent, env, false)?.1.remove(0))
+}
+
+fn resolve(
+    cfg: &Config,
+    name: &str,
+    a: &Agent,
+    env: &BTreeMap<String, String>,
+    team: bool,
+    output_tool: Option<OutputTool>,
+) -> Result<Selected, String> {
+    if team
+        && a.readonly
+        && a.sub_agents
+            .iter()
+            .chain(&a.handoffs)
+            .chain(std::iter::once(&a.force_handoff).filter(|n| !n.is_empty()))
+            .any(|n| !cfg.agents[n].readonly)
+    {
+        return Err("readonly agents cannot delegate or hand off to a writable agent".into());
+    }
+    let chain = !a.fallback.models.is_empty();
+    if team && a.toolsets.iter().any(|ts| ts.kind == "session_context") {
+        return Err("session_context with local delegation or handoff is not supported".into());
+    }
+    let mut toolsets = a.toolsets.clone();
+    for ts in &mut toolsets {
+        ts.readonly |= a.readonly;
+        ts.instruction = instruction(&ts.instruction, env);
+    }
+    let mut team_prompts = Vec::new();
+    for (tool, targets) in [("transfer_task", &a.sub_agents), ("handoff", &a.handoffs)] {
+        if !targets.is_empty() {
+            toolsets.push(Toolset {
+                kind: tool.into(),
+                ..Default::default()
+            });
+            let mut roster = String::new();
+            for target in targets {
+                use std::fmt::Write;
+                writeln!(
+                    roster,
+                    "Name: {target} | Description: {}",
+                    instruction(&cfg.agents[target].description, env)
+                )
+                .unwrap();
+            }
+            team_prompts.push(crate::team::prompt(tool, &roster, &targets.join(", ")));
+        }
+    }
+    let primary = &cfg.models[&a.model];
+    let history = a.limits.limits_history();
+    let overrides = a.toolsets.iter().any(|ts| !ts.model.is_empty());
+    let hooks = a.hooks.clone().with_defaults(
+        a.redact_secrets.unwrap_or(true),
+        a.add_date,
+        a.add_environment_info,
+    );
+    let bounded_output =
+        output_tool.is_some() && (history || overrides || a.limits.max_iterations > 0);
+    if bounded_output {
+        if chain {
+            return Err("tool-mode structured output with history limits, max_iterations or toolset model overrides cannot use fallback models".into());
+        }
+        // Go may compact on overflow even without a declared context window.
+        if a.session_compaction != Some(false) {
+            return Err("tool-mode structured output with history limits, max_iterations or toolset model overrides requires session_compaction: false".into());
+        }
+        // Intercepted output bypasses tool transforms. A middle-out cut can defeat outgoing redaction.
+        if a.limits.max_tool_result_tokens > 0 && hooks.redact_messages {
+            return Err("tool-mode structured output with max_tool_result_tokens cannot safely truncate results before secret redaction".into());
+        }
+    }
+    if team && chain && a.limits.needs_bounded_fallback(&a.hooks) {
+        return Err(
+            "iteration or history limits on a fallback chain within local teams are not supported"
+                .into(),
+        );
+    }
+    let bounded_fallback = chain && a.limits.needs_bounded_fallback(&a.hooks);
+    if bounded_fallback && a.session_compaction != Some(false) {
+        return Err("bounded fallback requires session_compaction: false".into());
+    }
+    if chain
+        && a.hooks
+            .max_calls
+            .is_some_and(|n| n as usize > crate::limits::MAX_TOOL_ROUNDS)
+    {
+        return Err("fallback max_iterations hook exceeds the portable tool round limit".into());
+    }
+    if chain && a.hooks.max_calls.is_some() && output_tool.is_some() {
+        return Err(
+            "fallback max_iterations hook with tool-mode structured output is not supported".into(),
+        );
+    }
+    if team && overrides {
+        return Err("toolset model overrides with local teams are not supported".into());
+    }
+    let has_tools = output_tool.is_some() || !toolsets.is_empty();
+    let summary_name = first_nonempty([
+        &a.compaction_model,
+        &primary.compaction_model,
+        cfg.providers
+            .get(&primary.provider)
+            .map_or("", |p| &p.compaction_model),
+    ]);
+    let multi_target = chain || team || !summary_name.is_empty();
+    let resolve_target =
+        |m: &Model, output| resolve_model(cfg, m, a, env, has_tools, multi_target, output);
+    let output = a.structured_output.as_ref();
+    let request = resolve_target(primary, output)?;
+    let compatible = |name: &str, feature: &str| -> Result<Target, String> {
+        let inline;
+        let m = if let Some(m) = cfg.models.get(name) {
+            m
+        } else {
+            inline = inline_model(name)
+                .filter(|_| !name.contains(','))
+                .ok_or_else(|| format!("unsupported {feature} model {name:?}"))?;
+            &inline
+        };
+        // Do not reuse the open handle's Authorization header at a new destination.
+        if m.context_window != primary.context_window
+            || m.compaction_threshold != primary.compaction_threshold
+        {
+            return Err(format!("{feature} cannot change compaction policy"));
+        }
+        if m.provider != primary.provider {
+            return Err(format!("{feature} cannot switch providers"));
+        }
+        // Runtime picker and tool overrides build fresh providers without agent structured output.
+        let target = resolve_target(m, None)?;
+        if target.transport.chatgpt {
+            return Err(format!(
+                "{feature} requires a new ChatGPT client session ID"
+            ));
+        }
+        if target.media_projection() != request.media_projection() {
+            return Err(format!("{feature} cannot change media capabilities"));
+        }
+        if target.key_base != request.key_base
+            || target.transport != request.transport
+            || target.responses != request.responses
+            || target.merge_messages != request.merge_messages
+        {
+            return Err(format!(
+                "{feature} cannot change the model endpoint, API or credential"
+            ));
+        }
+        Ok(target)
+    };
+    let mut tool_models = BTreeMap::new();
+    for ts in &a.toolsets {
+        let name = &ts.model;
+        if name.is_empty() || tool_models.contains_key(name) {
+            continue;
+        }
+        if name.contains(',') || cfg.models.get(name).is_some_and(|m| m.model.contains(',')) {
+            return Err("toolset model overrides cannot use multi-model references".into());
+        }
+        tool_models.insert(name.clone(), compatible(name, "toolset")?.request);
+    }
+    let mut picker = crate::model_picker::Picker::default();
+    for ts in a.toolsets.iter().filter(|ts| ts.kind == "model_picker") {
+        if chain && team {
+            return Err(
+                "model_picker with fallback models within local teams is not supported".into(),
+            );
+        }
+        if !picker.choices.is_empty() {
+            return Err("multiple model_picker toolsets are not supported".into());
+        }
+        for name in ts.models.as_ref().expect("validated picker") {
+            if picker.choices.contains_key(name) {
+                return Err(format!("duplicate model_picker choice {name:?}"));
+            }
+            let target = compatible(name, "model_picker")?;
+            picker.choices.insert(name.clone(), target.request);
+        }
+    }
+    let selected_fallback_chain = chain && (overrides || !picker.choices.is_empty());
+    if selected_fallback_chain {
+        // Go may compact on overflow even without a declared context window.
+        if a.session_compaction != Some(false) {
+            return Err("model selection with fallback requires session_compaction: false".into());
+        }
+        if a.model.contains(',') {
+            return Err("model selection with fallback requires a single primary model".into());
+        }
+    }
+    let mut models = vec![request];
+    for name in &a.fallback.models {
+        let inline;
+        let m = if let Some(m) = cfg.models.get(name) {
+            m
+        } else {
+            inline =
+                inline_model(name).ok_or_else(|| format!("fallback model {name:?} not found"))?;
+            &inline
+        };
+        models.push(resolve_target(m, output)?);
+    }
+    if team
+        && output_tool.is_some()
+        && (chain || !picker.choices.is_empty() || models[0].request.name().contains(','))
+    {
+        return Err(
+            "tool-mode structured output within local teams requires a single serving model".into(),
+        );
+    }
+    if (team || chain) && models.iter().any(|m| m.compaction.proactive()) {
+        let primary = &models[0];
+        // A leaf transfer owns fresh history. Handoffs share their caller's frame and limits.
+        let leaf = !chain
+            && a.handoffs.is_empty()
+            && a.force_handoff.is_empty()
+            && a.sub_agents.is_empty()
+            && !cfg
+                .agents
+                .values()
+                .any(|a| a.force_handoff == name || a.handoffs.iter().any(|n| n == name));
+        if (team && !leaf)
+            || (chain && has_tools)
+            || models
+                .iter()
+                .any(|m| m.responses != primary.responses || m.compaction != primary.compaction)
+        {
+            return Err("routed compaction requires a tool-free chain or an isolated delegate and matching APIs, context windows and thresholds; otherwise set session_compaction: false".into());
+        }
+    }
+    let summary_model = if summary_name.is_empty() {
+        None
+    } else {
+        if team
+            || !picker.choices.is_empty()
+            || a.hooks.max_calls.is_some()
+            || !models[0].compaction.proactive()
+        {
+            return Err("a dedicated compaction_model requires one agent with active compaction, no model picker and no history/iteration limits".into());
+        }
+        let summary = cfg.models.get(summary_name).ok_or_else(|| format!("compaction_model {summary_name:?} must name a model with a declared context_window"))?;
+        if summary.context_window.is_none() {
+            return Err("compaction_model requires a declared context_window".into());
+        }
+        let target = resolve_model(cfg, summary, a, env, false, true, None)?;
+        if a.model.contains(',')
+            || summary_name.contains(',')
+            || models
+                .iter()
+                .chain([&target])
+                .any(|m| m.request.name().contains(','))
+        {
+            return Err("dedicated compaction cannot use a multi-model reference".into());
+        }
+        Some(target)
+    };
+    let checkpoint_tools = bounded_fallback || bounded_output || selected_fallback_chain;
+    let routed_rounds = (team || !picker.choices.is_empty()) && !models[0].compaction.proactive();
+    Ok(Selected {
+        limits: a.limits,
+        tool_models,
+        summary_model,
+        output_tool,
+        separate_model_attempts: checkpoint_tools || routed_rounds,
+        checkpoint_tools,
+        selected_fallback_chain,
+        hooks,
+        tool_policy: Policy {
+            rules: cfg.permissions.clone(),
+            // Go small leaves approval to the host: a config cannot waive it.
+            safety: match if a.safety == Safety::Legacy {
+                cfg.runtime.safety
+            } else {
+                a.safety
+            } {
+                Safety::Autonomous => Safety::Legacy,
+                safety => safety,
+            },
+        },
+        picker,
+        models,
+        // Go only loads fallback settings alongside a model chain.
+        policy: if chain {
+            a.fallback.policy()
+        } else {
+            Default::default()
+        },
+        instruction: instruction(&a.instruction, env),
+        name: name.into(),
+        team_prompts,
+        sub_agents: a.sub_agents.clone(),
+        handoffs: a.handoffs.clone(),
+        force_handoff: a.force_handoff.clone(),
+        toolsets,
+    })
+}
+
+fn check_provider(
+    custom: Option<&Provider>,
+    m: &Model,
+) -> Result<Option<&'static providers::Builtin>, String> {
+    let builtin = providers::lookup(&m.provider);
+    if custom.is_none()
+        && builtin.is_none()
+        && !matches!(
+            m.provider.as_str(),
+            "openai_responses" | "openai_chatcompletions"
+        )
+    {
+        return Err(format!("unsupported provider {:?}", m.provider));
+    }
+    if custom.is_some_and(|p| p.provider.is_empty()) && builtin.is_some_and(|p| p.scoped()) {
+        return Err(
+            "custom providers shadowing this built-in must declare their underlying provider"
+                .into(),
+        );
+    }
+    let builtin = custom
+        .filter(|p| !p.provider.is_empty())
+        .map_or(builtin, |p| providers::lookup(&p.provider));
+    m.provider_opts.validate(builtin)?;
+    Ok(builtin)
+}
+
+fn resolve_model(
+    cfg: &Config,
+    m: &Model,
+    a: &Agent,
+    env: &BTreeMap<String, String>,
+    tools: bool,
+    multi_target: bool,
+    output: Option<&StructuredOutput>,
+) -> Result<Target, String> {
+    let p = cfg.providers.get(&m.provider);
+    let builtin = check_provider(p, m)?;
+    let default_base = builtin
+        .filter(|_| p.is_none())
+        .map_or(OPENAI_BASE, |b| b.base_url.as_str());
+    let custom = p.is_some();
+    let chatgpt = builtin.is_some_and(|b| b.name == "chatgpt");
+    // Go resolves a custom provider's default protocol before expanding the model.
+    let id = expand_model_field(&m.model, env)?;
+    let api_type = m
+        .provider_opts
+        .api_type
+        .as_deref()
+        .or_else(|| p?.provider_opts.api_type.as_deref())
+        .or_else(|| p.map(|p| p.api_type.as_str()).filter(|s| !s.is_empty()));
+    let responses = chatgpt
+        || match api_type {
+            Some(t) => t == "openai_responses",
+            None if p.is_some() => supports_responses_api(&m.model),
+            None => builtin.is_some_and(|b| b.auto_responses) && supports_responses_api(&id),
+        };
+    let default_provider = Provider::default();
+    let p = p.unwrap_or(&default_provider);
+    let key = first_nonempty([&m.token_key, &p.token_key, ""]);
+    if !custom && builtin.is_none() && (key.is_empty() || m.base_url.is_empty()) {
+        return Err("a protocol-only provider requires an explicit base_url and token_key".into());
+    }
+    let base_field = first_nonempty([&m.base_url, &p.base_url, default_base]);
+    if let Some(b) = builtin.filter(|_| !custom || chatgpt) {
+        if !custom && api_type.is_some() && !m.base_url.is_empty() && key.is_empty() && !chatgpt {
+            return Err("an explicit API and base_url require an explicit token_key".into());
+        }
+        b.validate_base(base_field, key, env)?;
+    }
+    let base = expand_field(base_field, |name| {
+        if name == key || builtin.is_some_and(|b| b.credential_key(name)) {
+            return Err("model endpoint cannot reference a credential".into());
+        }
+        env.get(name)
+            .map(String::as_str)
+            .ok_or_else(|| format!("environment variable {name:?} not set"))
+    })?;
+    if id.trim().is_empty() || base.trim().is_empty() {
+        return Err("model and endpoint must not expand to an empty string".into());
+    }
+    let merge_messages = !responses
+        && (custom
+            || api_type == Some("openai_chatcompletions")
+            || builtin.is_some_and(|b| b.merge_consecutive_messages)
+            || (m.provider == "openai" && base.trim_end_matches('/') != default_base));
+    let route = if responses {
+        "responses"
+    } else {
+        "chat/completions"
+    };
+    let provider_id = if custom && p.provider.is_empty() {
+        &m.provider
+    } else {
+        providers::canonical(first_nonempty([&p.provider, &m.provider, ""]))
+    };
+    if responses
+        && m.provider_opts
+            .supports_deferred_tools
+            .or(p.provider_opts.supports_deferred_tools)
+            .unwrap_or_else(|| reasoning::deferred_tools(provider_id, &id))
+        && a.toolsets.iter().any(|ts| {
+            let (all, names) = ts.defer.parts();
+            all || !names.is_empty()
+        })
+    {
+        return Err("this Responses model requires native deferred tool loads".into());
+    }
+    let model_id = format!("{provider_id}/{id}");
+    let compaction = crate::compaction::Policy::new(
+        m.context_window,
+        a.session_compaction,
+        m.compaction_threshold.or(a.compaction_threshold),
+    );
+    let output = output.filter(|o| matches!(o.mode, OutputMode::Native));
+    if let Some(output) = output {
+        output.check_session(&id)?;
+    }
+    let schema_instruction = output.filter(|_| is_claude(&id)).map(|output| {
+        crate::structured_output::schema_instruction(
+            &output.name,
+            &output.description,
+            &output.schema,
+        )
+    });
+    let vendor = builtin.is_none_or(|b| b.openai_vendor)
+        || id.trim().to_ascii_lowercase().starts_with("openai/");
+    let cache_breakpoints = vendor
+        && reasoning::explicit_cache(&id)
+        && !(provider_id == "openai" && base.trim_end_matches('/') != OPENAI_BASE);
+    let reasoning = Reasoning::new(
+        &m.model,
+        &id,
+        vendor,
+        responses,
+        m.thinking_budget.as_ref().or(p.thinking_budget.as_ref()),
+    )?;
+    if !responses && m.track_usage.or(p.track_usage) == Some(false) {
+        return Err(
+            "track_usage: false on Chat Completions requires different stream termination".into(),
+        );
+    }
+    if responses
+        && (provider_id == "chatgpt"
+            || provider_id == "openai" && base.trim_end_matches('/') == OPENAI_BASE)
+        && m.provider_opts
+            .preserve_reasoning
+            .or(p.provider_opts.preserve_reasoning)
+            == Some(true)
+    {
+        return Err("preserve_reasoning requires source-bound encrypted Responses history".into());
+    }
+    let mut params = model_params(id, m, p, tools, compaction)?;
+    if let Some(output) = output {
+        params.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":output.name,"description":output.description,"strict":output.strict,"schema":output.schema}}));
+    }
+    if multi_target
+        && responses
+        && ["frequency_penalty", "presence_penalty"]
+            .iter()
+            .any(|k| params.contains_key(*k))
+    {
+        return Err(
+            "Responses does not support frequency_penalty or presence_penalty when switching model targets"
+                .into(),
+        );
+    }
+    // An override on one model must not redirect an inherited provider key to another origin.
+    let key_base = if custom && !m.base_url.is_empty() && m.token_key.is_empty() && !key.is_empty()
+    {
+        Some(expand_model_field(
+            first_nonempty([&p.base_url, default_base, ""]),
+            env,
+        )?)
+    } else {
+        None
+    };
+    Ok(Target {
+        request: RequestModel {
+            id: model_id,
+            model_params: params,
+            schema_instruction,
+            reasoning,
+            cache_breakpoints,
+            replay_reasoning: responses
+                || m.provider_opts
+                    .replay_reasoning
+                    .or(p.provider_opts.replay_reasoning)
+                    .unwrap_or(true),
+            cap: m.max_tokens.or(p.max_tokens),
+        },
+        transport: providers::transport(
+            builtin,
+            &base,
+            route,
+            key,
+            &m.provider_opts,
+            custom.then_some(&p.provider_opts),
+            env,
+        )?,
+        responses,
+        merge_messages: merge_messages && !cache_breakpoints,
+        key_base,
+        compaction,
+        capabilities: m.capabilities,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn primary_params(cfg: &str, agent: &str, env: &BTreeMap<String, String>) -> Value {
+        Value::Object(
+            select(cfg, agent, env)
+                .unwrap()
+                .models
+                .remove(0)
+                .request
+                .model_params,
+        )
+    }
+
+    #[test]
+    fn strict_loader() {
+        for yaml in [
+            "agents: {}",
+            "agents: {a: {model: nope}}",
+            "agents: {a: {model: a/b, hooks: {bogus: []}}}",
+            "agents: {a: {model: a/b}, a: {model: a/c}}",
+            "version: 2\nagents: {a: {model: a/b}}",
+        ] {
+            assert!(parse(yaml).is_err(), "{yaml}");
+        }
+    }
+
+    #[test]
+    fn native_schema_is_per_agent_and_projected_without_normalization() {
+        let cfg = r"providers: {local: {}}
+agents:
+  root:
+    model: local/test
+    toolsets: [{type: think}]
+    structured_output:
+      name: result
+      schema:
+        type: object
+        properties: {values: {type: array, items: {$ref: '#/$defs/result'}}}
+        $defs: {result: {type: [string, 'null'], enum: [null, 'a']}}
+        required: []
+  other: {model: local/test}
+";
+        let params = |agent| primary_params(cfg, agent, &BTreeMap::new());
+        let schema = json!({"type":"object", "properties":{"values":{"type":"array","items":{"$ref":"#/$defs/result"}}},
+            "$defs":{"result":{"type":["string","null"], "enum":[null,"a"]}}, "required":[]});
+        assert_eq!(
+            params("root"),
+            json!({"model":"test", "tool_choice":"auto", "response_format":{
+            "type":"json_schema", "json_schema":{"name":"result", "description":"", "strict":false, "schema":schema}}})
+        );
+        assert_eq!(params("other"), json!({"model":"test"}));
+        assert!(parse(cfg).unwrap()["agents"][0]
+            .get("structured_output")
+            .is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_output_configs_and_lossy_schema_values() {
+        for output in [
+            "[]", "{}", "{name: out}", "{schema: {type: object, properties: {}}}",
+            "{name: out, schema: null}", "{name: out, schema: true}", "{name: out, schema: {type: string}}",
+            "{name: out, schema: {type: object, properties: []}}",
+            "{name: out, schema: {type: object, properties: {}, required: [2]}}",
+            "{name: out, schema: {type: object, properties: {}, additionalProperties: null}}",
+            "{name: out, schema: {type: object, properties: {}, $defs: {s: {const: [9007199254740993]}}}}",
+            "{name: out, schema: {type: object, properties: {}, enum: [-9007199254740993]}}",
+            "{name: out, schema: {type: object, properties: {x: {enum: [.nan]}}}}",
+            "{name: out, schema: {type: object, properties: {<<: {x: {type: string}}}}}",
+            "{name: out, schema: {type: object, properties: {false: {type: string}}}}",
+            "{name: out, schema: {type: object, properties: {}}, strict: 'true'}",
+            "{name: out, schema: {type: object, properties: {}}, typo: false}",
+            "{name: out, schema: {type: object, properties: {}}, mode: Tool}",
+        ] {
+            assert!(parse(&format!("agents: {{root: {{model: openai/test, structured_output: {output}}}}}")).is_err(), "{output}");
+        }
+    }
+
+    #[test]
+    fn dedicated_summary_target_is_separate_and_uses_go_precedence() {
+        let cfg = "providers: {local: {compaction_model: p}}
+models:
+  main: {provider: local, model: ordinary, context_window: 3000, compaction_model: m}
+  a: {provider: local, model: agent-choice, context_window: 3000}
+  m: {provider: local, model: model-choice, context_window: 4000}
+  p: {provider: local, model: provider-choice, context_window: 2000}
+agents: {root: {model: main, compaction_model: a}}";
+        let no_agent_override = cfg.replace(", compaction_model: a", "");
+        for (cfg, expected, window) in [
+            (cfg.to_owned(), "agent-choice", 3000),
+            (no_agent_override.clone(), "model-choice", 3000),
+            (
+                no_agent_override.replace(", compaction_model: m", ""),
+                "provider-choice",
+                2000,
+            ),
+        ] {
+            let spec = select(&cfg, "root", &BTreeMap::new()).unwrap();
+            assert_eq!(spec.models.len(), 1);
+            assert_eq!(spec.targets().count(), 2);
+            let (i, summary) = spec.summary_target();
+            assert_eq!(i, 1);
+            assert_eq!(summary.request.name(), expected);
+            assert_eq!(spec.context_window(), window);
+        }
+    }
+
+    #[test]
+    fn small_compaction_example_resolves_both_models() {
+        let yaml = include_str!("../../examples/small-compaction.yaml");
+        let env = BTreeMap::from([("OPENAI_API_KEY".into(), "test".into())]);
+        let spec = select(yaml, "root", &env).unwrap();
+        assert_eq!(spec.models[0].request.name(), "gpt-4o");
+        assert_eq!(spec.summary_target().1.request.name(), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn fallback_compaction_admission_checks_the_whole_chain() {
+        let cfg = include_str!("../testdata/fallback-compaction.yaml");
+        let env = BTreeMap::from([
+            ("MODEL_URL".into(), "https://fixture.invalid/v1".into()),
+            ("LOCAL_KEY".into(), "fixture".into()),
+        ]);
+        assert_eq!(select(cfg, "root", &env).unwrap().models.len(), 2);
+        let different = cfg.replace(
+            "temperature: 0.75",
+            "temperature: 0.75, compaction_threshold: 0.9",
+        );
+        assert!(select(&different, "root", &env)
+            .err()
+            .unwrap()
+            .contains("routed compaction"));
+        let disabled = cfg.replace("session_compaction: true", "session_compaction: false");
+        assert_eq!(select(&disabled, "root", &env).unwrap().models.len(), 2);
+    }
+
+    #[test]
+    fn claude_schema_uses_the_expanded_model_not_the_provider() {
+        let cfg = "providers: {local: {}}\nagents:\n  root: {model: local/test}\n  other: {model: 'local/$MODEL', structured_output: {mode: native, name: output, schema: {type: object, properties: {}}}}";
+        for model in [
+            " claude-opus-4.8 ",
+            "org/anthropic/CLAUDE-sonnet",
+            "anthropic.claude-3",
+            "foo/global.anthropic.claude-test",
+        ] {
+            let env = BTreeMap::from([("MODEL".into(), model.into())]);
+            let selected = select(cfg, "other", &env).unwrap();
+            assert!(
+                selected.models[0].request.schema_instruction.is_some(),
+                "{model}"
+            );
+        }
+        let env = BTreeMap::from([("MODEL".into(), "org/openai/claude-test".into())]);
+        assert!(select(cfg, "other", &env).unwrap().models[0]
+            .request
+            .schema_instruction
+            .is_none());
+        assert!(select(&cfg.replace("mode: native", "mode: ''"), "other", &env).is_ok());
+        for name in ["''", "two words", &"x".repeat(65)] {
+            assert!(select(
+                &cfg.replace("name: output", &format!("name: {name}")),
+                "other",
+                &env
+            )
+            .err()
+            .unwrap()
+            .contains("name must be"));
+        }
+    }
+
+    #[test]
+    fn team_iteration_limits_exclude_hooked_delegates_and_chains() {
+        let hook =
+            "hooks: {before_llm_call: {type: builtin, command: max_iterations, args: ['2']}}";
+        let open = |root: &str, helper: &str| {
+            let yaml = format!(
+                "providers: {{p: {{}}}}\nagents:\n  root: {{model: p/a, {root}}}\n  helper: {{model: p/b, {helper}}}\n  other: {{model: p/c, {hook}}}"
+            );
+            team(&yaml, "", &BTreeMap::new(), false).map(|(_, agents, _)| agents.len())
+        };
+        let capped = format!("max_iterations: 2, {hook}, sub_agents: [helper], handoffs: [other]");
+        assert_eq!(open(&capped, "max_iterations: 1"), Ok(3));
+        assert_eq!(open("force_handoff: helper", "handoffs: [other]"), Ok(3));
+        for (root, helper) in [
+            ("sub_agents: [other]", "description: unused"),
+            ("sub_agents: [helper]", "handoffs: [other]"),
+            ("sub_agents: [helper]", "force_handoff: other"),
+            ("handoffs: [other, helper]", "sub_agents: [root]"),
+        ] {
+            let error = open(root, helper).unwrap_err();
+            assert!(
+                error.contains("\"other\", which can run inside transfer_task"),
+                "{error}"
+            );
+        }
+        let chain = "max_iterations: 1, session_compaction: false, fallback: {models: [p/d]}";
+        let error = open("handoffs: [helper]", chain).unwrap_err();
+        assert!(
+            error.contains("fallback chain within local teams"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn delegated_output_is_bounded_by_every_possible_opener() {
+        let output = "session_compaction: false, structured_output: {name: result, mode: tool, schema: {type: object, properties: {}}}";
+        let cfg = format!("providers: {{p: {{}}}}\nagents:\n  root: {{model: p/main, sub_agents: [child, other]}}\n  child: {{model: p/child, max_iterations: 2, force_handoff: target}}\n  other: {{model: p/other, max_iterations: 1, handoffs: [target]}}\n  target: {{model: p/test, {output}, handoffs: [child]}}");
+        let open = |yaml: &str| select(yaml, "", &BTreeMap::new()).map(|_| ());
+        assert_eq!(open(&cfg), Ok(()));
+        for (from, to) in [
+            ("max_iterations: 2, force", "force"),
+            ("max_iterations: 1, handoffs", "max_iterations: 3, handoffs"),
+            (
+                "max_iterations: 2, force",
+                "max_iterations: 2, max_consecutive_tool_calls: 2, force",
+            ),
+            ("p/test", "p/us.anthropic.claude-sonnet-5-v1:0"),
+            ("[child, other]", "[child, other, target]"),
+        ] {
+            assert!(
+                open(&cfg.replace(from, to))
+                    .unwrap_err()
+                    .contains("inside transfer_task"),
+                "{to}"
+            );
+        }
+        for (from, to, reason) in [
+            ("session_compaction: false, ", "", "team frame limits"),
+            (
+                "max_iterations: 2, force",
+                "max_iterations: 2, max_tool_result_tokens: 5, force",
+                "truncate results",
+            ),
+            (
+                "p/test,",
+                "p/test, fallback: {models: [p/backup]},",
+                "single serving model",
+            ),
+            (
+                "p/test,",
+                "p/test, toolsets: [{type: model_picker, models: [p/other]}],",
+                "single serving model",
+            ),
+        ] {
+            assert!(
+                open(&cfg.replace(from, to)).unwrap_err().contains(reason),
+                "{to}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_lossy_claude_schema_on_primary_and_fallback() {
+        let cfg = "providers: {local: {}}\nagents: {root: {model: local/claude-test, structured_output: {name: answer, schema: {type: object, properties: {}, $defs: {nested: [{const: VALUE}]}}}}}";
+        for value in [
+            "1.0",
+            "1e-7",
+            "-0.0",
+            "1_000",
+            "0123",
+            "!!int '0x11'",
+            r#""a\tb""#,
+            "'? key'",
+        ] {
+            let primary = cfg.replace("VALUE", value);
+            let fallback = primary.replace(
+                "model: local/claude-test",
+                "model: local/main, fallback: {models: [local/claude-test]}",
+            );
+            for yaml in [primary, fallback] {
+                assert!(
+                    select(&yaml, "", &BTreeMap::new())
+                        .err()
+                        .unwrap()
+                        .contains("Claude"),
+                    "{yaml}"
+                );
+            }
+        }
+        let non_claude = cfg
+            .replace("local/claude-test", "local/openai/claude-test")
+            .replace("VALUE", "1.5");
+        assert!(select(&non_claude, "", &BTreeMap::new()).is_ok());
+    }
+
+    const CONFIG: &str = "
+providers:
+  local:
+    api_type: openai_chatcompletions
+    temperature: 0.75
+    top_p: 0.5
+    frequency_penalty: -0.5
+    presence_penalty: 0.25
+    parallel_tool_calls: true
+    max_tokens: 500000
+models:
+  custom:
+    provider: local
+    model: 'openai/${env.MODEL}'
+    temperature: 0
+    top_p: null
+    frequency_penalty: 0
+    parallel_tool_calls: false
+agents:
+  root: {model: custom, toolsets: [{type: think}]}
+  no_tools: {model: custom}
+  inherited: {model: local/gpt-4o-mini, toolsets: [{type: think}]}
+";
+
+    #[test]
+    fn model_options_override_provider_defaults_field_by_field() {
+        let env = BTreeMap::from([("MODEL".into(), "gpt-5".into())]);
+        let select_params = |name| primary_params(CONFIG, name, &env);
+        assert_eq!(
+            select_params("root"),
+            json!({"model":"openai/gpt-5", "temperature":0,
+            "top_p":0.5, "frequency_penalty":0, "presence_penalty":0.25,
+            "max_completion_tokens":500000, "tool_choice":"auto", "parallel_tool_calls":false})
+        );
+        assert_eq!(
+            select_params("inherited"),
+            json!({"model":"gpt-4o-mini", "temperature":0.75,
+            "top_p":0.5, "frequency_penalty":-0.5, "presence_penalty":0.25,
+            "max_tokens":500000, "tool_choice":"auto", "parallel_tool_calls":true})
+        );
+        let no_tools = select_params("no_tools");
+        assert!(no_tools.get("parallel_tool_calls").is_none());
+        assert!(no_tools.get("tool_choice").is_none());
+        assert_eq!(
+            parse(CONFIG).unwrap()["models"]["custom"],
+            json!({"provider":"local", "model":"openai/${env.MODEL}", "base_url":""})
+        );
+    }
+
+    #[test]
+    fn service_tier_uses_present_model_option_before_provider() {
+        for (option, expected) in [
+            ("", Some("priority")),
+            (", provider_opts: {}", Some("priority")),
+            (", provider_opts: {service_tier: flex}", Some("flex")),
+            (", provider_opts: {service_tier: ''}", None),
+            (", provider_opts: {service_tier: null}", None),
+        ] {
+            let cfg = format!("providers: {{p: {{provider_opts: {{service_tier: priority}}}}}}\nmodels: {{m: {{model: test, provider: p{option}}}}}\nagents: {{root: {{model: m}}}}");
+            let m = select(&cfg, "root", &BTreeMap::new()).unwrap();
+            assert_eq!(
+                m.models[0]
+                    .request
+                    .model_params
+                    .get("service_tier")
+                    .and_then(Value::as_str),
+                expected,
+                "{option}"
+            );
+        }
+    }
+
+    #[test]
+    fn openrouter_stays_on_chat_completions_for_newer_models() {
+        let cfg = "models: {m: {provider: openrouter, model: openai/gpt-4.1-mini, max_tokens: 12}}\nagents: {root: {model: m}}";
+        let env = BTreeMap::from([("OPENROUTER_API_KEY".into(), "key".into())]);
+        let params = primary_params(cfg, "", &env);
+        assert_eq!(
+            params,
+            json!({"model":"openai/gpt-4.1-mini", "max_completion_tokens":12})
+        );
+    }
+
+    #[test]
+    fn omitted_and_nonpositive_token_caps_are_not_sent() {
+        let yaml = "providers: {local: {}}\nagents: {root: {model: local/test}}";
+        let params = |cfg: &str| primary_params(cfg, "", &BTreeMap::new());
+        assert_eq!(params(yaml), json!({"model":"test"}));
+        for cap in [0, -1] {
+            let cfg = format!("providers: {{local: {{max_tokens: 42}}}}\nmodels: {{m: {{provider: local, model: test, max_tokens: {cap}}}}}\nagents: {{root: {{model: m}}}}");
+            assert_eq!(params(&cfg), json!({"model":"test"}));
+        }
+    }
+
+    #[test]
+    fn token_budget_wire_key_matches_go_model_families() {
+        for (name, expected) in [
+            ("gpt-4o-mini", false),
+            ("org/test", false),
+            ("openrouter/openai/GPT-4.1-mini", true),
+            ("gpt-5-chat-latest", true),
+            (" o3-mini ", true),
+            ("o1-preview", true),
+            ("o4-mini", true),
+            ("codex-mini", true),
+            ("x-codex", true),
+            ("gpt-6", true),
+            ("gpt-10.2-mini", true),
+            ("gpt-6.20260709", false),
+            ("gpt-6foo", false),
+            ("gpt-100-astra", false),
+        ] {
+            assert_eq!(supports_responses_api(name), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn expands_selected_fields_only_once_after_provider_defaults() {
+        let cfg = "
+providers:
+  local: {base_url: '${env.HOST}/$VERSION/', token_key: '${TOKEN_KEY}'}
+models:
+  override: {provider: local, model: '${ MODEL }', base_url: '${BASE}/v2', token_key: '${TOKEN_KEY}'}
+agents:
+  root: {model: 'local/org/${ env.MODEL }'}
+  other: {model: override}
+";
+        let mut env = BTreeMap::from([
+            ("HOST".into(), "http://localhost:8080".into()),
+            ("VERSION".into(), "v1".into()),
+            ("MODEL".into(), "$LITERAL".into()),
+            ("${TOKEN_KEY}".into(), "secret".into()),
+        ]);
+        let s = select(cfg, "root", &env).unwrap();
+        assert_eq!(
+            s.models[0].transport.endpoint,
+            "http://localhost:8080/v1/chat/completions"
+        );
+        assert_eq!(s.models[0].request.model_params["model"], "org/$LITERAL");
+        assert_eq!(
+            s.models[0].transport.headers["Authorization"],
+            "Bearer secret"
+        ); // token_key is a name, not a template.
+        env.remove("HOST");
+        assert!(select(cfg, "root", &env).err().unwrap().contains("HOST"));
+        env.insert(" MODEL ".into(), "other".into());
+        env.insert("BASE".into(), "https://example.invalid".into());
+        let s = select(cfg, "other", &env).unwrap();
+        assert_eq!(s.models[0].request.model_params["model"], "other");
+        assert_eq!(
+            s.models[0].transport.endpoint,
+            "https://example.invalid/v2/chat/completions"
+        );
+        assert!(expand_model_field("${env.PATH}", &env)
+            .unwrap_err()
+            .contains("PATH"));
+        env.insert("MODEL".into(), String::new());
+        assert_eq!(
+            expand_model_field("pre${MODEL}post", &env).unwrap(),
+            "prepost"
+        );
+        env.insert("BASE".into(), String::new());
+        assert!(select(&cfg.replace("${BASE}/v2", "${BASE}"), "other", &env).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_options_and_selects_responses_when_required() {
+        for option in [
+            "temperature: .nan",
+            "top_p: nope",
+            "max_tokens: 1.5",
+            "parallel_tool_calls: 1",
+            "top_p: 1, top_p: 0",
+            "context_window: 0",
+            "provider_opts: {transport: websocket}",
+            "provider_opts: {extra_body: {model: other}}",
+            "provider_opts: {service_tier: 42}",
+            "provider_opts: {service_tier: priority, service_tier: flex}",
+            "thinking_budget: unknown",
+            "max_completion_tokens: 42",
+        ] {
+            let provider =
+                format!("providers: {{p: {{{option}}}}}\nagents: {{root: {{model: p/test}}}}");
+            let model = format!("models: {{m: {{provider: openai, model: test, {option}}}}}\nagents: {{root: {{model: m}}}}");
+            for cfg in [provider, model] {
+                assert!(parse(&cfg).is_err(), "{cfg}");
+            }
+        }
+        let env = BTreeMap::from([("OPENAI_API_KEY".into(), "key".into())]);
+        for cfg in [
+            "agents: {root: {model: openai/gpt-5}}",
+            "providers: {local: {}}\nagents: {root: {model: local/gpt-4.1-mini}}",
+            "providers: {local: {api_type: openai_responses}}\nagents: {root: {model: local/test}}",
+        ] {
+            let selected = select(cfg, "", &env).unwrap();
+            assert!(
+                selected.models[0].responses
+                    && selected.models[0]
+                        .transport
+                        .endpoint
+                        .ends_with("/responses")
+            );
+        }
+        let cfg = "providers: {local: {max_tokens: 9007199254740993}}\nagents: {root: {model: local/test}}";
+        assert!(select(cfg, "", &BTreeMap::new())
+            .err()
+            .unwrap()
+            .contains("safe integer"));
+    }
+
+    #[test]
+    fn selects_root_before_first_and_does_not_leak_keys_to_custom_endpoint() {
+        let env = BTreeMap::from([
+            ("OPENAI_API_KEY".into(), "secret".into()),
+            ("WHO".into(), "Ada".into()),
+        ]);
+        let cfg = "version: 16\nproviders: {local: {base_url: 'http://localhost:8001/v1'}}\nagents:\n  helper: {model: openai/other}\n  root: {model: local/org/name, instruction: '${env.WHO} ${x} ${wrap(${env.WHO})} ${env.ABSENT}'}";
+        let s = select(cfg, "", &env).unwrap();
+        assert_eq!(s.models[0].request.model_params["model"], "org/name");
+        assert_eq!(s.models[0].transport.headers.get("Authorization"), None);
+        assert_eq!(s.instruction, "Ada ${x} ${wrap(${env.WHO})} ");
+        assert_eq!(
+            select(cfg, "helper", &env).unwrap().models[0]
+                .transport
+                .headers["Authorization"],
+            "Bearer secret"
+        );
+        assert!(select(cfg, "missing", &env).is_err());
+    }
+}

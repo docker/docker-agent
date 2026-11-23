@@ -1,0 +1,12 @@
+providers:
+  local: {provider: openai, api_type: openai_chatcompletions, base_url: $MODEL_URL, token_key: LOCAL_KEY}
+models:
+  main: {provider: local, model: main, context_window: 2048, temperature: 0.25}
+  spare: {provider: local, model: spare, context_window: 2048, temperature: 0.75}
+agents:
+  root:
+    model: main
+    session_compaction: true
+    compaction_threshold: 0.5
+    fallback: {models: [spare], retries: -1, cooldown: 1h}
+    structured_output: {name: answer, schema: {type: object, properties: {}}}
