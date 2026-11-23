@@ -102,7 +102,7 @@ agents:
 | `add_prompt_files`          | array   | ✗        | List of file paths whose contents are appended to the system prompt. Useful for including coding standards, guidelines, or additional context.                                |
 | `add_prompt_files_depth`    | int     | ✗        | Also list, by path only, the `add_prompt_files` names found up to this many directory levels below the working directory (`1` = direct subdirectories). Contents are not loaded — the agent reads the ones it needs. Useful in monorepos. Default: `0` (no scan). See [Prompt Files](#prompt-files) below. |
 | `add_description_parameter` | boolean | ✗        | When `true`, adds agent descriptions as a parameter in tool schemas. Helps with tool selection in multi-agent scenarios.                                                      |
-| `redact_secrets`            | boolean | ✗        | Enabled by default; set `false` to opt out. Scrubs detected secrets (API keys, tokens, private keys, etc.) out of tool-call arguments, outgoing chat messages, and tool output before they reach a tool, the model, or downstream consumers. See [Redacting Secrets](#redacting-secrets) below.   |
+| `redact_secrets`            | boolean | ✗        | Enabled by default; set `false` to opt out. Scrubs detected secrets (API keys, tokens, private keys, etc.) out of tool-call arguments, outgoing chat messages, and tool output — including inline document attachments — before they reach a tool, the model, or downstream consumers. See [Redacting Secrets](#redacting-secrets) below.   |
 | `code_mode_tools`           | boolean | ✗        | When `true`, replaces the agent's individual tools with a single tool that runs a JavaScript script calling as many of them as needed in one turn. See [Code Mode](../../features/code-mode/index.md). |
 | `max_iterations`            | int     | ✗        | Maximum number of tool-calling loops. Default: unlimited (0). Set this to prevent infinite loops.                                                                             |
 | `max_consecutive_tool_calls` | int     | ✗        | Maximum consecutive identical tool calls before the agent is terminated, preventing degenerate loops. Default: `5`.                                                          |
@@ -320,7 +320,7 @@ Secret redaction is enabled by default. The `redact_secrets` field controls scru
 
 1. A `tool_input_transform` built-in hook that scrubs detected secrets from the **arguments of every tool call**, before the tool sees them.
 2. A `before_llm_call` built-in hook that scrubs the same patterns from **outgoing chat messages** — message content, multi-part text content, prior reasoning content, and the JSON-encoded arguments of any tool call still in the conversation — before they reach the model provider.
-3. A `tool_response_transform` built-in hook that scrubs **tool output at the source**, so the secret never reaches event consumers, the persisted session file, the `post_tool_use` hook input, or the next LLM call.
+3. A `tool_response_transform` built-in hook that scrubs **tool output, its display metadata, and its inline document attachments at the source**, so the secret never reaches event consumers, the persisted session file, the `post_tool_use` hook input, or the next LLM call.
 
 ```yaml
 agents:

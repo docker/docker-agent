@@ -385,6 +385,15 @@ type Input struct {
 	ToolError      bool `json:"tool_error,omitempty"`
 	ToolResultMeta any  `json:"tool_result_meta,omitempty"`
 
+	// ToolDocuments carries the tool result's inline document attachments
+	// for [EventToolResponseTransform] and [EventPostToolUse]. MCP servers
+	// return text resources as [tools.DocumentContent] with Text set; those
+	// documents are emitted to event subscribers and persisted in the
+	// session next to the textual output, so response transformers need to
+	// see them to scrub their string fields too. Data is opaque base64 and
+	// is never inspected.
+	ToolDocuments []tools.DocumentContent `json:"tool_documents,omitempty"`
+
 	// Messages is the conversation snapshot the runtime is about to send
 	// to the model. Populated only for [EventBeforeLLMCall] dispatches
 	// where rewriting is meaningful; nil for every other event so the
@@ -686,6 +695,17 @@ type HookSpecificOutput struct {
 	// JSON null clears metadata; nil leaves it unchanged.
 	UpdatedToolResultMeta json.RawMessage `json:"updated_tool_result_meta,omitempty"`
 
+	// UpdatedToolDocuments replaces the tool result's inline document
+	// attachments on an [EventToolResponseTransform] response, before the
+	// runtime emits them, records them in the session, hands them to
+	// post_tool_use, or sends them to the next LLM call. nil leaves them
+	// unchanged; a non-nil slice (including an empty one, which drops every
+	// attachment) replaces them.
+	//
+	// Hooks run in config order; each sees the preceding rewrite. The last
+	// non-nil rewrite is returned.
+	UpdatedToolDocuments []tools.DocumentContent `json:"updated_tool_documents,omitempty"`
+
 	// Transition is a control hook's route request. Only
 	// [EventBeforeAgentRun] and [EventAfterAgentComplete] accept it; any
 	// other event rejects output that carries one.
@@ -744,6 +764,11 @@ type Result struct {
 	// "explicitly cleared" (empty string) from "no rewrite" (nil).
 	UpdatedToolResponse   *string
 	UpdatedToolResultMeta json.RawMessage
+	// UpdatedToolDocuments is the rewritten attachment list produced by an
+	// [EventToolResponseTransform] hook. nil means "no rewrite"; a non-nil
+	// slice (possibly empty) replaces the tool result's documents before
+	// emission and persistence.
+	UpdatedToolDocuments []tools.DocumentContent
 
 	// Metadata aggregates the key/value annotations contributed by
 	// [EventPermissionRequest], [EventToolGuard] and control-event hooks. The runtime

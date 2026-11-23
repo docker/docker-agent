@@ -1071,7 +1071,7 @@ func (r callRuntime) RunTool(ctx context.Context, tc tools.ToolCall, tool tools.
 	} else if result != nil {
 		response = *result
 	}
-	response.Output, response.Meta = c.transformToolResult(ctx, response.Output, response.IsError, response.Meta)
+	response.Output, response.Meta, response.Documents = c.transformToolResult(ctx, response.Output, response.IsError, response.Meta, response.Documents)
 	c.em.EmitToolCallResponse(tc.ID, tool, &response, response.Output, c.a.Name())
 	return result, err
 }
@@ -1175,7 +1175,7 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 	// only paid when at least one hook is configured for the event, so
 	// agents that haven't opted into output rewriting take the cheap
 	// path through Dispatch's `exec.Has(event)` short-circuit.
-	res.Output, res.Meta = c.transformToolResult(ctx, res.Output, res.IsError, res.Meta)
+	res.Output, res.Meta, res.Documents = c.transformToolResult(ctx, res.Output, res.IsError, res.Meta, res.Documents)
 
 	// gen_ai.tool.call.result captures the post-transform output so the
 	// span matches what the LLM actually saw on the next turn (any
@@ -1204,11 +1204,17 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 // the persisted session file, the input the post_tool_use hook sees,
 // and the messages going to the next LLM call.
 func (c *call) applyToolResponseTransform(ctx context.Context, payload string, isError bool) string {
-	output, _ := c.transformToolResult(ctx, payload, isError, nil)
+	output, _, _ := c.transformToolResult(ctx, payload, isError, nil, nil)
 	return output
 }
 
-func (c *call) transformToolResult(ctx context.Context, payload string, isError bool, meta any) (output string, transformedMeta any) {
+// transformToolResult fires [hooks.EventToolResponseTransform] and returns
+// the hook-supplied rewrites for the textual output, the display metadata,
+// and the inline document attachments. Documents ride through the transform
+// because emission and recordToolResponse both read them off the result:
+// skipping them leaks attachment text (MCP inline-text resources) verbatim
+// into the event stream and the persisted session.
+func (c *call) transformToolResult(ctx context.Context, payload string, isError bool, meta any, documents []tools.DocumentContent) (output string, transformedMeta any, transformedDocuments []tools.DocumentContent) {
 	defer func() {
 		output = builtins.BoundToolResult(c.tool.Category, c.tool.Name, output, "The full result was not saved by the output limiter; narrow the tool query to retrieve the part you need.")
 	}()
@@ -1219,17 +1225,18 @@ func (c *call) transformToolResult(ctx context.Context, payload string, isError 
 		}
 	}
 	if c.d.Hooks == nil {
-		return payload, meta
+		return payload, meta, documents
 	}
 	in := NewPostToolHooksInput(c.sess, c.tc, &tools.ToolCallResult{Output: payload, IsError: isError, Meta: meta})
 	in.ToolCategory = c.tool.Category
+	in.ToolDocuments = documents
 	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventToolResponseTransform, in)
 	// A canceled hook can discard its rewrite; never fall back to the untransformed payload.
 	if ctx.Err() != nil {
-		return c.cancellationMessage(ctx), nil
+		return c.cancellationMessage(ctx), nil, nil
 	}
 	if result == nil {
-		return payload, meta
+		return payload, meta, documents
 	}
 	if result.UpdatedToolResultMeta != nil {
 		meta = result.UpdatedToolResultMeta
@@ -1237,7 +1244,10 @@ func (c *call) transformToolResult(ctx context.Context, payload string, isError 
 	if result.UpdatedToolResponse != nil {
 		payload = *result.UpdatedToolResponse
 	}
-	return payload, meta
+	if result.UpdatedToolDocuments != nil {
+		documents = result.UpdatedToolDocuments
+	}
+	return payload, meta, documents
 }
 
 // translateError converts a tool-handler error into a [tools.ToolCallResult]
