@@ -22,14 +22,32 @@ func ClearXDG() {
 	}
 }
 
-// Setenver is implemented by *testing.T and *testing.B.
-type Setenver interface{ Setenv(key, value string) }
+// EnvSetter is implemented by *testing.T and *testing.B.
+type EnvSetter interface{ Setenv(key, value string) }
+
+// DefaultDirs returns the config, data and cache directories of a fresh
+// install on goos. Spelled out rather than derived from pkg/paths, so a
+// regression in any platform branch is caught.
+func DefaultDirs(goos, home string) (config, data, cache string) {
+	switch goos {
+	case "darwin":
+		support := filepath.Join(home, "Library", "Application Support", "cagent")
+		return support, support, filepath.Join(home, "Library", "Caches", "cagent")
+	case "windows":
+		local := filepath.Join(home, "AppData", "Local", "cagent")
+		return filepath.Join(home, "AppData", "Roaming", "cagent"), local, local
+	default:
+		return filepath.Join(home, ".config", "cagent"),
+			filepath.Join(home, ".local", "share", "cagent"),
+			filepath.Join(home, ".cache", "cagent")
+	}
+}
 
 // SetHome isolates state under home for a single test. HOME and USERPROFILE
 // are not enough on Windows, where config and data resolve from the
 // %APPDATA% and %LOCALAPPDATA% known folders, and XDG variables take
 // precedence everywhere.
-func SetHome(t Setenver, home string) {
+func SetHome(t EnvSetter, home string) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	if runtime.GOOS == "windows" {

@@ -4,25 +4,30 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
-// resetRootState clears the process-wide decisions and overrides between
-// tests. None of these tests is parallel: they mutate environment and globals.
+// None of these tests is parallel: they mutate the environment and globals.
+
 func resetRootState(t *testing.T) {
 	t.Helper()
 	reset := func() {
-		for _, r := range allRoots {
-			r.mode.Store(int32(modeUndecided))
-			r.override.Set("")
-		}
+		ResetRootsForTesting()
+		SetRoot("")
 	}
 	reset()
 	t.Cleanup(reset)
 }
+
+// forgetDecisions models a new process launch on the same filesystem.
+func forgetDecisions() { ResetRootsForTesting() }
 
 func clearXDG(t *testing.T) {
 	t.Helper()
@@ -31,8 +36,8 @@ func clearXDG(t *testing.T) {
 	}
 }
 
-// setTestHome isolates home and the Windows known folders under a temp dir so
-// native defaults stay inside the test's own filesystem.
+// setTestHome isolates home and the Windows known folders under a temp dir,
+// on every host, so the currentOS seam can exercise each platform.
 func setTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -43,21 +48,20 @@ func setTestHome(t *testing.T) string {
 	return home
 }
 
-func xdgTargets(t *testing.T, base string) []string {
+func useOS(t *testing.T, goos string) {
 	t.Helper()
-	bases := []string{
-		filepath.Join(base, "config"),
-		filepath.Join(base, "data"),
-		filepath.Join(base, "cache"),
-	}
-	t.Setenv("XDG_CONFIG_HOME", bases[0])
-	t.Setenv("XDG_DATA_HOME", bases[1])
-	t.Setenv("XDG_CACHE_HOME", bases[2])
-	return []string{
-		filepath.Join(bases[0], "cagent"),
-		filepath.Join(bases[1], "cagent"),
-		filepath.Join(bases[2], "cagent"),
-	}
+	original := currentOS
+	currentOS = goos
+	t.Cleanup(func() { currentOS = original })
+}
+
+// freshInstall is a clean home with no XDG variables, on the given platform.
+func freshInstall(t *testing.T, goos string) string {
+	t.Helper()
+	resetRootState(t)
+	clearXDG(t)
+	useOS(t, goos)
+	return setTestHome(t)
 }
 
 func writeState(t *testing.T, dir string) string {
@@ -68,253 +72,290 @@ func writeState(t *testing.T, dir string) string {
 	return p
 }
 
-// expectedDefaults is the XDG/native layout for a given platform with a known
-// home. It is deliberately spelled out rather than derived from the code under
-// test so a regression in any branch is caught.
-func expectedDefaults(goos, home string) (config, data, cache string) {
-	switch goos {
-	case "darwin":
-		support := filepath.Join(home, "Library", "Application Support")
-		return filepath.Join(support, "cagent"),
-			filepath.Join(support, "cagent"),
-			filepath.Join(home, "Library", "Caches", "cagent")
-	case "windows":
-		return filepath.Join(home, "AppData", "Roaming", "cagent"),
-			filepath.Join(home, "AppData", "Local", "cagent"),
-			filepath.Join(home, "AppData", "Local", "cagent")
-	default:
-		return filepath.Join(home, ".config", "cagent"),
-			filepath.Join(home, ".local", "share", "cagent"),
-			filepath.Join(home, ".cache", "cagent")
+// ensureRoots runs EnsureRoots expecting nothing worth logging.
+func ensureRoots(t *testing.T) []string {
+	t.Helper()
+	warnings, err := EnsureRoots()
+	require.NoError(t, err)
+	return warnings
+}
+
+func skipWithoutPermissionChecks(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permission checks as a non-root user")
 	}
 }
 
-func TestEnsureRootsFreshInstall(t *testing.T) {
-	resetRootState(t)
-	clearXDG(t)
-	home := setTestHome(t)
-
-	require.NoError(t, EnsureRoots())
-
-	config, data, cache := expectedDefaults(runtime.GOOS, home)
-	for r, dir := range map[*root]string{configRoot: config, dataRoot: data, cacheRoot: cache} {
-		assert.DirExists(t, dir)
-		assert.FileExists(t, filepath.Join(dir, r.marker()))
+func TestDefaultsPerPlatform(t *testing.T) {
+	// Only a root with a distinct legacy location has a choice to record.
+	marked := map[string][]*root{
+		"linux":   {dataRoot},
+		"darwin":  {configRoot, dataRoot},
+		"windows": {configRoot, dataRoot},
 	}
-	assert.Equal(t, config, GetConfigDir())
-	assert.Equal(t, data, GetDataDir())
-	assert.Equal(t, cache, GetCacheDir())
-
-	// No legacy directory is created, and nothing is copied into one.
-	assert.NoDirExists(t, filepath.Join(home, ".cagent"))
-
-	// Ensuring again is a no-op.
-	require.NoError(t, EnsureRoots())
-	assert.Equal(t, data, GetDataDir())
-}
-
-func TestEnsureRootsKeepsNonEmptyLegacyRoots(t *testing.T) {
-	resetRootState(t)
-	home := setTestHome(t)
-	targets := xdgTargets(t, home)
-
-	legacy := []string{
-		filepath.Join(home, ".config", "cagent"),
-		filepath.Join(home, ".cagent"),
-		nativeCacheDir(),
-	}
-	var stateFiles []string
-	for _, dir := range legacy {
-		stateFiles = append(stateFiles, writeState(t, dir))
-	}
-
-	require.NoError(t, EnsureRoots())
-
-	getters := []func() string{GetConfigDir, GetDataDir, GetCacheDir}
-	for i, get := range getters {
-		assert.Equal(t, legacy[i], get(), "root %d should stay on its legacy path", i)
-		assert.NoDirExists(t, targets[i], "root %d target must not be created", i)
-		assert.NoFileExists(t, filepath.Join(targets[i], allRoots[i].marker()))
-		assert.FileExists(t, stateFiles[i], "existing state must not be moved or deleted")
-	}
-}
-
-func TestMarkerPrecedenceOverLegacy(t *testing.T) {
-	resetRootState(t)
-	home := setTestHome(t)
-	targets := xdgTargets(t, home)
-
-	for i, target := range targets {
-		require.NoError(t, createMarker(target, allRoots[i].marker()))
-	}
-	// An older binary has recreated the legacy directories in the meantime.
-	legacyFiles := []string{
-		writeState(t, filepath.Join(home, ".config", "cagent")),
-		writeState(t, filepath.Join(home, ".cagent")),
-		writeState(t, nativeCacheDir()),
-	}
-
-	// A marker is honoured even before EnsureRoots runs.
-	assert.Equal(t, targets[1], GetDataDir())
-
-	require.NoError(t, EnsureRoots())
-	getters := []func() string{GetConfigDir, GetDataDir, GetCacheDir}
-	for i, get := range getters {
-		assert.Equal(t, targets[i], get(), "root %d must stay on the marked path", i)
-		assert.FileExists(t, legacyFiles[i], "legacy state must be left untouched")
-	}
-}
-
-func TestEmptyLegacyRootDoesNotBlockAdoption(t *testing.T) {
-	resetRootState(t)
-	clearXDG(t)
-	home := setTestHome(t)
-
-	legacy := filepath.Join(home, ".cagent")
-	require.NoError(t, os.MkdirAll(legacy, 0o700))
-
-	require.NoError(t, EnsureRoots())
-	_, data, _ := expectedDefaults(runtime.GOOS, home)
-	assert.Equal(t, data, GetDataDir())
-	assert.FileExists(t, filepath.Join(data, dataRoot.marker()))
-	assert.DirExists(t, legacy, "empty legacy directory is never removed")
-}
-
-func TestAbsoluteXDGValuesAreHonoured(t *testing.T) {
-	resetRootState(t)
-	clearXDG(t)
-	setTestHome(t)
-	targets := xdgTargets(t, t.TempDir())
-
-	assert.Equal(t, targets[0], GetConfigDir())
-	assert.Equal(t, targets[1], GetDataDir())
-	assert.Equal(t, targets[2], GetCacheDir())
-
-	require.NoError(t, EnsureRoots())
-	assert.Equal(t, targets[1], GetDataDir())
-	assert.FileExists(t, filepath.Join(targets[1], dataRoot.marker()))
-}
-
-func TestRelativeXDGValuesAreIgnored(t *testing.T) {
-	resetRootState(t)
-	clearXDG(t)
-	home := setTestHome(t)
-
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join("some", "relative", "config"))
-	t.Setenv("XDG_DATA_HOME", "relative-data")
-	t.Setenv("XDG_CACHE_HOME", ".")
-
-	config, data, cache := expectedDefaults(runtime.GOOS, home)
-	assert.Equal(t, config, GetConfigDir())
-	assert.Equal(t, data, GetDataDir())
-	assert.Equal(t, cache, GetCacheDir())
-
-	require.NoError(t, EnsureRoots())
-	assert.Equal(t, data, GetDataDir())
-	assert.FileExists(t, filepath.Join(data, dataRoot.marker()))
-	assert.NoDirExists(t, filepath.Join("relative-data", "cagent"))
-}
-
-func TestCrossPlatformDefaults(t *testing.T) {
-	original := currentOS
-	t.Cleanup(func() { currentOS = original })
-
-	for _, goos := range []string{"linux", "darwin", "windows"} {
+	for goos, wantMarked := range marked {
 		t.Run(goos, func(t *testing.T) {
-			resetRootState(t)
-			clearXDG(t)
-			home := setTestHome(t)
-			currentOS = goos
+			home := freshInstall(t, goos)
+			config, data, cache := testutil.DefaultDirs(goos, home)
+			dirs := map[*root]string{configRoot: config, dataRoot: data, cacheRoot: cache}
 
-			config, data, cache := expectedDefaults(goos, home)
 			assert.Equal(t, config, GetConfigDir())
 			assert.Equal(t, data, GetDataDir())
 			assert.Equal(t, cache, GetCacheDir())
 
-			require.NoError(t, EnsureRoots())
-			assert.Equal(t, config, GetConfigDir())
-			assert.Equal(t, data, GetDataDir())
-			assert.Equal(t, cache, GetCacheDir())
-			// Roots sharing a directory (data and cache on Windows) each keep
-			// their own marker.
-			for r, dir := range map[*root]string{configRoot: config, dataRoot: data, cacheRoot: cache} {
-				assert.FileExists(t, filepath.Join(dir, r.marker()))
+			// Ensuring twice is a no-op.
+			for range 2 {
+				assert.Empty(t, ensureRoots(t))
+				assert.Equal(t, config, GetConfigDir())
+				assert.Equal(t, data, GetDataDir())
+				assert.Equal(t, cache, GetCacheDir())
 			}
+
+			for _, r := range allRoots {
+				marker := filepath.Join(dirs[r], r.marker())
+				if slices.Contains(wantMarked, r) {
+					assert.FileExists(t, marker)
+				} else {
+					assert.NoFileExists(t, marker)
+				}
+			}
+			assert.NoDirExists(t, filepath.Join(home, ".cagent"))
 		})
 	}
 }
 
-func TestEnsureRootsMarkerFailureFallsBackToLegacy(t *testing.T) {
-	resetRootState(t)
-	home := setTestHome(t)
-	clearXDG(t)
-
-	// A regular file where the target directory should be makes MkdirAll fail.
+func TestLegacyRootsWithStateStayInPlace(t *testing.T) {
+	home := freshInstall(t, runtime.GOOS)
 	base := t.TempDir()
-	blocked := filepath.Join(base, "cagent")
-	require.NoError(t, os.MkdirAll(base, 0o700))
-	require.NoError(t, os.WriteFile(blocked, []byte("blocked"), 0o600))
-	t.Setenv("XDG_DATA_HOME", base)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
 
-	legacy := writeState(t, filepath.Join(home, ".cagent"))
-	require.NoError(t, EnsureRoots())
-	assert.Equal(t, filepath.Join(home, ".cagent"), GetDataDir())
-	assert.FileExists(t, legacy)
+	legacyConfig := filepath.Join(home, ".config", "cagent")
+	legacyData := filepath.Join(home, ".cagent")
+	files := []string{writeState(t, legacyConfig), writeState(t, legacyData)}
+
+	assert.Empty(t, ensureRoots(t))
+
+	assert.Equal(t, legacyConfig, GetConfigDir())
+	assert.Equal(t, legacyData, GetDataDir())
+	assert.NoDirExists(t, filepath.Join(base, "config", "cagent"), "target must not be created")
+	assert.NoDirExists(t, filepath.Join(base, "data", "cagent"), "target must not be created")
+	for _, f := range files {
+		assert.FileExists(t, f, "existing state must not be moved or deleted")
+	}
+	assert.NoFileExists(t, filepath.Join(legacyData, dataRoot.marker()))
 }
 
-func TestEnsureRootsMarkerFailureWithoutLegacy(t *testing.T) {
-	resetRootState(t)
-	setTestHome(t)
-	clearXDG(t)
+// What counts as state in a legacy root: anything but a marker, on purpose.
+func TestLegacyStateRule(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, legacy string)
+		wantLegacy bool
+		symlink    bool
+	}{
+		{name: "missing", setup: func(*testing.T, string) {}},
+		{name: "empty directory", setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			require.NoError(t, os.MkdirAll(legacy, 0o700))
+		}},
+		{name: "only a root marker", setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			require.NoError(t, createMarker(legacy, cacheRoot.marker()))
+		}},
+		{name: "regular file", setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			require.NoError(t, os.WriteFile(legacy, []byte("not a directory"), 0o600))
+		}},
+		{name: "dangling symlink", symlink: true, setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "gone"), legacy))
+		}},
+		{name: "debug log only", wantLegacy: true, setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			require.NoError(t, os.MkdirAll(legacy, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(legacy, "cagent.debug.log"), nil, 0o600))
+		}},
+		{name: ".DS_Store only", wantLegacy: true, setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			require.NoError(t, os.MkdirAll(legacy, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(legacy, ".DS_Store"), nil, 0o600))
+		}},
+		{name: "empty subdirectory", wantLegacy: true, setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			require.NoError(t, os.MkdirAll(filepath.Join(legacy, "sessions"), 0o700))
+		}},
+		{name: "symlink to a directory with state", wantLegacy: true, symlink: true, setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			elsewhere := t.TempDir()
+			writeState(t, elsewhere)
+			require.NoError(t, os.Symlink(elsewhere, legacy))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.symlink && runtime.GOOS == "windows" {
+				t.Skip("creating symlinks needs a privilege on Windows")
+			}
+			home := freshInstall(t, runtime.GOOS)
+			legacy := filepath.Join(home, ".cagent")
+			tt.setup(t, legacy)
+			_, target, _ := testutil.DefaultDirs(runtime.GOOS, home)
+
+			want := target
+			if tt.wantLegacy {
+				want = legacy
+			}
+			assert.Equal(t, want, GetDataDir(), "before EnsureRoots")
+			assert.Empty(t, ensureRoots(t))
+			assert.Equal(t, want, GetDataDir())
+			assert.Equal(t, !tt.wantLegacy, markerExists(target, dataRoot.marker()))
+		})
+	}
+}
+
+// An unreadable legacy root is not an empty one: adopting the new root would
+// hide the user's data behind a marker for good.
+func TestUnreadableLegacyRootIsKept(t *testing.T) {
+	skipWithoutPermissionChecks(t)
+	home := freshInstall(t, runtime.GOOS)
+	legacy := filepath.Join(home, ".cagent")
+	writeState(t, legacy)
+	require.NoError(t, os.Chmod(legacy, 0))
+	t.Cleanup(func() { _ = os.Chmod(legacy, 0o700) })
+	_, target, _ := testutil.DefaultDirs(runtime.GOOS, home)
+
+	assert.Equal(t, legacy, GetDataDir(), "before EnsureRoots")
+
+	warnings, err := EnsureRoots()
+	require.NoError(t, err)
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "cannot read "+legacy)
+	assert.Equal(t, legacy, GetDataDir())
+	assert.NoDirExists(t, target, "no marker may pin the new root")
+}
+
+func TestMarkerWinsOverRecreatedLegacyRoot(t *testing.T) {
+	home := freshInstall(t, runtime.GOOS)
+	_, target, _ := testutil.DefaultDirs(runtime.GOOS, home)
+	assert.Empty(t, ensureRoots(t))
+	require.FileExists(t, filepath.Join(target, dataRoot.marker()))
+
+	// An older binary recreates the legacy root after adoption.
+	legacyFile := writeState(t, filepath.Join(home, ".cagent"))
+	forgetDecisions()
+	assert.Equal(t, target, GetDataDir(), "a marker is honoured before EnsureRoots runs")
+
+	warnings, err := EnsureRoots()
+	assert.Empty(t, warnings)
+	require.ErrorContains(t, err, "also holds state and is ignored")
+	assert.Equal(t, target, GetDataDir())
+	assert.FileExists(t, legacyFile, "legacy state must be left untouched")
+}
+
+func TestAbsoluteXDGValuesAreHonoured(t *testing.T) {
+	freshInstall(t, runtime.GOOS)
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(base, "cache"))
+
+	for range 2 {
+		assert.Equal(t, filepath.Join(base, "config", "cagent"), GetConfigDir())
+		assert.Equal(t, filepath.Join(base, "data", "cagent"), GetDataDir())
+		assert.Equal(t, filepath.Join(base, "cache", "cagent"), GetCacheDir())
+		assert.Empty(t, ensureRoots(t))
+	}
+	assert.FileExists(t, filepath.Join(base, "data", "cagent", dataRoot.marker()))
+}
+
+func TestRelativeXDGValuesAreIgnored(t *testing.T) {
+	home := freshInstall(t, runtime.GOOS)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join("some", "relative", "config"))
+	t.Setenv("XDG_DATA_HOME", "relative-data")
+	t.Setenv("XDG_CACHE_HOME", ".")
+
+	config, data, cache := testutil.DefaultDirs(runtime.GOOS, home)
+	for range 2 {
+		assert.Equal(t, config, GetConfigDir())
+		assert.Equal(t, data, GetDataDir())
+		assert.Equal(t, cache, GetCacheDir())
+		assert.Empty(t, ensureRoots(t))
+	}
+	assert.NoDirExists(t, filepath.Join("relative-data", "cagent"))
+}
+
+// Earlier versions resolved the cache through os.UserCacheDir, which honours
+// XDG_CACHE_HOME everywhere but macOS and Windows.
+func TestExistingCacheIsNotRelocated(t *testing.T) {
+	t.Run("linux keeps a cache under XDG_CACHE_HOME", func(t *testing.T) {
+		home := freshInstall(t, "linux")
+		base := t.TempDir()
+		t.Setenv("XDG_CACHE_HOME", base)
+		existing := filepath.Join(base, "cagent")
+		writeState(t, existing)
+		writeState(t, filepath.Join(home, ".cache", "cagent"))
+
+		assert.Empty(t, ensureRoots(t))
+		assert.Equal(t, existing, GetCacheDir())
+	})
+
+	t.Run("darwin keeps the native cache when XDG_CACHE_HOME appears", func(t *testing.T) {
+		home := freshInstall(t, "darwin")
+		t.Setenv("XDG_CACHE_HOME", t.TempDir())
+		existing := filepath.Join(home, "Library", "Caches", "cagent")
+		writeState(t, existing)
+
+		assert.Empty(t, ensureRoots(t))
+		assert.Equal(t, existing, GetCacheDir())
+	})
+}
+
+// A root whose legacy location is the target itself (Linux config without
+// XDG_CONFIG_HOME) has no choice to record, so nothing is written into it.
+func TestTargetEqualToLegacyWritesNoMarker(t *testing.T) {
+	home := freshInstall(t, "linux")
+	config := filepath.Join(home, ".config", "cagent")
+	file := writeState(t, config)
+
+	assert.Empty(t, ensureRoots(t))
+	assert.Equal(t, config, GetConfigDir())
+
+	entries, err := os.ReadDir(config)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "only the pre-existing file")
+	assert.Equal(t, filepath.Base(file), entries[0].Name())
+}
+
+// Pointing XDG_DATA_HOME elsewhere after adoption selects a fresh root; the
+// user is told once that the adopted one is left behind.
+func TestXDGChangedAfterAdoptionWarnsOnce(t *testing.T) {
+	home := freshInstall(t, runtime.GOOS)
+	_, adopted, _ := testutil.DefaultDirs(runtime.GOOS, home)
+	assert.Empty(t, ensureRoots(t))
+	session := writeState(t, adopted)
 
 	base := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(base, "cagent"), []byte("blocked"), 0o600))
 	t.Setenv("XDG_DATA_HOME", base)
+	moved := filepath.Join(base, "cagent")
 
-	err := EnsureRoots()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "data root marker")
-}
+	forgetDecisions()
+	warnings := ensureRoots(t)
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], adopted)
+	assert.Contains(t, warnings[0], moved)
+	assert.Equal(t, moved, GetDataDir())
+	assert.FileExists(t, session, "the adopted root is left untouched")
 
-func TestEnsureRootsSkipsOverrides(t *testing.T) {
-	resetRootState(t)
-	clearXDG(t)
-	setTestHome(t)
-
-	override := t.TempDir()
-	SetDataDir(override)
-	SetConfigDir(override)
-	SetCacheDir(override)
-
-	require.NoError(t, EnsureRoots())
-	assert.Equal(t, override, GetDataDir())
-	assert.Equal(t, override, GetConfigDir())
-	assert.Equal(t, override, GetCacheDir())
-	assert.NoFileExists(t, filepath.Join(override, dataRoot.marker()))
-}
-
-func TestEnsureRootsSkipsSetRoot(t *testing.T) {
-	resetRootState(t)
-	clearXDG(t)
-	setTestHome(t)
-
-	root := t.TempDir()
-	SetRoot(root)
-	t.Cleanup(func() { SetRoot("") })
-
-	require.NoError(t, EnsureRoots())
-	assert.Equal(t, filepath.Join(root, "data"), GetDataDir())
-	assert.Equal(t, filepath.Join(root, "config"), GetConfigDir())
-	assert.Equal(t, filepath.Join(root, "cache"), GetCacheDir())
-	assert.NoFileExists(t, filepath.Join(root, "data", dataRoot.marker()))
+	forgetDecisions()
+	assert.Empty(t, ensureRoots(t), "the new root is marked, so the warning does not repeat")
+	assert.Equal(t, moved, GetDataDir())
 }
 
 // Config and data share one directory on macOS: a marker created for one root
 // must not make the other adopt it and abandon its legacy state.
 func TestSharedTargetDoesNotAdoptOtherRootsLegacyState(t *testing.T) {
-	original := currentOS
-	t.Cleanup(func() { currentOS = original })
-
 	tests := []struct {
 		name         string
 		legacyConfig bool
@@ -326,12 +367,8 @@ func TestSharedTargetDoesNotAdoptOtherRootsLegacyState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resetRootState(t)
-			clearXDG(t)
-			home := setTestHome(t)
-			currentOS = "darwin"
-
-			wantConfig, wantData, _ := expectedDefaults("darwin", home)
+			home := freshInstall(t, "darwin")
+			wantConfig, wantData, _ := testutil.DefaultDirs("darwin", home)
 			var files []string
 			if tt.legacyConfig {
 				wantConfig = filepath.Join(home, ".config", "cagent")
@@ -342,15 +379,11 @@ func TestSharedTargetDoesNotAdoptOtherRootsLegacyState(t *testing.T) {
 				files = append(files, writeState(t, wantData))
 			}
 
-			// Run twice, resetting in-memory decisions in between, to model two
-			// separate process launches.
 			for range 2 {
-				require.NoError(t, EnsureRoots())
+				assert.Empty(t, ensureRoots(t))
 				assert.Equal(t, wantConfig, GetConfigDir())
 				assert.Equal(t, wantData, GetDataDir())
-				for _, r := range allRoots {
-					r.mode.Store(int32(modeUndecided))
-				}
+				forgetDecisions()
 			}
 			assert.Equal(t, wantConfig, GetConfigDir())
 			assert.Equal(t, wantData, GetDataDir())
@@ -361,41 +394,117 @@ func TestSharedTargetDoesNotAdoptOtherRootsLegacyState(t *testing.T) {
 	}
 }
 
-// A directory squatting on the marker path is not a marker: O_EXCL reports
-// EEXIST for it, but the root must not be treated as adopted.
-func TestEnsureRootsMarkerPathIsDirectory(t *testing.T) {
-	setup := func(t *testing.T) (home, target string) {
-		t.Helper()
-		resetRootState(t)
-		clearXDG(t)
-		home = setTestHome(t)
-		base := t.TempDir()
-		t.Setenv("XDG_DATA_HOME", base)
-		target = filepath.Join(base, "cagent")
+// A marker that cannot be written must not stop the command: the root is used
+// unmarked and the failure is only reported for logging.
+func TestMarkerFailureUsesTargetUnmarked(t *testing.T) {
+	t.Run("directory squatting on the marker path", func(t *testing.T) {
+		home := freshInstall(t, runtime.GOOS)
+		_, target, _ := testutil.DefaultDirs(runtime.GOOS, home)
 		require.NoError(t, os.MkdirAll(filepath.Join(target, dataRoot.marker()), 0o700))
-		return home, target
-	}
+		// An empty legacy directory is no reason to fall back to it.
+		require.NoError(t, os.MkdirAll(filepath.Join(home, ".cagent"), 0o700))
 
-	t.Run("createMarker reports failure", func(t *testing.T) {
-		_, target := setup(t)
 		require.Error(t, createMarker(target, dataRoot.marker()))
+
+		warnings, err := EnsureRoots()
+		assert.Empty(t, warnings)
+		require.ErrorContains(t, err, "data directory: using "+target+" unmarked")
+		assert.Equal(t, target, GetDataDir())
 		assert.False(t, markerExists(target, dataRoot.marker()))
 	})
 
-	t.Run("falls back to an existing legacy root", func(t *testing.T) {
-		home, target := setup(t)
-		legacy := filepath.Join(home, ".cagent")
-		require.NoError(t, os.MkdirAll(legacy, 0o700))
+	t.Run("read-only home on a fresh install", func(t *testing.T) {
+		skipWithoutPermissionChecks(t)
+		home := freshInstall(t, runtime.GOOS)
+		config, data, cache := testutil.DefaultDirs(runtime.GOOS, home)
+		require.NoError(t, os.Chmod(home, 0o500))
+		t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
 
-		require.NoError(t, EnsureRoots())
-		assert.Equal(t, legacy, GetDataDir())
-		assert.NotEqual(t, target, GetDataDir())
-	})
+		warnings, err := EnsureRoots()
+		assert.Empty(t, warnings)
+		require.ErrorContains(t, err, "unmarked")
+		assert.Equal(t, config, GetConfigDir())
+		assert.Equal(t, data, GetDataDir())
+		assert.Equal(t, cache, GetCacheDir())
 
-	t.Run("fails startup without a legacy root", func(t *testing.T) {
-		setup(t)
-		err := EnsureRoots()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "data root marker")
+		entries, readErr := os.ReadDir(home)
+		require.NoError(t, readErr)
+		assert.Empty(t, entries)
 	})
+}
+
+// Without a home directory, state falls back to a temp dir shared between
+// users: no marker is written there and nothing fails.
+func TestUnknownHomeUsesTempDirWithoutMarkers(t *testing.T) {
+	resetRootState(t)
+	clearXDG(t)
+	tmp := t.TempDir()
+	for _, name := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"} {
+		t.Setenv(name, "")
+	}
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, tmp)
+	}
+	require.Empty(t, GetHomeDir())
+
+	assert.Empty(t, ensureRoots(t))
+	assert.Equal(t, filepath.Join(os.TempDir(), ".cagent-config"), GetConfigDir())
+	assert.Equal(t, filepath.Join(os.TempDir(), ".cagent"), GetDataDir())
+	assert.Equal(t, filepath.Join(os.TempDir(), ".cagent-cache"), GetCacheDir())
+
+	entries, err := os.ReadDir(tmp)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "nothing is created in the shared temp dir")
+}
+
+func TestCreateMarkerIsRaceSafe(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "cagent")
+	const workers = 16
+
+	errs := make([]error, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Go(func() {
+			<-start
+			errs[i] = createMarker(target, dataRoot.marker())
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+	assert.True(t, markerExists(target, dataRoot.marker()))
+	entries, err := os.ReadDir(target)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
+}
+
+func TestEnsureRootsSkipsOverrides(t *testing.T) {
+	freshInstall(t, runtime.GOOS)
+	override := t.TempDir()
+	SetDataDir(override)
+	SetConfigDir(override)
+	SetCacheDir(override)
+
+	assert.Empty(t, ensureRoots(t))
+	assert.Equal(t, override, GetDataDir())
+	assert.Equal(t, override, GetConfigDir())
+	assert.Equal(t, override, GetCacheDir())
+	assert.NoFileExists(t, filepath.Join(override, dataRoot.marker()))
+}
+
+func TestEnsureRootsSkipsSetRoot(t *testing.T) {
+	freshInstall(t, runtime.GOOS)
+	root := t.TempDir()
+	SetRoot(root)
+	t.Cleanup(func() { SetRoot("") })
+
+	assert.Empty(t, ensureRoots(t))
+	assert.Equal(t, filepath.Join(root, "data"), GetDataDir())
+	assert.Equal(t, filepath.Join(root, "config"), GetConfigDir())
+	assert.Equal(t, filepath.Join(root, "cache"), GetCacheDir())
+	assert.NoFileExists(t, filepath.Join(root, "data", dataRoot.marker()))
 }

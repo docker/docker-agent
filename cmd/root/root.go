@@ -86,11 +86,11 @@ New to docker agent? Take the hands-on tour: docker agent getting-started`,
 				paths.SetDataDir(dataDir)
 			}
 
-			// Adopt the XDG/native roots (or keep an existing legacy install)
-			// before anything writes state: the first-run marker, the debug
-			// log, telemetry, sessions, caches.
-			if err := paths.EnsureRoots(); err != nil {
-				return fmt.Errorf("initializing state directories: %w", err)
+			// Settle where state lives before anything writes it. A problem
+			// here must not stop the command (read-only or missing HOME).
+			rootWarnings, rootsErr := paths.EnsureRoots()
+			for _, warning := range rootWarnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Warning:", warning)
 			}
 
 			// Set the version for automatic telemetry initialization
@@ -128,6 +128,10 @@ We collect anonymous usage data to help improve docker agent. To disable:
 						return slog.LevelInfo
 					}(),
 				})))
+			}
+
+			if rootsErr != nil {
+				slog.Warn("State directories", "error", rootsErr)
 			}
 
 			telemetry.SetGlobalTelemetryDebugMode(flags.debugMode)

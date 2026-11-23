@@ -10,7 +10,7 @@ import (
 )
 
 // ToolsDir returns the base directory for installed tools.
-// Checks DOCKER_AGENT_TOOLS_DIR env var, defaults to ~/.cagent/tools/
+// Checks DOCKER_AGENT_TOOLS_DIR env var, defaults to <data-dir>/tools/
 func ToolsDir() string {
 	if dir := os.Getenv("DOCKER_AGENT_TOOLS_DIR"); dir != "" {
 		return filepath.Clean(dir)

@@ -74,28 +74,10 @@ func TestGetHomeDirUsesPlatformNativeHome(t *testing.T) {
 
 	assert.Equal(t, filepath.Clean(userHome), paths.GetHomeDir())
 
-	config, data, cache := expectedDefaults(runtime.GOOS, home)
+	config, data, cache := testutil.DefaultDirs(runtime.GOOS, home)
 	assert.Equal(t, config, paths.GetConfigDir())
 	assert.Equal(t, data, paths.GetDataDir())
 	assert.Equal(t, cache, paths.GetCacheDir())
-}
-
-func expectedDefaults(goos, home string) (config, data, cache string) {
-	switch goos {
-	case "darwin":
-		support := filepath.Join(home, "Library", "Application Support")
-		return filepath.Join(support, "cagent"),
-			filepath.Join(support, "cagent"),
-			filepath.Join(home, "Library", "Caches", "cagent")
-	case "windows":
-		return filepath.Join(home, "AppData", "Roaming", "cagent"),
-			filepath.Join(home, "AppData", "Local", "cagent"),
-			filepath.Join(home, "AppData", "Local", "cagent")
-	default:
-		return filepath.Join(home, ".config", "cagent"),
-			filepath.Join(home, ".local", "share", "cagent"),
-			filepath.Join(home, ".cache", "cagent")
-	}
 }
 
 func TestSetRoot(t *testing.T) {
@@ -115,11 +97,4 @@ func TestSetRoot(t *testing.T) {
 	assert.Equal(t, defaultData, paths.GetDataDir())
 	assert.Equal(t, defaultConfig, paths.GetConfigDir())
 	assert.Equal(t, defaultCache, paths.GetCacheDir())
-}
-
-func TestEnsureRootsIsIdempotent(t *testing.T) {
-	require.NoError(t, paths.EnsureRoots())
-	dir := paths.GetDataDir()
-	require.NoError(t, paths.EnsureRoots())
-	assert.Equal(t, dir, paths.GetDataDir())
 }

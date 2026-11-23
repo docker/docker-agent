@@ -356,7 +356,7 @@ func DefaultTheme() *Theme {
 const UserThemePrefix = "user:"
 
 // ListThemeRefs returns the list of available theme references.
-// It includes all built-in themes (including "default") and user themes from ~/.cagent/themes/.
+// It includes all built-in themes (including "default") and user themes from <data-dir>/themes/.
 // User themes with names matching built-in themes are prefixed with "user:" to distinguish them.
 // The "default" theme is always listed first for UX purposes.
 func ListThemeRefs() ([]string, error) {
@@ -450,7 +450,7 @@ func (r *themeRegistry) listBuiltinThemeRefs() ([]string, error) {
 	return slices.Clone(refs), nil
 }
 
-// listUserThemeRefs returns the list of user theme references from ~/.cagent/themes/.
+// listUserThemeRefs returns the list of user theme references from <data-dir>/themes/.
 func listUserThemeRefs() ([]string, error) {
 	return listThemeRefsFrom(ThemesDir())
 }
