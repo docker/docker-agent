@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"bufio"
+	"bytes"
 	"os"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,4 +46,24 @@ func TestTerminalSizeWithoutTTY(t *testing.T) {
 	w, h := terminal.Size()
 	assert.Equal(t, 80, w)
 	assert.Equal(t, 24, h)
+}
+
+func TestTerminalSetWindowTitle(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	terminal := &Terminal{writer: bufio.NewWriter(&buf)}
+
+	terminal.SetWindowTitle("docker agent: Fix auth bug")
+	assert.Equal(t, ansi.SetWindowTitle("docker agent: Fix auth bug"), buf.String())
+
+	buf.Reset()
+	terminal.SetWindowTitle("docker agent: Line 1\nLine 2\x07\x1b]0;injected")
+	assert.Equal(t, ansi.SetWindowTitle("docker agent: Line 1 Line 2]0;injected"), buf.String())
+
+	var nilTerm *Terminal
+	assert.NotPanics(t, func() {
+		nilTerm.SetWindowTitle("ignored")
+		(&Terminal{}).SetWindowTitle("ignored")
+	})
 }

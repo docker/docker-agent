@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strings"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -87,6 +89,30 @@ func (t *Terminal) Writer() *bufio.Writer {
 func (t *Terminal) SetClipboard(text string) {
 	t.writeString(ansi.SetSystemClipboard(text))
 	t.flush()
+}
+
+func (t *Terminal) SetWindowTitle(title string) {
+	if t == nil || t.writer == nil {
+		return
+	}
+	t.writeString(ansi.SetWindowTitle(sanitizeWindowTitle(title)))
+	t.flush()
+}
+
+func sanitizeWindowTitle(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\r' || r == '\n' || r == '\t':
+			b.WriteByte(' ')
+		case unicode.IsControl(r):
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func (t *Terminal) writeString(s string) {

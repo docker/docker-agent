@@ -50,7 +50,6 @@ func TestBuildConfig_ServiceTier(t *testing.T) {
 	}
 }
 
-// Title generation returns early from buildConfig; the tier must already be set.
 func TestBuildConfig_ServiceTier_NoThinkingTitle(t *testing.T) {
 	t.Parallel()
 
@@ -60,7 +59,8 @@ func TestBuildConfig_ServiceTier_NoThinkingTitle(t *testing.T) {
 	}}
 
 	config := client.buildConfig(t.Context())
-	assert.Nil(t, config.ThinkingConfig)
+	require.NotNil(t, config.ThinkingConfig)
+	assert.Equal(t, genai.ThinkingLevelLow, config.ThinkingConfig.ThinkingLevel)
 	assert.Equal(t, genai.ServiceTierFlex, config.ServiceTier)
 }
 

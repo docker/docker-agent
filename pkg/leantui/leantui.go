@@ -90,6 +90,9 @@ func Run(ctx context.Context, cfg Config) error {
 	m.status.Branch = branchWatcher.Current()
 	m.commitWelcome()
 	m.loadInitialSessionTranscript()
+	if m.sessionState != nil {
+		m.applySessionTitle(m.sessionState.SessionTitle())
+	}
 	m.refreshCommands(loopCtx)
 
 	keys := make(chan ui.Key, 64)
@@ -323,6 +326,9 @@ type model struct {
 
 	quitting         bool
 	appName          string
+	windowTitleSet   bool
+	lastWindowTitle  string
+	setWindowTitle   func(string)
 	banner           []string
 	disabledCommands map[string]bool
 	renderImages     bool
@@ -333,11 +339,13 @@ type model struct {
 	hideBanner bool
 }
 
+const defaultAppName = "docker agent"
+
 func newModel(term *ui.Terminal, cfg Config) *model {
 	w, h := term.Size()
 	appName := cfg.AppName
 	if appName == "" {
-		appName = "docker agent"
+		appName = defaultAppName
 	}
 	disabled := make(map[string]bool, len(cfg.DisabledCommands))
 	for _, c := range cfg.DisabledCommands {
@@ -373,6 +381,40 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 		imageSupport:     renderImages,
 		sendMode:         messages.ParseSendMode(userconfig.Get().GetBusySendMode()),
 		hideBanner:       cfg.ShowBanner != nil && !*cfg.ShowBanner,
+	}
+}
+
+func formatWindowTitle(appName, sessionTitle string) string {
+	if appName == "" {
+		appName = defaultAppName
+	}
+	title := strings.TrimSpace(sessionTitle)
+	if title == "" {
+		return appName
+	}
+	return appName + ": " + title
+}
+
+func (m *model) applySessionTitle(title string) {
+	trimmed := strings.TrimSpace(title)
+	if m.sessionState != nil {
+		m.sessionState.SetSessionTitle(trimmed)
+	}
+	if trimmed == "" && !m.windowTitleSet {
+		return
+	}
+	windowTitle := formatWindowTitle(m.appName, trimmed)
+	if m.windowTitleSet && windowTitle == m.lastWindowTitle {
+		return
+	}
+	m.windowTitleSet = true
+	m.lastWindowTitle = windowTitle
+	if m.setWindowTitle != nil {
+		m.setWindowTitle(windowTitle)
+		return
+	}
+	if m.term != nil {
+		m.term.SetWindowTitle(windowTitle)
 	}
 }
 

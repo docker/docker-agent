@@ -521,21 +521,18 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 	// Apply thinking configuration for Gemini models.
 	// See https://ai.google.dev/gemini-api/docs/thinking
 	if c.ModelOptions.NoThinking() {
-		if c.ModelOptions.GeneratingTitle() {
-			return config
-		}
-
 		if modelinfo.ResolveReasoningSupport(ctx, c.ModelOptions.ModelsDevStore(), c.ID()) != modelinfo.ReasoningUnsupported {
-			// NoThinking requested (e.g. MCP sampling). For Gemini 3+ models
-			// that always think, use the lowest level and bump MaxOutputTokens so
-			// internal reasoning doesn't consume the entire budget. Gemini 2.5 and
-			// older can fully disable thinking with ThinkingBudget=0.
+			// NoThinking requested (e.g. title generation, MCP sampling). For
+			// Gemini 3+ models that always think, use the lowest level and bump
+			// MaxOutputTokens so internal reasoning doesn't consume the entire
+			// budget. Gemini 2.5 and older can fully disable thinking with
+			// ThinkingBudget=0.
 			if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
 				config.ThinkingConfig = &genai.ThinkingConfig{
 					IncludeThoughts: false,
 					ThinkingLevel:   genai.ThinkingLevelLow,
 				}
-				const minOutputTokens int32 = 200
+				const minOutputTokens int32 = 512
 				if config.MaxOutputTokens < minOutputTokens {
 					config.MaxOutputTokens = minOutputTokens
 				}

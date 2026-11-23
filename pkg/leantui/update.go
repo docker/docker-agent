@@ -351,6 +351,7 @@ func (m *model) handleSlash(ctx context.Context, text string, mode busySubmitMod
 		m.eventGeneration.Add(1)
 		m.app.NewSession()
 		m.resetConversation()
+		m.applySessionTitle("")
 		m.addNotice("", "Started a new session.", ui.StMuted())
 		m.refreshCommands(ctx)
 		return true
@@ -512,6 +513,7 @@ func (m *model) resumeSession(ctx context.Context, sessionID string) {
 	m.resetConversation()
 	m.screen.Transcript = ui.NewTranscript()
 	m.sessionState = service.NewSessionState(sess)
+	m.applySessionTitle(sess.Title)
 	m.loadSessionTranscript(sess)
 	m.refreshCommands(ctx)
 	title := strings.TrimSpace(sess.Title)

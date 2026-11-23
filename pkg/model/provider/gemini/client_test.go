@@ -73,10 +73,24 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 		wantMinTokens bool
 	}{
 		{
-			name:         "title generation omits thinking config",
-			model:        "gemini-3-flash",
+			name:         "title generation omits thinking for non-thinking image model",
+			model:        "gemini-2.5-flash-image",
 			opts:         []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
 			wantThinking: false,
+		},
+		{
+			name:          "title generation uses low thinking for Gemini 3",
+			model:         "gemini-3-flash",
+			opts:          []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
+			wantThinking:  true,
+			wantMinTokens: true,
+		},
+		{
+			name:          "title generation uses low thinking for Gemini 4",
+			model:         "gemini-4-neon",
+			opts:          []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
+			wantThinking:  true,
+			wantMinTokens: true,
 		},
 		{
 			name:         "MCP sampling omits thinking for non-thinking image model",
