@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -186,4 +187,107 @@ func TestHandleThemePreviewResolvesAuto(t *testing.T) {
 	_, _ = m.handleThemePreview(styles.AutoThemeRef)
 	assert.Equal(t, styles.DefaultLightThemeRef, styles.CurrentTheme().Ref)
 	assert.False(t, styles.AutoThemeEnabled(), "previewing auto must not enable it")
+}
+
+func TestThemeSwitchRecolorsDrafts(t *testing.T) {
+	setupAutoThemeTest(t)
+	styles.ApplyTheme(styles.DefaultTheme())
+	m := newTabLifecycleModel(t)
+	first := m.activeTab.editor
+	first.SetValue("Q1")
+	_, _ = m.handleSpawnSession("/second")
+	_, _ = m.Update(messages.RequestFocusMsg{Target: messages.PanelEditor})
+	for _, r := range "Q2" {
+		_, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+
+	checkDrafts := func() {
+		t.Helper()
+		want := color.RGBAModel.Convert(styles.TextPrimary)
+		assert.Equal(t, want, themeTestForeground(t, m.activeTab.editor.View(), "Q"), "active draft")
+		assert.Equal(t, want, themeTestForeground(t, first.View(), "Q"), "background draft")
+	}
+	checkDrafts()
+	_, cmd := m.Update(messages.ChangeThemeMsg{ThemeRef: styles.DefaultLightThemeRef})
+	for _, msg := range collectMsgs(cmd) {
+		_, _ = m.Update(msg)
+	}
+	require.Equal(t, styles.DefaultLightThemeRef, styles.CurrentTheme().Ref)
+	checkDrafts()
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	require.Equal(t, "Qx2", m.activeTab.editor.Value())
+	require.Equal(t, "Q1", first.Value())
+}
+
+func TestThemeSwitchRecolorsInactiveTab(t *testing.T) {
+	setupAutoThemeTest(t)
+	styles.ApplyTheme(styles.DefaultTheme())
+	m := newTabLifecycleModel(t)
+	firstID := m.supervisor.ActiveID()
+	page := m.activeTab.chatPage
+	_, _ = m.Update(messages.RoutedMsg{SessionID: firstID, Inner: runtime.UserMessage("Ω first prompt", m.application.Session().ID, nil)})
+	_ = m.resizeAll()
+	beforePrompt := themeTestForeground(t, page.View(), "Ω")
+
+	event := &runtime.ElicitationRequestEvent{ElicitationID: "first"}
+	_, _ = m.Update(queuedRuntimeDelivery(m, firstID, event))
+	prompt := m.dialogMgr.TopDialog()
+	require.NotNil(t, prompt)
+	_, _ = m.Update(tea.PasteMsg{Content: "Ψ unfinished answer"})
+	beforeInput := themeTestForeground(t, prompt.View(), "Ψ")
+
+	_, _ = m.handleSpawnSession("/second")
+	require.NotSame(t, page, m.activeTab.chatPage)
+	require.Same(t, prompt, m.tabs[firstID].attentionDialogs[event])
+	_, _ = m.Update(messages.ThemePreviewMsg{ThemeRef: styles.DefaultLightThemeRef})
+	require.Equal(t, styles.DefaultLightThemeRef, styles.CurrentTheme().Ref)
+
+	want := color.RGBAModel.Convert(styles.TextPrimary)
+	require.NotEqual(t, want, beforePrompt)
+	require.NotEqual(t, want, beforeInput)
+	assert.Equal(t, want, themeTestForeground(t, page.View(), "Ω"), "inactive transcript updates without a resize")
+	_, _ = m.handleSwitchTab(firstID)
+	require.Same(t, prompt, m.dialogMgr.TopDialog())
+	assert.Equal(t, want, themeTestForeground(t, prompt.View(), "Ψ"), "parked input keeps its draft and uses the new color")
+}
+
+func TestThemeSwitchRecolorsLeanWorkingIndicator(t *testing.T) {
+	setupAutoThemeTest(t)
+	styles.ApplyTheme(styles.DefaultTheme())
+	m := newSpawnTestModel(t, &spySpawner{}, WithLeanMode())
+	m.initSessionComponents(m.supervisor.ActiveID(), m.application, m.application.Session())
+	t.Cleanup(func() {
+		m.cleanupAll()
+		m.cleanupManagedResources()
+	})
+	_, _ = m.handleWorkingStateChanged(messages.WorkingStateChangedMsg{Working: true})
+	spinner := m.workingSpinner
+	dots := m.workingSpinner.RawFrame()
+	before := m.renderLeanWorkingIndicator()
+	oldColor := themeTestForeground(t, before, dots)
+	assert.Equal(t, oldColor, themeTestForeground(t, before, "W"))
+
+	_, _ = m.Update(messages.ThemePreviewMsg{ThemeRef: styles.DefaultLightThemeRef})
+	want := color.RGBAModel.Convert(styles.TabAccentFg)
+	require.NotEqual(t, want, oldColor)
+	require.Same(t, spinner, m.workingSpinner)
+	after := m.renderLeanWorkingIndicator()
+	assert.Equal(t, ansi.Strip(before), ansi.Strip(after), "theme switch should not advance the animation")
+	assert.Equal(t, want, themeTestForeground(t, after, dots))
+	assert.Equal(t, want, themeTestForeground(t, after, "W"))
+}
+
+func themeTestForeground(t *testing.T, view, content string) color.Color {
+	t.Helper()
+	for _, line := range uv.NewStyledString(view).Lines(ansi.GraphemeWidth) {
+		for _, cell := range line {
+			if cell.Content == content {
+				require.NotNil(t, cell.Style.Fg, "text has no foreground color")
+				return color.RGBAModel.Convert(cell.Style.Fg)
+			}
+		}
+	}
+	t.Fatalf("%q missing from rendered view", content)
+	return nil
 }

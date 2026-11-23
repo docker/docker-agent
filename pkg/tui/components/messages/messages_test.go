@@ -25,8 +25,65 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuimessages "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
+
+func TestThemeChangedRestylesExistingUserPrompt(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	styles.ApplyTheme(styles.DefaultTheme())
+
+	const prompt = "Explain the code"
+	newTranscript := func() Model {
+		m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{})
+		m.AddUserMessage(prompt)
+		return m
+	}
+	existing := newTranscript()
+	before := existing.View()
+	require.Contains(t, ansi.Strip(before), prompt)
+
+	theme := styles.DefaultTheme()
+	theme.Colors.TextPrimary = "#123456"
+	theme.Colors.BackgroundAlt = "#abcdef"
+	theme.Colors.Accent = "#316497"
+	styles.ApplyTheme(theme)
+
+	updated, _ := existing.Update(tuimessages.ThemeChangedMsg{})
+	want := newTranscript().View()
+	require.NotEqual(t, want, before, "a fresh prompt should use the new colors")
+	require.Equal(t, ansi.Strip(before), ansi.Strip(want), "only styles should change")
+	assert.Equal(t, want, updated.View(), "an existing prompt should use the same colors as a fresh one")
+}
+
+func TestThemeChangedRestylesInlineEdit(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	styles.ApplyTheme(styles.DefaultTheme())
+
+	newEditor := func(content string) *model {
+		m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+		m.AddUserMessage("original prompt")
+		m.StartInlineEdit(0, 0, content)
+		return m
+	}
+	m := newEditor("draft")
+	_, _ = m.Update(tea.PasteMsg{Content: " text"})
+	before := m.inlineEditTextarea.View()
+
+	theme := styles.DefaultTheme()
+	theme.Colors.TextPrimary = "#123456"
+	theme.Colors.BackgroundAlt = "#abcdef"
+	styles.ApplyTheme(theme)
+	_, _ = m.Update(tuimessages.ThemeChangedMsg{})
+
+	require.Equal(t, "draft text", m.inlineEditTextarea.Value())
+	want := newEditor("draft text").inlineEditTextarea.View()
+	require.NotEqual(t, want, before)
+	require.Equal(t, ansi.Strip(before), ansi.Strip(want))
+	assert.Equal(t, want, m.inlineEditTextarea.View())
+}
 
 func TestViewDoesNotWrapWideLines(t *testing.T) {
 	t.Parallel()

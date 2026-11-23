@@ -147,3 +147,43 @@ func TestRunEarlyReturnKeepsFollowUpTurnsAlive(t *testing.T) {
 	assert.NilError(t, secondTurnCtxErr)
 	assert.Check(t, strings.Contains(buf.String(), "second turn answer"), "the follow-up turn must run: %q", buf.String())
 }
+
+// A declined max-iterations prompt must not end the turn: a capped sub-agent
+// hands back to its parent (#4947).
+func TestRunMaxIterationsDeclineKeepsTurnAlive(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stdin string
+	}{
+		{name: "unreadable stdin", stdin: ""},
+		{name: "explicit no", stdin: "n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			swapStdin(t, tc.stdin)
+
+			rt := &mockRuntime{
+				runStreamFn: func(ctx context.Context, _ *session.Session) <-chan runtime.Event {
+					ch := make(chan runtime.Event)
+					go func() {
+						defer close(ch)
+						ch <- maxIterEvent(1)
+						select {
+						case ch <- runtime.AgentChoice("root", "sess", "parent answer"):
+						case <-ctx.Done():
+						}
+					}()
+					return ch
+				},
+			}
+
+			var buf bytes.Buffer
+			err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, session.New(), []string{"hello"})
+			assert.NilError(t, err)
+
+			resumes := rt.getResumes()
+			assert.Equal(t, len(resumes), 1)
+			assert.Equal(t, resumes[0].Type, runtime.ResumeTypeReject)
+			assert.Check(t, strings.Contains(buf.String(), "parent answer"), "events after the decline must still be printed: %q", buf.String())
+		})
+	}
+}

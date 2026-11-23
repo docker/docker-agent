@@ -410,6 +410,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// Theme changed - invalidate all render caches
 		m.invalidateAllItems()
 		m.toolRenderers.InvalidateCaches()
+		if m.inlineEditMsgIndex >= 0 {
+			m.inlineEditTextarea.SetStyles(inlineEditTextareaStyles())
+		}
 		for i, view := range m.views {
 			updatedView, cmd := view.Update(msg)
 			m.views[i] = updatedView
@@ -1068,16 +1071,17 @@ func (m *model) Bindings() []key.Binding {
 
 // InlineEditBindings returns key bindings for inline edit mode
 func (m *model) InlineEditBindings() []key.Binding {
-	// Get the newline key help based on the configured keymap
-	newlineKeys := m.inlineEditTextarea.KeyMap.InsertNewline.Keys()
-	newlineHelp := "Ctrl+j"
-	if slices.Contains(newlineKeys, "shift+enter") {
-		newlineHelp = "Shift+Enter"
-	}
+	send := core.GetKeys().EditorSend
+	send.SetHelp(send.Help().Key, "save")
+	newline := m.inlineEditTextarea.KeyMap.InsertNewline
+	send.SetKeys(slices.DeleteFunc(slices.Clone(send.Keys()), func(k string) bool {
+		return slices.Contains(newline.Keys(), k)
+	})...)
+	newline.SetHelp(newline.Help().Key, "newline")
 	return []key.Binding{
-		key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "save")),
+		send,
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("Esc", "cancel")),
-		key.NewBinding(key.WithKeys(newlineKeys...), key.WithHelp(newlineHelp, "newline")),
+		newline,
 	}
 }
 
@@ -1492,6 +1496,22 @@ func (m *model) renderItem(index int, view layout.Model) renderedItem {
 	}
 
 	return item
+}
+
+func inlineEditTextareaStyles() textarea.Styles {
+	return textarea.Styles{
+		Focused: textarea.StyleState{
+			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
+			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
+		},
+		Blurred: textarea.StyleState{
+			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
+			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
+		},
+		Cursor: textarea.CursorStyle{
+			Color: styles.Accent,
+		},
+	}
 }
 
 // renderInlineEditTextarea renders the inline editing textarea with user message styling.
@@ -2823,21 +2843,7 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0 // No limit
 
-	// Set custom styles with background color matching the user message style
-	inlineEditStyle := textarea.Styles{
-		Focused: textarea.StyleState{
-			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
-			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
-		},
-		Blurred: textarea.StyleState{
-			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
-			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
-		},
-		Cursor: textarea.CursorStyle{
-			Color: styles.Accent,
-		},
-	}
-	ta.SetStyles(inlineEditStyle)
+	ta.SetStyles(inlineEditTextareaStyles())
 
 	// Mirror the composer's configurable newline keys (ctrl+j by default),
 	// always offering shift+enter for terminals with keyboard enhancements.

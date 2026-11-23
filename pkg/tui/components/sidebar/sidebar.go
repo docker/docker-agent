@@ -443,7 +443,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		sessionUsage:      make(map[string]*runtime.Usage),
 		todoComp:          todotool.NewSidebarComponent(),
 		transferAnimation: ar.Subscribe(),
-		spinner:           spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
+		spinner:           spinner.NewThemed(ar, spinner.ModeSpinnerOnly, func() lipgloss.Style { return styles.SpinnerDotsHighlightStyle }),
 		sessionTitle:      "New session",
 		ragIndexing:       make(map[string]*ragIndexingState),
 		sessionState:      sessionState,
@@ -1479,32 +1479,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		m.invalidateCache()
 		return m, nil
 	case messages.ThemeChangedMsg:
-		// Theme changed - recreate spinners with new colors
-		// The spinner pre-renders frames with colors, so we need to recreate it
-		var cmds []tea.Cmd
-
-		// Recreate main spinner
-		wasActive := m.spinnerActive
-		if wasActive {
-			m.spinner.Stop()
-		}
-		m.spinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)
-		if wasActive {
-			cmd := m.spinner.Init()
-			m.spinnerActive = true
-			cmds = append(cmds, cmd)
-		}
-
-		// Recreate all RAG indexing spinners
-		for _, state := range m.ragIndexing {
-			state.spinner.Stop()
-			state.spinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)
-			cmds = append(cmds, state.spinner.Init())
-		}
-
 		m.todoComp.InvalidateCache() // Cached todo lines embed theme styling
-		m.invalidateCache()          // Theme affects all styling
-		return m, tea.Batch(cmds...)
+		m.invalidateCache()
+		return m, nil
 	default:
 		var cmds []tea.Cmd
 		needsInvalidate := false

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -155,7 +156,7 @@ func New(ar *animation.Runtime, msg *types.Message) *messageModel {
 		height:          1,  // Will be calculated
 		focused:         false,
 		imageScanOffset: imageScanOffset,
-		spinner:         spinner.New(ar, spinner.ModeBoth, styles.SpinnerDotsAccentStyle),
+		spinner:         spinner.NewThemed(ar, spinner.ModeBoth, func() lipgloss.Style { return styles.SpinnerDotsAccentStyle }),
 	}
 }
 
@@ -303,8 +304,16 @@ func (mv *messageModel) SetHovered(hovered bool) {
 
 // Update handles messages and updates the message view state
 func (mv *messageModel) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
-	if _, ok := msg.(messages.ImageRenderingChangedMsg); ok {
+	switch msg.(type) {
+	case messages.ImageRenderingChangedMsg:
 		mv.renderCache.valid = false
+		return mv, nil
+	case messages.ThemeChangedMsg:
+		mv.renderCache.valid = false
+		if mv.mdRenderer != nil {
+			mv.mdRenderer.Reset()
+		}
+		mv.streamLines = assistantStreamLines{}
 		return mv, nil
 	}
 	if loaded, ok := msg.(markdownImagesLoadedMsg); ok && loaded.target == mv {

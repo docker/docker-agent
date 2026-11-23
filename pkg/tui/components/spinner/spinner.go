@@ -30,10 +30,12 @@ type Spinner interface {
 type spinner struct {
 	ar                  *animation.Runtime
 	animSub             animation.Subscription // manages animation tick subscription
-	dotsStyle           lipgloss.Style
+	dotsStyle           func() lipgloss.Style
+	themed              bool
+	frameTheme          *[4]lipgloss.Style
 	spinnerAnim         animation.Spinner
 	spinnerFrames       animation.Frames
-	styledSpinnerFrames []string // pre-rendered spinner frames
+	styledSpinnerFrames []string
 	mode                Mode
 	currentMessage      string
 	lightPosition       int
@@ -85,6 +87,10 @@ func New(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style) Spinner {
 	return NewWithAnimation(ar, mode, dotsStyle, animation.Chat)
 }
 
+func NewThemed(ar *animation.Runtime, mode Mode, dotsStyle func() lipgloss.Style) Spinner {
+	return newSpinner(ar, mode, dotsStyle, animation.Chat, true)
+}
+
 // NewWithFrames creates a spinner that animates using the provided frame set.
 // If frames is empty, animation.Chat is used.
 func NewWithFrames(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style, frames animation.Frames) Spinner {
@@ -97,6 +103,10 @@ func NewWithFrames(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style, f
 // NewWithAnimation creates a spinner that uses the provided duration-aware
 // animation. If anim is empty, animation.Chat is used.
 func NewWithAnimation(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style, anim animation.Spinner) Spinner {
+	return newSpinner(ar, mode, func() lipgloss.Style { return dotsStyle }, anim, false)
+}
+
+func newSpinner(ar *animation.Runtime, mode Mode, dotsStyle func() lipgloss.Style, anim animation.Spinner, themed bool) Spinner {
 	if ar == nil {
 		panic("spinner: nil animation runtime")
 	}
@@ -105,29 +115,26 @@ func NewWithAnimation(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style
 	}
 	spinnerFrames := anim.Frames()
 
-	// Pre-render all spinner frames for fast lookup during render.
-	styledFrames := make([]string, len(spinnerFrames))
-	for i, char := range spinnerFrames {
-		styledFrames[i] = dotsStyle.Render(char)
-	}
-
-	return &spinner{
+	s := &spinner{
 		ar:                  ar,
 		animSub:             ar.Subscribe(),
 		dotsStyle:           dotsStyle,
+		themed:              themed,
 		spinnerAnim:         anim,
 		spinnerFrames:       spinnerFrames,
-		styledSpinnerFrames: styledFrames,
+		styledSpinnerFrames: make([]string, len(spinnerFrames)),
 		mode:                mode,
 		currentMessage:      defaultMessages[rand.IntN(len(defaultMessages))],
 		lightPosition:       -3,
 		direction:           1,
 		lightPauseSteps:     max(1, int(lightPauseDuration/lightStepDuration)),
 	}
+	s.renderFrames(styles.CurrentSpinnerPalette())
+	return s
 }
 
 func (s *spinner) Reset() Spinner {
-	return NewWithAnimation(s.ar, s.mode, s.dotsStyle, s.spinnerAnim)
+	return newSpinner(s.ar, s.mode, s.dotsStyle, s.spinnerAnim, s.themed)
 }
 
 // SetMessage replaces the current spinner text.
@@ -190,13 +197,24 @@ func (s *spinner) RawFrame() string {
 	return s.spinnerFrames[s.spinnerAnim.FrameIndexAt(s.ar.Now())]
 }
 
+func (s *spinner) renderFrames(theme *[4]lipgloss.Style) {
+	style := s.dotsStyle()
+	for i, frame := range s.spinnerFrames {
+		s.styledSpinnerFrames[i] = style.Render(frame)
+	}
+	s.frameTheme = theme
+}
+
 func (s *spinner) View() string {
-	frame := s.spinnerAnim.FrameIndexAt(s.ar.Now())
-	spinner := s.styledSpinnerFrames[frame]
+	theme := styles.CurrentSpinnerPalette()
+	if s.themed && s.frameTheme != theme {
+		s.renderFrames(theme)
+	}
+	spinner := s.styledSpinnerFrames[s.spinnerAnim.FrameIndexAt(s.ar.Now())]
 	if s.mode == ModeSpinnerOnly {
 		return spinner
 	}
-	return spinner + " " + s.renderMessage()
+	return spinner + " " + s.renderMessage(theme)
 }
 
 func (s *spinner) SetSize(_, _ int) tea.Cmd { return nil }
@@ -213,15 +231,7 @@ func (s *spinner) Stop() {
 	s.animSub.Stop()
 }
 
-// lightStyles maps distance from light position to style (0=brightest, 1=bright, 2=dim, 3+=dimmest).
-var lightStyles = []lipgloss.Style{
-	styles.SpinnerTextBrightestStyle,
-	styles.SpinnerTextBrightStyle,
-	styles.SpinnerTextDimStyle,
-	styles.SpinnerTextDimmestStyle,
-}
-
-func (s *spinner) renderMessage() string {
+func (s *spinner) renderMessage(lightStyles *[4]lipgloss.Style) string {
 	var out strings.Builder
 	for i, char := range s.currentMessage {
 		dist := min(max(i-s.lightPosition, s.lightPosition-i), len(lightStyles)-1)

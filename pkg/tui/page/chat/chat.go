@@ -404,10 +404,7 @@ func defaultKeyMap() KeyMap {
 			key.WithHelp("Esc", "interrupt"),
 		),
 		ToggleSplitDiff: splitDiff,
-		ToggleSidebar: key.NewBinding(
-			key.WithKeys("ctrl+b"),
-			key.WithHelp("Ctrl+b", "toggle sidebar"),
-		),
+		ToggleSidebar:   core.GetKeys().ToggleSidebar,
 	}
 }
 
@@ -1784,6 +1781,12 @@ func (p *chatPage) routeMouseEvent(msg tea.Msg, _ int) tea.Cmd {
 // IsWorking returns whether the agent is currently working
 func (p *chatPage) IsWorking() bool {
 	return p.working
+}
+
+// IsTitleEditing reports whether the page is editing its sidebar session title.
+func IsTitleEditing(page Page) bool {
+	p, ok := page.(*chatPage)
+	return ok && p.sidebar.IsEditingTitle()
 }
 
 // IsInlineEditing returns true if a past user message is being edited inline.

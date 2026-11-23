@@ -167,7 +167,7 @@ func (p *Printer) PromptMaxIterationsContinue(ctx context.Context, maxIterations
 
 	response, err := input.ReadLine(ctx, os.Stdin)
 	if err != nil {
-		p.Println("\nFailed to read input, exiting...")
+		p.Println("\nFailed to read input, stopping the agent...")
 		return ConfirmationAbort
 	}
 
@@ -176,7 +176,7 @@ func (p *Printer) PromptMaxIterationsContinue(ctx context.Context, maxIterations
 		p.Print("✓ Continuing...\n\n")
 		return ConfirmationApprove
 	} else {
-		p.Print("Exiting...\n\n")
+		p.Print("Stopping the agent...\n\n")
 		return ConfirmationReject
 	}
 }

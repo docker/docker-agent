@@ -153,6 +153,10 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case messages.ThemeChangedMsg:
+		d.refreshInputStyles()
+		return d, nil
+
 	case tea.PasteMsg:
 		cmd := d.handleInputChange(msg)
 		return d, cmd
