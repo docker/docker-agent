@@ -197,10 +197,17 @@ tasks:
       - node --test cmd/wasm/node/bridge_test.js cmd/wasm/node/rag_off_test.js
 
   build-wasm-small:
-    desc: Build the size-optimised browser binary (the cmd/wasm small profile)
+    desc: Build the size-optimised browser binary (requires Binaryen's wasm-opt)
+    preconditions:
+      - sh: command -v wasm-opt
+        msg: Install Binaryen to build the small WASM profile (CI uses version 132).
     cmds:
-      - GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
-      - go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
+      - mkdir -p bin/wasm-small
+      - GOOS=js GOARCH=wasm go build -trimpath -gcflags=all=-l -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o bin/wasm-small/unpacked.wasm ./cmd/wasm
+      - go run ./scripts/wasmpack -o bin/wasm-small/packed.wasm bin/wasm-small/unpacked.wasm
+      - >-
+        wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext
+        --strip-debug --strip-producers bin/wasm-small/packed.wasm -o cmd/wasm/web/docker-agent.wasm
 
   test-wasm-browser:
     desc: Test real browser fetch, tools and RAG (requires Chrome and openssl)

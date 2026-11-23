@@ -236,6 +236,8 @@ jobs:
       - name: WASM runtime, tools and providers
         run: task test-wasm-js
 
+      - uses: $/.github/actions/setup-binaryen
+
       - name: WASM JavaScript bridge
         run: task test-wasm-bridge
 
