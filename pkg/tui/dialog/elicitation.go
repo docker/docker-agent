@@ -10,11 +10,14 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
+	messagecomponents "github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/dialog/common"
 	"github.com/docker/docker-agent/pkg/tui/elicitform"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -24,13 +27,6 @@ const (
 	defaultCharLimit = 500
 	numberCharLimit  = 50
 	defaultWidth     = 50
-
-	// elicitationHeaderLines is the count of fixed header lines above the
-	// scrollable body (title + separator).
-	elicitationHeaderLines = 2
-	// elicitationOverhead is the dialog height not available to the body:
-	// header (2) + footer blank+help (2) + frame border+padding (4).
-	elicitationOverhead = 8
 )
 
 // ElicitationDialog implements Dialog for MCP elicitation requests.
@@ -67,6 +63,10 @@ type ElicitationDialog struct {
 	// per-option row ranges) relative to fieldStarts[i]. Populated together
 	// with fieldStarts by View().
 	fieldGeoms []fieldGeometry
+	// Geometry for copy-label hit-testing, populated by View().
+	codeBlocks    []markdown.CodeBlock
+	bodyLines     []string
+	scrollableCol int
 	// scrollableRow is the absolute screen row of the first scrollable line.
 	scrollableRow int
 	// reanchorFocus asks the next View() to scroll the focused control back
@@ -100,7 +100,7 @@ func (g fieldGeometry) optionAt(offset int) int {
 }
 
 type elicitationKeyMap struct {
-	Up, Down, Tab, ShiftTab, Enter, Escape, Space key.Binding
+	Up, Down, Tab, ShiftTab, Enter, Escape, Space, Copy key.Binding
 }
 
 // hasFreeFormInput returns true when no schema fields exist and the dialog
@@ -156,6 +156,7 @@ func NewElicitationDialog(message string, schema any, meta map[string]any, elici
 			Enter:    key.NewBinding(key.WithKeys("enter")),
 			Escape:   key.NewBinding(key.WithKeys("esc")),
 			Space:    key.NewBinding(key.WithKeys("space")),
+			Copy:     key.NewBinding(key.WithKeys("ctrl+o")),
 		},
 		// Up/Down stay reserved for selection inside enum/boolean fields;
 		// the scrollview consumes mouse wheel/scrollbar plus PgUp/PgDn/Home/End.
@@ -237,6 +238,8 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	switch {
+	case key.Matches(msg, d.keyMap.Copy) && d.message != "":
+		return d, messagecomponents.CopyTextToClipboard(markdown.StripTerminalControls(d.message))
 	case key.Matches(msg, d.keyMap.Space) && !d.isTextInputField() && !d.hasFreeFormInput():
 		// Space toggles a multiselect option, and cycles forward through
 		// other options, same as down arrow
@@ -437,30 +440,59 @@ func (d *ElicitationDialog) collectAndValidate() (map[string]any, int) {
 // and Position() share it so layout math lives in exactly one place.
 type elicitationLayout struct {
 	dialogWidth  int
-	contentWidth int             // inside dialog frame
-	viewport     int             // height of the scrollable region in lines
-	bodyLines    []string        // pre-rendered body, one entry per line
+	contentWidth int      // inside dialog frame
+	viewport     int      // height of the scrollable region in lines
+	bodyLines    []string // pre-rendered body, one entry per line
+	codeBlocks   []markdown.CodeBlock
+	helpLines    []string
+	title        string
 	fieldStarts  []int           // line offset of each field's label
 	fieldGeoms   []fieldGeometry // wrapped row layout per field, relative to fieldStarts
 }
 
 // dialogHeight is the total rendered height of the dialog, including frame.
-func (l elicitationLayout) dialogHeight() int { return l.viewport + elicitationOverhead }
+func (l elicitationLayout) dialogHeight() int {
+	footer := 0
+	if len(l.helpLines) > 0 {
+		footer = 1 + len(l.helpLines)
+	}
+	return l.viewport + 4 + lipgloss.Height(l.title) + 1 + footer
+}
 
 func (d *ElicitationDialog) layout() elicitationLayout {
 	dialogWidth := d.ComputeDialogWidth(70, 60, 90)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
 	innerWidth := max(1, contentWidth-d.scrollview.ReservedCols())
 
-	bodyLines, fieldStarts, fieldGeoms := d.buildBody(innerWidth)
-	maxViewport := max(1, min(d.Height()*80/100, 40)-elicitationOverhead)
-	viewport := max(1, min(len(bodyLines), maxViewport))
+	bodyLines, codeBlocks, fieldStarts, fieldGeoms := d.buildBody(innerWidth)
+	maxHeight := min(d.Height(), max(8, min(d.Height()*80/100, 40)))
+	titleLines := strings.Split(RenderTitle(d.title, contentWidth, styles.DialogTitleStyle), "\n")
+	// Keep at least one body row visible when a server supplies a very long title.
+	titleLines = titleLines[:min(len(titleLines), max(1, maxHeight-6))]
+	title := strings.Join(titleLines, "\n")
+	fixedHeight := 4 + len(titleLines) + 1
+	helpLines := d.renderHelpLines(contentWidth, false)
+	viewport := max(1, min(len(bodyLines), maxHeight-fixedHeight-1-len(helpLines)))
+	if len(bodyLines) > viewport {
+		helpLines = d.renderHelpLines(contentWidth, true)
+	}
+	// Help is secondary to the body; omit overflowing rows on short screens.
+	maxHelp := max(0, maxHeight-fixedHeight-2)
+	helpLines = helpLines[:min(len(helpLines), maxHelp)]
+	footer := 0
+	if len(helpLines) > 0 {
+		footer = 1 + len(helpLines)
+	}
+	viewport = max(1, min(len(bodyLines), maxHeight-fixedHeight-footer))
 
 	return elicitationLayout{
 		dialogWidth:  dialogWidth,
 		contentWidth: contentWidth,
 		viewport:     viewport,
 		bodyLines:    bodyLines,
+		codeBlocks:   codeBlocks,
+		helpLines:    helpLines,
+		title:        title,
 		fieldStarts:  fieldStarts,
 		fieldGeoms:   fieldGeoms,
 	}
@@ -470,12 +502,13 @@ func (d *ElicitationDialog) layout() elicitationLayout {
 // helpers and records the line offset of every field's label plus each
 // field's wrapped row geometry. Tracks line count incrementally to keep
 // buildBody O(N) in the number of fields.
-func (d *ElicitationDialog) buildBody(width int) (lines []string, fieldStarts []int, fieldGeoms []fieldGeometry) {
+func (d *ElicitationDialog) buildBody(width int) (lines []string, codeBlocks []markdown.CodeBlock, fieldStarts []int, fieldGeoms []fieldGeometry) {
 	body := NewContent(width)
 	lineCount := 0
 
 	if d.message != "" {
-		msgRendered := renderMarkdownMessage(d.message, width)
+		msgRendered, blocks := renderMarkdownMessage(d.message, width)
+		codeBlocks = blocks
 		body.AddContent(msgRendered)
 		lineCount += lipgloss.Height(msgRendered)
 	}
@@ -516,7 +549,7 @@ func (d *ElicitationDialog) buildBody(width int) (lines []string, fieldStarts []
 		body.AddContent(d.responseInput.View())
 	}
 
-	return strings.Split(body.Build(), "\n"), fieldStarts, fieldGeoms
+	return strings.Split(body.Build(), "\n"), codeBlocks, fieldStarts, fieldGeoms
 }
 
 func (d *ElicitationDialog) View() string {
@@ -527,6 +560,8 @@ func (d *ElicitationDialog) View() string {
 	// layout, so we accept the mutation as a render-cache compromise.
 	d.fieldStarts = l.fieldStarts //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
 	d.fieldGeoms = l.fieldGeoms   //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
+	d.codeBlocks = l.codeBlocks   //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
+	d.bodyLines = l.bodyLines     //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
 
 	// Configure the scrollview viewport and give it the body. Scroll position
 	// is intentionally not adjusted here: the dialog opens scrolled to the top
@@ -553,22 +588,26 @@ func (d *ElicitationDialog) View() string {
 	row, col := CenterPosition(d.Width(), d.Height(), l.dialogWidth, l.dialogHeight())
 	frameTop := styles.DialogStyle.GetBorderTopSize() + styles.DialogStyle.GetPaddingTop()
 	frameLeft := styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
-	d.scrollableRow = row + frameTop + elicitationHeaderLines //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
-	d.scrollview.SetPosition(col+frameLeft, d.scrollableRow)
+	d.scrollableRow = row + frameTop + lipgloss.Height(l.title) + 1 //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
+	d.scrollableCol = col + frameLeft                               //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
+	d.scrollview.SetPosition(d.scrollableCol, d.scrollableRow)
 
 	parts := []string{
-		RenderTitle(d.title, l.contentWidth, styles.DialogTitleStyle),
+		l.title,
 		RenderSeparator(l.contentWidth),
 	}
 	parts = append(parts, strings.Split(d.scrollview.View(), "\n")...)
-	parts = append(parts, "", RenderHelpKeys(l.contentWidth, d.helpPairs()...))
+	if len(l.helpLines) > 0 {
+		parts = append(parts, "")
+		parts = append(parts, l.helpLines...)
+	}
 
 	return styles.DialogStyle.Width(l.dialogWidth).Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
 
 // helpPairs returns key/description pairs for the dialog's bottom help line,
 // in left-to-right display order.
-func (d *ElicitationDialog) helpPairs() []string {
+func (d *ElicitationDialog) helpPairs(scrollable bool) []string {
 	var pairs []string
 	if d.hasSelectionFields() {
 		pairs = append(pairs, "↑/↓", "select")
@@ -579,11 +618,27 @@ func (d *ElicitationDialog) helpPairs() []string {
 	if len(d.fields) > 0 {
 		pairs = append(pairs, "tab", "next field")
 	}
+	if d.message != "" {
+		pairs = append(pairs, "ctrl+o", "copy message")
+	}
 	pairs = append(pairs, "enter", "submit", "esc", "cancel")
-	if d.scrollview.NeedsScrollbar() {
+	if scrollable {
 		pairs = append(pairs, "pgup/pgdn", "scroll")
 	}
 	return pairs
+}
+
+func (d *ElicitationDialog) renderHelpLines(width int, scrollable bool) []string {
+	pairs := d.helpPairs(scrollable)
+	var lines []string
+	start := 0
+	for i := 2; i <= len(pairs); i += 2 {
+		if i > start+2 && common.HelpKeysWidth(pairs[start:i]...) > width {
+			lines = append(lines, strings.Split(RenderHelpKeys(width, pairs[start:i-2]...), "\n")...)
+			start = i - 2
+		}
+	}
+	return append(lines, strings.Split(RenderHelpKeys(width, pairs[start:]...), "\n")...)
 }
 
 // hasSelectionFields returns true if any field uses selection-based input (boolean, enum or multiselect).
@@ -724,6 +779,9 @@ func capitalizeFirst(s string) string {
 
 // handleMouseClick handles mouse click events for field focus and selection toggling.
 func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
+	if text, ok := d.codeBlockAt(msg.X, msg.Y); ok {
+		return d, messagecomponents.CopyTextToClipboard(text)
+	}
 	if len(d.fieldStarts) == 0 || len(d.fieldGeoms) != len(d.fieldStarts) || d.scrollableRow == 0 {
 		return d, nil
 	}
@@ -760,6 +818,10 @@ func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Mode
 		return d, nil
 	}
 	return d, nil
+}
+
+func (d *ElicitationDialog) TitleZoneHeight() int {
+	return styles.DialogStyle.GetBorderTopSize() + styles.DialogStyle.GetPaddingTop() + lipgloss.Height(d.layout().title) + 1
 }
 
 func (d *ElicitationDialog) Position() (row, col int) {
@@ -810,13 +872,35 @@ func (d *ElicitationDialog) createInput(field elicitform.Field, idx int) textinp
 	return ti
 }
 
-// renderMarkdownMessage renders a message string as markdown for display in dialogs.
-// Falls back to plain text rendering if the markdown renderer fails.
-func renderMarkdownMessage(message string, contentWidth int) string {
-	// No copy icon: dialogs do not hit-test clicks on code blocks.
-	rendered, err := markdown.NewRendererWithoutCopyIcon(contentWidth).Render(message)
-	if err != nil {
-		return styles.DialogContentStyle.Width(contentWidth).Render(message)
+// codeBlockAt maps a visible copy label to the original, unwrapped code.
+func (d *ElicitationDialog) codeBlockAt(x, y int) (string, bool) {
+	relY := y - d.scrollableRow
+	col := x - d.scrollableCol
+	if relY < 0 || relY >= d.scrollview.VisibleHeight() || col < 0 || col >= d.scrollview.ContentWidth() {
+		return "", false
 	}
-	return strings.TrimRight(rendered, "\n")
+	line := d.scrollview.ScrollOffset() + relY
+	if line < 0 || line >= len(d.bodyLines) {
+		return "", false
+	}
+	for _, block := range d.codeBlocks {
+		if block.Line != line {
+			continue
+		}
+		before, _, found := strings.Cut(ansi.Strip(d.bodyLines[line]), markdown.CodeBlockCopyIcon)
+		start := ansi.StringWidth(before)
+		if found && col >= start && col < start+ansi.StringWidth(markdown.CodeBlockCopyIcon) {
+			return block.Content, true
+		}
+	}
+	return "", false
+}
+
+// renderMarkdownMessage falls back to plain text if the renderer fails.
+func renderMarkdownMessage(message string, contentWidth int) (string, []markdown.CodeBlock) {
+	rendered, blocks, err := markdown.NewFastRenderer(contentWidth).RenderWithSourceCodeBlocks(message)
+	if err != nil {
+		return styles.DialogContentStyle.Width(contentWidth).Render(message), nil
+	}
+	return strings.TrimRight(rendered, "\n"), blocks
 }
