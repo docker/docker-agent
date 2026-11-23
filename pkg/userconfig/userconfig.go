@@ -144,6 +144,9 @@ type Settings struct {
 	// Sandbox runs agents inside a Docker sandbox by default when true.
 	// Equivalent to passing --sandbox unless overridden on the CLI.
 	Sandbox bool `yaml:"sandbox,omitempty"`
+	// StreamIdleTimeout sets the default stream silence timeout across all
+	// agents and models (positive Go duration or -1 to disable).
+	StreamIdleTimeout *latest.StreamIdleTimeout `yaml:"stream_idle_timeout,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.
@@ -555,8 +558,21 @@ func readConfig(configPath string) (*Config, error) {
 	if err := config.validateSafety(); err != nil {
 		return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
 	}
+	if err := config.validateSettings(); err != nil {
+		return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
+	}
 
 	return config, nil
+}
+
+func (c *Config) validateSettings() error {
+	if c.Settings == nil {
+		return nil
+	}
+	if err := c.Settings.StreamIdleTimeout.Validate(); err != nil {
+		return fmt.Errorf("settings.stream_idle_timeout: %w", err)
+	}
+	return nil
 }
 
 // validateSafety rejects non-canonical safety modes in settings and

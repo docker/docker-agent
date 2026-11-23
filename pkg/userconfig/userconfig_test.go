@@ -1841,3 +1841,17 @@ func TestSettings_SandboxRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, loaded.GetSettings().Sandbox)
 }
+
+func TestSettings_StreamIdleTimeoutRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	require.NoError(t, os.WriteFile(configFile, []byte("settings:\n  stream_idle_timeout: 5m\n"), 0o600))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	require.NotNil(t, loaded.GetSettings().StreamIdleTimeout)
+	assert.Equal(t, "5m0s", loaded.GetSettings().StreamIdleTimeout.String())
+}

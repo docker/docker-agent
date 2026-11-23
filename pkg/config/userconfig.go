@@ -58,6 +58,13 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 	if settings.Sandbox {
 		ensureRuntime(cfg).Sandbox = true
 	}
+
+	if settings.StreamIdleTimeout != nil {
+		rt := ensureRuntime(cfg)
+		if rt.StreamIdleTimeout == nil {
+			rt.StreamIdleTimeout = new(*settings.StreamIdleTimeout)
+		}
+	}
 }
 
 func ensureRuntime(cfg *latest.Config) *latest.RuntimeDefaults {

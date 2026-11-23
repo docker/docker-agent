@@ -168,3 +168,41 @@ func TestWithUserConfig_Sandbox(t *testing.T) {
 	require.NotNil(t, cfg.Runtime)
 	assert.True(t, cfg.Runtime.Sandbox)
 }
+
+func TestWithUserConfig_StreamIdleTimeout(t *testing.T) {
+	t.Parallel()
+
+	t.Run("applies global default when unset", func(t *testing.T) {
+		agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+		cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+			Settings: &userconfig.Settings{
+				StreamIdleTimeout: &latest.StreamIdleTimeout{Duration: latest.DisabledStreamIdleTimeout},
+			},
+		}))
+		require.NoError(t, err)
+		require.NotNil(t, cfg.Runtime)
+		require.NotNil(t, cfg.Runtime.StreamIdleTimeout)
+		assert.Equal(t, latest.DisabledStreamIdleTimeout, cfg.Runtime.StreamIdleTimeout.Duration)
+	})
+
+	t.Run("agent runtime.stream_idle_timeout wins", func(t *testing.T) {
+		agentYAML := []byte(`runtime:
+  stream_idle_timeout: 2m
+agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+		cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(&userconfig.Config{
+			Settings: &userconfig.Settings{
+				StreamIdleTimeout: &latest.StreamIdleTimeout{Duration: latest.DisabledStreamIdleTimeout},
+			},
+		}))
+		require.NoError(t, err)
+		assert.Equal(t, "2m0s", cfg.Runtime.StreamIdleTimeout.String())
+	})
+}
