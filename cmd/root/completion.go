@@ -61,12 +61,16 @@ func completeMessage(cmd *cobra.Command, args []string, toComplete string) ([]st
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
+	userCfg, err := userconfig.Load()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 	agentSource, err := sources.Resolve(args[0], nil)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	cfg, err := config.Load(cmd.Context(), agentSource, config.WithVersions(legacy.Register))
+	cfg, err := config.Load(cmd.Context(), agentSource, config.WithVersions(legacy.Register), config.WithUserConfig(userCfg))
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

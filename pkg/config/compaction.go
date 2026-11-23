@@ -35,5 +35,11 @@ func EffectiveCompactionModelRef(cfg *latest.Config, a *latest.AgentConfig) stri
 			return providerCfg.CompactionModel
 		}
 	}
-	return ""
+	for name := range strings.SplitSeq(a.Model, ",") {
+		model := cfg.Models[strings.TrimSpace(name)]
+		if model.IsFirstAvailable() {
+			return ""
+		}
+	}
+	return cfg.DefaultCompactionModel
 }

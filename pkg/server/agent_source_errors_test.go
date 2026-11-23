@@ -13,7 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 func TestAgentSourceErrorsAreTyped(t *testing.T) {
@@ -90,4 +92,43 @@ func TestGetAgentsSkipsUnavailableSources(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"name":"healthy"`)
 	assert.NotContains(t, rec.Body.String(), "broken")
+}
+
+func TestAgentDiscovery_UserModels(t *testing.T) {
+	t.Parallel()
+	sm := NewSessionManager(t.Context(), config.Sources{
+		"global": config.NewBytesSource("global", []byte("agents:\n  root:\n    model: fast\n    instruction: test\n    toolsets:\n      - type: mcp\n        ref: remote\n")),
+	}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{Config: config.Config{UserConfig: &userconfig.Config{
+		Models: map[string]latest.ModelConfig{
+			"fast":          {Provider: "dmr", Model: "local"},
+			"private-model": {BaseURL: "https://user:private-model-password@example.com/v1?key=private-model-query#private-model-fragment", ProviderOpts: map[string]any{"unload_api": "https://user:private-unload-password@example.com/unload?key=private-unload-query#private-unload-fragment", "http_headers": map[string]any{"Authorization": "private-model-header"}}, Provider: "anthropic", Model: "unused", Auth: &latest.AuthConfig{Type: latest.AuthTypeWorkloadIdentityFederation, Federation: &latest.FederationAuthConfig{FederationRuleID: "fdrl_test", OrganizationID: "org", IdentityToken: &latest.IdentityTokenSourceConfig{URL: "https://example.com/token", Headers: map[string]string{"Authorization": "private-model-auth"}}}}},
+		},
+		Providers: map[string]latest.ProviderConfig{
+			"private-provider": {BaseURL: "https://user:private-provider-password@example.com/v1?key=private-provider-query#private-provider-fragment", ProviderOpts: map[string]any{"unload_api": "https://user:private-unload-password@example.com/unload?key=private-unload-query#private-unload-fragment", "http_headers": map[string]any{"Authorization": "private-provider-header"}}, Provider: "anthropic", Auth: &latest.AuthConfig{Type: latest.AuthTypeWorkloadIdentityFederation, Federation: &latest.FederationAuthConfig{FederationRuleID: "fdrl_test", OrganizationID: "org", IdentityToken: &latest.IdentityTokenSourceConfig{Command: []string{"token-helper", "private-provider-auth"}}}}},
+		},
+		MCPs: map[string]latest.MCPToolset{
+			"private": {Toolset: latest.Toolset{Type: "mcp", Command: "private-command", Env: map[string]string{"TOKEN": "private-token"}}},
+			"remote":  {Toolset: latest.Toolset{Type: "mcp", Remote: latest.Remote{URL: "https://example.com/mcp", Headers: map[string]string{"Authorization": "private-header"}, OAuth: &latest.RemoteOAuthConfig{ClientID: "client", ClientSecret: "private-oauth"}}}},
+		},
+	}}})
+	effective, err := sm.LoadAgentConfig(t.Context(), "global")
+	require.NoError(t, err)
+	assert.Equal(t, "private-header", effective.Agents[0].Toolsets[0].Remote.Headers["Authorization"])
+	assert.Equal(t, "private-oauth", effective.MCPs["remote"].Remote.OAuth.ClientSecret)
+
+	srv := NewWithManager(sm, "")
+	for _, path := range []string{"/api/agents", "/api/agents/global"} {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		srv.e.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		if path == "/api/agents" {
+			assert.Contains(t, rec.Body.String(), "global")
+		} else {
+			assert.Contains(t, rec.Body.String(), `"model":"fast"`)
+			for _, secret := range []string{"private-token", "private-header", "private-oauth", "private-command", "private-model-auth", "private-provider-auth", "private-model-header", "private-provider-header", "private-model-password", "private-provider-password", "private-model-query", "private-provider-query", "private-model-fragment", "private-provider-fragment", "private-unload-password", "private-unload-query", "private-unload-fragment"} {
+				assert.NotContains(t, rec.Body.String(), secret)
+			}
+		}
+	}
 }

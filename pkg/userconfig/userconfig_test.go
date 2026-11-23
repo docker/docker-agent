@@ -1952,3 +1952,31 @@ func TestConfig_EvaluatorsRoundTrip(t *testing.T) {
 	require.Contains(t, evals, "risk")
 	assert.Equal(t, "boolean", evals["risk"].Type)
 }
+
+func TestConfig_ModelsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	cfg := &Config{
+		Models: map[string]latest.ModelConfig{
+			"fast": {
+				Provider: "openai",
+				Model:    "gpt-4o-mini",
+			},
+		},
+	}
+	require.NoError(t, cfg.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	models := loaded.GetModels()
+	require.Contains(t, models, "fast")
+	assert.Equal(t, "gpt-4o-mini", models["fast"].Model)
+
+	nanModel := "models:\n  bad:\n    provider: openai\n    model: gpt-4o\n    compaction_threshold: .nan\n"
+	require.NoError(t, os.WriteFile(configFile, []byte(nanModel), 0o600))
+	_, err = loadFrom(configFile, "")
+	require.ErrorContains(t, err, "compaction_threshold")
+}

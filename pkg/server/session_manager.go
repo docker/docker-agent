@@ -1873,7 +1873,11 @@ func (sm *SessionManager) LoadAgentConfig(ctx context.Context, agentFilename str
 		return nil, err
 	}
 
-	cfg, err := config.Load(ctx, agentSource, config.WithVersions(legacy.Register))
+	loadOpts := []config.LoadOption{config.WithVersions(legacy.Register)}
+	if sm.runConfig != nil {
+		loadOpts = append(loadOpts, config.WithUserConfig(sm.runConfig.UserConfig), config.WithFlavors(sm.runConfig.Flavors...))
+	}
+	cfg, err := config.Load(ctx, agentSource, loadOpts...)
 	if err != nil {
 		return nil, sm.sourceLoadError(agentFilename, err)
 	}

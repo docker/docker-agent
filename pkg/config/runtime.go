@@ -50,6 +50,7 @@ type Config struct {
 	Models         map[string]latest.ModelConfig
 	Providers      map[string]latest.ProviderConfig
 	UserConfig     *userconfig.Config
+	ModelOverrides []string
 
 	// EncryptedConfig is an opaque, encrypted representation of the full agent
 	// YAML (as produced by `docker agent share push --key --encrypt`). When set
@@ -119,6 +120,7 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 	clone.modelsDevStoreOnce.Do(func() {}) // mark as resolved
 	clone.EnvFiles = slices.Clone(runConfig.EnvFiles)
 	clone.Flavors = slices.Clone(runConfig.Flavors)
+	clone.ModelOverrides = slices.Clone(runConfig.ModelOverrides)
 	clone.EvaluatorOptions = slices.Clone(runConfig.EvaluatorOptions)
 	clone.Models = maps.Clone(runConfig.Models)
 	clone.Providers = maps.Clone(runConfig.Providers)

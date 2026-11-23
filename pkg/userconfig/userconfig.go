@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/deepcopy"
 	"github.com/docker/docker-agent/pkg/paths"
 )
 
@@ -498,6 +500,10 @@ type Config struct {
 	// section of an agent file and are merged into every loaded agent config;
 	// definitions in the agent file win on name conflicts.
 	Providers map[string]latest.ProviderConfig `yaml:"providers,omitempty"`
+	// Models maps user-defined model names to reusable model configurations.
+	// Merged into every loaded agent config; definitions in the agent file win
+	// on name conflicts.
+	Models map[string]latest.ModelConfig `yaml:"models,omitempty"`
 	// Evaluators maps user-defined evaluator names to reusable evaluator
 	// configurations. Merged into every loaded agent config (agent definitions
 	// win on name conflicts), allowing global tool_guard hooks to reference them.
@@ -589,8 +595,59 @@ func readConfig(configPath string) (*Config, error) {
 	if err := config.validateSettings(); err != nil {
 		return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
 	}
+	if err := config.validateModels(); err != nil {
+		return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
+	}
 
 	return config, nil
+}
+
+func (c *Config) validateModels() error {
+	if len(c.Models) == 0 {
+		return nil
+	}
+	for name, m := range c.Models {
+		if err := validateModelFloats(m); err != nil {
+			return fmt.Errorf("models.%s: %w", name, err)
+		}
+	}
+	if err := (&latest.Config{Models: c.Models, Providers: c.Providers}).Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateModelFloats(m latest.ModelConfig) error {
+	for _, f := range []struct {
+		name string
+		val  *float64
+	}{
+		{"temperature", m.Temperature},
+		{"top_p", m.TopP},
+		{"frequency_penalty", m.FrequencyPenalty},
+		{"presence_penalty", m.PresencePenalty},
+		{"compaction_threshold", m.CompactionThreshold},
+	} {
+		if f.val != nil && (math.IsNaN(*f.val) || math.IsInf(*f.val, 0)) {
+			return fmt.Errorf("%s must be finite, got %v", f.name, *f.val)
+		}
+	}
+	if m.Cost != nil {
+		for _, f := range []struct {
+			name string
+			val  float64
+		}{
+			{"cost.input", m.Cost.Input},
+			{"cost.output", m.Cost.Output},
+			{"cost.cache_read", m.Cost.CacheRead},
+			{"cost.cache_write", m.Cost.CacheWrite},
+		} {
+			if math.IsNaN(f.val) || math.IsInf(f.val, 0) {
+				return fmt.Errorf("%s must be finite, got %v", f.name, f.val)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Config) validateSettings() error {
@@ -868,6 +925,30 @@ func (c *Config) GetEvaluators() map[string]latest.EvaluatorConfig {
 		return nil
 	}
 	return maps.Clone(c.Evaluators)
+}
+
+// GetModels returns a deep copy of the user-defined model configurations.
+func (c *Config) GetModels() map[string]latest.ModelConfig {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.Models) == 0 {
+		return nil
+	}
+	out := make(map[string]latest.ModelConfig, len(c.Models))
+	for name, m := range c.Models {
+		if err := validateModelFloats(m); err != nil {
+			slog.Warn("Ignoring invalid model from user config", "model", name, "error", err)
+			continue
+		}
+		cloned, err := deepcopy.Value(m)
+		if err != nil {
+			slog.Warn("Ignoring invalid model from user config", "model", name, "error", err)
+			continue
+		}
+		out[name] = cloned
+	}
+	return out
 }
 
 // SetProvider creates or updates a user-defined provider configuration.

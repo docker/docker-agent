@@ -317,27 +317,20 @@ func gatherSourceEnvVars(ctx context.Context, source config.Source, env environm
 
 	var evaluatorOpts []options.Opt
 	modelsGateway := ""
-	titleRef := ""
 	for _, rc := range defaults {
 		if rc == nil {
 			continue
 		}
 		modelsGateway = rc.ModelsGateway
-		titleRef = config.UserTitleModelRef(rc.UserConfig)
+		if err := config.ApplyModelOverrides(cfg, rc.ModelOverrides); err != nil {
+			return nil, err
+		}
 		evaluatorOpts = append(evaluatorOpts, options.WithGateway(rc.ModelsGateway))
 		evaluatorOpts = append(evaluatorOpts, rc.EvaluatorOptions...)
 		config.MergeGlobalProviders(cfg, rc.Providers)
 		config.MergeAgentHooks(cfg, config.MergeHooks(rc.GlobalHooks, rc.CLIHooks()))
 	}
-	if err := config.ResolveFirstAvailableModels(ctx, cfg, modelsGateway, env, titleRef); err != nil {
-		return nil, err
-	}
-	for _, rc := range defaults {
-		if rc != nil {
-			config.ApplyDeferredUserSettings(cfg, rc.UserConfig)
-		}
-	}
-	if err := config.ResolveFirstAvailableModels(ctx, cfg, modelsGateway, env, titleRef); err != nil {
+	if err := config.ResolveFirstAvailableModels(ctx, cfg, modelsGateway, env); err != nil {
 		return nil, err
 	}
 	if err := cfg.ValidateEvaluators(); err != nil {
@@ -350,7 +343,7 @@ func gatherSourceEnvVars(ctx context.Context, source config.Source, env environm
 	}
 
 	var names []string
-	names = append(names, config.GatherEnvVarsForModels(ctx, cfg, env, titleRef)...)
+	names = append(names, config.GatherEnvVarsForModels(ctx, cfg, env)...)
 	names = append(names, config.RequiredEvaluatorEnvVars(cfg, evaluatorOpts...)...)
 
 	toolNames, err := config.GatherEnvVarsForTools(ctx, cfg)

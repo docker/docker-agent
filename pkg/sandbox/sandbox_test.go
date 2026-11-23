@@ -628,15 +628,17 @@ func TestGuestBuiltinDoesNotResolveAnotherAlias(t *testing.T) {
 func TestEnvForSource_UserModels(t *testing.T) {
 	t.Parallel()
 	source := config.NewBytesSource("agent.yaml", []byte("agents:\n  root:\n    model: pick\n    instruction: test\n"))
-	rc := &config.RuntimeConfig{UserConfig: &userconfig.Config{
+	rc := &config.RuntimeConfig{Config: config.Config{ModelOverrides: []string{"dmr/local"}, UserConfig: &userconfig.Config{
 		Models: map[string]latest.ModelConfig{
-			"pick":       {FirstAvailable: []string{"dmr/local"}},
+			"pick":       {FirstAvailable: []string{"missing/local"}},
 			"summarizer": {FirstAvailable: []string{"corp/small"}},
+			"titles":     {FirstAvailable: []string{"title/small"}},
 		},
-		Providers: map[string]latest.ProviderConfig{"corp": {Provider: "openai", TokenKey: "CORP_SUMMARY_KEY", BaseURL: "https://corp.example.com"}},
-		Settings:  &userconfig.Settings{CompactionModel: "summarizer"},
-	}}
-	flags, values := sandbox.EnvForSource(t.Context(), source, environment.NewMapEnvProvider(map[string]string{"CORP_SUMMARY_KEY": "secret"}), nil, rc)
+		Providers: map[string]latest.ProviderConfig{"corp": {Provider: "openai", TokenKey: "CORP_SUMMARY_KEY", BaseURL: "https://corp.example.com"}, "title": {Provider: "openai", TokenKey: "CORP_TITLE_KEY", BaseURL: "https://title.example.com"}},
+		Settings:  &userconfig.Settings{CompactionModel: "summarizer", TitleModel: "titles"},
+	}}}
+	flags, values := sandbox.EnvForSource(t.Context(), source, environment.NewMapEnvProvider(map[string]string{"CORP_SUMMARY_KEY": "secret", "CORP_TITLE_KEY": "title-secret"}), nil, rc)
 	assert.Contains(t, flags, "CORP_SUMMARY_KEY")
 	assert.Contains(t, values, "CORP_SUMMARY_KEY=secret")
+	assert.Contains(t, values, "CORP_TITLE_KEY=title-secret")
 }

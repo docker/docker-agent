@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // agentPickerDefaultsSpec is the --agent-picker sentinel meaning "use the
@@ -105,8 +106,14 @@ type agentChoice struct {
 // silently disappearing.
 func loadAgentChoices(ctx context.Context, refs []string, env environment.Provider, flavors []string) []agentChoice {
 	choices := make([]agentChoice, 0, len(refs))
+	userCfg, userErr := userconfig.Load()
 	for _, ref := range refs {
 		choice := agentChoice{ref: ref}
+		if userErr != nil {
+			choice.err = userErr
+			choices = append(choices, choice)
+			continue
+		}
 
 		source, err := sources.Resolve(ref, env)
 		if err != nil {
@@ -119,7 +126,7 @@ func loadAgentChoices(ctx context.Context, refs []string, env environment.Provid
 			choice.yaml = string(raw)
 		}
 
-		cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...), config.WithVersions(legacy.Register))
+		cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...), config.WithVersions(legacy.Register), config.WithUserConfig(userCfg))
 		if err != nil {
 			choice.err = err
 			choices = append(choices, choice)

@@ -154,7 +154,7 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	}
 
 	forwardArgs := slices.Clone(args)
-	envProvider := environment.NewDefaultProvider()
+	envProvider := runConfig.EnvProvider()
 	source, alias, err := sources.ResolveWithConfig(agentRef, userCfg, envProvider)
 	if err != nil {
 		return fmt.Errorf("resolving agent: %w", err)
@@ -252,6 +252,10 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	// any additional vars (e.g. MCP tool secrets).
 	// Sandbox dispatch precedes runOrExec, which normally loads inherited hooks.
 	envConfig := &config.RuntimeConfig{Config: runConfig.Config}
+	envConfig.ModelOverrides, _ = cmd.Flags().GetStringArray("model")
+	if len(envConfig.ModelOverrides) == 0 && alias != nil && !cmd.Flags().Changed("model") && alias.Model != "" {
+		envConfig.ModelOverrides = []string{alias.Model}
+	}
 	if envConfig.UserConfig == nil {
 		envConfig.UserConfig = userCfg
 	}

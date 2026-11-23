@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"sync"
@@ -24,7 +26,6 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
-	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/echolog"
 	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -203,7 +204,7 @@ func (s *Server) getAgents(c echo.Context) error {
 	for k, agentSource := range s.sm.Sources {
 		slog.Debug("API source", "source", agentSource.Name())
 
-		cfg, err := config.Load(c.Request().Context(), agentSource, config.WithVersions(legacy.Register))
+		cfg, err := s.sm.LoadAgentConfig(c.Request().Context(), k)
 		if err != nil {
 			slog.Error("Failed to load config from API source", "key", k, "error", err)
 			continue
@@ -256,7 +257,56 @@ func (s *Server) getAgentConfig(c echo.Context) error {
 	if err != nil {
 		return agentSourceHTTPError("failed to load agent source", err)
 	}
+	// Discovery must not expose private authentication or MCP connection details.
+	for name, model := range cfg.Models {
+		model.Auth = nil
+		model.BaseURL = discoveryURL(model.BaseURL)
+		model.ProviderOpts = discoveryOptions(model.ProviderOpts)
+		cfg.Models[name] = model
+	}
+	for name, provider := range cfg.Providers {
+		provider.Auth = nil
+		provider.BaseURL = discoveryURL(provider.BaseURL)
+		provider.UnloadAPI = discoveryURL(provider.UnloadAPI)
+		provider.ProviderOpts = discoveryOptions(provider.ProviderOpts)
+		cfg.Providers[name] = provider
+	}
+	cfg.MCPs = nil
+	sanitizeMCP := func(ts latest.Toolset) latest.Toolset {
+		if ts.Type != "mcp" {
+			return ts
+		}
+		return latest.Toolset{Type: ts.Type, Name: ts.Name, Ref: ts.Ref, Tools: ts.Tools, ReadOnly: ts.ReadOnly}
+	}
+	for i := range cfg.Agents {
+		for j := range cfg.Agents[i].Toolsets {
+			cfg.Agents[i].Toolsets[j] = sanitizeMCP(cfg.Agents[i].Toolsets[j])
+		}
+	}
+	for name, ts := range cfg.Toolsets {
+		cfg.Toolsets[name] = sanitizeMCP(ts)
+	}
 	return c.JSON(http.StatusOK, cfg)
+}
+
+func discoveryOptions(opts map[string]any) map[string]any {
+	opts = maps.Clone(opts)
+	delete(opts, "http_headers")
+	if raw, ok := opts["unload_api"].(string); ok {
+		opts["unload_api"] = discoveryURL(raw)
+	}
+	return opts
+}
+
+func discoveryURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.User = nil
+	u.RawQuery, u.Fragment, u.RawFragment = "", "", ""
+	u.ForceQuery = false
+	return u.String()
 }
 
 func agentSourceHTTPError(operation string, err error) error {

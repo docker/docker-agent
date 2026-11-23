@@ -1621,6 +1621,12 @@
     "Config": {
       "type": "object",
       "properties": {
+        "title_model": {
+          "type": "string"
+        },
+        "compaction_model": {
+          "type": "string"
+        },
         "version": {
           "type": "string"
         },

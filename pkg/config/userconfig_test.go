@@ -4,10 +4,12 @@ import (
 	"math"
 	"testing"
 
+	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
@@ -67,7 +69,12 @@ agents:
 
 	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(userCfg))
 	require.NoError(t, err)
-	assert.Equal(t, "openai/gpt-4o-mini", cfg.Models["primary"].TitleModel)
+	assert.Equal(t, "openai/gpt-4o-mini", EffectiveTitleModelRef(cfg, &cfg.Agents[0]))
+	exported, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+	reloaded, err := Load(t.Context(), NewBytesSource("exported.yaml", exported))
+	require.NoError(t, err)
+	assert.Equal(t, cfg.DefaultTitleModel, EffectiveTitleModelRef(reloaded, &reloaded.Agents[0]))
 }
 
 func TestWithUserConfig_RedactSecrets(t *testing.T) {
@@ -228,9 +235,7 @@ func TestWithUserConfig_Compaction(t *testing.T) {
 	assert.False(t, cfg.Agents[0].SessionCompactionEnabled())
 	require.NotNil(t, cfg.Agents[0].CompactionThreshold)
 	assert.InDelta(t, 0.8, *cfg.Agents[0].CompactionThreshold, 1e-9)
-	assert.Empty(t, cfg.Agents[0].CompactionModel)
-	ApplyDeferredUserSettings(cfg, userCfg)
-	assert.Equal(t, "openai/gpt-4o-mini", cfg.Agents[0].CompactionModel)
+	assert.Equal(t, "openai/gpt-4o-mini", EffectiveCompactionModelRef(cfg, &cfg.Agents[0]))
 }
 
 func TestWithUserConfig_CompactionModelDeferredForFirstAvailable(t *testing.T) {
@@ -260,7 +265,6 @@ agents:
 
 	// Simulate first_available resolving "pick" to "primary".
 	cfg.Models["pick"] = cfg.Models["primary"]
-	ApplyDeferredUserSettings(cfg, userCfg)
 	assert.Equal(t, "openai/gpt-4.1-mini", EffectiveCompactionModelRef(cfg, &cfg.Agents[0]))
 }
 
@@ -373,16 +377,8 @@ func TestWithUserConfig_Evaluators(t *testing.T) {
 
 	// Post-merge validation must also run for historical agent config versions.
 	v15YAML := []byte("version: \"15\"\nagents:\n  root:\n    model: bad\n    instruction: test\n")
-	v15Registrar := func(parsers map[string]func([]byte) (any, error), upgraders *[]func(any, []byte) (any, error)) {
-		parsers["15"] = func(_ []byte) (any, error) {
-			return latest.Config{
-				Version: "15",
-				Agents:  latest.Agents{{Name: "root", Model: "bad", Instruction: "test"}},
-			}, nil
-		}
-	}
 	_, err = Load(t.Context(), NewBytesSource("v15.yaml", v15YAML),
-		WithVersions(v15Registrar),
+		WithVersions(legacy.Register),
 		WithUserConfig(&userconfig.Config{
 			Models: map[string]latest.ModelConfig{
 				"bad": {Provider: "openai", Model: "gpt-4o", CompactionThreshold: new(1.5)},
@@ -390,4 +386,57 @@ func TestWithUserConfig_Evaluators(t *testing.T) {
 		}),
 	)
 	require.ErrorContains(t, err, "compaction_threshold")
+}
+
+func TestWithUserConfig_Models(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: fast
+    instruction: test
+`)
+	userCfg := &userconfig.Config{
+		Models: map[string]latest.ModelConfig{
+			"fast": {
+				Provider: "openai",
+				Model:    "gpt-4o-mini",
+			},
+		},
+	}
+
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(userCfg))
+	require.NoError(t, err)
+	require.Contains(t, cfg.Models, "fast")
+	assert.Equal(t, "gpt-4o-mini", cfg.Models["fast"].Model)
+}
+
+func TestWithUserConfig_LegacyProviderAuth(t *testing.T) {
+	t.Parallel()
+	source := NewBytesSource("legacy.yaml", []byte(`version: "15"
+models:
+  main:
+    provider: corp
+    model: claude-sonnet-4-5
+    auth:
+      type: workload_identity_federation
+      workload_identity_federation:
+        federation_rule_id: fdrl_test
+        organization_id: org-test
+        identity_token:
+          env: CORP_IDENTITY_TOKEN
+agents:
+  manager:
+    model: main
+    instruction: test
+  helper:
+    model: main
+    instruction: help
+`))
+	cfg, err := Load(t.Context(), source, WithVersions(legacy.Register), WithUserConfig(&userconfig.Config{
+		Providers: map[string]latest.ProviderConfig{"corp": {Provider: "anthropic", BaseURL: "https://corp.example.com"}},
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, "https://corp.example.com", cfg.Providers["corp"].BaseURL)
+	assert.Equal(t, "manager", cfg.Agents.First().Name)
 }

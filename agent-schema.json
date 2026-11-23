@@ -5,6 +5,14 @@
   "description": "Configuration schema for Docker Agent v16",
   "type": "object",
   "properties": {
+    "title_model": {
+      "type": "string",
+      "description": "Default session-title model; overrides model-level title_model."
+    },
+    "compaction_model": {
+      "type": "string",
+      "description": "Compaction model fallback after agent, model, and provider overrides."
+    },
     "version": {
       "type": "string",
       "description": "Configuration version",

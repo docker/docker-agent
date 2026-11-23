@@ -1,8 +1,14 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
+	"strconv"
 	"strings"
+
+	"github.com/goccy/go-yaml"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -19,12 +25,68 @@ func WithUserConfig(userCfg *userconfig.Config) LoadOption {
 	}
 }
 
+// Historical schemas validate authentication during decoding. Seed only provider
+// identities they understand; merge full current definitions after migration.
+func mergeUserProviderTypes(data []byte, version string, userCfg *userconfig.Config) ([]byte, error) {
+	v, err := strconv.Atoi(version)
+	if err != nil || v < 8 || len(userCfg.GetProviders()) == 0 {
+		return data, nil
+	}
+	var doc yaml.MapSlice
+	if err := yaml.UnmarshalWithOptions(data, &doc, yaml.UseOrderedMap()); err != nil {
+		return nil, err
+	}
+	value, hasProviders := lookupKey(doc, "providers")
+	providers, ok := value.(yaml.MapSlice)
+	if hasProviders && value != nil && !ok {
+		return data, nil // Let the historical parser report malformed providers.
+	}
+	global := userCfg.GetProviders()
+	for _, name := range slices.Sorted(maps.Keys(global)) {
+		p := global[name]
+		if _, exists := lookupKey(providers, name); !exists {
+			providers = append(providers, yaml.MapItem{Key: name, Value: yaml.MapSlice{{Key: "provider", Value: p.Provider}}})
+		}
+	}
+	if hasProviders {
+		for i := range doc {
+			if doc[i].Key == "providers" {
+				doc[i].Value = providers
+			}
+		}
+	} else {
+		doc = append(doc, yaml.MapItem{Key: "providers", Value: providers})
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("merging user provider identities: %w", err)
+	}
+	return out, nil
+}
+
 func mergeUserConfigDefinitions(cfg *latest.Config, userCfg *userconfig.Config) {
 	if cfg == nil || userCfg == nil {
 		return
 	}
 	MergeGlobalProviders(cfg, userCfg.GetProviders())
+	mergeGlobalModels(cfg, userCfg.GetModels())
 	mergeGlobalEvaluators(cfg, userCfg.GetEvaluators())
+}
+
+func mergeGlobalModels(cfg *latest.Config, global map[string]latest.ModelConfig) {
+	for name, modelCfg := range global {
+		if _, exists := cfg.Models[name]; exists {
+			continue
+		}
+		if strings.TrimSpace(name) == "" {
+			slog.Warn("Ignoring model with empty name from user config")
+			continue
+		}
+		if cfg.Models == nil {
+			cfg.Models = map[string]latest.ModelConfig{}
+		}
+		cfg.Models[name] = modelCfg
+	}
 }
 
 func mergeGlobalEvaluators(cfg *latest.Config, global map[string]latest.EvaluatorConfig) {
@@ -54,10 +116,10 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 	settings := userCfg.Settings
 
 	if settings.TitleModel != "" {
-		for name, m := range cfg.Models {
-			m.TitleModel = settings.TitleModel
-			cfg.Models[name] = m
-		}
+		cfg.DefaultTitleModel = settings.TitleModel
+	}
+	if settings.CompactionModel != "" {
+		cfg.DefaultCompactionModel = settings.CompactionModel
 	}
 
 	if settings.RedactSecrets != nil {
@@ -123,20 +185,6 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 	}
 }
 
-// ApplyDeferredUserSettings applies global settings whose precedence depends on
-// dynamic model resolution (e.g. first_available selectors), after resolution runs.
-func ApplyDeferredUserSettings(cfg *latest.Config, userCfg *userconfig.Config) {
-	if cfg == nil || userCfg == nil || userCfg.Settings == nil || userCfg.Settings.CompactionModel == "" {
-		return
-	}
-	for i := range cfg.Agents {
-		a := &cfg.Agents[i]
-		if a.Harness == nil && EffectiveCompactionModelRef(cfg, a) == "" {
-			a.CompactionModel = userCfg.Settings.CompactionModel
-		}
-	}
-}
-
 func ensureRuntime(cfg *latest.Config) *latest.RuntimeDefaults {
 	if cfg.Runtime == nil {
 		cfg.Runtime = &latest.RuntimeDefaults{}
@@ -173,10 +221,22 @@ func visitToolsets(cfg *latest.Config, fn func(*latest.Toolset)) {
 	}
 }
 
-// UserTitleModelRef returns the title-model fallback used even by auto and CLI models.
-func UserTitleModelRef(userCfg *userconfig.Config) string {
-	if userCfg == nil || userCfg.Settings == nil {
+// EffectiveTitleModelRef matches the first title model used by a model-backed agent.
+func EffectiveTitleModelRef(cfg *latest.Config, agent *latest.AgentConfig) string {
+	if agent.Harness != nil {
 		return ""
 	}
-	return userCfg.Settings.TitleModel
+	if cfg.DefaultTitleModel != "" {
+		return cfg.DefaultTitleModel
+	}
+	for name := range strings.SplitSeq(agent.Model, ",") {
+		model := cfg.Models[strings.TrimSpace(name)]
+		if model.IsFirstAvailable() {
+			return ""
+		}
+		if model.TitleModel != "" {
+			return model.TitleModel
+		}
+	}
+	return cfg.DefaultTitleModel
 }

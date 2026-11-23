@@ -190,6 +190,8 @@ export interface Command {
 
 /** Go: pkg/config/latest/types.go Config */
 export interface Config {
+  title_model?: string;
+  compaction_model?: string;
   version?: string;
   agents?: AgentConfig[];
   providers?: Record<string, ProviderConfig>;

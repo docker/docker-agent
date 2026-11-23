@@ -385,11 +385,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	// Resolve `first_available` model selectors into concrete provider/model
 	// definitions now that the environment is available, so the rest of the
 	// pipeline sees regular model definitions.
-	if err := config.ResolveFirstAvailableModels(ctx, cfg, runConfig.ModelsGateway, env, config.UserTitleModelRef(runConfig.UserConfig)); err != nil {
-		return nil, err
-	}
-	config.ApplyDeferredUserSettings(cfg, runConfig.UserConfig)
-	if err := config.ResolveFirstAvailableModels(ctx, cfg, runConfig.ModelsGateway, env, config.UserTitleModelRef(runConfig.UserConfig)); err != nil {
+	if err := config.ResolveFirstAvailableModels(ctx, cfg, runConfig.ModelsGateway, env); err != nil {
 		return nil, err
 	}
 
@@ -811,16 +807,7 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 // agent, if any. It returns the model named by the `title_model` field of the
 // first of the agent's configured models that sets it, or nil when none do.
 func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry, modelOpts []options.Opt) (provider.Provider, error) {
-	var titleRef string
-	for name := range strings.SplitSeq(a.Model, ",") {
-		if modelCfg, ok := cfg.Models[name]; ok && modelCfg.TitleModel != "" {
-			titleRef = modelCfg.TitleModel
-			break
-		}
-	}
-	if titleRef == "" && runConfig.UserConfig != nil && runConfig.UserConfig.Settings != nil {
-		titleRef = runConfig.UserConfig.Settings.TitleModel
-	}
+	titleRef := config.EffectiveTitleModelRef(cfg, a)
 	if titleRef == "" {
 		return nil, nil
 	}

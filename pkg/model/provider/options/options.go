@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
-	"github.com/docker/docker-agent/pkg/model/provider/internal/deepcopy"
+	"github.com/docker/docker-agent/pkg/deepcopy"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 

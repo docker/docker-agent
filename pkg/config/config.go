@@ -76,7 +76,14 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 	if deferValidate {
 		parsers[latest.Version] = func(d []byte) (any, error) { return latest.ParseRaw(d) }
 	}
-	oldConfig, err := parseCurrentVersion(data, raw.Version, parsers)
+	parseData := data
+	if loadOpts.userConfig != nil && !deferValidate {
+		parseData, err = mergeUserProviderTypes(data, raw.Version, loadOpts.userConfig)
+		if err != nil {
+			return nil, err
+		}
+	}
+	oldConfig, err := parseCurrentVersion(parseData, raw.Version, parsers)
 	if err != nil {
 		msg := yaml.FormatError(err, true, true)
 		if hint := newerVersionHint(data, raw.Version, err, parsers); hint != "" {
@@ -90,6 +97,21 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 	config, err := migrateToLatestConfig(oldConfig, data, upgraders)
 	if err != nil {
 		return nil, fmt.Errorf("migrating config: %w", err)
+	}
+
+	if loadOpts.userConfig != nil && !deferValidate {
+		// Identity-only entries existed solely for historical validation.
+		var original struct {
+			Providers map[string]any `yaml:"providers"`
+		}
+		if err := yaml.Unmarshal(data, &original); err != nil {
+			return nil, err
+		}
+		for name := range loadOpts.userConfig.GetProviders() {
+			if _, exists := original.Providers[name]; !exists {
+				delete(config.Providers, name)
+			}
+		}
 	}
 
 	config.Version = raw.Version

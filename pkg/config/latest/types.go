@@ -16,6 +16,7 @@ import (
 	"github.com/goccy/go-yaml"
 
 	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/deepcopy"
 	"github.com/docker/docker-agent/pkg/effort"
 )
 
@@ -23,6 +24,10 @@ const Version = "16"
 
 // Config represents the entire configuration file
 type Config struct {
+	// User model defaults remain separate from explicit agent/model overrides.
+	DefaultTitleModel      string `json:"title_model,omitempty" yaml:"title_model,omitempty"`
+	DefaultCompactionModel string `json:"compaction_model,omitempty" yaml:"compaction_model,omitempty"`
+
 	Version    string                     `json:"version,omitempty"`
 	Agents     Agents                     `json:"agents,omitempty"`
 	Providers  map[string]ProviderConfig  `json:"providers,omitempty"`
@@ -1355,11 +1360,10 @@ func (m *ModelConfig) Clone() *ModelConfig {
 	if m == nil {
 		return nil
 	}
-	var c ModelConfig
-	types.CloneThroughJSON(m, &c)
-	// Preserve fields excluded from JSON serialization
-	c.Name = m.Name
-	c.DisplayModel = m.DisplayModel
+	c, err := deepcopy.Value(*m)
+	if err != nil {
+		panic(err)
+	}
 	return &c
 }
 
@@ -1758,12 +1762,11 @@ type Toolset struct {
 	// A pattern matches the host exactly (case-insensitive) and any of its subdomains;
 	// e.g. "example.com" matches "example.com" and "docs.example.com" but not
 	// "badexample.com". A leading dot (".example.com") restricts the match to
-	// strict subdomains. Mutually exclusive with `blocked_domains`.
+	// strict subdomains. Blocked domains take precedence.
 	AllowedDomains []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty"`
 
 	// For the `fetch` tool - deny-list of domains the tool is forbidden to fetch.
-	// Uses the same matching rules as `allowed_domains`. Mutually exclusive with
-	// `allowed_domains`.
+	// Uses the same matching rules as `allowed_domains` and takes precedence.
 	BlockedDomains []string `json:"blocked_domains,omitempty" yaml:"blocked_domains,omitempty"`
 
 	// For the `fetch`, `api`, `openapi`, `a2a` and remote `mcp` toolsets — opt in

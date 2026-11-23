@@ -77,7 +77,7 @@ func TestRequires(t *testing.T) {
 	assert.Equal(t, map[string][]string{
 		// Custom provider and alias resolve to the registry key they are served by.
 		"anthropic":      {`models.main (provider "corp")`, "models.router"},
-		"openai":         {`models.cheap (provider "mistral")`, "models.main.title_model"},
+		"openai":         {`models.cheap (provider "mistral")`, "models.main.title_model", "agents.root.title_model"},
 		"google":         {"models.google/gemini-2.5-flash", "agents.root.toolsets[0].model"}, // routing targets are normalised into models by Load
 		"amazon-bedrock": {"agents.root.fallback.models[1]", "agents.root.skills.inline[0].model"},
 		"dmr":            {"agents.root.compaction_model"},

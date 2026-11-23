@@ -85,6 +85,9 @@ func Requires(cfg *latest.Config) Requirements {
 		for i, ref := range a.GetFallbackModels() {
 			r.modelRef(cfg, ref, fmt.Sprintf("%s.fallback.models[%d]", loc, i))
 		}
+		if ref := EffectiveTitleModelRef(cfg, a); ref != "" {
+			r.modelRef(cfg, ref, loc+".title_model")
+		}
 		if ref := EffectiveCompactionModelRef(cfg, a); ref != "" {
 			r.modelRef(cfg, ref, loc+".compaction_model")
 		}
