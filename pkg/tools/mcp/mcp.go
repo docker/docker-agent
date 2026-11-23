@@ -73,6 +73,9 @@ func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		}
 
 		if serverSpec.Type == "remote" {
+			if toolset.AllowPrivateIPs == nil && runConfig.UserConfig != nil && runConfig.UserConfig.Settings != nil && runConfig.UserConfig.Settings.Tools != nil {
+				toolset.AllowPrivateIPs = runConfig.UserConfig.Settings.Tools.AllowPrivateIPs
+			}
 			if toolset.WorkingDir != "" {
 				return nil, fmt.Errorf("working_dir is not supported for MCP toolset %q: ref %q resolves to a remote server (no local subprocess)",
 					toolset.Name, toolset.Ref)

@@ -382,7 +382,7 @@ agents:
 			wantErr: "",
 		},
 		{
-			name: "fetch with both is rejected",
+			name: "fetch with both applies both restrictions",
 			config: `
 agents:
   root:
@@ -394,7 +394,6 @@ agents:
         blocked_domains:
           - example.com
 `,
-			wantErr: "allowed_domains and blocked_domains are mutually exclusive",
 		},
 		{
 			name: "allowed_domains on non-fetch toolset is rejected",

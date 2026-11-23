@@ -2538,7 +2538,7 @@
         },
         "allowed_domains": {
           "type": "array",
-          "description": "Allow-list of domains the fetch tool is permitted to fetch (only valid for type 'fetch'). Patterns are case-insensitive. A bare host ('example.com') matches the apex AND any subdomain. A leading dot ('.example.com') or wildcard ('*.example.com') matches strict subdomains only. CIDR ranges ('10.0.0.0/8', '::1/128') match when the URL host parses as an IP inside the network. Mutually exclusive with 'blocked_domains'.",
+          "description": "Allow-list of domains the fetch tool is permitted to fetch (only valid for type 'fetch'). Patterns are case-insensitive. A bare host ('example.com') matches the apex AND any subdomain. A leading dot ('.example.com') or wildcard ('*.example.com') matches strict subdomains only. CIDR ranges ('10.0.0.0/8', '::1/128') match when the URL host parses as an IP inside the network. Blocked domains take precedence.",
           "items": {
             "type": "string"
           },
@@ -2558,7 +2558,7 @@
         },
         "blocked_domains": {
           "type": "array",
-          "description": "Deny-list of domains the fetch tool is forbidden to fetch (only valid for type 'fetch'). Uses the same matching rules as 'allowed_domains' (bare host, leading-dot or '*.' subdomain wildcard, and CIDR ranges for IP hosts). Mutually exclusive with 'allowed_domains'.",
+          "description": "Deny-list of domains the fetch tool is forbidden to fetch (only valid for type 'fetch'). Uses the same matching rules as 'allowed_domains' (bare host, leading-dot or '*.' subdomain wildcard, and CIDR ranges for IP hosts). Blocked domains take precedence.",
           "items": {
             "type": "string"
           },

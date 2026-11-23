@@ -130,9 +130,9 @@ func mergeGlobalEvaluators(cfg *latest.Config, global map[string]latest.Evaluato
 	}
 }
 
-func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
+func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) error {
 	if cfg == nil || userCfg == nil || userCfg.Settings == nil {
-		return
+		return nil
 	}
 	settings := userCfg.Settings
 
@@ -160,6 +160,12 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 				ts.SudoAskpass = new(*settings.SudoAskpass)
 			}
 		})
+	}
+
+	if settings.Tools != nil {
+		if err := applyToolPolicies(cfg, settings.Tools); err != nil {
+			return err
+		}
 	}
 
 	if settings.Sandbox {
@@ -204,6 +210,7 @@ func applyUserConfigSettings(cfg *latest.Config, userCfg *userconfig.Config) {
 			a.CodeModeTools = true
 		}
 	}
+	return nil
 }
 
 func ensureRuntime(cfg *latest.Config) *latest.RuntimeDefaults {
@@ -260,4 +267,82 @@ func EffectiveTitleModelRef(cfg *latest.Config, agent *latest.AgentConfig) strin
 		}
 	}
 	return cfg.DefaultTitleModel
+}
+
+func applyToolPolicies(cfg *latest.Config, policies *userconfig.ToolPolicies) error {
+	var policyErr error
+	visitToolsets(cfg, func(ts *latest.Toolset) {
+		if policies.AllowPrivateIPs != nil {
+			if !*policies.AllowPrivateIPs {
+				if supportsAllowPrivateIPs(ts) || (ts.Type == "mcp" && ts.Ref != "") {
+					ts.AllowPrivateIPs = new(false)
+				}
+			} else if supportsAllowPrivateIPs(ts) && ts.AllowPrivateIPs == nil {
+				ts.AllowPrivateIPs = new(true)
+			}
+		}
+
+		switch ts.Type {
+		case "filesystem", "file":
+			if policies.Filesystem != nil {
+				ts.DenyList = appendUnique(ts.DenyList, policies.Filesystem.DenyList)
+				if err := restrictAllowList(&ts.AllowList, policies.Filesystem.AllowList); err != nil {
+					policyErr = fmt.Errorf("%s: %w", ts.Type, err)
+				}
+			}
+		case "fetch":
+			if policies.Fetch != nil {
+				ts.BlockedDomains = appendUnique(ts.BlockedDomains, policies.Fetch.BlockedDomains)
+				if err := restrictAllowList(&ts.AllowedDomains, policies.Fetch.AllowedDomains); err != nil {
+					policyErr = fmt.Errorf("%s: %w", ts.Type, err)
+				}
+			}
+		case "mcp_catalog":
+			if policies.MCPCatalog != nil {
+				ts.BlockedServers = appendUnique(ts.BlockedServers, policies.MCPCatalog.BlockedServers)
+				if err := restrictAllowList(&ts.AllowedServers, policies.MCPCatalog.AllowedServers); err != nil {
+					policyErr = fmt.Errorf("%s: %w", ts.Type, err)
+				}
+			}
+		}
+	})
+	return policyErr
+}
+
+// Require an explicit subset of global rules rather than guessing whether
+// different path or wildcard spellings grant equivalent access.
+func restrictAllowList(agent *[]string, global []string) error {
+	if len(global) == 0 {
+		return nil
+	}
+	if len(*agent) == 0 {
+		*agent = slices.Clone(global)
+		return nil
+	}
+	for _, rule := range *agent {
+		if !slices.Contains(global, rule) {
+			return fmt.Errorf("allow-list entry %q is not in the global policy; use a subset of its rules", rule)
+		}
+	}
+	return nil
+}
+
+func supportsAllowPrivateIPs(ts *latest.Toolset) bool {
+	switch ts.Type {
+	case "fetch", "api", "openapi", "a2a":
+		return true
+	case "mcp":
+		return ts.Remote.URL != ""
+	default:
+		return false
+	}
+}
+
+func appendUnique(dst, src []string) []string {
+	for _, s := range src {
+		if !slices.Contains(dst, s) {
+			dst = append(dst, s)
+		}
+	}
+	return dst
 }

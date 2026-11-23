@@ -2006,3 +2006,56 @@ func TestConfig_MCPsRoundTrip(t *testing.T) {
 	require.Contains(t, mcps, "github")
 	assert.Equal(t, "npx", mcps["github"].Command)
 }
+
+func TestSettings_ToolPoliciesValidation(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	combined := `settings:
+  tools:
+    fetch:
+      allowed_domains: ["example.com"]
+      blocked_domains: ["evil.com"]
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(combined), 0o600))
+	_, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+
+	badPattern := "settings:\n  tools:\n    fetch:\n      blocked_domains: [\"*.evil.*\"]\n"
+	require.NoError(t, os.WriteFile(configFile, []byte(badPattern), 0o600))
+	_, err = loadFrom(configFile, "")
+	require.ErrorContains(t, err, "blocked_domains")
+
+	badFS := "settings:\n  tools:\n    filesystem:\n      deny_list: [\"\"]\n"
+	require.NoError(t, os.WriteFile(configFile, []byte(badFS), 0o600))
+	_, err = loadFrom(configFile, "")
+	require.ErrorContains(t, err, "deny_list")
+
+	badCat := "settings:\n  tools:\n    mcp_catalog:\n      blocked_servers: [\"\"]\n"
+	require.NoError(t, os.WriteFile(configFile, []byte(badCat), 0o600))
+	_, err = loadFrom(configFile, "")
+	require.ErrorContains(t, err, "blocked_servers")
+
+	good := &Config{
+		Settings: &Settings{
+			Tools: &ToolPolicies{
+				AllowPrivateIPs: new(false),
+				Filesystem:      &FilesystemPolicy{DenyList: []string{"~/.ssh"}},
+				Fetch:           &FetchPolicy{BlockedDomains: []string{"169.254.169.254"}},
+				MCPCatalog:      &MCPCatalogPolicy{BlockedServers: []string{"untrusted"}},
+			},
+		},
+	}
+	require.NoError(t, good.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	require.NotNil(t, loaded.GetSettings().Tools)
+	require.NotNil(t, loaded.GetSettings().Tools.AllowPrivateIPs)
+	assert.False(t, *loaded.GetSettings().Tools.AllowPrivateIPs)
+	assert.Equal(t, []string{"~/.ssh"}, loaded.GetSettings().Tools.Filesystem.DenyList)
+	assert.Equal(t, []string{"169.254.169.254"}, loaded.GetSettings().Tools.Fetch.BlockedDomains)
+	assert.Equal(t, []string{"untrusted"}, loaded.GetSettings().Tools.MCPCatalog.BlockedServers)
+}

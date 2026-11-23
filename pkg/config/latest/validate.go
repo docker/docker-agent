@@ -302,6 +302,11 @@ func (a *AgentConfig) validateHarness() error {
 	return nil
 }
 
+// Validate checks that the toolset's fields are valid for its type.
+func (t *Toolset) Validate() error {
+	return t.validate()
+}
+
 func (t *Toolset) validate() error {
 	// Attributes used on the wrong toolset type.
 	if len(t.Shell) > 0 && t.Type != "script" {
@@ -366,9 +371,6 @@ func (t *Toolset) validate() error {
 	}
 	if t.Recall != nil && t.Type != "background_jobs" {
 		return errors.New("recall can only be used with type 'background_jobs'")
-	}
-	if len(t.AllowedDomains) > 0 && len(t.BlockedDomains) > 0 {
-		return errors.New("allowed_domains and blocked_domains are mutually exclusive")
 	}
 	if err := validateDomainPatterns("allowed_domains", t.AllowedDomains); err != nil {
 		return err

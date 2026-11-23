@@ -131,7 +131,9 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 		return nil, err
 	}
 
-	applyUserConfigSettings(&config, loadOpts.userConfig)
+	if err := applyUserConfigSettings(&config, loadOpts.userConfig); err != nil {
+		return nil, err
+	}
 
 	warnExpansionMismatches(ctx, slog.Default(), &config)
 	warnMaxTokensVsContextWindow(ctx, slog.Default(), &config)

@@ -470,3 +470,62 @@ func TestWithUserConfig_MCPs(t *testing.T) {
 	assert.Equal(t, "npx", cfg.Agents[0].Toolsets[0].Command)
 	assert.Equal(t, []string{"-y", "@modelcontextprotocol/server-github"}, cfg.Agents[0].Toolsets[0].Args)
 }
+
+func TestWithUserConfig_ToolPolicies(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    toolsets:
+      - type: fetch
+        allow_private_ips: true
+        blocked_domains: ["agent-blocked.example"]
+      - type: filesystem
+        deny_list: ["/etc"]
+      - type: mcp_catalog
+        blocked_servers: ["legacy"]
+      - type: mcp
+        ref: docker:context7
+        allow_private_ips: true
+`)
+	userCfg := &userconfig.Config{
+		Settings: &userconfig.Settings{
+			Tools: &userconfig.ToolPolicies{
+				AllowPrivateIPs: new(false),
+				Filesystem: &userconfig.FilesystemPolicy{
+					AllowList: []string{"."},
+					DenyList:  []string{"~/.ssh", "/etc"},
+				},
+				Fetch: &userconfig.FetchPolicy{
+					BlockedDomains: []string{"169.254.169.254"},
+				},
+				MCPCatalog: &userconfig.MCPCatalogPolicy{
+					AllowedServers: []string{"github", "postgres"},
+					BlockedServers: []string{"untrusted"},
+				},
+			},
+		},
+	}
+
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(userCfg))
+	require.NoError(t, err)
+
+	fetchTS := cfg.Agents[0].Toolsets[0]
+	require.NotNil(t, fetchTS.AllowPrivateIPs)
+	assert.False(t, *fetchTS.AllowPrivateIPs, "global allow_private_ips: false must override agent true")
+	assert.Equal(t, []string{"agent-blocked.example", "169.254.169.254"}, fetchTS.BlockedDomains)
+
+	fsTS := cfg.Agents[0].Toolsets[1]
+	assert.Equal(t, []string{"."}, fsTS.AllowList)
+	assert.Equal(t, []string{"/etc", "~/.ssh"}, fsTS.DenyList)
+
+	catTS := cfg.Agents[0].Toolsets[2]
+	assert.Equal(t, []string{"github", "postgres"}, catTS.AllowedServers)
+	assert.Equal(t, []string{"legacy", "untrusted"}, catTS.BlockedServers)
+
+	mcpRefTS := cfg.Agents[0].Toolsets[3]
+	require.NotNil(t, mcpRefTS.AllowPrivateIPs)
+	assert.False(t, *mcpRefTS.AllowPrivateIPs, "global allow_private_ips: false must override docker: MCP ref true")
+}

@@ -173,6 +173,8 @@ type Settings struct {
 	NumHistoryItems int `yaml:"num_history_items,omitempty"`
 	// CodeModeTools enables code-mode tool wrapping across all agents by default.
 	CodeModeTools bool `yaml:"code_mode_tools,omitempty"`
+	// Tools defines global trust boundaries applied across all agents' toolsets.
+	Tools *ToolPolicies `yaml:"tools,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.
@@ -229,6 +231,43 @@ func (s *Settings) MCPSkillsEnabled() bool {
 // MCPTasksEnabled reports whether experimental MCP Tasks support is enabled.
 func (s *Settings) MCPTasksEnabled() bool {
 	return s != nil && s.Experimental != nil && s.Experimental.MCPTasks
+}
+
+// ToolPolicies defines global trust boundaries applied across all agents'
+// toolsets. Deny/block lists are always unioned (an agent cannot bypass a
+// global block); allow_private_ips: false acts as a hard ceiling.
+type ToolPolicies struct {
+	// AllowPrivateIPs controls SSRF protection across network toolsets
+	// (fetch, api, openapi, a2a, remote mcp). When false, agent configs cannot
+	// enable private IP access. When true, acts as a default when unset.
+	AllowPrivateIPs *bool `yaml:"allow_private_ips,omitempty"`
+	// Filesystem defines global allow_list and deny_list path boundaries for
+	// filesystem and file toolsets.
+	Filesystem *FilesystemPolicy `yaml:"filesystem,omitempty"`
+	// Fetch defines global allowed_domains and blocked_domains boundaries for
+	// fetch toolsets.
+	Fetch *FetchPolicy `yaml:"fetch,omitempty"`
+	// MCPCatalog defines global allowed_servers and blocked_servers boundaries
+	// for mcp_catalog toolsets.
+	MCPCatalog *MCPCatalogPolicy `yaml:"mcp_catalog,omitempty"`
+}
+
+// FilesystemPolicy defines global path boundaries for filesystem/file toolsets.
+type FilesystemPolicy struct {
+	AllowList []string `yaml:"allow_list,omitempty"`
+	DenyList  []string `yaml:"deny_list,omitempty"`
+}
+
+// FetchPolicy defines global domain boundaries for fetch toolsets.
+type FetchPolicy struct {
+	AllowedDomains []string `yaml:"allowed_domains,omitempty"`
+	BlockedDomains []string `yaml:"blocked_domains,omitempty"`
+}
+
+// MCPCatalogPolicy defines global server boundaries for mcp_catalog toolsets.
+type MCPCatalogPolicy struct {
+	AllowedServers []string `yaml:"allowed_servers,omitempty"`
+	BlockedServers []string `yaml:"blocked_servers,omitempty"`
 }
 
 // LayoutSettings customizes the TUI chat layout. The zero value is the
@@ -682,6 +721,45 @@ func (c *Config) validateSettings() error {
 		v := *c.Settings.CompactionThreshold
 		if !(v > 0 && v <= 1) {
 			return fmt.Errorf("settings.compaction_threshold must be greater than 0 and at most 1, got %v", v)
+		}
+	}
+	if c.Settings.Tools != nil {
+		if err := c.Settings.Tools.validate(); err != nil {
+			return fmt.Errorf("settings.tools: %w", err)
+		}
+	}
+	return nil
+}
+
+func (p *ToolPolicies) validate() error {
+	if p.Filesystem != nil {
+		ts := latest.Toolset{
+			Type:      "filesystem",
+			AllowList: p.Filesystem.AllowList,
+			DenyList:  p.Filesystem.DenyList,
+		}
+		if err := ts.Validate(); err != nil {
+			return fmt.Errorf("filesystem: %w", err)
+		}
+	}
+	if p.Fetch != nil {
+		ts := latest.Toolset{
+			Type:           "fetch",
+			AllowedDomains: p.Fetch.AllowedDomains,
+			BlockedDomains: p.Fetch.BlockedDomains,
+		}
+		if err := ts.Validate(); err != nil {
+			return fmt.Errorf("fetch: %w", err)
+		}
+	}
+	if p.MCPCatalog != nil {
+		ts := latest.Toolset{
+			Type:           "mcp_catalog",
+			AllowedServers: p.MCPCatalog.AllowedServers,
+			BlockedServers: p.MCPCatalog.BlockedServers,
+		}
+		if err := ts.Validate(); err != nil {
+			return fmt.Errorf("mcp_catalog: %w", err)
 		}
 	}
 	return nil

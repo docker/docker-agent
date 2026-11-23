@@ -204,7 +204,6 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 		{name: "allow_private_ips on wrong type", toolset: Toolset{Type: "shell", AllowPrivateIPs: new(true)}, wantErr: "allow_private_ips can only be used with type 'fetch', 'api', 'openapi', 'a2a' or remote MCP toolsets"},
 		{name: "sudo_askpass on non-shell", toolset: Toolset{Type: "fetch", SudoAskpass: new(true)}, wantErr: "sudo_askpass can only be used with type 'shell'"},
 		{name: "recall on non-background_jobs", toolset: Toolset{Type: "shell", Recall: new(true)}, wantErr: "recall can only be used with type 'background_jobs'"},
-		{name: "allowed and blocked domains", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"a.example.com"}, BlockedDomains: []string{"b.example.com"}}, wantErr: "allowed_domains and blocked_domains are mutually exclusive"},
 		{name: "invalid allowed_domains pattern", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"foo.*"}}, wantErr: `allowed_domains[0] "foo.*" is invalid`},
 		{name: "invalid blocked_domains pattern", toolset: Toolset{Type: "fetch", BlockedDomains: []string{"10.0.0.0/33"}}, wantErr: `blocked_domains[0] "10.0.0.0/33" is invalid: not a valid CIDR`},
 		{name: "models on non-model_picker", toolset: Toolset{Type: "shell", Models: []string{"openai/gpt-4o"}}, wantErr: "models can only be used with type 'model_picker'"},
@@ -317,6 +316,7 @@ func TestToolsetValidateValidToolsets(t *testing.T) {
 		name    string
 		toolset Toolset
 	}{
+		{name: "allowed and blocked domains", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"a.example.com"}, BlockedDomains: []string{"b.example.com"}}},
 		{name: "shell", toolset: Toolset{Type: "shell", Env: map[string]string{"A": "b"}, SudoAskpass: new(true)}},
 		{name: "background_jobs", toolset: Toolset{Type: "background_jobs", Env: map[string]string{"A": "b"}, Recall: new(true)}},
 		{name: "memory with path", toolset: Toolset{Type: "memory", Path: "/tmp/memory.db"}},
