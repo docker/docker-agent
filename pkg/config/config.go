@@ -21,14 +21,16 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // LoadOption customizes a single Load call.
 type LoadOption func(*loadOptions)
 
 type loadOptions struct {
-	flavors  []string
-	versions VersionRegistrar
+	flavors    []string
+	versions   VersionRegistrar
+	userConfig *userconfig.Config
 }
 
 // WithFlavors enables the named flavor patches for this load. Order matters:
@@ -92,9 +94,13 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 		return nil, err
 	}
 
+	mergeUserConfigDefinitions(&config, loadOpts.userConfig)
+
 	if err := validateConfig(&config); err != nil {
 		return nil, err
 	}
+
+	applyUserConfigSettings(&config, loadOpts.userConfig)
 
 	warnExpansionMismatches(ctx, slog.Default(), &config)
 	warnMaxTokensVsContextWindow(ctx, slog.Default(), &config)

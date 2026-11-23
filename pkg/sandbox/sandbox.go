@@ -303,7 +303,14 @@ func EnvForSource(ctx context.Context, source config.Source, env environment.Pro
 }
 
 func gatherSourceEnvVars(ctx context.Context, source config.Source, env environment.Provider, flavors []string, defaults ...*config.RuntimeConfig) ([]string, error) {
-	cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...), config.WithVersions(legacy.Register))
+	loadOpts := []config.LoadOption{config.WithFlavors(flavors...), config.WithVersions(legacy.Register)}
+	for _, rc := range defaults {
+		if rc != nil && rc.UserConfig != nil {
+			loadOpts = append(loadOpts, config.WithUserConfig(rc.UserConfig))
+			break
+		}
+	}
+	cfg, err := config.Load(ctx, source, loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("loading agent config: %w", err)
 	}

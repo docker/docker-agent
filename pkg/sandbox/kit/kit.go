@@ -58,6 +58,7 @@ import (
 	"github.com/docker/docker-agent/pkg/promptfiles"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/toolinstall"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // Output styles for PrintSummary. fatih/color auto-disables when
@@ -84,6 +85,9 @@ type Options struct {
 
 	// Source freezes an already resolved agent selection when provided.
 	Source config.Source
+
+	// UserConfig provides global definitions and settings when loading the agent config.
+	UserConfig *userconfig.Config
 
 	// EnvProvider is forwarded to [sources.Resolve] so URL-sourced
 	// agents can pick up GITHUB_TOKEN. May be nil.
@@ -421,14 +425,19 @@ func promote(stagingDir, finalDir string) error {
 }
 
 func loadConfig(ctx context.Context, opts Options) (*latestcfg.Config, error) {
+	loadOpts := []config.LoadOption{
+		config.WithFlavors(opts.Flavors...),
+		config.WithVersions(legacy.Register),
+		config.WithUserConfig(opts.UserConfig),
+	}
 	if opts.Source != nil {
-		return config.Load(ctx, opts.Source, config.WithFlavors(opts.Flavors...), config.WithVersions(legacy.Register))
+		return config.Load(ctx, opts.Source, loadOpts...)
 	}
 	source, err := sources.Resolve(opts.AgentRef, opts.EnvProvider)
 	if err != nil {
 		return nil, err
 	}
-	return config.Load(ctx, source, config.WithFlavors(opts.Flavors...), config.WithVersions(legacy.Register))
+	return config.Load(ctx, source, loadOpts...)
 }
 
 // stageSkills copies every local skill the agent config enables into

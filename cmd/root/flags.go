@@ -130,8 +130,7 @@ func addGatewayFlags(cmd *cobra.Command, runConfig *config.RuntimeConfig, loadUs
 
 		userCfg, err := loadUserConfig()
 		if err != nil {
-			slog.WarnContext(ctx, "Failed to load user config", "error", err)
-			userCfg = &userconfig.Config{}
+			return fmt.Errorf("loading user config: %w", err)
 		}
 
 		env := runConfig.EnvProvider()
@@ -169,6 +168,9 @@ func addGatewayFlags(cmd *cobra.Command, runConfig *config.RuntimeConfig, loadUs
 		// definitions with the same name win when configs are loaded.
 		if runConfig.Providers == nil {
 			runConfig.Providers = userCfg.GetProviders()
+		}
+		if runConfig.UserConfig == nil {
+			runConfig.UserConfig = userCfg
 		}
 
 		return setupWorkingDirectory(runConfig)

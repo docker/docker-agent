@@ -94,7 +94,11 @@ func loadAgentConfig(ctx context.Context, agentRef string, flavors []string) *la
 	if err != nil {
 		return nil
 	}
-	cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...), config.WithVersions(legacy.Register))
+	loadOpts := []config.LoadOption{config.WithFlavors(flavors...), config.WithVersions(legacy.Register)}
+	if userCfg, err := userconfig.Load(); err == nil {
+		loadOpts = append(loadOpts, config.WithUserConfig(userCfg))
+	}
+	cfg, err := config.Load(ctx, source, loadOpts...)
 	if err != nil {
 		return nil
 	}
@@ -177,6 +181,7 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		kitResult, err = kit.Build(ctx, kit.Options{
 			AgentRef:    source.Name(),
 			Source:      source,
+			UserConfig:  userCfg,
 			EnvProvider: envProvider,
 			HostCwd:     wd,
 			Workspace:   wd,
@@ -202,7 +207,7 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		}
 	}
 
-	agentCfg, err := config.Load(ctx, source, config.WithFlavors(runConfig.Flavors...), config.WithVersions(legacy.Register))
+	agentCfg, err := config.Load(ctx, source, config.WithFlavors(runConfig.Flavors...), config.WithVersions(legacy.Register), config.WithUserConfig(userCfg))
 	if err != nil {
 		return fmt.Errorf("loading sandbox agent: %w", err)
 	}
@@ -247,6 +252,9 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	// any additional vars (e.g. MCP tool secrets).
 	// Sandbox dispatch precedes runOrExec, which normally loads inherited hooks.
 	envConfig := &config.RuntimeConfig{Config: runConfig.Config}
+	if envConfig.UserConfig == nil {
+		envConfig.UserConfig = userCfg
+	}
 	envConfig.GlobalHooks = config.MergeHooks(
 		config.MergeHooks(userCfg.GetSettings().GlobalHooks(), config.LoadHookDropIns()),
 		runConfig.GlobalHooks,

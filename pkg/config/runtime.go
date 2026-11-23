@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 type RuntimeConfig struct {
@@ -48,6 +49,7 @@ type Config struct {
 	WorkingDir     string
 	Models         map[string]latest.ModelConfig
 	Providers      map[string]latest.ProviderConfig
+	UserConfig     *userconfig.Config
 
 	// EncryptedConfig is an opaque, encrypted representation of the full agent
 	// YAML (as produced by `docker agent share push --key --encrypt`). When set

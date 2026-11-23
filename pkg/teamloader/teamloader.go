@@ -288,7 +288,11 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	}
 
 	// Load the agent's configuration
-	cfg, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...), config.WithVersions(loadOpts.configVersions))
+	cfg, err := config.Load(ctx, agentSource,
+		config.WithFlavors(runConfig.Flavors...),
+		config.WithVersions(loadOpts.configVersions),
+		config.WithUserConfig(runConfig.UserConfig),
+	)
 	if err != nil {
 		return nil, err
 	}

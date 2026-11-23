@@ -169,7 +169,13 @@ Exits with a non-zero status when an issue would prevent an agent from running.`
 	if flags.loadHookDropIns == nil {
 		flags.loadHookDropIns = config.LoadHookDropIns
 	}
-	addGatewayFlags(cmd, &flags.runConfig, loadUserConfig)
+	addGatewayFlags(cmd, &flags.runConfig, func() (*userconfig.Config, error) {
+		cfg, err := loadUserConfig()
+		if err != nil {
+			return &userconfig.Config{}, nil // buildReport reports invalid user config.
+		}
+		return cfg, nil
+	})
 
 	return cmd
 }
@@ -274,7 +280,12 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		if err != nil {
 			return nil, err
 		}
-		if agentCfg, err = config.Load(ctx, agentSource, config.WithVersions(legacy.Register)); err != nil {
+		var loadOpts []config.LoadOption
+		loadOpts = append(loadOpts, config.WithVersions(legacy.Register))
+		if userErr == nil && userCfg != nil {
+			loadOpts = append(loadOpts, config.WithUserConfig(userCfg))
+		}
+		if agentCfg, err = config.Load(ctx, agentSource, loadOpts...); err != nil {
 			return nil, err
 		}
 	}

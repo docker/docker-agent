@@ -218,6 +218,9 @@ func TestCloudRejectsInvalidUserConfigBeforeProvisioning(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	require.ErrorContains(t, cmd.ExecuteContext(t.Context()), "loading user config")
 	data, err := os.ReadFile(calls)
+	if errors.Is(err, os.ErrNotExist) {
+		return // Invalid user config now aborts before any sandbox CLI call.
+	}
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "run")
 	assert.NotContains(t, string(data), "exec")

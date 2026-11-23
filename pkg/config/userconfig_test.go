@@ -1,0 +1,48 @@
+package config
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/userconfig"
+)
+
+func TestWithUserConfig_MergesProviders(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: corp/my-model
+    instruction: test
+`)
+	userCfg := &userconfig.Config{
+		Providers: map[string]latest.ProviderConfig{
+			"corp": {
+				Provider: "openai",
+				BaseURL:  "https://llm.corp.internal/v1",
+				TokenKey: "CORP_API_KEY",
+			},
+		},
+	}
+
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(userCfg))
+	require.NoError(t, err)
+	require.Contains(t, cfg.Providers, "corp")
+	assert.Equal(t, "https://llm.corp.internal/v1", cfg.Providers["corp"].BaseURL)
+}
+
+func TestWithUserConfig_NilIsNoop(t *testing.T) {
+	t.Parallel()
+
+	agentYAML := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`)
+	cfg, err := Load(t.Context(), NewBytesSource("agent.yaml", agentYAML), WithUserConfig(nil))
+	require.NoError(t, err)
+	assert.Len(t, cfg.Agents, 1)
+}
