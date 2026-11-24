@@ -7,8 +7,8 @@ const path = require("node:path");
 const { before, it } = require("node:test");
 const { bootDockerAgent } = require("./boot.js");
 
-// The optimized binary is about 34 MiB, versus 42 MiB without wasm-opt.
-const sizeBudget = 37 * 1024 * 1024;
+// With either dependency optimization missing, the build exceeds 32 MiB.
+const sizeBudget = 32 * 1024 * 1024;
 
 const yaml = `
 agents:

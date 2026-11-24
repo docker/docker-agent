@@ -94,7 +94,7 @@ See `examples/cloud-bedrock.yaml` and `examples/cloud-vertex.yaml`.
 ### Small profile
 
 Most of the default binary is what it links, not the runtime. The small
-profile keeps the shared runtime and trades features for size: about 33 MiB
+profile keeps the shared runtime and trades features for size: about 32 MiB
 uncompressed with Go 1.27.4 and Binaryen 132, compared to 162 MiB for the
 stripped default build. The small build requires [Binaryen](https://github.com/WebAssembly/binaryen/releases/tag/version_132)
 (`wasm-opt` on `PATH`; e.g. `brew install binaryen`). CI uses version 132.
@@ -133,6 +133,13 @@ code, then runs `scripts/wasmpack`. On wasm the linker's `runtime.findfunctab`
 costs 320 bytes per function: the tool removes the table and adds a start
 function that writes it back at instantiation, leaving memory byte for byte
 unchanged. Finally, `wasm-opt -Oz` optimizes the packed binary for size.
+
+The task uses `scripts/wasmsmall` to prepare local copies of two pinned
+dependencies. It makes Anthropic request-union metadata lazy so the linker
+can drop unused API types, and omits the ordered-map YAML adapter to avoid
+linking a second YAML parser. The ordered-map JSON support and the agent
+config YAML parser are unchanged. Native and default WASM builds use both
+dependencies unmodified.
 
 `e2e/dependencies_test.go` guards the profile's dependency closure and
 `node/small_test.js` its size.
