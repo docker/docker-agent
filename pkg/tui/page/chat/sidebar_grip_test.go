@@ -28,7 +28,8 @@ func TestSidebarGripPreservesResizeAndToggleTargets(t *testing.T) {
 			tester := NewHitTest(p)
 			view := func() string { return p.renderSidebarHandle(sl.chatHeight) }
 			rest := view()
-			assert.Equal(t, tc.toggle+strings.Repeat("\n ", sl.chatHeight-1), ansi.Strip(rest))
+			divider := styles.ResizeHandleStyle.Foreground(styles.Separator).Render("│")
+			assert.Equal(t, styles.MutedStyle.Render(tc.toggle)+strings.Repeat("\n"+divider, sl.chatHeight-1), rest)
 			assert.Equal(t, TargetSidebarToggle, tester.At(x, 0))
 			assert.Equal(t, TargetSidebarResizeHandle, tester.At(x, 1))
 
@@ -113,7 +114,7 @@ func TestSidebarGripLeavesToggleAloneOnShortColumn(t *testing.T) {
 	p := newLayoutTestPage(t, msgtypes.SidebarRight)
 	assert.Empty(t, p.renderSidebarHandle(0))
 	assert.Equal(t, "»", ansi.Strip(p.renderSidebarHandle(1)))
-	assert.Equal(t, "»\n ", ansi.Strip(p.renderSidebarHandle(2)))
+	assert.Equal(t, "»\n│", ansi.Strip(p.renderSidebarHandle(2)))
 }
 
 func TestSidebarBandKeepsBlankSeparatorRow(t *testing.T) {

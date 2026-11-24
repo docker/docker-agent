@@ -106,7 +106,15 @@ func (r *Reveal) Render(glyph string, count int) string {
 	if !r.dragging && r.edge == 0 {
 		return strings.Repeat(" ", count)
 	}
-	segment := strings.Repeat(glyph, count)
+	return r.renderOver(strings.Repeat(glyph, count), styles.Background)
+}
+
+// RenderOnSeparator reveals the grip over a persistent divider.
+func (r *Reveal) RenderOnSeparator() string {
+	return r.renderOver("│", styles.Separator)
+}
+
+func (r *Reveal) renderOver(segment string, background color.Color) string {
 	switch {
 	case r.dragging:
 		return darkenedStyle().Render(segment)
@@ -114,7 +122,7 @@ func (r *Reveal) Render(glyph string, count int) string {
 		return styles.ResizeHandleHoverStyle.Render(segment)
 	default:
 		fg := blend(styles.ResizeHandleStyle.GetForeground(), styles.ResizeHandleHoverStyle.GetForeground(), r.handle)
-		return styles.ResizeHandleStyle.Foreground(blend(styles.Background, fg, r.edge)).Render(segment)
+		return styles.ResizeHandleStyle.Foreground(blend(background, fg, r.edge)).Render(segment)
 	}
 }
 

@@ -184,7 +184,8 @@ func (p *chatPage) renderSidebarHandle(height int) string {
 	}
 
 	start, end := sidebarGripRows(height)
-	return styles.MutedStyle.Render(glyph) + strings.Repeat("\n ", start-1) +
-		strings.Repeat("\n"+p.sidebarGrip.Render("│", 1), end-start) +
-		strings.Repeat("\n ", height-end)
+	rule := "\n" + styles.ResizeHandleStyle.Foreground(styles.Separator).Render("│")
+	return styles.MutedStyle.Render(glyph) + strings.Repeat(rule, start-1) +
+		strings.Repeat("\n"+p.sidebarGrip.RenderOnSeparator(), end-start) +
+		strings.Repeat(rule, height-end)
 }
