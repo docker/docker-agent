@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  teamorouter_model:
+    provider: teamorouter
+    model: deepseek-v4-flash
+
+agents:
+  root:
+    model: teamorouter_model
+    description: Assistant using TeamoRouter
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think
