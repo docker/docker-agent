@@ -241,6 +241,7 @@ func TestWasmSmallBinaryDependencies(t *testing.T) {
 		"github.com/docker/docker-agent/pkg/model/provider/gemini",
 		"github.com/docker/docker-agent/pkg/model/provider/vertexai",
 		"github.com/aws/aws-sdk-go-v2",
+		"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp",
 		"google.golang.org/genai",
 		"google.golang.org/grpc",
 		"google.golang.org/protobuf",
