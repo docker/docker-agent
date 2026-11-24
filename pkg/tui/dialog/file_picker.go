@@ -11,6 +11,7 @@ import (
 	"github.com/docker/go-units"
 
 	"github.com/docker/docker-agent/pkg/fsx"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -316,14 +317,25 @@ func (d *filePickerDialog) filterEntries() {
 	d.scrollview.SetScrollOffset(0)
 }
 
+// truncateDir shortens dir to fit contentWidth columns, keeping the path tail
+// behind an ellipsis. Two columns are reserved for the "📁 " prefix. Embedded
+// line breaks are escaped first: lipgloss.Width measures the widest line, so a
+// raw newline passes the fit check and renders a second header row that the
+// picker's fixed one-row scrollbar offset does not account for.
+func truncateDir(dir string, contentWidth int) string {
+	dir = pathEscaper.Replace(dir)
+	return toolcommon.TruncateTextLeft(dir, contentWidth-4)
+}
+
+// pathEscaper renders line breaks visible instead of letting them split the
+// one-line header.
+var pathEscaper = strings.NewReplacer("\n", `\n`, "\r", `\r`)
+
 func (d *filePickerDialog) View() string {
 	dialogWidth, _, contentWidth := d.dialogSize()
 	d.textInput.SetWidth(contentWidth)
 
-	displayDir := d.currentDir
-	if len(displayDir) > contentWidth-4 {
-		displayDir = "…" + displayDir[len(displayDir)-(contentWidth-5):]
-	}
+	displayDir := truncateDir(d.currentDir, contentWidth)
 	dirLine := styles.MutedStyle.Render("📁 " + displayDir)
 
 	var allLines []string
