@@ -556,9 +556,21 @@ func (a *RuntimeAttachment) Detach() {
 	sm.finishDetach(a.sessionID, a.rs)
 }
 
-// finishDetach drops a closing attachment's runtimeSessions entry once no stream
-// holds its guard anymore. The identity check keeps a late finish for a replaced
-// attachment from deleting its replacement.
+// finishDetach drops a closing attachment's runtimeSessions entry once its
+// streaming guard is released. The identity check keeps a late finish for a
+// replaced attachment from deleting its replacement.
+//
+// finishDetach only ever completes a teardown opportunistically and never
+// blocks: it uses TryLock because the guard may be held by a live stream, and
+// it is the guard's release that has to call back here. Every holder of
+// rs.streaming therefore releases it through RuntimeAttachment.Unlock or
+// unlockStream, which invoke finishDetach after Unlock; a plain streaming.Unlock
+// would drop the guard without retrying and could leak a closed attachment in
+// GET /api/sessions?active=true forever (#4909 review). This matters for
+// non-stream holders too: an idle GetSessionSnapshot/GetActiveSessions/
+// GetSessionStatus probe or an AddMessage/UpdateMessage busy check acquires the
+// same guard for a moment, so a detach that lands during one of those probes
+// must be finished by the probe's release.
 func (sm *SessionManager) finishDetach(sessionID string, rs *activeRuntimes) {
 	if !rs.closing.Load() {
 		return
@@ -640,13 +652,16 @@ func (sm *SessionManager) WaitSessionAttached(ctx context.Context, sessionID str
 // server. Unlike GetSessions, it never reads historical sessions from disk.
 func (sm *SessionManager) GetActiveSessions() []api.SessionsResponse {
 	sessions := []api.SessionsResponse{}
-	sm.runtimeSessions.Range(func(_ string, rs *activeRuntimes) bool {
+	sm.runtimeSessions.Range(func(sessionID string, rs *activeRuntimes) bool {
 		if rs.session == nil {
 			return true
 		}
 		streaming := !rs.streaming.TryLock()
 		if !streaming {
-			rs.streaming.Unlock()
+			// Release through unlockStream, not a plain Unlock: if the
+			// attachment was detached while this probe held the guard, the
+			// release is what finishes the teardown (see finishDetach).
+			rs.unlockStream(sm, sessionID)
 		}
 		title := rs.session.TitleSnapshot()
 		inputTokens, outputTokens := rs.session.Usage()
@@ -676,10 +691,12 @@ func (sm *SessionManager) GetSessionStatus(ctx context.Context, id string) (*api
 	sess := rs.session
 
 	// Probe streaming state: TryLock succeeds only when no RunStream is
-	// in progress. Immediately unlock so we don't interfere.
+	// in progress. Immediately unlock so we don't interfere, through
+	// unlockStream so a detach that landed while this probe held the guard
+	// is finished here (see finishDetach).
 	streaming := !rs.streaming.TryLock()
 	if !streaming {
-		rs.streaming.Unlock()
+		rs.unlockStream(sm, id)
 	}
 
 	title := sess.TitleSnapshot()
@@ -712,7 +729,11 @@ func (sm *SessionManager) GetSessionSnapshot(ctx context.Context, id string) (*a
 		defer rs.snapshotBoundary.Unlock()
 		// Keep an idle turn stable until messages and cursor have been copied.
 		if rs.streaming.TryLock() {
-			defer rs.streaming.Unlock()
+			// Release through unlockStream: this probe is not a stream (there
+			// is no later Unlock from a stream goroutine), so if the tab was
+			// detached while the snapshot held the guard, this release is the
+			// only chance to finish the teardown (#4909 review).
+			defer rs.unlockStream(sm, id)
 		} else {
 			streaming = true
 		}
@@ -1529,9 +1550,11 @@ func (sm *SessionManager) FollowUpSession(ctx context.Context, sessionID string,
 
 	// Probe streaming state so the caller knows whether the follow-up
 	// will be consumed by the current turn or sit idle until the next.
+	// unlockStream (not a plain Unlock) also completes a detach that landed
+	// while this probe held the guard (see finishDetach).
 	streaming = !rt.streaming.TryLock()
 	if !streaming {
-		rt.streaming.Unlock()
+		rt.unlockStream(sm, sessionID)
 	}
 
 	return streaming, false, nil
@@ -2201,15 +2224,21 @@ func (sm *SessionManager) GetAgentToolCount(ctx context.Context, agentFilename, 
 // store write completes would otherwise interleave with it (#3590).
 func (sm *SessionManager) AddMessage(ctx context.Context, sessionID string, msg *session.Message) error {
 	sm.mux.Lock()
-	defer sm.mux.Unlock()
 
 	rt, ok := sm.runtimeSessions.Load(sessionID)
-	if ok {
-		if !rt.streaming.TryLock() {
-			return ErrSessionBusy
-		}
-		defer rt.streaming.Unlock()
+	if ok && !rt.streaming.TryLock() {
+		sm.mux.Unlock()
+		return ErrSessionBusy
 	}
+	// The guard must be released through unlockStream so a detach that landed
+	// while the busy check held it is finished (see finishDetach). Do it after
+	// sm.mux is dropped: finishDetach takes sm.mux.
+	defer func() {
+		sm.mux.Unlock()
+		if ok {
+			rt.unlockStream(sm, sessionID)
+		}
+	}()
 
 	_, err := sm.sessionStore.AddMessage(ctx, sessionID, msg)
 	if err != nil {
@@ -2231,14 +2260,19 @@ func (sm *SessionManager) AddMessage(ctx context.Context, sessionID string, msg 
 // the whole mutation instead of releasing it right after the check.
 func (sm *SessionManager) UpdateMessage(ctx context.Context, sessionID, msgID string, msg *session.Message) error {
 	sm.mux.Lock()
-	defer sm.mux.Unlock()
 
-	if rt, ok := sm.runtimeSessions.Load(sessionID); ok {
-		if !rt.streaming.TryLock() {
-			return ErrSessionBusy
-		}
-		defer rt.streaming.Unlock()
+	rt, ok := sm.runtimeSessions.Load(sessionID)
+	if ok && !rt.streaming.TryLock() {
+		sm.mux.Unlock()
+		return ErrSessionBusy
 	}
+	// See AddMessage: release the guard through unlockStream, after sm.mux.
+	defer func() {
+		sm.mux.Unlock()
+		if ok {
+			rt.unlockStream(sm, sessionID)
+		}
+	}()
 
 	msgPos, err := strconv.ParseInt(msgID, 10, 64)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -26,6 +27,11 @@ type mcpFlags struct {
 	authToken      string
 	insecureNoAuth bool
 	runConfig      config.RuntimeConfig
+
+	// runRegistry resolves --attach targets. Nil means the process-wide
+	// runregistry.Default(); tests inject an isolated registry so the CLI
+	// lookup never reads the user's real run registry.
+	runRegistry attachRuns
 }
 
 func newMCPCmd() *cobra.Command {
@@ -47,7 +53,7 @@ func newMCPCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&flags.agentName, "agent", "a", "", "Name of the agent to run (all agents if not specified)")
 	cmd.PersistentFlags().BoolVar(&flags.http, "http", false, "Use streaming HTTP transport instead of stdio")
 	cmd.PersistentFlags().StringVarP(&flags.listenAddr, "listen", "l", "127.0.0.1:8081", "Address to listen on")
-	cmd.PersistentFlags().StringVar(&flags.attach, "attach", "", "Attach to a running TUI run by pid, address, or session id (or empty for the most recent)")
+	cmd.PersistentFlags().StringVar(&flags.attach, "attach", "", "Attach to a running TUI run by pid, address, or session id, including a tab spawned after the run started (or empty for the most recent)")
 	cmd.PersistentFlags().Lookup("attach").NoOptDefVal = "latest"
 	cmd.PersistentFlags().StringVar(&flags.safety, "safety", "", "Tool safety policy (strict, balanced, restricted, autonomous); only valid with --http")
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for HTTP MCP requests; only valid with --http")
@@ -116,23 +122,165 @@ func (f *mcpFlags) runMCPCommand(cmd *cobra.Command, args []string) (commandErr 
 }
 
 func (f *mcpFlags) runAttach(ctx context.Context) error {
-	target := f.attach
+	addr, sessionID, err := resolveAttachTarget(ctx, f.attachRuns(), f.attach)
+	if err != nil {
+		return err
+	}
+	return mcp.StartAttachStdio(ctx, addr, sessionID)
+}
+
+// attachRuns is the subset of the run registry the --attach lookup needs.
+// *runregistry.Registry is the production implementation; tests inject an
+// in-memory fake so the CLI lookup never reads the user's real registry.
+type attachRuns interface {
+	Find(target string) (runregistry.Record, error)
+	List() ([]runregistry.Record, error)
+}
+
+var _ attachRuns = (*runregistry.Registry)(nil)
+
+// attachRuns returns the registry used to resolve --attach targets.
+func (f *mcpFlags) attachRuns() attachRuns {
+	if f.runRegistry != nil {
+		return f.runRegistry
+	}
+	return runregistry.Default()
+}
+
+// attachSession is a live tab resolved on a discovered run.
+type attachSession struct {
+	addr      string
+	sessionID string
+}
+
+// resolveAttachTarget maps a --attach value to the control-plane address of the
+// live run that serves it and the session ID the MCP proxy should drive.
+//
+// A pid, an http(s) address, or an empty/"latest" target discovers a run through
+// the registry; the session is then resolved inside that run: its recorded
+// initial session while that is still attached, the only live session when the
+// initial tab was closed, or a clear error listing the candidates.
+//
+// A session ID selects that live session. A run's registry record only stores
+// the session the run started with, so a TUI tab spawned after startup is not on
+// any record. The lookup therefore probes every live run's attached sessions for
+// the ID, which is what makes "serve mcp --attach <spawned-tab-id>" work. An
+// explicitly selected session that is attached nowhere fails clearly instead of
+// being silently redirected to another tab.
+func resolveAttachTarget(ctx context.Context, runs attachRuns, target string) (addr, sessionID string, err error) {
+	target = strings.TrimSpace(target)
 	if target == "latest" {
 		target = ""
 	}
-	rec, err := runregistry.Default().Find(target)
-	if err != nil {
-		return err
+
+	if !attachTargetIsSessionID(target) {
+		rec, err := runs.Find(target)
+		if err != nil {
+			return "", "", err
+		}
+		sessionID, err := mcp.ResolveAttachSession(ctx, rec.Addr, rec.SessionID, false)
+		if err != nil {
+			return "", "", err
+		}
+		return rec.Addr, sessionID, nil
 	}
-	// The discovery record keeps naming the session the run started with, but
-	// that tab can be closed while the run stays alive. Resolve a session that
-	// is actually attached before starting the proxy; an explicitly named
-	// closed session fails instead of being silently redirected.
-	sessionID, err := mcp.ResolveAttachSession(ctx, rec.Addr, rec.SessionID, attachTargetIsSessionID(target))
-	if err != nil {
-		return err
+
+	// An explicit session ID is either the discovered run's recorded initial
+	// session (the original lookup path) or a tab spawned after startup, which
+	// no registry record knows about. Try the recorded run first so its "tab was
+	// closed" error is preserved when that is what the caller named, then fall
+	// back to scanning every live run for the tab.
+	var recordedErr error
+	if rec, findErr := runs.Find(target); findErr == nil {
+		sessionID, err := mcp.ResolveAttachSession(ctx, rec.Addr, rec.SessionID, true)
+		if err == nil {
+			return rec.Addr, sessionID, nil
+		}
+		recordedErr = err
+		if rec.SessionID == target {
+			// The caller named the run's initial session exactly and its tab is
+			// closed: fail instead of prefix-matching a different live tab, so an
+			// explicit closed selection is never silently redirected.
+			return "", "", err
+		}
 	}
-	return mcp.StartAttachStdio(ctx, rec.Addr, sessionID)
+
+	resolved, err := findLiveAttachSession(ctx, runs, target)
+	if err != nil {
+		if recordedErr != nil {
+			return "", "", recordedErr
+		}
+		return "", "", err
+	}
+	return resolved.addr, resolved.sessionID, nil
+}
+
+// findLiveAttachSession resolves an explicitly selected tab against the attached
+// sessions of every discovered run. Exact IDs win over prefixes and the match
+// must be unique, so a client is never silently attached to a different tab.
+func findLiveAttachSession(ctx context.Context, runs attachRuns, target string) (attachSession, error) {
+	records, err := runs.List()
+	if err != nil {
+		return attachSession{}, fmt.Errorf("listing live runs: %w", err)
+	}
+
+	var exact, prefix []attachSession
+	var live, unreachable []string
+	for _, rec := range records {
+		ids, err := mcp.LiveAttachSessions(ctx, rec.Addr)
+		if err != nil {
+			// One unreachable run must not hide a tab that lives on another;
+			// report it only when nothing matches anywhere.
+			unreachable = append(unreachable, fmt.Sprintf("%s: %v", rec.Addr, err))
+			continue
+		}
+		live = append(live, ids...)
+		for _, id := range ids {
+			candidate := attachSession{addr: rec.Addr, sessionID: id}
+			switch {
+			case id == target:
+				exact = append(exact, candidate)
+			case strings.HasPrefix(id, target):
+				prefix = append(prefix, candidate)
+			}
+		}
+	}
+
+	matches := exact
+	if len(matches) == 0 {
+		matches = prefix
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		slices.Sort(live)
+		msg := fmt.Sprintf("session %s is not attached to any live docker-agent run; live sessions: %s", target, formatLiveSessions(live))
+		if len(unreachable) > 0 {
+			slices.Sort(unreachable)
+			msg += "; could not query runs: " + strings.Join(unreachable, ", ")
+		}
+		return attachSession{}, errors.New(msg)
+	default:
+		slices.SortFunc(matches, func(a, b attachSession) int {
+			if c := strings.Compare(a.sessionID, b.sessionID); c != 0 {
+				return c
+			}
+			return strings.Compare(a.addr, b.addr)
+		})
+		options := make([]string, 0, len(matches))
+		for _, m := range matches {
+			options = append(options, fmt.Sprintf("%s (run at %s)", m.sessionID, m.addr))
+		}
+		return attachSession{}, fmt.Errorf("session %q is ambiguous: it matches %s", target, strings.Join(options, ", "))
+	}
+}
+
+func formatLiveSessions(ids []string) string {
+	if len(ids) == 0 {
+		return "none"
+	}
+	return strings.Join(ids, ", ")
 }
 
 // attachTargetIsSessionID reports whether a --attach value names a session ID

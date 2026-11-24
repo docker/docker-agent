@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -119,20 +120,12 @@ func AttachServer(ctx context.Context, addr, sessionID string) (*mcp.Server, err
 //   - a fresh run-level discovery resolves the live session when there is
 //     exactly one, and otherwise fails clearly listing the candidates.
 func ResolveAttachSession(ctx context.Context, addr, recorded string, explicit bool) (string, error) {
-	client, err := remote.NewClient(addr)
+	live, err := LiveAttachSessions(ctx, addr)
 	if err != nil {
-		return "", fmt.Errorf("client for %s: %w", addr, err)
+		return "", err
 	}
-	active, err := client.GetActiveSessions(ctx)
-	if err != nil {
-		return "", fmt.Errorf("listing attached sessions of %s: %w", addr, err)
-	}
-	live := make([]string, 0, len(active))
-	for _, sess := range active {
-		if sess.ID == recorded {
-			return recorded, nil
-		}
-		live = append(live, sess.ID)
+	if slices.Contains(live, recorded) {
+		return recorded, nil
 	}
 
 	if explicit {
@@ -146,6 +139,27 @@ func ResolveAttachSession(ctx context.Context, addr, recorded string, explicit b
 	default:
 		return "", fmt.Errorf("the run's initial session %s is no longer attached and the run has several live sessions; select one explicitly with --attach <session-id>: %s", recorded, formatSessionIDs(live))
 	}
+}
+
+// LiveAttachSessions returns the IDs of the sessions currently attached to the
+// run serving at addr (GET /api/sessions?active=true). Unlike the run's
+// discovery record, which keeps naming the session the run started with, this is
+// the live view: under --listen every open TUI tab is listed, including tabs
+// spawned after startup, so a caller can select one explicitly.
+func LiveAttachSessions(ctx context.Context, addr string) ([]string, error) {
+	client, err := remote.NewClient(addr)
+	if err != nil {
+		return nil, fmt.Errorf("client for %s: %w", addr, err)
+	}
+	active, err := client.GetActiveSessions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing attached sessions of %s: %w", addr, err)
+	}
+	ids := make([]string, 0, len(active))
+	for _, sess := range active {
+		ids = append(ids, sess.ID)
+	}
+	return ids, nil
 }
 
 func formatSessionIDs(ids []string) string {

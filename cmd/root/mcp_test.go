@@ -1,12 +1,22 @@
 package root
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/api"
+	"github.com/docker/docker-agent/pkg/runregistry"
 )
 
 func TestMCPHTTPSafetyAndAuthenticationFlagsRequireHTTP(t *testing.T) {
@@ -95,4 +105,204 @@ func TestAttachTargetIsSessionID(t *testing.T) {
 	for _, target := range []string{"", "latest", "4242", "http://127.0.0.1:8080", "https://example.test"} {
 		assert.False(t, attachTargetIsSessionID(target), "target %q discovers a run", target)
 	}
+}
+
+// fakeAttachRuns is an in-memory attachRuns for the CLI lookup tests: it never
+// touches the user's real run registry and can advertise several runs at once.
+type fakeAttachRuns struct {
+	records []runregistry.Record
+}
+
+var _ attachRuns = (*fakeAttachRuns)(nil)
+
+func (f *fakeAttachRuns) List() ([]runregistry.Record, error) { return f.records, nil }
+
+// Find mimics *runregistry.Registry.Find for the target shapes the tests use.
+func (f *fakeAttachRuns) Find(target string) (runregistry.Record, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		if len(f.records) == 0 {
+			return runregistry.Record{}, runregistry.ErrNoRun
+		}
+		latest := f.records[0]
+		for _, rec := range f.records[1:] {
+			if rec.StartedAt.After(latest.StartedAt) {
+				latest = rec
+			}
+		}
+		return latest, nil
+	}
+	if pid, err := strconv.Atoi(target); err == nil {
+		for _, rec := range f.records {
+			if rec.PID == pid {
+				return rec, nil
+			}
+		}
+		return runregistry.Record{}, fmt.Errorf("no live run with pid %d: %w", pid, runregistry.ErrNoRun)
+	}
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		want := strings.TrimRight(target, "/")
+		for _, rec := range f.records {
+			if strings.TrimRight(rec.Addr, "/") == want {
+				return rec, nil
+			}
+		}
+		return runregistry.Record{}, fmt.Errorf("no live run at %s: %w", target, runregistry.ErrNoRun)
+	}
+	for _, rec := range f.records {
+		if rec.SessionID == target {
+			return rec, nil
+		}
+	}
+	for _, rec := range f.records {
+		if strings.Contains(rec.SessionID, target) {
+			return rec, nil
+		}
+	}
+	return runregistry.Record{}, fmt.Errorf("no live run matches %q: %w", target, runregistry.ErrNoRun)
+}
+
+// attachSessionsServer serves GET /api/sessions?active=true with the given
+// session IDs, mimicking a --listen control plane with those tabs open.
+func attachSessionsServer(t *testing.T, ids ...string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/sessions" || r.URL.Query().Get("active") != "true" {
+			http.NotFound(w, r)
+			return
+		}
+		sessions := make([]api.SessionsResponse, 0, len(ids))
+		for _, id := range ids {
+			sessions = append(sessions, api.SessionsResponse{ID: id})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(sessions); err != nil {
+			t.Errorf("encoding active sessions: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func attachTestRecord(addr, sessionID string) runregistry.Record {
+	return runregistry.Record{PID: 4242, Addr: addr, SessionID: sessionID, StartedAt: time.Now()}
+}
+
+// TestResolveAttachTarget_SelectsSpawnedTabBySessionID is the regression test
+// for selecting a TUI tab spawned after startup through serve mcp --attach:
+// the run's discovery record only knows the initial session, so the CLI lookup
+// must find the spawned tab among the run's live sessions instead of failing in
+// the registry lookup first (#4909 review).
+func TestResolveAttachTarget_SelectsSpawnedTabBySessionID(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "spawned-a", "spawned-b")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-closed")}}
+
+	addr, sessionID, err := resolveAttachTarget(t.Context(), runs, "spawned-b")
+	require.NoError(t, err, "a spawned tab must be selectable by its session ID")
+	assert.Equal(t, srv.URL, addr)
+	assert.Equal(t, "spawned-b", sessionID)
+}
+
+func TestResolveAttachTarget_SelectsSpawnedTabByUniquePrefix(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "tab-alpha", "tab-beta")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-closed")}}
+
+	_, sessionID, err := resolveAttachTarget(t.Context(), runs, "tab-al")
+	require.NoError(t, err)
+	assert.Equal(t, "tab-alpha", sessionID)
+}
+
+func TestResolveAttachTarget_ExplicitClosedTabFailsClearly(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "spawned-a")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "closed-initial")}}
+
+	_, _, err := resolveAttachTarget(t.Context(), runs, "closed-initial")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "closed-initial")
+	assert.Contains(t, err.Error(), "no longer attached")
+	assert.Contains(t, err.Error(), "spawned-a", "the error must list the live sessions")
+}
+
+// TestResolveAttachTarget_ClosedRecordedSessionIsNeverPrefixRedirected pins the
+// explicit-selection rule: naming the run's recorded initial session whose tab
+// is closed fails, even when another live tab has that ID as a prefix. An
+// explicitly selected closed session must never be silently swapped for a
+// different tab.
+func TestResolveAttachTarget_ClosedRecordedSessionIsNeverPrefixRedirected(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "closed-initial-2")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "closed-initial")}}
+
+	_, _, err := resolveAttachTarget(t.Context(), runs, "closed-initial")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no longer attached")
+	assert.Contains(t, err.Error(), "closed-initial-2")
+}
+
+func TestResolveAttachTarget_UnknownSessionFailsInsteadOfRedirecting(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "spawned-a")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "closed-initial")}}
+
+	_, _, err := resolveAttachTarget(t.Context(), runs, "dead-tab")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dead-tab")
+	assert.Contains(t, err.Error(), "not attached to any live docker-agent run")
+	assert.Contains(t, err.Error(), "spawned-a")
+}
+
+// TestResolveAttachTarget_SelectsTabOnSecondRun covers several --listen runs:
+// a tab that registry records do not know about must be found on the run that
+// actually serves it, not on whichever run the registry lookup returns first.
+func TestResolveAttachTarget_SelectsTabOnSecondRun(t *testing.T) {
+	t.Parallel()
+
+	first := attachSessionsServer(t, "tab-1")
+	second := attachSessionsServer(t, "tab-2")
+	runs := &fakeAttachRuns{records: []runregistry.Record{
+		attachTestRecord(first.URL, "initial-1"),
+		attachTestRecord(second.URL, "initial-2"),
+	}}
+
+	addr, sessionID, err := resolveAttachTarget(t.Context(), runs, "tab-2")
+	require.NoError(t, err)
+	assert.Equal(t, second.URL, addr)
+	assert.Equal(t, "tab-2", sessionID)
+}
+
+func TestResolveAttachTarget_RunDiscoveryStillResolvesLiveTab(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "spawned-a")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "closed-initial")}}
+
+	// Discovered by pid and by latest: both resolve the only live tab after
+	// the run's initial tab was closed.
+	for _, target := range []string{"4242", "", "latest"} {
+		addr, sessionID, err := resolveAttachTarget(t.Context(), runs, target)
+		require.NoError(t, err, "target %q", target)
+		assert.Equal(t, srv.URL, addr, "target %q", target)
+		assert.Equal(t, "spawned-a", sessionID, "target %q", target)
+	}
+}
+
+func TestResolveAttachTarget_RunDiscoveryFailsWhenAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "tab-a", "tab-b")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "closed-initial")}}
+
+	_, _, err := resolveAttachTarget(t.Context(), runs, "4242")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tab-a")
+	assert.Contains(t, err.Error(), "tab-b")
+	assert.Contains(t, err.Error(), "--attach <session-id>")
 }

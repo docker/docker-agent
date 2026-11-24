@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -120,6 +121,66 @@ func TestDetachRuntime_KeepsBusyGuardUntilStreamStops(t *testing.T) {
 
 	assert.Empty(t, sm.GetActiveSessions(), "stream teardown must finish the detach")
 	require.NoError(t, sm.AddMessage(ctx, sess.ID, session.UserMessage("edit after close")))
+}
+
+// TestDetachRuntime_IdleSnapshotOverlapFinishesTeardown is the regression test
+// for an idle tab close that overlaps a snapshot: GetSessionSnapshot takes the
+// same streaming guard for a moment on an idle attachment and releases it with
+// the guard's new owner-aware release. A plain Unlock there would lose the
+// teardown: finishDetach's TryLock fails during the snapshot but no stream
+// goroutine ever comes back to finish it, so the closed tab would stay in
+// GET /api/sessions?active=true forever (#4909 review).
+func TestDetachRuntime_IdleSnapshotOverlapFinishesTeardown(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	sm, sess := newDetachTestManager(t)
+	rt := &recallRuntime{fakeRuntime: &fakeRuntime{}}
+	attachment := sm.AttachRuntime(ctx, sess.ID, rt, sess)
+	sm.RegisterFollowUpInjector(sess.ID, func(context.Context, string) {})
+	sm.RegisterEventSource(sess.ID, blockUntilCancelled)
+
+	attached, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok)
+
+	// Park the snapshot on its modelSwitch lock after it has taken the idle
+	// streaming guard, so the detach below deterministically overlaps it.
+	attached.modelSwitch.Lock()
+	var releaseOnce sync.Once
+	releaseSnapshot := func() { releaseOnce.Do(attached.modelSwitch.Unlock) }
+	t.Cleanup(releaseSnapshot)
+
+	snapshotErr := make(chan error, 1)
+	go func() {
+		_, err := sm.GetSessionSnapshot(ctx, sess.ID)
+		snapshotErr <- err
+	}()
+
+	// Wait until the snapshot owns the guard. A failed TryLock means someone
+	// holds it, and the parked snapshot is the only holder here.
+	require.Eventually(t, func() bool {
+		if attached.streaming.TryLock() {
+			attached.streaming.Unlock()
+			return false
+		}
+		return true
+	}, 10*time.Second, time.Millisecond, "the idle snapshot must take the streaming guard")
+
+	// Closing the tab now cannot finish: the guard is held by the snapshot, not
+	// by a stream that would release it and retry the teardown.
+	attachment.Detach()
+	_, stillAttached := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, stillAttached, "teardown must wait for the snapshot's guard")
+	require.Len(t, sm.GetActiveSessions(), 1, "the closing attachment stays registered while the snapshot holds its guard")
+
+	// Releasing the snapshot guard completes the pending teardown.
+	releaseSnapshot()
+	require.NoError(t, <-snapshotErr)
+	require.Eventually(t, func() bool {
+		_, attached := sm.runtimeSessions.Load(sess.ID)
+		return !attached
+	}, 10*time.Second, time.Millisecond, "the snapshot's release must finish the pending detach")
+	assert.Empty(t, sm.GetActiveSessions(), "a closed idle tab must not stay in /api/sessions?active=true")
 }
 
 // TestDetachRuntime_StaleCleanupLeavesReplacementUsable covers the cleanup that
