@@ -2,6 +2,7 @@ package main
 
 import (
 	"go/ast"
+	"go/token"
 
 	"github.com/dgageot/rubocop-go/cop"
 )
@@ -31,9 +32,8 @@ import (
 //
 // The cop runs on pkg/hooks/builtins/builtins.go (where Register() lives),
 // scans every *.go file in the same directory for `const Name = "wire"`
-// declarations whose value is a string literal, and reports any whose
-// identifier never appears as the first argument of a RegisterBuiltin
-// call in the inspected file.
+// declarations whose value is a string literal, and checks that each
+// identifier appears in a RegisterBuiltin call or the portableHooks table.
 //
 // Files named builtins.go itself, *_test.go, and testhelpers_test.go are
 // excluded from the constant scan because they are not where new
@@ -41,7 +41,7 @@ import (
 var HookBuiltinsRegistered = &cop.Func{
 	Meta: cop.Meta{
 		Name:        "Lint/HookBuiltinsRegistered",
-		Description: "every builtin name constant under pkg/hooks/builtins/ must appear in a RegisterBuiltin call",
+		Description: "every builtin name constant under pkg/hooks/builtins/ must be registered",
 		Severity:    cop.Error,
 	},
 	Scope: cop.OnlyFile("pkg/hooks/builtins/builtins.go"),
@@ -52,6 +52,9 @@ var HookBuiltinsRegistered = &cop.Func{
 		}
 
 		registered := p.IdentSetFromCalls("RegisterBuiltin", 0)
+		for _, name := range portableBuiltinNames(p.File) {
+			registered[name] = true
+		}
 
 		var missing []string
 		for _, name := range declared {
@@ -67,8 +70,38 @@ var HookBuiltinsRegistered = &cop.Func{
 			anchor = call
 		}
 		p.ReportMissing(anchor,
-			"pkg/hooks/builtins/builtins.go is missing RegisterBuiltin call(s) for: %s", missing)
+			"pkg/hooks/builtins/builtins.go is missing registrations for: %s", missing)
 	},
+}
+
+func portableBuiltinNames(file *ast.File) []string {
+	var names []string
+	for _, decl := range file.Decls {
+		group, ok := decl.(*ast.GenDecl)
+		if !ok || group.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range group.Specs {
+			v := spec.(*ast.ValueSpec)
+			if len(v.Names) != 1 || v.Names[0].Name != "portableHooks" || len(v.Values) != 1 {
+				continue
+			}
+			list, ok := v.Values[0].(*ast.CompositeLit)
+			if !ok {
+				continue
+			}
+			for _, entry := range list.Elts {
+				hook, ok := entry.(*ast.CompositeLit)
+				if !ok || len(hook.Elts) != 2 {
+					continue
+				}
+				if name, ok := hook.Elts[0].(*ast.Ident); ok {
+					names = append(names, name.Name)
+				}
+			}
+		}
+	}
+	return names
 }
 
 // exportedBuiltinNames returns the identifiers of every exported `const Name = "..."`

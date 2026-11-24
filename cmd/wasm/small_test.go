@@ -71,6 +71,33 @@ agents:
 	}
 }
 
+func TestSmallProfileRunsBuiltinHooks(t *testing.T) {
+	const yaml = `
+agents:
+  root:
+    model: mock/root
+    add_environment_info: true
+    hooks:
+      turn_start:
+        - type: builtin
+          command: add_date
+`
+	model := newScriptedModel("mock/root", textTurn("ok"))
+	s := openTestSession(t, testHost(&echoToolSet{}, map[string]provider.Provider{"root": model}), sessionOptions{YAML: yaml})
+
+	_, err := s.send("hi", func(context.Context, map[string]any) {})
+	require.NoError(t, err)
+	var system []string
+	for _, msg := range model.lastCall() {
+		if msg.Role == chat.MessageRoleSystem {
+			system = append(system, msg.Content)
+		}
+	}
+	joined := strings.Join(system, "\n")
+	assert.Contains(t, joined, "Today's date:")
+	assert.Contains(t, joined, "Operating System: js")
+}
+
 // Without the JavaScript engine ${env.NAME} still resolves from the session
 // env; any other expression stays as text.
 func TestSmallProfileExpandsEnvPlaceholdersOnly(t *testing.T) {

@@ -285,7 +285,7 @@ type LocalRuntime struct {
 	modelContexts    modelContextCache
 
 	// hooksRegistry is the runtime-private hooks.Registry used to build
-	// every Executor. It carries the stock builtins from [builtins.Register]
+	// every Executor. It carries the stock builtins from [builtins.RegisterRuntime]
 	// plus the runtime-owned ones (e.g. cache_response), registered once
 	// during NewLocalRuntime, so they're available to every agent without
 	// touching any process-wide state.
@@ -806,7 +806,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	if r.hooksRegistry == nil {
 		r.hooksRegistry = hooks.NewRegistry()
 	}
-	if err := builtins.Register(r.hooksRegistry); err != nil {
+	if err := builtins.RegisterRuntime(r.hooksRegistry); err != nil {
 		return nil, fmt.Errorf("register builtin hooks: %w", err)
 	}
 	RegisterModelHook(r.hooksRegistry, r.providerRegistry)
@@ -832,7 +832,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	// because it needs to capture the runtime to resolve the agent
 	// referenced by Input.AgentName. The other builtins are stateless
 	// and can stay as package-level functions registered via
-	// [builtins.Register] above.
+	// [builtins.RegisterRuntime] above.
 	if err := r.hooksRegistry.RegisterBuiltin(BuiltinCacheResponse, r.cacheResponseBuiltin); err != nil {
 		return nil, fmt.Errorf("register %q builtin: %w", BuiltinCacheResponse, err)
 	}
