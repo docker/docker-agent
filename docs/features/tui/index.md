@@ -599,6 +599,8 @@ Run `/settings` to open the settings dialog. Click a category tab, or use <kbd>T
 
 The **Fade scroll edges** toggle on the Appearance tab controls whether scrollable areas (such as the chat) gently fade out their top and bottom edges when more content lies beyond them. It is on by default; turn it off to render scrollable content at full brightness right up to the edge.
 
+The **Show top margin** toggle on the Appearance tab adds one blank row above the full TUI when the terminal is taller than 24 rows, giving the content some breathing room. It is off by default and is saved as `top_margin` in your settings.
+
 Press <kbd>Enter</kbd> to apply and persist, or <kbd>Escape</kbd> to cancel and restore the previous layout. The settings are saved globally in `~/.config/cagent/config.yaml`:
 
 ```yaml
