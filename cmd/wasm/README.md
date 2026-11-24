@@ -94,7 +94,7 @@ See `examples/cloud-bedrock.yaml` and `examples/cloud-vertex.yaml`.
 ### Small profile
 
 Most of the default binary is what it links, not the runtime. The small
-profile keeps the shared runtime and trades features for size: about 34 MiB
+profile keeps the shared runtime and trades features for size: about 33 MiB
 uncompressed with Go 1.27.4 and Binaryen 132, compared to 162 MiB for the
 stripped default build. The small build requires [Binaryen](https://github.com/WebAssembly/binaryen/releases/tag/version_132)
 (`wasm-opt` on `PATH`; e.g. `brew install binaryen`). CI uses version 132.
@@ -117,6 +117,8 @@ A config that asks for what is left out is rejected when the session is
 created, like everything else in *Limits*; only JavaScript expressions are
 not detected, and reach the model as text. The JavaScript API is unchanged.
 RAG can be added with `docker_agent_wasm_rag`; the cloud providers cannot.
+The small build forwards inline media as supplied; the Go attachment-processing
+and image-resizing helpers are not linked.
 
 The tags go together. goja, `text/template` and expr look methods up by
 reflection, which makes the Go linker keep every exported method of every
