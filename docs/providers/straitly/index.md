@@ -102,10 +102,6 @@ implementation:
 - **Base URL:** `https://api.straitly.ai/v1`
 - **Token variable:** `STRAITLY_API_KEY`
 
-As with other multi-model hosts, Docker Agent combines consecutive system
-messages for compatibility with models that require a single leading system
-message.
-
 Claude models are callable through this alias like any other model. Use the ID
 exactly as `/v1/models` returns it.
 
