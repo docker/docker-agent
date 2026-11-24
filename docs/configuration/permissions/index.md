@@ -39,8 +39,8 @@ Safety modes can also be declared as **defaults** in YAML, at four scopes:
 
 | Scope | Location | Owner |
 | ----- | -------- | ----- |
-| Alias | `aliases.<name>.safety` in `~/.config/cagent/config.yaml` (or `docker agent alias add ... --safety <mode>`) | User |
-| Global settings | `settings.safety` in `~/.config/cagent/config.yaml` | User |
+| Alias | `aliases.<name>.safety` in [`<config-dir>`](../directories/index.md)`/config.yaml` (or `docker agent alias add ... --safety <mode>`) | User |
+| Global settings | `settings.safety` in `<config-dir>/config.yaml` | User |
 | Per-agent | `agents.<name>.safety` in the agent YAML | Agent author |
 | Config-wide | `runtime.safety` in the agent YAML | Agent author |
 
@@ -82,7 +82,7 @@ Permissions can be defined at two levels:
 | Level | Location | Scope |
 | ----- | -------- | ----- |
 | **Agent-level** | Agent YAML config (`permissions:` section) | Applies to that specific agent config |
-| **Global (user-level)** | `~/.config/cagent/config.yaml` under `settings.permissions` | Applies to every agent you run |
+| **Global (user-level)** | `<config-dir>/config.yaml` under `settings.permissions` | Applies to every agent you run |
 
 Hooks follow the same user-config pattern: agent-level hooks live under `agents.<name>.hooks`, and global hooks live under `settings.hooks`. See [Hooks](../hooks/index.md#global-user-level-hooks).
 
@@ -123,7 +123,7 @@ The three lists are evaluated in order `deny` → `allow` → `ask`. An `ask:` e
 Global permissions let you enforce rules across **all** agents, regardless of which agent config you run. Define them in your user config file:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   permissions:
     deny:

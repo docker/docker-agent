@@ -35,7 +35,7 @@ The simplest way is to enable snapshots globally for every agent in your user
 config:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   snapshot: true
 ```

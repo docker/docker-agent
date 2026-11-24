@@ -200,23 +200,23 @@ the automatic default.
 
 ## Global (user-level) hooks
 
-Global hooks let you apply the same hook configuration to every agent you run. Define them in your user config file at `~/.config/cagent/config.yaml` under `settings.hooks`:
+Global hooks let you apply the same hook configuration to every agent you run. Define them in your user config file at [`<config-dir>`](../directories/index.md)`/config.yaml` under `settings.hooks`:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   hooks:
     session_start:
       - type: command
-        command: "~/.config/cagent/hooks/session-start.sh"
+        command: "<config-dir>/hooks/session-start.sh"
     pre_compact:
       - type: command
-        command: "~/.config/cagent/hooks/pre-compact.sh"
+        command: "<config-dir>/hooks/pre-compact.sh"
     pre_tool_use:
       - matcher: "shell"
         hooks:
           - type: command
-            command: "~/.config/cagent/hooks/check-shell.sh"
+            command: "<config-dir>/hooks/check-shell.sh"
 ```
 
 Global hooks use the same schema as agent-level hooks and are additive. If an event is configured in multiple places, all matching hooks run in this order:
@@ -230,10 +230,10 @@ Global hooks cannot be suppressed by an individual agent. Use them for user-wide
 
 ### Hook drop-in files (`hooks.d`)
 
-External tools that integrate with Docker Agent (terminal emulators, IDEs, audit or observability sidecars) shouldn't have to rewrite your `config.yaml` to install a hook. Instead, Docker Agent also loads every `*.yaml` / `*.yml` file from the `hooks.d` directory next to your user config (default: `~/.config/cagent/hooks.d/`). Each file is a standalone hooks block with the same schema as the content of `settings.hooks`:
+External tools that integrate with Docker Agent (terminal emulators, IDEs, audit or observability sidecars) shouldn't have to rewrite your `config.yaml` to install a hook. Instead, Docker Agent also loads every `*.yaml` / `*.yml` file from the `hooks.d` directory next to your user config (default: `<config-dir>/hooks.d/`). Each file is a standalone hooks block with the same schema as the content of `settings.hooks`:
 
 ```yaml
-# ~/.config/cagent/hooks.d/50-mytool.yaml
+# <config-dir>/hooks.d/50-mytool.yaml
 session_start:
   - type: command
     command: mytool notify --event session-start

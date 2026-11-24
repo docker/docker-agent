@@ -1,6 +1,6 @@
 ---
 title: "User Settings"
-description: "Full reference for the global settings block in ~/.config/cagent/config.yaml: theme, layout, YOLO, sound, snapshots, permissions, hooks, keybindings, and how they interact with agent config and CLI flags."
+description: "Full reference for the global settings block in <config-dir>/config.yaml: theme, layout, YOLO, sound, snapshots, permissions, hooks, keybindings, and how they interact with agent config and CLI flags."
 keywords: docker agent, ai agents, configuration, yaml, user settings, user config
 linkTitle: "User Settings"
 weight: 110
@@ -12,7 +12,7 @@ canonical: https://docs.docker.com/ai/docker-agent/configuration/user-settings/
 Docker Agent reads a single user-level config file, independent of any agent YAML:
 
 ```text
-~/.config/cagent/config.yaml
+<config-dir>/config.yaml
 ```
 
 On a new macOS or Windows installation the file lives in the OS-native config directory instead. See [State Directories](../directories/index.md).
@@ -20,7 +20,7 @@ On a new macOS or Windows installation the file lives in the OS-native config di
 The `settings:` block inside it holds preferences that apply to every agent you run — appearance, behavior, notifications, and a few global safety defaults. Everything under `settings:` is optional; an unset field falls back to the documented default.
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   theme: dracula
   lean: false
@@ -95,7 +95,7 @@ Enable **Plans** under `/settings` → **Appearance** → **Sidebar sections**, 
 ## Complete Example
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   theme: auto
   theme_dark: dracula
@@ -129,7 +129,7 @@ settings:
   hooks:
     session_start:
       - type: command
-        command: "~/.config/cagent/hooks/session-start.sh"
+        command: "<config-dir>/hooks/session-start.sh"
   keybindings:
     - action: "commands"
       keys: ["f2", "ctrl+k"]

@@ -67,7 +67,7 @@ providers:
     max_tokens: 16384
 
 # 8. Permissions — agent-level tool permission rules (optional)
-#    For user-wide global permissions, see ~/.config/cagent/config.yaml
+#    For user-wide global permissions, see <config-dir>/config.yaml
 permissions:
   allow: ["read_*"]
   deny: ["shell:cmd=sudo*"]

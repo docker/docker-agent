@@ -33,7 +33,7 @@ docker agent setup
 Pick **chatgpt** in the provider list: instead of asking for an API key, the
 wizard opens your browser on the ChatGPT sign-in page and stores the
 resulting OAuth credential in the Docker Agent config directory
-(`~/.config/cagent/chatgpt-auth.json`, owner-only permissions). The access
+([`<config-dir>`](../../configuration/directories/index.md)`/chatgpt-auth.json`, owner-only permissions). The access
 token is refreshed automatically; you only need to sign in again if the
 refresh token is revoked.
 
@@ -41,7 +41,8 @@ Related commands:
 
 ```bash
 docker agent doctor                        # the chatgpt row shows the credential state
-rm ~/.config/cagent/chatgpt-auth.json      # sign out (remove the stored sign-in)
+rm <config-dir>/chatgpt-auth.json      # sign out (remove the stored sign-in)
+                                           # `docker agent doctor` prints your config directory
 ```
 
 ## Configuration

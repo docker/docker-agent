@@ -277,7 +277,7 @@ $ docker agent toolsets --format json | jq             # machine-readable (type,
 
 Set up a model interactively. Four paths:
 
-- **Built-in cloud provider**: pick a provider Docker Agent already knows (Anthropic, OpenAI, Google, Groq, Hugging Face, ...) and connect it. Credentials vary by provider: most take an API key or token, stored in the Docker Agent env file `~/.config/cagent/.env`, while `chatgpt` signs in with your ChatGPT account in the browser.
+- **Built-in cloud provider**: pick a provider Docker Agent already knows (Anthropic, OpenAI, Google, Groq, Hugging Face, ...) and connect it. Credentials vary by provider: most take an API key or token, stored in the Docker Agent env file [`<config-dir>`](../../configuration/directories/index.md)`/.env`, while `chatgpt` signs in with your ChatGPT account in the browser.
 - **Local model**: check Docker Model Runner and pull a model. No API key needed.
 - **Custom OpenAI-compatible endpoint**: register an endpoint that is not built in (vLLM, LiteLLM, a corporate gateway, ...) with its base URL, API format, and API key variable, saved to your [user configuration](../../providers/custom/index.md#global-providers-user-configuration) so its models work everywhere via `--model <name>/<model>`.
 - **Claude Code harness**: use a Claude subscription through the official `claude` CLI. The wizard checks that the CLI is installed and logged in, offers to run `claude auth login --claudeai` (only after you confirm), and writes a ready-to-run `claude-code-agent.yaml`. See [Coding Harnesses](../harnesses/index.md).
@@ -471,7 +471,7 @@ See [Chat Server](../chat-server/index.md) for the full feature reference.
 
 ### `docker agent board`
 
-Launch a full-screen Kanban TUI for orchestrating multiple agents at once. Each card runs an agent in its own tmux session on an isolated git worktree; moving a card forward through the pipeline (Dev → Review → Push → Done) delivers the destination column's prompt to that card's agent. Projects and column prompts are stored in the global config file (`~/.config/cagent/config.yaml`) and can be managed from the TUI.
+Launch a full-screen Kanban TUI for orchestrating multiple agents at once. Each card runs an agent in its own tmux session on an isolated git worktree; moving a card forward through the pipeline (Dev → Review → Push → Done) delivers the destination column's prompt to that card's agent. Projects and column prompts are stored in the global config file (`<config-dir>/config.yaml`) and can be managed from the TUI.
 
 ```bash
 $ docker agent board
@@ -714,7 +714,7 @@ $ docker agent sandbox allow api.example.com
 # Or several at once.
 $ docker agent sandbox allow api.example.com registry.npmjs.org:443
 
-# See what's persisted in ~/.config/cagent/config.yaml.
+# See what's persisted in <config-dir>/config.yaml.
 $ docker agent sandbox list
 
 # Drop a host you no longer need.

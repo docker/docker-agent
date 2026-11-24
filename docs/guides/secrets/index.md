@@ -14,9 +14,9 @@ Docker Agent needs API keys to talk to model providers (OpenAI, Anthropic, etc.)
 | --- | --- | --- |
 | 1 | [Environment variables](#environment-variables) | `export OPENAI_API_KEY=sk-...` |
 | 2 | [Docker Compose secrets](#docker-compose-secrets) | Files in `/run/secrets/` |
-| 3 | [Docker Agent env file](#docker-agent-env-file) | `~/.config/cagent/.env`, written by `docker agent setup` |
+| 3 | [Docker Agent env file](#docker-agent-env-file) | [`<config-dir>`](../../configuration/directories/index.md)`/.env`, written by `docker agent setup` |
 | 4 | [ChatGPT login](../../providers/chatgpt/index.md) | `CHATGPT_OAUTH_TOKEN` from the account login created by `docker agent setup` |
-| 5 | [Credential helper](#credential-helper) | Custom command declared in `~/.config/cagent/config.yaml` under `credential_helper:`; supplies `DOCKER_TOKEN` only |
+| 5 | [Credential helper](#credential-helper) | Custom command declared in `<config-dir>/config.yaml` under `credential_helper:`; supplies `DOCKER_TOKEN` only |
 | 6 | [Docker Desktop](#docker-desktop) | Secrets stored by the Docker Desktop backend (no setup on a Desktop install) |
 
 The first provider that has a value wins. You can mix and match — for example, use environment variables for one key and the Docker Agent env file for another.
@@ -97,10 +97,10 @@ The file format supports:
 
 ## Docker Agent env file
 
-A `.env` file (same format as above) at `~/.config/cagent/.env` is read automatically on every run — no `--env-from-file` flag needed. It is where [`docker agent setup`](../../features/cli/index.md#docker-agent-setup) stores API keys when you choose the env-file location, and you can edit it by hand:
+A `.env` file (same format as above) at `<config-dir>/.env` is read automatically on every run — no `--env-from-file` flag needed. It is where [`docker agent setup`](../../features/cli/index.md#docker-agent-setup) stores API keys when you choose the env-file location, and you can edit it by hand:
 
 ```bash
-# ~/.config/cagent/.env
+# <config-dir>/.env
 OPENAI_API_KEY=sk-...
 ```
 
@@ -182,16 +182,16 @@ Docker Agent can shell out to an external credential helper you define in your u
 > **The credential helper does not serve API keys.** It is consulted for `DOCKER_TOKEN` only. To load provider API keys or MCP tokens from 1Password, store an `op://` reference in any other source instead, for example in the [Docker Agent env file](#docker-agent-env-file):
 >
 > ```bash
-> # ~/.config/cagent/.env
+> # <config-dir>/.env
 > ANTHROPIC_API_KEY=op://Personal/Anthropic/api-key
 > ```
 >
 > See [1Password References](#1password-references).
 
-Declare the helper in `~/.config/cagent/config.yaml`:
+Declare the helper in `<config-dir>/config.yaml`:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 credential_helper:
   command: op
   args: ["read", "op://Personal/Docker/token"]

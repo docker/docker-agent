@@ -234,7 +234,7 @@ before launch so you can audit exactly which hosts the run opens up.
 
 For hosts you keep needing across agents (a corporate proxy, a
 self-hosted registry, ...) `docker agent sandbox allow` writes the
-entry into `~/.config/cagent/config.yaml` once and unions it with the
+entry into [`<config-dir>`](../directories/index.md)`/config.yaml` once and unions it with the
 inferred and agent-declared sets on every subsequent `--sandbox` run:
 
 ```bash

@@ -62,7 +62,7 @@ The following environment variables must be set:
 Provide them using any of these sources:
  - Shell environment:      export ANTHROPIC_API_KEY=<value>
  - Env file:               docker agent run --env-from-file <file> ...
- - Docker Agent env file:  docker agent setup (stores the key in ~/.config/cagent/.env)
+ - Docker Agent env file:  docker agent setup (stores the key in <config-dir>/.env)
 
 See https://docs.docker.com/ai/docker-agent/guides/secrets/ for details.
 ```

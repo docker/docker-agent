@@ -243,7 +243,7 @@ docker-agent run --sandbox agent.yaml
 Use [global permissions](../../configuration/permissions/index.md#global-permissions) in your user config to enforce safety rules across every agent:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   permissions:
     deny:
@@ -372,7 +372,7 @@ Session compacted. Summary generated and history trimmed.
 
 ### User-Defined Default Model
 
-Set your preferred default model in `~/.config/cagent/config.yaml`:
+Set your preferred default model in [`<config-dir>`](../../configuration/directories/index.md)`/config.yaml`:
 
 ```yaml
 settings:
@@ -386,7 +386,7 @@ This model is used by the built-in default agent when you run `docker agent run`
 Long-running agents shouldn't require staring at the terminal. Add [global hooks](../../configuration/hooks/index.md#global-user-level-hooks) to your user config so every agent notifies you when it needs attention or finishes:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   hooks:
     # Agent is waiting for your input (question, approval prompt, ...)

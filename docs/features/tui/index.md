@@ -61,7 +61,7 @@ File writes use the tool's display title (for example, **Write**) and preview fi
 The lean TUI uses a simplified terminal interface with minimal chrome. To make it the default for interactive runs, set `lean` in your user config:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   lean: true
 ```
@@ -151,7 +151,7 @@ Dictation stays with the tab where it started. Switching tabs while transcriptio
 The optional **Plans** section is off by default. Enable it under `/settings` → **Appearance** → **Sidebar sections**, or in your global [user settings](../../configuration/user-settings/index.md):
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   layout:
     show_plans: true
@@ -272,7 +272,7 @@ Reasoning/thinking blocks are collapsed by default and carry a `Thinking` header
 To start new sessions with thinking/tool blocks expanded by default, set `expand_thinking` in your user config:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   expand_thinking: true
 ```
@@ -314,11 +314,11 @@ Unsupported or syntactically invalid LaTeX expressions fall back to displaying t
 
 The TUI fetches and renders images referenced in agent responses using the Kitty graphics protocol. When an assistant message contains a standard Markdown image reference, the TUI downloads the image in the background and displays it inline at the point of the reference. While the image is loading a placeholder is shown; once loaded, the message re-renders with the image in place.
 
-Only `http://`, `https://`, and `data:image/…;base64,…` URIs are resolved. `file://`, `sandbox://`, and any other URI scheme are rejected as a security measure against prompt-injection attacks that could otherwise read local files. Bare relative paths (e.g. `./output.png`, used for agent-generated images) are read via the local filesystem. Images that fail to load are silently dropped — the surrounding message text is unaffected. Image rendering requires a terminal that supports the Kitty graphics protocol; it is automatically disabled when the terminal does not support it. Support is checked before the TUI starts. Terminals without Kitty graphics answer right away; only a terminal that answers nothing at all waits out the 300 ms timeout. You can disable rendering and skip this check via `render_images: false` in `~/.config/cagent/config.yaml` or the **Render images** toggle in `/settings`. Disabling and re-enabling images applies immediately when startup confirmed support. If the startup check was skipped, enabling images takes effect on the next launch.
+Only `http://`, `https://`, and `data:image/…;base64,…` URIs are resolved. `file://`, `sandbox://`, and any other URI scheme are rejected as a security measure against prompt-injection attacks that could otherwise read local files. Bare relative paths (e.g. `./output.png`, used for agent-generated images) are read via the local filesystem. Images that fail to load are silently dropped — the surrounding message text is unaffected. Image rendering requires a terminal that supports the Kitty graphics protocol; it is automatically disabled when the terminal does not support it. Support is checked before the TUI starts. Terminals without Kitty graphics answer right away; only a terminal that answers nothing at all waits out the 300 ms timeout. You can disable rendering and skip this check via `render_images: false` in [`<config-dir>`](../../configuration/directories/index.md)`/config.yaml` or the **Render images** toggle in `/settings`. Disabling and re-enabling images applies immediately when startup confirmed support. If the startup check was skipped, enabling images takes effect on the next launch.
 
 ### Snapshots, `/undo`, and `/snapshots`
 
-Enable shadow-git snapshots globally in `~/.config/cagent/config.yaml`:
+Enable shadow-git snapshots globally in `<config-dir>/config.yaml`:
 
 ```yaml
 settings:
@@ -541,7 +541,7 @@ Press <kbd>Ctrl</kbd>+<kbd>H</kbd> to view the complete list of all available ke
 
 ### Custom Keybindings
 
-You can remap the shortcuts above by adding a `keybindings` list to the `settings` block of your `~/.config/cagent/config.yaml` (see [User Settings](../../configuration/user-settings/index.md#settings-reference) for the field reference). Each entry maps an action to one or more key combinations in [Bubbles key format](https://github.com/charmbracelet/bubbles) (for example `ctrl+q`, `alt+enter`, `f2`). Unlisted actions keep their defaults.
+You can remap the shortcuts above by adding a `keybindings` list to the `settings` block of your `<config-dir>/config.yaml` (see [User Settings](../../configuration/user-settings/index.md#settings-reference) for the field reference). Each entry maps an action to one or more key combinations in [Bubbles key format](https://github.com/charmbracelet/bubbles) (for example `ctrl+q`, `alt+enter`, `f2`). Unlisted actions keep their defaults.
 
 This is the recommended way to replace the `Ctrl+J` newline fallback, which conflicts with common editor/terminal shortcuts (for example inside VS Code).
 
@@ -598,10 +598,10 @@ Run `/settings` to open the settings dialog. Click a category tab, or use <kbd>T
 
 The **Fade scroll edges** toggle on the Appearance tab controls whether scrollable areas (such as the chat) gently fade out their top and bottom edges when more content lies beyond them. It is on by default; turn it off to render scrollable content at full brightness right up to the edge.
 
-Press <kbd>Enter</kbd> to apply and persist, or <kbd>Escape</kbd> to cancel and restore the previous layout. The settings are saved globally in `~/.config/cagent/config.yaml`:
+Press <kbd>Enter</kbd> to apply and persist, or <kbd>Escape</kbd> to cancel and restore the previous layout. The settings are saved globally in `<config-dir>/config.yaml`:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   busy_send_mode: queue # steer (default), queue
   fade_scroll_edges: true # false to turn off the fade at scrollable edges (default: true)
@@ -687,7 +687,7 @@ markdown:
 
 ### Applying Themes
 
-**In user config** (`~/.config/cagent/config.yaml`, see [User Settings](../../configuration/user-settings/index.md) for the full reference):
+**In user config** (`<config-dir>/config.yaml`, see [User Settings](../../configuration/user-settings/index.md) for the full reference):
 
 ```yaml
 settings:
@@ -696,7 +696,7 @@ settings:
 
 **At launch:** Pass `--theme <name>` to `docker agent run` to preselect a theme for that session. This overrides `settings.theme` in your config but is not saved. Invalid theme names print an error at startup listing the available options. Has no effect in `--exec` mode. `--theme auto` enables the [auto theme](#auto-theme-match-the-terminal) for the session.
 
-**At runtime:** Open `/settings`, select **Theme** on the Appearance tab, and choose from the available themes. Your selection is saved globally in `~/.config/cagent/config.yaml` under `settings.theme` and persists across sessions.
+**At runtime:** Open `/settings`, select **Theme** on the Appearance tab, and choose from the available themes. Your selection is saved globally in `<config-dir>/config.yaml` under `settings.theme` and persists across sessions.
 
 > [!TIP]
 > **Hot Reload**

@@ -163,7 +163,7 @@ Every mutation is guarded by the version shown on screen (the same optimistic lo
 Enable **Plans** under `/settings` → **Appearance** → **Sidebar sections** to keep shared plans visible alongside the chat. It is off by default and saved as a global user preference, separate from agent YAML:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   layout:
     show_plans: true

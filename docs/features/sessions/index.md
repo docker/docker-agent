@@ -103,7 +103,7 @@ Press `/sessions` to open the session browser: search and filter past conversati
 <kbd>Ctrl</kbd>+<kbd>T</kbd> opens a new tab running an additional agent session alongside the current one; <kbd>Ctrl</kbd>+<kbd>N</kbd>/<kbd>Ctrl</kbd>+<kbd>P</kbd> cycle between tabs and <kbd>Ctrl</kbd>+<kbd>W</kbd> closes the current one. By default, tabs are not restored the next time you launch the TUI. Set `restore_tabs: true` in your user config to reopen the same tabs (and their sessions) on the next launch:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   restore_tabs: true
 ```

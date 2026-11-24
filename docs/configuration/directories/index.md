@@ -77,7 +77,13 @@ A flag takes precedence over its environment variable. An override is used as gi
 > [!WARNING]
 > **Windows: the config directory roams**
 >
-> `%AppData%` is the roaming profile folder, so the config directory can follow you between machines on a domain. It holds MCP OAuth tokens and sandbox tokens. To keep them on one machine, point the config directory at a local folder, for example `--config-dir "%LocalAppData%\cagent-config"`.
+> `%AppData%` is the roaming profile folder, so the config directory can follow you between machines on a domain. It holds MCP OAuth tokens and sandbox tokens. To keep them on one machine, set `DOCKER_AGENT_CONFIG_DIR` once instead of passing `--config-dir` on every run:
+>
+> ```powershell
+> [Environment]::SetEnvironmentVariable('DOCKER_AGENT_CONFIG_DIR', "$env:LOCALAPPDATA\cagent-config", 'User')
+> ```
+>
+> Tokens already stored in the roaming directory do not follow; sign in again, or move the files yourself.
 
 - **Read-only home directory.** Common in containers and CI. Docker Agent still runs, but anything that writes state fails. Point `--data-dir`, `--config-dir` and `--cache-dir` at writable paths.
 - **No home directory.** Docker Agent falls back to `.cagent`, `.cagent-config` and `.cagent-cache` under the system temporary directory. That directory can be shared with other users, so set the overrides instead.

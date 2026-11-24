@@ -9,7 +9,7 @@
 # repo's ignore rules and skips newly-added files larger than 2 MiB.
 #
 # To enable the same turn-level snapshots for every agent, set this in
-# ~/.config/cagent/config.yaml instead of wiring hooks manually:
+# config.yaml in your config directory instead of wiring hooks manually:
 #
 # settings:
 #   snapshot: true
