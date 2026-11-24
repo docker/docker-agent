@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/rulebased"
 	"github.com/docker/docker-agent/pkg/modelinfo"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 type Factory func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error)
@@ -178,7 +179,7 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	}
 	providerType := resolveProviderType(enhancedCfg)
 	if budget.IsDisabled() && !globalOptions.NoThinking() {
-		warnThinkingCannotBeDisabled(ctx, providerType, enhancedCfg)
+		warnThinkingCannotBeDisabled(ctx, providerType, enhancedCfg, globalOptions.ModelsDevStore())
 	}
 	factory, ok := r.factory(providerType)
 	if !ok {
@@ -206,15 +207,25 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 }
 
 // warnThinkingCannotBeDisabled flags a configured thinking_budget none or 0
-// that a native Claude transport cannot honor. Internal no-thinking calls
-// (titles, sampling) are not configured by the user and stay silent.
-func warnThinkingCannotBeDisabled(ctx context.Context, providerType string, cfg *latest.ModelConfig) {
+// that a native Claude or Gemini transport cannot honor. Internal no-thinking
+// calls (titles, sampling) are not configured by the user and stay silent.
+func warnThinkingCannotBeDisabled(ctx context.Context, providerType string, cfg *latest.ModelConfig, store *modelsdev.Store) {
 	switch providerType {
 	case "anthropic", "amazon-bedrock":
 	case "google":
+		publisher, _ := cfg.ProviderOpts["publisher"].(string)
+		if publisher == "" || strings.EqualFold(publisher, "google") {
+			id := modelsdev.NewID(cfg.Provider, cfg.DisplayOrModel())
+			if modelinfo.UsesThinkingLevel(cfg.Model) &&
+				modelinfo.ResolveGeminiThinkingSupport(ctx, store, id, cfg.Model) {
+				slog.WarnContext(ctx, "model cannot disable thinking; thinking_budget none or 0 is sent with thinkingLevel low",
+					"model", cfg.Model, "provider", providerType)
+			}
+			return
+		}
 		// Only Model Garden's Anthropic publisher reaches a Claude client. Not
 		// vertexai.IsModelGardenConfig: importing vertexai links the OpenAI SDK.
-		if publisher, _ := cfg.ProviderOpts["publisher"].(string); !strings.EqualFold(publisher, "anthropic") {
+		if !strings.EqualFold(publisher, "anthropic") {
 			return
 		}
 	default:

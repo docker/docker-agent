@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -520,22 +519,36 @@ func TestCreateDirectProvider_WarnsWhenThinkingCannotBeDisabled(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	const warning = "thinking_budget none or 0 is sent as adaptive thinking with low effort"
+	const claudeWarning = "thinking_budget none or 0 is sent as adaptive thinking with low effort"
+	const geminiWarning = "thinking_budget none or 0 is sent with thinkingLevel low"
 	none := func() *latest.ThinkingBudget { return &latest.ThinkingBudget{Effort: "none"} }
+	geminiStore := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"gemini-3.1-flash-image": {Reasoning: true},
+			"gemini-4-custom":        {Reasoning: false},
+		}},
+	}})
 	cases := []struct {
 		name     string
 		cfg      latest.ModelConfig
 		opts     []options.Opt
-		wantWarn bool
+		wantWarn string
 	}{
-		{name: "configured none on opus 5.5", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5", ThinkingBudget: none()}, wantWarn: true},
-		{name: "configured none on bedrock fable", cfg: latest.ModelConfig{Provider: "amazon-bedrock", Model: "us.anthropic.claude-fable-5", ThinkingBudget: none()}, wantWarn: true},
+		{name: "configured none on opus 5.5", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5", ThinkingBudget: none()}, wantWarn: claudeWarning},
+		{name: "configured none on bedrock fable", cfg: latest.ModelConfig{Provider: "amazon-bedrock", Model: "us.anthropic.claude-fable-5", ThinkingBudget: none()}, wantWarn: claudeWarning},
 		{name: "internal no-thinking call", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5"}, opts: []options.Opt{options.WithNoThinking()}},
 		{name: "model can disable", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-5", ThinkingBudget: none()}},
 		{name: "openai-compatible provider", cfg: latest.ModelConfig{Provider: "openai", Model: "claude-opus-5-5", ThinkingBudget: none()}},
-		{name: "configured 0 on opus 5.5", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5", ThinkingBudget: &latest.ThinkingBudget{}}, wantWarn: true},
-		{name: "vertex model garden", cfg: latest.ModelConfig{Provider: "google", Model: "claude-opus-5-5", ThinkingBudget: none(), ProviderOpts: map[string]any{"publisher": "anthropic"}}, wantWarn: true},
+		{name: "configured 0 on opus 5.5", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5", ThinkingBudget: &latest.ThinkingBudget{}}, wantWarn: claudeWarning},
+		{name: "vertex model garden", cfg: latest.ModelConfig{Provider: "google", Model: "claude-opus-5-5", ThinkingBudget: none(), ProviderOpts: map[string]any{"publisher": "anthropic"}}, wantWarn: claudeWarning},
 		{name: "google without anthropic publisher", cfg: latest.ModelConfig{Provider: "google", Model: "claude-opus-5-5", ThinkingBudget: none()}},
+		{name: "configured none on gemini-4-neon", cfg: latest.ModelConfig{Provider: "google", Model: "gemini-4-neon", ThinkingBudget: none()}, wantWarn: geminiWarning},
+		{name: "configured 0 on gemini-4-carbon", cfg: latest.ModelConfig{Provider: "google", Model: "gemini-4-carbon", ThinkingBudget: &latest.ThinkingBudget{}}, wantWarn: geminiWarning},
+		{name: "internal no-thinking call on gemini-4-neon", cfg: latest.ModelConfig{Provider: "google", Model: "gemini-4-neon"}, opts: []options.Opt{options.WithNoThinking()}},
+		{name: "configured 0 on gemini-2.5-flash", cfg: latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash", ThinkingBudget: &latest.ThinkingBudget{}}},
+		{name: "configured none on gemini-3-pro-image", cfg: latest.ModelConfig{Provider: "google", Model: "gemini-3-pro-image", ThinkingBudget: none()}},
+		{name: "configured none on non-reasoning gemini in store", cfg: latest.ModelConfig{Provider: "google", Model: "gemini-4-custom", ThinkingBudget: none()}, opts: []options.Opt{options.WithModelsDevStore(geminiStore)}},
+		{name: "configured none on reasoning-capable gemini-3.1-flash-image in store", cfg: latest.ModelConfig{Provider: "google", Model: "gemini-3.1-flash-image", ThinkingBudget: none()}, opts: []options.Opt{options.WithModelsDevStore(geminiStore)}, wantWarn: geminiWarning},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -543,7 +556,11 @@ func TestCreateDirectProvider_WarnsWhenThinkingCannotBeDisabled(t *testing.T) {
 			r := NewRegistry(map[string]providerFactory{tc.cfg.Provider: tagFactory(tc.cfg.Provider)})
 			_, err := r.createDirectProvider(t.Context(), &tc.cfg, environment.NewMapEnvProvider(nil), tc.opts...)
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantWarn, strings.Contains(logs.String(), warning), logs.String())
+			if tc.wantWarn != "" {
+				assert.Contains(t, logs.String(), tc.wantWarn)
+			} else {
+				assert.NotContains(t, logs.String(), "model cannot disable thinking")
+			}
 		})
 	}
 }

@@ -25,8 +25,8 @@ Docker Agent exposes this through a single `thinking_budget` field on any named 
 | ------------------- | ---------- | --------------------------------------------------------------------------------------- | ------------------ |
 | OpenAI              | string     | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; `xhigh` on gpt-5.2+, `max` on gpt-5.6+; API-level `none` on GPT-5.x from 5.6 onward and GPT-6 Sol/Luna, `minimal` dropped on gpt-5.6+ | `medium` (API default) |
 | Anthropic           | int or str | Fixed budgets: ≥1024 and less than `max_tokens`; or `minimal`–`max`, `adaptive`, `adaptive/<effort>`, `none` | Model-dependent; Claude 5.x defaults to adaptive |
-| Gemini 2.5          | int        | `0` (off), `-1` (dynamic), or token count (max 24576 / 32768)                           | `-1` (dynamic)     |
-| Gemini 3+           | string     | `minimal` (Gemini 3), `low`, `medium`, `high`, `xhigh` (`gemini-4-hydrogen` / `gemini-4-neon`) | API default (model-dependent) |
+| Gemini 2.5          | int or str | `0` (off), `-1` (dynamic), token count (max 24576 / 32768), or `minimal`–`max` / `adaptive` (mapped to tokens) | `-1` (dynamic)     |
+| Gemini 3+           | string     | `minimal` (Gemini 3), `low`, `medium`, `high`, `xhigh` (`gemini-4-hydrogen` / `gemini-4-neon`), `adaptive`, `adaptive/<effort>`, `none` (lowers to `low` with warning) | API default (model-dependent) |
 | AWS Bedrock         | int or str | Fixed budgets: ≥1024 and less than `max_tokens`; `minimal`–`max` mapped to tokens on older models; adaptive on supported newer Claude models | Model-dependent; Claude 5.x defaults to adaptive |
 | Docker Model Runner | int or str | token count, `minimal`–`max` (mapped to tokens), `adaptive` (unlimited), `none`         | engine default     |
 
@@ -221,11 +221,20 @@ models:
     model: gemini-4-carbon
     thinking_budget: high     # low | medium | high (Carbon and Argon)
 
+  gemini4-adaptive:
+    provider: google
+    model: gemini-4-carbon
+    thinking_budget: adaptive # omits thinkingLevel (model default); adaptive/<effort> selects a tier
+
   gemini3-flash:
     provider: google
     model: gemini-3-flash
     thinking_budget: medium   # minimal | low | medium | high
 ```
+
+- **Disabling thinking (`none` / `0`):** Gemini 3+ models always think; setting `thinking_budget: none` or `0` logs a warning and sends `low` effort with thoughts hidden.
+- **Integer budgets on Gemini 4+:** Gemini 4 models reject `thinkingBudget` tokens; Docker Agent logs a warning and omits the token budget so the model falls back to its default `thinkingLevel`.
+- **OpenAI-compatible gateways:** When routing `google/gemini-3*` or `google/gemini-4*` models through an OpenAI-compatible gateway (such as `openrouter` or `vercel`), `thinking_budget` is mapped and clamped to `reasoning_effort` automatically.
 
 ## AWS Bedrock (Claude)
 

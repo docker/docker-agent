@@ -225,14 +225,3 @@ func ForGemini(l Level) (string, bool) {
 		return "", false
 	}
 }
-
-// ForGemini3 returns the Gemini 3 thinking-level string for l.
-// Gemini 3 accepts: minimal, low, medium, high.
-func ForGemini3(l Level) (string, bool) {
-	switch l {
-	case Minimal, Low, Medium, High:
-		return string(l), true
-	default:
-		return "", false
-	}
-}

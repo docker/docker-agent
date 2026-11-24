@@ -50,18 +50,41 @@ func TestBuildConfig_ServiceTier(t *testing.T) {
 	}
 }
 
+// Title generation on Gemini 3+ sets ThinkingLevelLow and bumps tiny MaxOutputTokens;
+// ServiceTier must still be preserved.
 func TestBuildConfig_ServiceTier_NoThinkingTitle(t *testing.T) {
 	t.Parallel()
 
-	client := &Client{Config: base.Config{
-		ModelConfig:  latest.ModelConfig{Provider: "google", Model: "gemini-3-flash", ProviderOpts: map[string]any{"service_tier": "flex"}},
-		ModelOptions: options.Apply(options.WithGeneratingTitle(), options.WithNoThinking()),
-	}}
+	t.Run("gemini-2.5-flash disables thinking with budget 0", func(t *testing.T) {
+		t.Parallel()
+		client := &Client{Config: base.Config{
+			ModelConfig:  latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash", MaxTokens: new(int64(128)), ProviderOpts: map[string]any{"service_tier": "flex"}},
+			ModelOptions: options.Apply(options.WithGeneratingTitle(), options.WithNoThinking()),
+		}}
 
-	config := client.buildConfig(t.Context())
-	require.NotNil(t, config.ThinkingConfig)
-	assert.Equal(t, genai.ThinkingLevelLow, config.ThinkingConfig.ThinkingLevel)
-	assert.Equal(t, genai.ServiceTierFlex, config.ServiceTier)
+		config := client.buildConfig(t.Context())
+		require.NotNil(t, config.ThinkingConfig)
+		assert.False(t, config.ThinkingConfig.IncludeThoughts)
+		require.NotNil(t, config.ThinkingConfig.ThinkingBudget)
+		assert.Zero(t, *config.ThinkingConfig.ThinkingBudget)
+		assert.Equal(t, int32(128), config.MaxOutputTokens)
+		assert.Equal(t, genai.ServiceTierFlex, config.ServiceTier)
+	})
+
+	t.Run("gemini-3-flash uses low thinking level and floors max tokens", func(t *testing.T) {
+		t.Parallel()
+		client := &Client{Config: base.Config{
+			ModelConfig:  latest.ModelConfig{Provider: "google", Model: "gemini-3-flash", MaxTokens: new(int64(128)), ProviderOpts: map[string]any{"service_tier": "flex"}},
+			ModelOptions: options.Apply(options.WithGeneratingTitle(), options.WithNoThinking()),
+		}}
+
+		config := client.buildConfig(t.Context())
+		require.NotNil(t, config.ThinkingConfig)
+		assert.False(t, config.ThinkingConfig.IncludeThoughts)
+		assert.Equal(t, genai.ThinkingLevelLow, config.ThinkingConfig.ThinkingLevel)
+		assert.Equal(t, int32(512), config.MaxOutputTokens)
+		assert.Equal(t, genai.ServiceTierFlex, config.ServiceTier)
+	})
 }
 
 // serviceTierInBody returns the top-level serviceTier of a generateContent
