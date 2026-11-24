@@ -164,6 +164,17 @@ func TestLegacyStateRule(t *testing.T) {
 			t.Helper()
 			require.NoError(t, createMarker(legacy, cacheRoot.marker()))
 		}},
+		{name: "a file that only looks like a marker", wantLegacy: true, setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			require.NoError(t, os.MkdirAll(legacy, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(legacy, markerPrefix+"backup"), nil, 0o600))
+		}},
+		{name: "every root marker", setup: func(t *testing.T, legacy string) {
+			t.Helper()
+			for _, r := range allRoots {
+				require.NoError(t, createMarker(legacy, r.marker()))
+			}
+		}},
 		{name: "regular file", setup: func(t *testing.T, legacy string) {
 			t.Helper()
 			require.NoError(t, os.WriteFile(legacy, []byte("not a directory"), 0o600))

@@ -313,11 +313,23 @@ func hasState(p string) (bool, error) {
 		return false, err
 	}
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), markerPrefix) {
+		if !isMarkerName(e.Name()) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// isMarkerName reports whether name is one of the markers this package writes.
+// A prefix match would read an unrelated ".cagent-root-backup" as a marker and
+// abandon the directory holding it.
+func isMarkerName(name string) bool {
+	for _, r := range allRoots {
+		if name == r.marker() {
+			return true
+		}
+	}
+	return false
 }
 
 // isTempFallback reports whether target is the shared temp-dir location used
