@@ -67,7 +67,7 @@ func SecretSourcesHelp(exampleVar string) string {
 	b.WriteString("Provide them using any of these sources:\n")
 	fmt.Fprintf(&b, " - Shell environment:      export %s=<value>\n", exampleVar)
 	b.WriteString(" - Env file:               docker agent run --env-from-file <file> ...\n")
-	b.WriteString(" - Docker Agent env file:  docker agent setup (stores the key in ~/.config/cagent/.env)\n")
+	fmt.Fprintf(&b, " - Docker Agent env file:  docker agent setup (stores the key in %s)\n", ConfigEnvFilePath())
 	fmt.Fprintf(&b, "\nSee %s for details.\n", SecretsDocsURL)
 	return b.String()
 }

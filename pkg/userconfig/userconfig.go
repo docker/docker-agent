@@ -1,5 +1,5 @@
 // Package userconfig provides user-level configuration for docker agent.
-// This configuration is stored in ~/.config/cagent/config.yaml and contains
+// This configuration is stored in config.yaml in the config directory and contains
 // user preferences like aliases.
 package userconfig
 
