@@ -140,6 +140,8 @@ type Model interface {
 	// need to observe real list state rather than trust a call was made.
 	MessageTypeCount(t types.MessageType) int
 
+	FadeOutScrollbar() tea.Cmd
+	ScrollbarOpacity() float64
 	// IsScrollbarDragging returns true when the scrollbar thumb is being dragged.
 	IsScrollbarDragging() bool
 
@@ -1249,6 +1251,10 @@ func (m *model) revealAfterScroll(before int, cmd tea.Cmd) tea.Cmd {
 	m.scrollview.SetContentWithTrailingSlack(m.renderedLines, m.totalHeight, m.bottomSlack)
 	return tea.Batch(cmd, m.scrollview.RevealScrollbar())
 }
+
+func (m *model) FadeOutScrollbar() tea.Cmd { return m.scrollview.FadeOutScrollbar() }
+
+func (m *model) ScrollbarOpacity() float64 { return m.scrollview.ScrollbarOpacity() }
 
 func (m *model) SetScrollbarPointer(x, y int) tea.Cmd {
 	return m.scrollview.SetScrollbarPointer(x, y)

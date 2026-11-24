@@ -106,27 +106,38 @@ func (r *Reveal) Render(glyph string, count int) string {
 	if !r.dragging && r.edge == 0 {
 		return strings.Repeat(" ", count)
 	}
-	segment := strings.Repeat(glyph, count)
+	return r.renderOver(strings.Repeat(glyph, count), styles.Background, styles.ResizeHandleStyle.GetForeground())
+}
+
+// RenderOnSeparator reveals the grip over a persistent divider.
+func (r *Reveal) RenderOnSeparator(scrollbarOpacity float64) (rule, grip string) {
+	background := blend(styles.Separator, styles.Background, scrollbarOpacity)
+	rule = " "
+	if scrollbarOpacity < 1 {
+		rule = styles.ResizeHandleStyle.Foreground(background).Render("│")
+	}
+	if r.edge == 0 && !r.dragging {
+		return rule, rule
+	}
+	near := blend(styles.ResizeHandleStyle.GetForeground(), styles.TextPrimary, 0.30)
+	return rule, r.renderOver("│", background, near)
+}
+
+func (r *Reveal) renderOver(segment string, background, near color.Color) string {
 	switch {
 	case r.dragging:
 		return darkenedStyle().Render(segment)
 	case r.handle == 1 && r.edge == 1:
 		return styles.ResizeHandleHoverStyle.Render(segment)
 	default:
-		fg := blend(styles.ResizeHandleStyle.GetForeground(), styles.ResizeHandleHoverStyle.GetForeground(), r.handle)
-		return styles.ResizeHandleStyle.Foreground(blend(styles.Background, fg, r.edge)).Render(segment)
+		fg := blend(near, styles.ResizeHandleHoverStyle.GetForeground(), r.handle)
+		return styles.ResizeHandleStyle.Foreground(blend(background, fg, r.edge)).Render(segment)
 	}
 }
 
 func darkenedStyle() lipgloss.Style {
 	r, g, b := styles.ColorToRGB(styles.ResizeHandleStyle.GetForeground())
 	return styles.ResizeHandleStyle.Foreground(styles.RGBToColor(r*0.7, g*0.7, b*0.7))
-}
-
-// RenderGuide fades the sidebar guide against the terminal background.
-func RenderGuide(opacity float64) string {
-	style := styles.ResizeHandleActiveStyle.Bold(false)
-	return style.Foreground(blend(styles.Background, style.GetForeground(), opacity)).Render("│")
 }
 
 func blend(from, to color.Color, amount float64) color.Color {

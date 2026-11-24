@@ -154,6 +154,7 @@ type Model interface {
 	UpdateTitleInput(msg tea.Msg) tea.Cmd
 	// SetTitleRegenerating sets the title regeneration state and returns a command to start/stop spinner
 	SetTitleRegenerating(regenerating bool) tea.Cmd
+	ScrollbarOpacity() float64
 	// IsScrollbarDragging returns true when the scrollbar thumb is being dragged.
 	IsScrollbarDragging() bool
 	// VisualGeneration increments whenever an update changes rendered sidebar state.
@@ -845,6 +846,8 @@ func (m *model) SetTitleRegenerating(regenerating bool) tea.Cmd {
 	m.stopSpinner()
 	return nil
 }
+
+func (m *model) ScrollbarOpacity() float64 { return m.scrollview.ScrollbarOpacity() }
 
 func (m *model) SetScrollbarPointer(x, y int) tea.Cmd {
 	if m.mode == ModeVertical {

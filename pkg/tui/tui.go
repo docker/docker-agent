@@ -189,11 +189,6 @@ type appModel struct {
 	viewCacheValid       bool
 	viewCacheInitialized bool
 	foreground           viewForeground
-	sidebarGuideCache    struct {
-		guide   chat.SidebarGuide
-		content string
-	}
-
 	paneHidden           bool
 	tmuxVisibilityProbe  func(context.Context) bool
 	visibilityGeneration uint64
@@ -2655,10 +2650,9 @@ func (m *appModel) canRestorePointerCache(msg tea.Msg) bool {
 	if !m.viewCacheValid || m.activeTab.chatPage == nil {
 		return false
 	}
-	// A captured left drag updates only its own grip. A changed composer
-	// divider invalidates via contentHeight; a sidebar guide is separate.
+	// A changed composer divider invalidates via contentHeight.
 	if motion, ok := msg.(tea.MouseMotionMsg); ok && motion.Button == tea.MouseLeft &&
-		(m.isDragging || chat.IsResizingSidebar(m.activeTab.chatPage)) {
+		m.isDragging {
 		return true
 	}
 	if m.tabBar == nil || m.dialogMgr == nil || m.dialogMgr.Open() || m.activeTab.chatPage.IsSelecting() || m.notification.Open() {
@@ -2667,7 +2661,7 @@ func (m *appModel) canRestorePointerCache(msg tea.Msg) bool {
 	var x, y int
 	switch msg := msg.(type) {
 	case tea.MouseMotionMsg:
-		if msg.Button == tea.MouseLeft && !m.tabBar.IsDragging() {
+		if chat.IsResizingSidebar(m.activeTab.chatPage) || (msg.Button == tea.MouseLeft && !m.tabBar.IsDragging()) {
 			return false
 		}
 		x, y = msg.X, msg.Y
@@ -3117,10 +3111,9 @@ func anyRunningTab(tabs []messages.TabInfo) bool {
 // View renders the model.
 func (m *appModel) View() tea.View {
 	if m.viewCacheValid {
-		return m.withSidebarResizeGuide(m.viewCache)
+		return m.viewCache
 	}
 	if m.paneHidden && m.viewCacheInitialized && m.err == nil {
-		m.clearSidebarResizeGuide()
 		// Keep completion signals live without composing the hidden transcript.
 		view := m.viewCache
 		view.WindowTitle = m.windowTitle()
@@ -3135,8 +3128,7 @@ func (m *appModel) View() tea.View {
 	m.viewCache = view
 	m.viewCacheValid = true
 	m.viewCacheInitialized = true
-	m.sidebarGuideCache.content = ""
-	return m.withSidebarResizeGuide(view)
+	return view
 }
 
 func (m *appModel) composeView() tea.View {
@@ -3256,10 +3248,13 @@ func (m *appModel) composeView() tea.View {
 
 	if m.imageWriter != nil {
 		// Extract markers before the compositor consumes their APC sequences.
-		baseView = m.imageWriter.SetContent(baseView, foregroundBounds(m.foreground.layers)...)
+		masks := foregroundBounds(m.foreground.layers)
+		if mask := chat.SidebarDragImageMask(m.activeTab.chatPage); !mask.Empty() {
+			masks = append(masks, mask)
+		}
+		baseView = m.imageWriter.SetContent(baseView, masks...)
 	}
 	if len(m.foreground.layers) > 0 {
-		m.foreground.base = baseView
 		baseView = m.foreground.compose(baseView)
 	}
 	return toFullscreenView(baseView, windowTitle, m.activeTab.chatPage.IsWorking(), m.leanMode)

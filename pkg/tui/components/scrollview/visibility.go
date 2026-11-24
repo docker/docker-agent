@@ -45,6 +45,11 @@ func (m *Model) RevealScrollbar() tea.Cmd {
 	return m.syncScrollbarAnimation()
 }
 
+func (m *Model) FadeOutScrollbar() tea.Cmd {
+	m.visibility.holdUntil = 0
+	return m.SetScrollbarPointer(-1, -1)
+}
+
 // SetScrollbarPointer observes motion without taking mouse capture. Negative
 // coordinates clear hover, for example when another surface takes focus.
 func (m *Model) SetScrollbarPointer(x, y int) tea.Cmd {
@@ -129,16 +134,16 @@ func (m *Model) UpdateScrollbarAnimation(tick animation.TickMsg) {
 // reports whether its scrollbar must be repainted. With no tick chain to
 // animate a layout change, settled opacity follows the final pointer geometry.
 func (m *Model) SetPositionAndReconcileScrollbar(x, y int) bool {
-	before := m.scrollbarOpacity()
+	before := m.ScrollbarOpacity()
 	m.SetPosition(x, y)
 	v := &m.visibility
 	if v.clock != nil && !v.ticks.IsActive() && m.pointerOverScrollbar() {
 		v.alpha = 1
 	}
-	return m.scrollbarOpacity() != before
+	return m.ScrollbarOpacity() != before
 }
 
-func (m *Model) scrollbarOpacity() float64 {
+func (m *Model) ScrollbarOpacity() float64 {
 	if m.visibility.clock == nil {
 		if m.pointerOverScrollbar() || m.IsDragging() {
 			return 1
@@ -149,7 +154,7 @@ func (m *Model) scrollbarOpacity() float64 {
 }
 
 func (m *Model) scrollbarLines() []string {
-	alpha := m.scrollbarOpacity()
+	alpha := m.ScrollbarOpacity()
 	if alpha <= 0 {
 		return nil
 	}
