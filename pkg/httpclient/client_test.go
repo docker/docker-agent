@@ -39,6 +39,22 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestWrapWithOTel(t *testing.T) {
+	t.Cleanup(func() { SetOTelTransportWrapper(nil) })
+	base := &http.Transport{}
+	require.Same(t, base, WrapWithOTel(base))
+
+	wrapped := &wrappedRoundTripper{RoundTripper: base}
+	SetOTelTransportWrapper(func(rt http.RoundTripper) http.RoundTripper {
+		assert.Same(t, base, rt)
+		return wrapped
+	})
+	assert.Same(t, wrapped, WrapWithOTel(base))
+
+	SetOTelTransportWrapper(nil)
+	assert.Same(t, base, WrapWithOTel(base))
+}
+
 func TestHeaders(t *testing.T) {
 	t.Parallel()
 

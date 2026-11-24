@@ -1,3 +1,5 @@
+//go:build !js || !wasm || !docker_agent_wasm_small
+
 package chat_test
 
 import (

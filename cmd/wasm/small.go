@@ -23,14 +23,7 @@ import (
 // browserFeatures leaves code mode out: it runs on goja.
 var browserFeatures = []config.Feature{config.FeatureHooks, config.FeatureToon, config.FeatureDeferredTools}
 
-// browserBuiltinHooks leaves add_context out: it renders Go templates.
-var browserBuiltinHooks = []string{
-	builtins.AddDate,
-	builtins.AddEnvironmentInfo,
-	builtins.LimitLargeToolResults,
-	builtins.MaxIterations,
-	builtins.RedactSecrets,
-}
+var browserBuiltinHooks = builtins.RuntimeBuiltinNames()
 
 // configVersions is nil: only the current YAML schema is accepted.
 var configVersions config.VersionRegistrar

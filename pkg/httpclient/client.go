@@ -14,8 +14,6 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-
 	"github.com/docker/docker-agent/pkg/userid"
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -126,35 +124,26 @@ func WithUnauthorizedRetry(refresh func(ctx context.Context, rejected string) (s
 	}
 }
 
-// otelEnabled tracks whether the OTel SDK has been initialised in this
-// process. `cmd/root/otel.go:initOTelSDK` calls `SetOTelEnabled(true)`
-// on success; nothing else flips this flag. Gating on a single source
-// of truth (rather than re-reading `OTEL_EXPORTER_OTLP_ENDPOINT`)
-// avoids the previous mismatch where the SDK could be initialised
-// without the HTTP wrap, or the HTTP wrap could fire without the SDK
-// initialising the propagator.
-var otelEnabled atomic.Bool
+var otelTransportWrapper atomic.Pointer[func(http.RoundTripper) http.RoundTripper]
 
-// SetOTelEnabled toggles the gate consulted by WrapWithOTel. Called by
-// `initOTelSDK` after providers and the propagator are wired so HTTP
-// clients start injecting `traceparent` only once the rest of the SDK
-// can actually use the resulting spans.
-func SetOTelEnabled(enabled bool) {
-	otelEnabled.Store(enabled)
+// SetOTelTransportWrapper installs the wrapper for new transports. Hosts call
+// it after initializing tracing and propagation. A nil wrapper disables tracing
+// for new transports without affecting existing clients.
+func SetOTelTransportWrapper(wrap func(http.RoundTripper) http.RoundTripper) {
+	if wrap == nil {
+		otelTransportWrapper.Store(nil)
+		return
+	}
+	otelTransportWrapper.Store(&wrap)
 }
 
-// WrapWithOTel returns rt wrapped with otelhttp when OpenTelemetry has
-// been enabled via `SetOTelEnabled` (called by `initOTelSDK`), or rt
-// unchanged otherwise. Gating avoids per-request span allocation on
-// the no-OTel path and stops sending a `traceparent` header to
-// upstream LLM providers that have no use for it. Exposed so callers
-// that build their own transports outside of `NewHTTPClient` can opt
-// into the same gating without duplicating the check.
+// WrapWithOTel applies the host's tracing wrapper, or returns rt unchanged
+// when the host has not installed one.
 func WrapWithOTel(rt http.RoundTripper) http.RoundTripper {
-	if !otelEnabled.Load() {
-		return rt
+	if wrap := otelTransportWrapper.Load(); wrap != nil {
+		return (*wrap)(rt)
 	}
-	return otelhttp.NewTransport(rt)
+	return rt
 }
 
 // TracedDefaultClient returns an `http.Client` equivalent to
