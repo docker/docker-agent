@@ -153,9 +153,23 @@ type Settings struct {
 	// "always" (default) shows a confirmation dialog, "double-tap" requires
 	// pressing Esc twice within 1 second, "none" interrupts immediately.
 	InterruptConfirmation string `yaml:"interrupt_confirmation,omitempty"`
+	// Experimental enables opt-in experimental features. All fields default to false.
+	Experimental *ExperimentalSettings `yaml:"experimental,omitempty"`
 	// Extra preserves settings keys this version does not know about (e.g.
 	// written by a newer docker-agent) across a load/save round trip.
 	Extra map[string]any `yaml:",inline"`
+}
+
+// ExperimentalSettings enables opt-in experimental features.
+type ExperimentalSettings struct {
+	// MCPEvents enables experimental SEP-3415 event discovery and push
+	// subscriptions over stdio and Streamable HTTP.
+	MCPEvents bool `yaml:"mcp_events,omitempty"`
+}
+
+// MCPEventsEnabled reports whether experimental MCP Events push subscriptions are enabled.
+func (s *Settings) MCPEventsEnabled() bool {
+	return s != nil && s.Experimental != nil && s.Experimental.MCPEvents
 }
 
 // LayoutSettings customizes the TUI chat layout. The zero value is the

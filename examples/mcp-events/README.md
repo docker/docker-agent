@@ -32,21 +32,18 @@ server is unauthenticated; keep it bound to loopback for local use.
 
 ## Opt in
 
-MCP Events is disabled by default. Both demo configs enable it per MCP toolset:
+MCP Events is disabled by default. Enable it globally in your user settings
+(`~/.config/cagent/config.yaml`):
 
 ```yaml
-toolsets:
-  - type: mcp
-    experimental:
-      mcp_events: true
-    # command or remote configuration
+settings:
+  experimental:
+    mcp_events: true
 ```
 
 Without this setting, docker-agent does not advertise Events support, install
-event adapters, or expose event tools. Shared `mcps` definitions can also set
-it; a referencing toolset can override it with `experimental: {mcp_events: false}`.
-Embedders using MCP toolset constructors can opt in with
-`SetExperimentalEvents(true)` before starting the toolset.
+event adapters, or expose event tools. Embedders using MCP toolset constructors
+can opt in with `SetExperimentalEvents(true)` before starting the toolset.
 
 ## Scope
 

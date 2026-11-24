@@ -3794,9 +3794,6 @@
           "$ref": "#/$defs/Remote"
         },
         "config": true,
-        "experimental": {
-          "$ref": "#/$defs/ToolsetExperimentalConfig"
-        },
         "version": {
           "type": "string"
         },
@@ -3877,9 +3874,6 @@
           "$ref": "#/$defs/Remote"
         },
         "config": true,
-        "experimental": {
-          "$ref": "#/$defs/ToolsetExperimentalConfig"
-        },
         "version": {
           "type": "string"
         },
@@ -5377,9 +5371,6 @@
           "$ref": "#/$defs/Remote"
         },
         "config": true,
-        "experimental": {
-          "$ref": "#/$defs/ToolsetExperimentalConfig"
-        },
         "version": {
           "type": "string"
         },
@@ -7602,15 +7593,6 @@
           "$ref": "#/$defs/WebhookToolset"
         }
       ]
-    },
-    "ToolsetExperimentalConfig": {
-      "type": "object",
-      "properties": {
-        "mcp_events": {
-          "type": "boolean"
-        }
-      },
-      "$comment": "pkg/config/latest/types.go ToolsetExperimentalConfig"
     },
     "ToolsetInfoEvent": {
       "type": "object",

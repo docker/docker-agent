@@ -10,8 +10,6 @@ agents:
     toolsets:
       - type: mcp
         name: demo
-        experimental:
-          mcp_events: true
         allow_private_ips: true
         remote:
           url: http://127.0.0.1:8080/mcp

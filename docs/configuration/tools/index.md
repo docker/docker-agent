@@ -165,14 +165,12 @@ Installed binaries are placed in `~/.cagent/tools/bin/` and cached so they are o
 ## Experimental MCP Events
 
 MCP Events push subscriptions (proposed SEP-3415) are disabled by default.
-Enable them per MCP toolset:
+Enable them globally in `~/.config/cagent/config.yaml`:
 
 ```yaml
-toolsets:
-  - type: mcp
-    command: my-mcp-server
-    experimental:
-      mcp_events: true
+settings:
+  experimental:
+    mcp_events: true
 ```
 
 Compatible servers expose event discovery, subscription, and cancellation tools.
