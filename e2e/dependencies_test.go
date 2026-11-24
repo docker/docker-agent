@@ -216,10 +216,9 @@ func TestWasmDefaultBinaryDependencies(t *testing.T) {
 	}
 }
 
-// The small browser profile links one provider SDK and none of the engines
+// The small browser profile links the OpenAI and Anthropic SDKs and no engines
 // whose reflective method lookups make the linker keep every exported method
-// of every reachable type. If this fails you probably added an import that
-// drags one of them back in: the binary roughly doubles when that happens.
+// of every reachable type. Adding one of those engines roughly doubles the binary.
 func TestWasmSmallBinaryDependencies(t *testing.T) {
 	t.Parallel()
 	const tags = "docker_agent_wasm_small,docker_agent_no_hook_templates,docker_agent_no_js_expansion"
@@ -237,9 +236,11 @@ func TestWasmSmallBinaryDependencies(t *testing.T) {
 		"html/template",
 		"net/rpc",
 		// Left out of the profile.
-		"github.com/docker/docker-agent/pkg/model/provider/anthropic",
+		"github.com/docker/docker-agent/pkg/model/provider/anthropic/vertex",
+		"github.com/docker/docker-agent/pkg/model/provider/bedrock",
 		"github.com/docker/docker-agent/pkg/model/provider/gemini",
-		"github.com/anthropics/anthropic-sdk-go",
+		"github.com/docker/docker-agent/pkg/model/provider/vertexai",
+		"github.com/aws/aws-sdk-go-v2",
 		"google.golang.org/genai",
 		"google.golang.org/grpc",
 		"google.golang.org/protobuf",
