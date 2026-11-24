@@ -94,7 +94,7 @@ See `examples/cloud-bedrock.yaml` and `examples/cloud-vertex.yaml`.
 ### Small profile
 
 Most of the default binary is what it links, not the runtime. The small
-profile keeps the shared runtime and trades features for size: about 28 MiB
+profile keeps the shared runtime and trades features for size: about 34 MiB
 uncompressed with Go 1.27.4 and Binaryen 132, compared to 162 MiB for the
 stripped default build. The small build requires [Binaryen](https://github.com/WebAssembly/binaryen/releases/tag/version_132)
 (`wasm-opt` on `PATH`; e.g. `brew install binaryen`). CI uses version 132.
@@ -105,7 +105,7 @@ task build-wasm-small  # writes cmd/wasm/web/docker-agent.wasm
 
 | | Default | Small |
 | --- | --- | --- |
-| Providers | OpenAI, Anthropic, Google | OpenAI and anything OpenAI-compatible (custom `providers:` entries such as OpenRouter) |
+| Providers | OpenAI, Anthropic, Google | OpenAI, Anthropic, and OpenAI-compatible providers (custom `providers:` entries such as OpenRouter) |
 | Toolsets | see *Limits* | the same, without `openapi` |
 | `${...}` | JavaScript | `${env.NAME}` and bound `${name}` placeholders; any other expression stays as text |
 | `code_mode_tools` | yes | no |
@@ -474,7 +474,7 @@ documents is rejected when the session is created.
 | `events.go` | Projects runtime events onto the JS event shapes. |
 | `handle.go` | The JS session object and the lifetime of its callbacks. |
 | `bridge.go` | JS ⇄ Go value helpers, promises, awaiting JS callbacks. |
-| `providers.go` | Explicit demo provider registry: OpenAI, plus the profile's providers (Anthropic / Google by default). |
+| `providers.go` | Explicit demo provider registry: OpenAI and Anthropic, plus any profile-specific providers. |
 | `examples/` | Configs that run unchanged in the browser and in the CLI. |
 | `node/` | Node loader and JS bridge tests. |
 | `browser/` | Headless Chrome integration tests using real fetch and local mock services. |

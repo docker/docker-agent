@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,11 +16,12 @@ import (
 )
 
 func TestSmallProfileRejectsOtherProviders(t *testing.T) {
-	for _, model := range []string{"anthropic/claude-sonnet-4-6", "google/gemini-2.5-flash", "amazon-bedrock/anthropic.claude-sonnet-4-6"} {
+	for _, model := range []string{"google/gemini-2.5-flash", "amazon-bedrock/anthropic.claude-sonnet-4-6", "dmr/ai/qwen3"} {
 		t.Run(model, func(t *testing.T) {
 			yaml := "agents:\n  root:\n    model: " + model + "\n"
-			_, err := browserHost.openSession(t.Context(), sessionOptions{YAML: yaml, Env: map[string]string{"ANTHROPIC_API_KEY": "k", "GOOGLE_API_KEY": "k"}})
-			require.ErrorContains(t, err, "provider")
+			_, err := browserHost.openSession(t.Context(), sessionOptions{YAML: yaml})
+			name, _, _ := strings.Cut(model, "/")
+			require.ErrorContains(t, err, `provider "`+name+`"`)
 		})
 	}
 }

@@ -16,8 +16,6 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/model/provider"
-	"github.com/docker/docker-agent/pkg/model/provider/anthropic"
-	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -55,13 +53,9 @@ var modelsStore = sync.OnceValue(func() *modelsdev.Store {
 	return modelsdev.NewDatabaseStore(embedded.Snapshot())
 })
 
-// registerProviders adds Anthropic and Google, plus the cloud providers of
-// cloud.go when the binary is built with -tags docker_agent_wasm_cloud;
-// googleFactory comes from cloud.go or cloud_off.go accordingly.
+// registerProviders adds Google, plus the cloud providers when built with
+// -tags docker_agent_wasm_cloud.
 func registerProviders(factories map[string]provider.Factory) {
-	factories["anthropic"] = func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (provider.Provider, error) {
-		return anthropic.NewClient(ctx, cfg, env, opts...)
-	}
 	factories["google"] = googleFactory
 	maps.Copy(factories, cloudFactories())
 }
