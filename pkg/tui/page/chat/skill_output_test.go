@@ -27,8 +27,8 @@ func TestForkSkillReplyDoesNotMergeWithParent(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		sess := session.New()
-		const url = "https://github.com/docker/gordon/pull/2287"
-		const reply = "Opened PR #2287 — fix(proxy): flush a ping before waiting for Bedrock stream events."
+		const url = "https://github.com/example/project/pull/2287"
+		const reply = "Opened PR #2287 — fix: flush a ping before waiting for stream events."
 		call := tools.ToolCall{ID: "skill", Function: tools.FunctionCall{Name: "run_skill"}}
 		p := renderAppEventBatches(t, sess, [][]runtime.Event{{
 			runtime.StreamStarted(sess.ID, "root"),
@@ -123,14 +123,14 @@ func TestSiblingStreamLifecycleDoesNotSplitContent(t *testing.T) {
 		runtime.StreamStarted("first-skill", "root"),
 		runtime.AgentChoice("root", "first-skill", "https://github.com/"),
 		runtime.StreamStarted("second-skill", "root"),
-		runtime.AgentChoice("root", "first-skill", "docker/gordon/pull/"),
+		runtime.AgentChoice("root", "first-skill", "example/project/pull/"),
 		runtime.StreamStopped("second-skill", "root", "normal"),
 		runtime.AgentChoice("root", "first-skill", "2287"),
 	} {
 		_, _ = p.handleRuntimeEvent(event)
 	}
 	require.Equal(t, 1, p.messages.MessageTypeCount(types.MessageTypeAssistant))
-	require.Contains(t, ansi.Strip(p.messages.View()), "https://github.com/docker/gordon/pull/2287")
+	require.Contains(t, ansi.Strip(p.messages.View()), "https://github.com/example/project/pull/2287")
 }
 
 // renderAppEventBatches exercises the same throttled subscription used by the TUI.

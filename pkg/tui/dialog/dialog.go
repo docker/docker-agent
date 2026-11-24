@@ -32,6 +32,7 @@ type Manager interface {
 	// TopIsBackground reports whether the topmost dialog is a background
 	// dialog (i.e. it should not block tab navigation).
 	TopIsBackground() bool
+	ContainsTop(x, y int) bool
 	// TopBackgroundEvent returns the originating event of the topmost
 	// background dialog, or nil if the top dialog is not a background dialog
 	// or the dialog stack is empty.
@@ -281,33 +282,7 @@ func (d *manager) adjustMouseMsg(msg tea.Msg) tea.Msg {
 		return msg
 	}
 	e := d.stack[len(d.stack)-1]
-	if e.offsetX == 0 && e.offsetY == 0 {
-		return msg
-	}
-
-	switch m := msg.(type) {
-	case tea.MouseClickMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	case tea.MouseMotionMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	case tea.MouseReleaseMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	case messages.WheelCoalescedMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	case tea.MouseWheelMsg:
-		m.X -= e.offsetX
-		m.Y -= e.offsetY
-		return m
-	}
-	return msg
+	return messages.LocalMouse(msg, e.offsetX, e.offsetY)
 }
 
 // handleOpen processes dialog opening requests and adds to stack
@@ -370,6 +345,18 @@ func (d *manager) handleCloseAll() (layout.Model, tea.Cmd) {
 // Open returns true if there is at least one active dialog
 func (d *manager) Open() bool {
 	return len(d.stack) > 0
+}
+
+// ContainsTop reports whether a screen coordinate is covered by the top dialog.
+func (d *manager) ContainsTop(x, y int) bool {
+	if len(d.stack) == 0 {
+		return false
+	}
+	e := d.stack[len(d.stack)-1]
+	row, col := e.dialog.Position()
+	view := e.dialog.View()
+	return x >= col+e.offsetX && x < col+e.offsetX+lipgloss.Width(view) &&
+		y >= row+e.offsetY && y < row+e.offsetY+lipgloss.Height(view)
 }
 
 // TopIsExitConfirmation returns true if the topmost dialog is the exit

@@ -160,6 +160,26 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 	return m.handleSwitchTab(forkedSession.ID)
 }
 
+// handleAskSideQuestion opens the /btw dialog: an isolated, tool-free,
+// non-persisted side request that never touches the running conversation or
+// its foreground operation lifecycle. Context is captured once, at open
+// time, from the session as it stands; a later retry reuses that snapshot
+// rather than recapturing it.
+func (m *appModel) handleAskSideQuestion(question string) (tea.Model, tea.Cmd) {
+	query, err := m.application.PrepareSideQuery(m.ctx())
+	if err != nil {
+		return m, notification.ErrorCmd(err.Error())
+	}
+	status := func() string {
+		if m.activeTab != nil && m.activeTab.chatPage != nil && m.activeTab.chatPage.IsWorking() {
+			return "working"
+		}
+		return "idle"
+	}
+	d := dialog.NewSideQueryDialog(m.ctx(), question, query.Run, status)
+	return m, core.CmdHandler(dialog.OpenDialogMsg{Model: d})
+}
+
 func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd) {
 	store := m.application.SessionStore()
 	if store == nil {
@@ -943,6 +963,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		HideToolResults:               settings.HideToolResults,
 		RenderImages:                  settings.GetRenderImages(),
 		ShowBanner:                    settings.GetShowBanner(),
+		TopMargin:                     m.showTopMargin,
 		FadeScrollEdges:               settings.GetFadeScrollEdges(),
 		YOLO:                          settings.YOLO,
 		RestoreTabs:                   settings.GetRestoreTabs(),
@@ -996,7 +1017,15 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 		cmd = tea.Batch(cmd, m.syncImageRendering(before))
 	}
 	m.tabBar.SetMaxTitleLength(preferences.TabTitleMaxLength)
-	cmd = tea.Batch(cmd, m.updateChatCmd(messages.SessionToggleChangedMsg{}), m.resizeAll())
+	cmd = tea.Batch(cmd, m.updateChatCmd(messages.SessionToggleChangedMsg{}))
+	oldMargin := m.topMargin()
+	terminalHeight := m.height + oldMargin
+	m.showTopMargin = preferences.TopMargin
+	if m.ready && oldMargin != m.topMarginForHeight(terminalHeight) {
+		cmd = tea.Batch(cmd, m.handleWindowResize(m.width, terminalHeight))
+	} else {
+		cmd = tea.Batch(cmd, m.resizeAll())
+	}
 
 	if err := savePreferences(preferences); err != nil {
 		slog.Warn("Failed to save settings to user config", "error", err)
@@ -1081,6 +1110,7 @@ func savePreferences(p messages.Preferences) error {
 		s.HideToolResults = p.HideToolResults
 		s.RenderImages = boolPreference(p.RenderImages, true)
 		s.ShowBanner = boolPreference(p.ShowBanner, true)
+		s.TopMargin = p.TopMargin
 		s.FadeScrollEdges = boolPreference(p.FadeScrollEdges, true)
 		s.YOLO = p.YOLO
 		s.Lean = p.Lean
@@ -1144,6 +1174,7 @@ func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.Send
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
+		TopMargin:       settings.GetTopMargin(),
 		FadeScrollEdges: settings.GetFadeScrollEdges(),
 		YOLO:            settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
 		BackgroundCompaction:          settings.BackgroundCompaction,

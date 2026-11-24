@@ -58,6 +58,8 @@ $ docker agent run agent.yaml --lean
 
 File writes use the tool's display title (for example, **Write**) and preview file contents as tool arguments stream in, with theme-aware syntax highlighting based on the filename. Unknown file types remain plain text. By default, the preview follows the last 10 file lines. Press <kbd>Ctrl</kbd>+<kbd>O</kbd> to toggle compact (last 10 lines) and complete (full contents) previews for the current session, including already displayed file writes. In `/settings`, change **Written file preview** to **Full** to show the entire incoming file, or persist `settings.lean_full_file_preview: true` in your user config.
 
+The lean TUI sets the terminal window title to `docker agent: <session title>` once the session has a title, and updates it when you resume a session with `/sessions`. Running `/new` resets it to `docker agent`. Control characters are stripped from the title, and the title is not rewritten when it has not changed.
+
 The lean TUI uses a simplified terminal interface with minimal chrome. To make it the default for interactive runs, set `lean` in your user config:
 
 ```yaml
@@ -74,7 +76,7 @@ The lean TUI supports a focused set of slash commands: `/new`, `/sessions`, `/co
 
 MCP elicitations and OAuth prompts appear inline in the lean TUI, in place of the editor, so a tool that asks for input no longer blocks the run with nothing on screen:
 
-- **Forms** (from MCP servers or the [`user_prompt`](../../tools/user-prompt/index.md) tool) support text, number/integer, boolean, single- and multi-select fields, and masked password fields, plus free-form answers. Single-select fields start on the schema `default` when one is set, instead of always the first option. The full TUI dialog behaves the same way and shares the same validation.
+- **Forms** (from MCP servers or the [`user_prompt`](../../tools/user-prompt/index.md) tool) support text, number/integer, boolean, single- and multi-select fields, and masked password fields, plus free-form answers. Single-select fields start on the schema `default` when one is set, instead of always the first option. The full TUI dialog behaves the same way and shares the same validation. In the full TUI, click a code block's copy label to copy its unwrapped code, or press <kbd>Ctrl</kbd>+<kbd>O</kbd> to copy the whole message as Markdown without your answers. If hidden terminal controls or ambiguous formatting make copying code unsafe, the message's copy labels are hidden. Whole-message copying removes terminal controls.
 - **URL prompts:** press <kbd>y</kbd> when done, <kbd>n</kbd> to decline, <kbd>o</kbd> to open the browser, or <kbd>Esc</kbd> to cancel.
 - **OAuth consent:** press <kbd>y</kbd> to authorize, or <kbd>n</kbd>/<kbd>Esc</kbd> to decline. A notice is shown when authorization completes.
 
@@ -100,6 +102,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/clear`           | Clear the current conversation (keep session, drop messages)                         |
 | `/compact`         | Summarize and compact the conversation history                                       |
 | `/fork`            | Fork the current session into a new branch                                           |
+| `/btw`             | Ask a side question about the current conversation without affecting it (`/btw <question>`, or `/btw` alone to type the question in the dialog). The answer streams into a dialog: no tools are used, nothing is saved to the conversation, and compaction, title generation, and the running agent are unaffected. Press <kbd>↑</kbd>/<kbd>↓</kbd> to scroll, <kbd>c</kbd> to copy the answer, <kbd>r</kbd> to retry after a failure, and <kbd>Esc</kbd> to cancel and close. Uses the agent's current model and is billed like any other call. Not available for remote sessions or external coding harnesses (such as Claude Code), and not in the lean TUI |
 | `/copy`            | Copy the entire conversation to clipboard                                            |
 | `/copy-last`       | Copy only the last assistant message to clipboard                                    |
 | `/undo`            | Restore file changes from the latest snapshot (only when snapshots are enabled)      |
@@ -117,7 +120,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/star`            | Star/unstar the current session                                                      |
 | `/context`         | Show a context-window breakdown: estimated tokens per category (system prompt, tool definitions, prompt files, messages, tool results, compaction summary), a team-level **Live sessions** view (the current session plus every running sub-agent session with its agent, short session ID, and context budget), plus a per-file inventory of attached files and prompt files. When a compaction has occurred, the dialog also displays the verbatim text of the most recent compaction summary. When a dedicated `compaction_model` caps the effective limit below the primary model's own window, a second line reads "compaction cap: `<model>` • `<N>` tokens" — Live-sessions rows are silent on the cap, and the sidebar shows a minimal ⚠ capped marker without repeating the model or the figure (the `/context` header is the authoritative source of the model + number). Use the arrow keys to select a row: press <kbd>Enter</kbd> on a live session to explicitly compact it, or <kbd>d</kbd> on an attached file to drop it |
 | `/drop`            | Remove an attached file from the session context (`/drop <path>`, or `/drop` alone to review and drop from the `/context` dialog). Press <kbd>Tab</kbd> after `/drop` and a space to complete an attached file's path |
-| `/cost`            | Show cost breakdown for this session. Includes a **By Agent** section (alongside **By Model**) showing cumulative cost per agent; unattributed usage and compaction spend appear in their own buckets. |
+| `/cost`            | Show cost breakdown for this session. Includes a **By Agent** section (alongside **By Model**) showing cumulative cost per agent; unattributed usage and compaction spend appear in their own buckets, and `/btw` side-question spend is itemized under its own group. |
 | `/eval`            | Create an evaluation report                                                          |
 | `/pause`           | Pause/resume the runtime loop. While the agent is mid-request, the resize handle shows "Pausing…" until the in-flight request completes; once the loop is blocked the indicator changes to "⏸ Paused". Run `/pause` again to resume. |
 | `/tools`           | Show every toolset (with lifecycle state) and the tools they expose                  |
@@ -537,7 +540,7 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Shift+Enter | Insert a newline |
 | Up/Down    | Navigate message history                        |
 
-Press <kbd>Ctrl</kbd>+<kbd>H</kbd> to view the complete list of all available keyboard shortcuts.
+The status bar shows only the <kbd>Ctrl</kbd>+<kbd>H</kbd> help hint rather than a list of shortcuts. Press <kbd>Ctrl</kbd>+<kbd>H</kbd> (or <kbd>F1</kbd>) to open the **Help** dialog. While another dialog is open, use <kbd>F1</kbd> to open Help over it: <kbd>Ctrl</kbd>+<kbd>H</kbd> is passed to that dialog as a text-editing key (for example, it deletes a character in the command palette filter). Help groups shortcuts into sections with those for your current context (for example the focused dialog or the editor) listed first. Type in the search box to filter shortcuts by key or description; press <kbd>Esc</kbd> or <kbd>Enter</kbd> to close the dialog. The dialog reflects any [custom keybindings](#custom-keybindings) you have configured.
 
 ### Custom Keybindings
 
@@ -597,6 +600,8 @@ Run `/settings` to open the settings dialog. Click a category tab, or use <kbd>T
 > This section covers the `/settings` dialog. For the complete list of `settings:` fields (including ones with no dialog UI, like `permissions`, `hooks`, and `keybindings`) and how they interact with CLI flags and aliases, see [User Settings](../../configuration/user-settings/index.md).
 
 The **Fade scroll edges** toggle on the Appearance tab controls whether scrollable areas (such as the chat) gently fade out their top and bottom edges when more content lies beyond them. It is on by default; turn it off to render scrollable content at full brightness right up to the edge.
+
+The **Show top margin** toggle on the Appearance tab adds one blank row above the full TUI when the terminal is taller than 24 rows, giving the content some breathing room. It is off by default and is saved as `top_margin` in your settings.
 
 Press <kbd>Enter</kbd> to apply and persist, or <kbd>Escape</kbd> to cancel and restore the previous layout. The settings are saved globally in `<config-dir>/config.yaml`:
 

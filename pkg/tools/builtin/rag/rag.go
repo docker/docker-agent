@@ -69,7 +69,7 @@ type ToolSet struct {
 	cancelWatcher context.CancelFunc
 	wg            sync.WaitGroup
 	// indexingTimeout bounds a single Initialize call. Zero means unbounded.
-	// Resolved once by the caller (config.RAGConfig.GetIndexingTimeout()); the
+	// Resolved once by the caller (latest.RAGConfig.GetIndexingTimeout()); the
 	// zero value here is a plain Go zero, not "apply the default".
 	indexingTimeout time.Duration
 

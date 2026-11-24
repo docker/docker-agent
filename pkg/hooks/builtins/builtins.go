@@ -109,23 +109,42 @@ func Register(r *hooks.Registry, opts ...Option) error {
 	}
 
 	return errors.Join(
+		registerBuiltins(r, portableHooks[:]),
 		r.RegisterBuiltin(AddContext, addContext),
 		r.RegisterBuiltin(TransformJSON, transformJSON),
-		r.RegisterBuiltin(AddDate, addDate),
-		r.RegisterBuiltin(AddEnvironmentInfo, addEnvironmentInfo),
 		r.RegisterBuiltin(AddPromptFiles, addPromptFiles),
 		r.RegisterBuiltin(AddGitStatus, addGitStatus),
 		r.RegisterBuiltin(AddGitDiff, addGitDiff),
 		r.RegisterBuiltin(AddDirectoryListing, addDirectoryListing),
 		r.RegisterBuiltin(AddUserInfo, addUserInfo),
 		r.RegisterBuiltin(AddRecentCommits, addRecentCommits),
-		r.RegisterBuiltin(MaxIterations, maxIterations),
-		r.RegisterBuiltin(RedactSecrets, redactSecrets),
-		r.RegisterBuiltin(LimitLargeToolResults, limitLargeToolResults),
 		r.RegisterBuiltin(SaferShell, saferShell),
 		r.RegisterBuiltin(HTTPPost, newHTTPPost(o.httpPostClient)),
 		r.RegisterBuiltin(Unload, unload),
 	)
+}
+
+type builtin struct {
+	name string
+	run  hooks.BuiltinFunc
+}
+
+var portableHooks = [...]builtin{
+	{AddDate, addDate},
+	{AddEnvironmentInfo, addEnvironmentInfo},
+	{LimitLargeToolResults, limitLargeToolResults},
+	{MaxIterations, maxIterations},
+	{RedactSecrets, redactSecrets},
+}
+
+func registerBuiltins(r *hooks.Registry, bs []builtin) error {
+	var errs []error
+	for _, b := range bs {
+		if err := r.RegisterBuiltin(b.name, b.run); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // AgentDefaults captures defaults that map onto stock builtin hook entries.

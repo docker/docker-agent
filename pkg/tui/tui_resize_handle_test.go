@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // TestRenderResizeHandle_TinyWidths guards against a panic (negative
@@ -46,10 +47,12 @@ func TestComposerGripFollowsDragFromPaddedEdge(t *testing.T) {
 	for _, chrome := range []string{"plain", "tabs and attachment"} {
 		t.Run(chrome, func(t *testing.T) {
 			m, _, _ := frozenClockRoot(t, 160, 40)
+			m.showTopMargin = true
+			m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 			m.composerGrip = resizegrip.Reveal{} // Snap to targets; timed fades are tested in resizegrip.
 			if chrome != "plain" {
 				m.tabBar.SetTabs([]messages.TabInfo{{SessionID: "profile", Title: "One"}, {SessionID: "second", Title: "Two"}}, 0)
-				m.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
+				m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 				file := filepath.Join(t.TempDir(), "attachment.txt")
 				require.NoError(t, os.WriteFile(file, []byte("attached"), 0o600))
 				before := m.contentHeight
@@ -62,7 +65,7 @@ func TestComposerGripFollowsDragFromPaddedEdge(t *testing.T) {
 				return editorHeight - styles.EditorStyle.GetVerticalFrameSize() - m.activeTab.editor.BannerHeight()
 			}
 			assert.Equal(t, 3, textRows(), "default matches upstream's editable height")
-			y := m.contentHeight
+			y := m.topMargin() + m.contentHeight
 			start := (m.width - resizeHandleWidth) / 2
 			segment := strings.Repeat("─", resizeHandleWidth)
 			blank := strings.Repeat(" ", m.width)
@@ -82,11 +85,11 @@ func TestComposerGripFollowsDragFromPaddedEdge(t *testing.T) {
 			assert.NotEqual(t, edge, m.renderResizeHandle(m.width), "press darkens the grip")
 			for _, row := range []int{y, y - 4} {
 				m.Update(tea.MouseMotionMsg{X: 0, Y: row, Button: tea.MouseLeft})
-				require.Equal(t, row, m.contentHeight, "divider follows the pointer")
+				require.Equal(t, row, m.topMargin()+m.contentHeight, "divider follows the pointer")
 				assert.Equal(t, shown, strings.Split(ansi.Strip(m.View().Content), "\n")[row])
 			}
 			m.Update(tea.MouseMotionMsg{X: 0, Y: m.height - 1, Button: tea.MouseLeft})
-			assert.Equal(t, y, m.contentHeight, "manual minimum matches the default")
+			assert.Equal(t, y, m.topMargin()+m.contentHeight, "manual minimum matches the default")
 			assert.Equal(t, 3, textRows(), "drag floor keeps three editable rows")
 			m.Update(tea.MouseReleaseMsg{X: -1, Y: y, Button: tea.MouseLeft})
 			assert.False(t, m.isDragging)
@@ -105,7 +108,7 @@ func TestComposerGripLosesCapture(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _, _ := frozenClockRoot(t, 160, 40)
-			m.Update(tea.MouseClickMsg{X: m.width / 2, Y: m.contentHeight, Button: tea.MouseLeft})
+			m.Update(tea.MouseClickMsg{X: m.width / 2, Y: m.topMargin() + m.contentHeight, Button: tea.MouseLeft})
 			require.True(t, m.isDragging)
 			tc.lose(m)
 			assert.False(t, m.isDragging)
@@ -121,7 +124,7 @@ func TestComposerSeparatorStaysBlankWhilePauseMovesToStatus(t *testing.T) {
 	check := func(want string) {
 		t.Helper()
 		rows := strings.Split(ansi.Strip(m.View().Content), "\n")
-		assert.Empty(t, strings.TrimSpace(rows[m.contentHeight]))
+		assert.Empty(t, strings.TrimSpace(rows[m.topMargin()+m.contentHeight]))
 		status := rows[len(rows)-1]
 		assert.Contains(t, status, want)
 		assert.LessOrEqual(t, lipgloss.Width(status), m.width)
@@ -152,8 +155,8 @@ func TestHistorySuggestionFollowsComposerResize(t *testing.T) {
 		rows := strings.Split(frame, "\n")
 		require.Len(t, rows, height)
 		assert.Equal(t, status, rows[height-1], "status remains on the last terminal row")
-		assert.Equal(t, ansi.Strip(m.renderResizeHandle(m.width)), rows[m.contentHeight])
-		firstTextRow := m.editorTop() + styles.EditorStyle.GetPaddingTop()
+		assert.Equal(t, ansi.Strip(m.renderResizeHandle(m.width)), rows[m.topMargin()+m.contentHeight])
+		firstTextRow := m.topMargin() + m.editorTop() + styles.EditorStyle.GetPaddingTop()
 		for i, want := range preview[:visible] {
 			assert.Contains(t, rows[firstTextRow+i], want)
 		}
@@ -165,7 +168,7 @@ func TestHistorySuggestionFollowsComposerResize(t *testing.T) {
 	m.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
 	checkPreview(3)
 
-	x, y := width/2, m.contentHeight
+	x, y := width/2, m.topMargin()+m.contentHeight
 	m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	require.True(t, m.isDragging)
 	m.Update(tea.MouseMotionMsg{X: x, Y: y - 2, Button: tea.MouseLeft})
@@ -200,7 +203,8 @@ func sidebarResizeTestRoot(t *testing.T, position messages.SidebarPosition) (*ap
 	m.activeTab.chatPage = p
 	t.Cleanup(func() { chat.Cleanup(p) })
 	p.SetSidebarSettings(chat.SidebarSettings{PreferredWidth: 45})
-	m.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
+	m.showTopMargin = true
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	return m, renderedSidebarDivider(t, m.View().Content, position), scheduler
 }
 
@@ -210,10 +214,9 @@ func renderedSidebarDivider(t *testing.T, frame string, position messages.Sideba
 	if position == messages.SidebarLeft {
 		glyph = "«"
 	}
-	first, _, _ := strings.Cut(ansi.Strip(frame), "\n")
-	before, _, ok := strings.Cut(first, glyph)
+	before, _, ok := strings.Cut(ansi.Strip(frame), glyph)
 	require.True(t, ok, "sidebar toggle not drawn")
-	return lipgloss.Width(before)
+	return lipgloss.Width(before[strings.LastIndexByte(before, '\n')+1:])
 }
 
 func sidebarGuideTestTick(t *testing.T, m *appModel, cmd tea.Cmd) tea.Cmd {
@@ -247,7 +250,7 @@ func TestSidebarResizeGuidePreviewsBeforeCommitting(t *testing.T) {
 			m, x, clock := sidebarResizeTestRoot(t, tc.dock)
 			p := m.activeTab.chatPage
 			initial := p.GetSidebarSettings()
-			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
+			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 2, Button: tea.MouseLeft})
 			require.True(t, chat.IsResizingSidebar(p))
 			compact := requireSidebarGuide(t, m)
 			assert.Equal(t, 3, compact.End-compact.Start)
@@ -273,10 +276,10 @@ func TestSidebarResizeGuidePreviewsBeforeCommitting(t *testing.T) {
 			shown := requireSidebarGuide(t, m)
 			assert.Equal(t, chat.SidebarGuide{X: previewX, Start: 0, End: m.contentHeight, Opacity: 1}, shown)
 			rows := strings.Split(ansi.Strip(m.View().Content), "\n")
-			for y := range m.contentHeight {
+			for y := m.topMargin(); y < m.topMargin()+m.contentHeight; y++ {
 				assert.Equal(t, "│", ansi.Cut(rows[y], previewX, previewX+1), "guide row %d", y)
 			}
-			assert.Equal(t, strings.Split(ansi.Strip(base), "\n")[m.contentHeight:], rows[m.contentHeight:])
+			assert.Equal(t, strings.Split(ansi.Strip(base), "\n")[m.topMargin()+m.contentHeight:], rows[m.topMargin()+m.contentHeight:])
 			m.Update(agentruntime.UserMessage("LIVE-RESIZE-PREVIEW-MARKER", "profile", nil))
 			assert.Contains(t, ansi.Strip(m.View().Content), "-RESIZE-PREVIEW-MARKER", "content stays live under preview")
 
@@ -357,4 +360,61 @@ func TestSidebarGripFadesWhenPointerLeavesChat(t *testing.T) {
 	require.True(t, m.ar.HasActive())
 	require.Nil(t, sidebarGuideTestTick(t, m, cmd))
 	assert.Equal(t, rest, m.View().Content, "fade needs no second motion inside chat")
+}
+
+func TestTopMarginFollowsTerminalHeight(t *testing.T) {
+	m, x, _ := sidebarResizeTestRoot(t, messages.SidebarRight)
+	m.hideSidebar = false
+	m.Update(agentruntime.SessionTitle("profile", strings.Repeat("a", 2080)))
+	for _, collapsed := range []bool{false, true} {
+		m.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
+		compact := m.View().Content
+		m.Update(tea.WindowSizeMsg{Width: 160, Height: 25})
+		require.Equal(t, strings.Repeat(" ", 160)+"\n"+compact, m.View().Content, "collapsed=%v", collapsed)
+		if !collapsed {
+			m.Update(tea.MouseClickMsg{X: x, Y: 0, Button: tea.MouseLeft})
+			require.False(t, m.activeTab.chatPage.GetSidebarSettings().Collapsed)
+			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
+			for _, msg := range collectMsgs(cmd) {
+				m.Update(msg)
+			}
+			require.True(t, m.activeTab.chatPage.GetSidebarSettings().Collapsed)
+		}
+	}
+}
+
+func TestTopMarginAppliesOnSaveAndSurvivesRestart(t *testing.T) {
+	setupSettingsConfigTest(t)
+
+	const width, height = 160, 25
+	m, _, _ := frozenClockRoot(t, width, height)
+	row := strings.Repeat(" ", width) + "\n"
+	check := func(m *appModel, visible bool) {
+		t.Helper()
+		frame := m.View().Content
+		assert.Equal(t, visible, strings.HasPrefix(frame, row))
+		assert.Equal(t, height, lipgloss.Height(frame))
+		assert.Equal(t, height, m.height+m.topMargin())
+	}
+	check(m, false)
+
+	prefs := defaultTestPreferences()
+	prefs.TopMargin = true
+	m.Update(messages.ApplySettingsMsg{Preferences: prefs})
+	check(m, true)
+	assert.True(t, userconfig.Get().GetTopMargin())
+
+	// Settings changes elsewhere must preserve the saved margin.
+	require.NoError(t, saveSettingsToUserConfig(prefs.Layout, prefs.SendMode))
+	restarted, _, _ := frozenClockRoot(t, width, height)
+	check(restarted, true)
+
+	prefs.TopMargin = false
+	restarted.Update(messages.ApplySettingsMsg{Preferences: prefs})
+	check(restarted, false)
+	require.False(t, userconfig.Get().GetTopMargin())
+
+	// A second restart checks that disabling the setting also persists.
+	restarted, _, _ = frozenClockRoot(t, width, height)
+	check(restarted, false)
 }

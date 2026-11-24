@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,11 +16,12 @@ import (
 )
 
 func TestSmallProfileRejectsOtherProviders(t *testing.T) {
-	for _, model := range []string{"anthropic/claude-sonnet-4-6", "google/gemini-2.5-flash", "amazon-bedrock/anthropic.claude-sonnet-4-6"} {
+	for _, model := range []string{"google/gemini-2.5-flash", "amazon-bedrock/anthropic.claude-sonnet-4-6", "dmr/ai/qwen3"} {
 		t.Run(model, func(t *testing.T) {
 			yaml := "agents:\n  root:\n    model: " + model + "\n"
-			_, err := browserHost.openSession(t.Context(), sessionOptions{YAML: yaml, Env: map[string]string{"ANTHROPIC_API_KEY": "k", "GOOGLE_API_KEY": "k"}})
-			require.ErrorContains(t, err, "provider")
+			_, err := browserHost.openSession(t.Context(), sessionOptions{YAML: yaml})
+			name, _, _ := strings.Cut(model, "/")
+			require.ErrorContains(t, err, `provider "`+name+`"`)
 		})
 	}
 }
@@ -67,6 +69,33 @@ agents:
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
+}
+
+func TestSmallProfileRunsBuiltinHooks(t *testing.T) {
+	const yaml = `
+agents:
+  root:
+    model: mock/root
+    add_environment_info: true
+    hooks:
+      turn_start:
+        - type: builtin
+          command: add_date
+`
+	model := newScriptedModel("mock/root", textTurn("ok"))
+	s := openTestSession(t, testHost(&echoToolSet{}, map[string]provider.Provider{"root": model}), sessionOptions{YAML: yaml})
+
+	_, err := s.send("hi", func(context.Context, map[string]any) {})
+	require.NoError(t, err)
+	var system []string
+	for _, msg := range model.lastCall() {
+		if msg.Role == chat.MessageRoleSystem {
+			system = append(system, msg.Content)
+		}
+	}
+	joined := strings.Join(system, "\n")
+	assert.Contains(t, joined, "Today's date:")
+	assert.Contains(t, joined, "Operating System: js")
 }
 
 // Without the JavaScript engine ${env.NAME} still resolves from the session

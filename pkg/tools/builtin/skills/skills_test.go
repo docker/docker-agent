@@ -380,8 +380,9 @@ func TestSkillsToolset_ReadSkillContent_ExpandsCommands(t *testing.T) {
 	assert.Equal(t, "# Skill\nBranch: main\nDone.", result)
 }
 
+// Not parallel: a concurrent fork in another test can inherit the write fd of
+// gather.sh, making exec fail with ETXTBSY (golang/go#22315).
 func TestSkillsToolset_ReadSkillContent_ExpandsScript(t *testing.T) {
-	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}

@@ -1614,7 +1614,7 @@ func TestRecallSession_SkipsMirroredElicitationOnRunStream(t *testing.T) {
 
 // TestRecallSession_KeepsElicitationFromNonMirroringRuntime is the
 // counterpart guard: a runtime that does NOT declare
-// MirrorsElicitationOnRunStream (e.g. RemoteRuntime, whose
+// MirrorsElicitationOnRunStream (e.g. remote.Runtime, whose
 // OnElicitationRequest is a no-op) delivers elicitations ONLY via RunStream,
 // so that sole copy must reach the event log unfiltered.
 func TestRecallSession_KeepsElicitationFromNonMirroringRuntime(t *testing.T) {

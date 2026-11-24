@@ -263,6 +263,24 @@ func TestSupportedThinkingLevels(t *testing.T) {
 			modelID:  "anthropic/claude-sonnet-4.5",
 			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High},
 		},
+		{
+			name:     "vercel with google/ qualified gemini-4-neon resolves to google scale (xhigh, no minimal)",
+			provider: "vercel",
+			modelID:  "google/gemini-4-neon",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh},
+		},
+		{
+			name:     "openrouter with google/ qualified gemini-4-carbon resolves to google scale (high, no minimal)",
+			provider: "openrouter",
+			modelID:  "google/gemini-4-carbon",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High},
+		},
+		{
+			name:     "openrouter with google/ qualified gemini-3-flash-preview includes minimal",
+			provider: "openrouter",
+			modelID:  "google/gemini-3-flash-preview",
+			want:     []effort.Level{effort.None, effort.Minimal, effort.Low, effort.Medium, effort.High},
+		},
 	}
 
 	for _, tt := range tests {

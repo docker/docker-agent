@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -12,6 +13,7 @@ import (
 	"time"
 	"uuid"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -78,14 +80,10 @@ func initOTelSDK(ctx context.Context) (err error) {
 		propagation.Baggage{},
 	))
 
-	// Single source of truth for "is OTel enabled?" — flip the
-	// httpclient gate now so outbound requests start emitting CLIENT
-	// spans and injecting traceparent. Previously the gate read
-	// OTEL_EXPORTER_OTLP_ENDPOINT directly, which diverged from the
-	// `--otel` CLI gate that controls this function: we'd either
-	// initialise providers without HTTP wrapping, or wrap HTTP without
-	// having a usable propagator.
-	httpclient.SetOTelEnabled(true)
+	// Install HTTP tracing only after the providers and propagator are ready.
+	httpclient.SetOTelTransportWrapper(func(rt http.RoundTripper) http.RoundTripper {
+		return otelhttp.NewTransport(rt)
+	})
 
 	go func() {
 		<-ctx.Done()

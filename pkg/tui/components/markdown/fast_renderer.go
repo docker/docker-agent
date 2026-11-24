@@ -328,6 +328,78 @@ func (r *FastRenderer) RenderWithCodeBlocks(input string) (string, []CodeBlock, 
 	return finalizeOutput(result, r.width), blocks, nil
 }
 
+// RenderWithSourceCodeBlocks preserves source bytes when the raw and safe
+// parses agree. If controls change the parse, hide copy labels rather than
+// associate a visible block with the wrong source.
+func (r *FastRenderer) RenderWithSourceCodeBlocks(input string) (string, []CodeBlock, error) {
+	out, blocks, err := r.RenderWithCodeBlocks(input)
+	if err != nil || len(blocks) == 0 || sanitizeForTerminal(input) == input {
+		return out, blocks, err
+	}
+	p := parserPool.Get().(*parser)
+	p.reset(input, r.width)
+	p.hideCopyIcon = r.hideCopyIcon
+	rawOutput := finalizeOutput(p.parse(), r.width)
+	rawBlocks := slices.Clone(p.codeBlocks)
+	parserPool.Put(p)
+
+	// CRLF must be normalized before rendering, not after it affects padding.
+	normalizedBlocks := rawBlocks
+	if strings.Contains(input, "\r\n") {
+		p = parserPool.Get().(*parser)
+		p.reset(strings.ReplaceAll(input, "\r\n", "\n"), r.width)
+		p.hideCopyIcon = r.hideCopyIcon
+		rawOutput = finalizeOutput(p.parse(), r.width)
+		normalizedBlocks = slices.Clone(p.codeBlocks)
+		parserPool.Put(p)
+	}
+	compatible := len(rawBlocks) == len(blocks) && len(normalizedBlocks) == len(blocks) && sanitizeForTerminal(rawOutput) == sanitizeForTerminal(out)
+	if compatible {
+		for i := range blocks {
+			// Remove CR only when the normalized parse identifies it as a line separator.
+			trimmed := strings.TrimSuffix(rawBlocks[i].Content, "\r")
+			if strings.ReplaceAll(trimmed, "\r\n", "\n") == normalizedBlocks[i].Content {
+				rawBlocks[i].Content = trimmed
+			}
+			if strings.ReplaceAll(rawBlocks[i].Content, "\r\n", "\n") != normalizedBlocks[i].Content || blocks[i].Line != normalizedBlocks[i].Line || blocks[i].Content != sanitizeForTerminal(rawBlocks[i].Content) || containsHiddenControl(rawBlocks[i].Content) {
+				compatible = false
+				break
+			}
+		}
+	}
+	if !compatible {
+		safe := *r
+		safe.HideCopyIcon()
+		return safe.RenderWithCodeBlocks(input)
+	}
+	for i := range blocks {
+		blocks[i].Content = rawBlocks[i].Content
+	}
+	return out, blocks, nil
+}
+
+// Invisible controls can make pasted code differ from what was displayed.
+func containsHiddenControl(s string) bool {
+	if !utf8.ValidString(s) || hasEncodedC1(s) {
+		return true
+	}
+	for i := range len(s) {
+		switch s[i] {
+		case '\r':
+			if i+1 >= len(s) || s[i+1] != '\n' {
+				return true
+			}
+		case '\x1b':
+			return true
+		default:
+			if isControlByte(s[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // parser holds the state for parsing markdown.
 type parser struct {
 	input        string
@@ -386,15 +458,43 @@ func (p *parser) parse() string {
 	return strings.TrimRight(p.out.String(), "\n")
 }
 
-// tryCodeBlock checks for fenced code blocks (``` or ~~~)
-func (p *parser) tryCodeBlock(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "```") && !strings.HasPrefix(trimmed, "~~~") {
+// openingFence returns the complete run of fence characters and its info string.
+func openingFence(line string) (string, string) {
+	line = strings.TrimSpace(line)
+	if len(line) < 3 || (line[0] != '`' && line[0] != '~') {
+		return "", ""
+	}
+	i := 0
+	for i < len(line) && line[i] == line[0] {
+		i++
+	}
+	if i < 3 {
+		return "", ""
+	}
+	return line[:i], strings.TrimSpace(line[i:])
+}
+
+func closingFence(line, fence string, openerIndent int) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	// Keep permissive deeply-indented openers usable without closing on deeper code.
+	if indentationWidth(line[:len(line)-len(trimmed)]) >= max(4, openerIndent+1) {
 		return false
 	}
+	line = strings.TrimSpace(trimmed)
+	rest, ok := strings.CutPrefix(line, fence)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(strings.TrimLeft(rest, string(fence[0]))) == ""
+}
 
-	fence := trimmed[:3]
-	lang := strings.TrimSpace(trimmed[3:])
+// tryCodeBlock checks for fenced code blocks (``` or ~~~)
+func (p *parser) tryCodeBlock(line string) bool {
+	fence, lang := openingFence(line)
+	if fence == "" {
+		return false
+	}
+	indent := indentationWidth(line[:len(line)-len(strings.TrimLeft(line, " \t"))])
 	p.lineIdx++
 
 	// Build code directly into a builder to avoid slice + Join allocation
@@ -402,7 +502,7 @@ func (p *parser) tryCodeBlock(line string) bool {
 	first := true
 	for p.lineIdx < len(p.lines) {
 		codeLine := p.lines[p.lineIdx]
-		if strings.HasPrefix(strings.TrimSpace(codeLine), fence) {
+		if closingFence(codeLine, fence, indent) {
 			p.lineIdx++
 			break
 		}
@@ -609,7 +709,7 @@ func (p *parser) renderBlockquoteContent(lines []string, indent string, availabl
 			// Collect all consecutive nested blockquote lines
 			var nestedLines []string
 			for i < len(lines) {
-				l := strings.TrimSpace(lines[i])
+				l := strings.TrimLeftFunc(lines[i], unicode.IsSpace)
 				content, found := strings.CutPrefix(l, ">")
 				if !found {
 					break
@@ -630,16 +730,15 @@ func (p *parser) renderBlockquoteContent(lines []string, indent string, availabl
 		}
 
 		// Check for fenced code block start
-		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			fence := trimmed[:3]
-			lang := strings.TrimSpace(trimmed[3:])
+		if fence, lang := openingFence(trimmed); fence != "" {
+			fenceIndent := indentationWidth(line[:len(line)-len(strings.TrimLeft(line, " \t"))])
 			i++
 
 			// Collect code lines until fence end
 			var codeLines []string
 			for i < len(lines) {
 				codeLine := lines[i]
-				if strings.HasPrefix(strings.TrimSpace(codeLine), fence) {
+				if closingFence(codeLine, fence, fenceIndent) {
 					i++
 					break
 				}
@@ -1208,6 +1307,19 @@ func parseListItem(line string) (listItem, bool) {
 	return listItem{}, false
 }
 
+// listSourceWidth counts the source columns through the marker's whitespace.
+// The caller has already recognized the line as a list item.
+func listSourceWidth(line string) int {
+	trimmed := strings.TrimLeft(line, " \t")
+	markerEnd := 1
+	if trimmed[0] != '-' && trimmed[0] != '*' && trimmed[0] != '+' {
+		markerEnd = strings.IndexByte(trimmed, '.') + 1
+	}
+	afterMarker := trimmed[markerEnd:]
+	whitespace := len(afterMarker) - len(strings.TrimLeft(afterMarker, " \t"))
+	return indentationWidth(line[:len(line)-len(trimmed)+markerEnd+whitespace])
+}
+
 // isListStart checks if a line starts a list item
 func isListStart(line string) bool {
 	_, ok := parseListItem(line)
@@ -1222,7 +1334,7 @@ func (p *parser) tryList(line string) bool {
 	}
 
 	// Track the current list item's bullet width for continuation content (code blocks)
-	var currentBulletWidth int
+	var currentBulletWidth, currentSourceWidth int
 
 	for p.lineIdx < len(p.lines) {
 		l := p.lines[p.lineIdx]
@@ -1236,7 +1348,7 @@ func (p *parser) tryList(line string) bool {
 			// This is a code block - check if it's indented (part of list)
 			if lindent > 0 || currentBulletWidth > 0 {
 				// Render the code block with list indentation
-				p.renderListCodeBlock(lindent, currentBulletWidth)
+				p.renderListCodeBlock(lindent, currentBulletWidth, currentSourceWidth)
 				continue
 			}
 			// Not indented, break out of list
@@ -1297,6 +1409,7 @@ func (p *parser) tryList(line string) bool {
 
 		// Store current list item's bullet width for code blocks
 		currentBulletWidth = bulletWidth
+		currentSourceWidth = listSourceWidth(l)
 
 		rendered := p.renderInline(item.content)
 		wrapped := p.wrapText(rendered, contentWidth)
@@ -1405,32 +1518,27 @@ func (p *parser) tryFootnoteDefinition(line string) bool {
 }
 
 // renderListCodeBlock renders a fenced code block within a list context
-func (p *parser) renderListCodeBlock(codeIndent, bulletWidth int) {
+func (p *parser) renderListCodeBlock(codeIndent, bulletWidth, sourceWidth int) {
 	// Add spacing before code block
 	p.out.WriteString("\n")
 
 	line := p.lines[p.lineIdx]
 	ltrimmed := strings.TrimLeft(line, " \t")
+	codeIndent = indentationWidth(line[:codeIndent])
 
-	fence := ltrimmed[:3]
-	lang := strings.TrimSpace(ltrimmed[3:])
+	fence, lang := openingFence(ltrimmed)
 	p.lineIdx++
 
 	// Collect code lines
 	var codeLines []string
 	for p.lineIdx < len(p.lines) {
 		codeLine := p.lines[p.lineIdx]
-		codeTrimmed := strings.TrimLeft(codeLine, " \t")
-		if strings.HasPrefix(codeTrimmed, fence) {
+		containerWidth := min(sourceWidth, codeIndent)
+		if closingFence(removeIndentation(codeLine, containerWidth), fence, codeIndent-containerWidth) {
 			p.lineIdx++
 			break
 		}
-		// Remove the list indentation from code lines
-		if len(codeLine) >= codeIndent {
-			codeLines = append(codeLines, codeLine[codeIndent:])
-		} else {
-			codeLines = append(codeLines, strings.TrimLeft(codeLine, " \t"))
-		}
+		codeLines = append(codeLines, removeIndentation(codeLine, codeIndent))
 		p.lineIdx++
 	}
 
@@ -1442,6 +1550,40 @@ func (p *parser) renderListCodeBlock(codeIndent, bulletWidth int) {
 	indent := spaces(bulletWidth)
 	availableWidth := p.width - bulletWidth
 	p.renderCodeBlockWithIndent(code, lang, indent, availableWidth)
+}
+
+func indentationWidth(indent string) int {
+	column := 0
+	for _, ch := range indent {
+		if ch == '\t' {
+			column += 4 - column%4
+		} else {
+			column++
+		}
+	}
+	return column
+}
+
+// A tab crossing the indentation boundary leaves spaces in the code.
+func removeIndentation(line string, width int) string {
+	if width <= 0 {
+		return line
+	}
+	column := 0
+	for i := 0; i < len(line) && column < width; i++ {
+		switch line[i] {
+		case ' ':
+			column++
+		case '\t':
+			column += 4 - column%4
+		default:
+			return line[i:]
+		}
+		if column >= width {
+			return strings.Repeat(" ", column-width) + line[i+1:]
+		}
+	}
+	return ""
 }
 
 // renderListBlockquote renders a blockquote within a list context
@@ -1512,10 +1654,11 @@ func (p *parser) renderParagraph() {
 // paragraph terminates correctly at the start of the next block.
 func isBlockStart(line string) bool {
 	trimmed := strings.TrimLeft(line, " \t")
+	if fence, _ := openingFence(line); fence != "" {
+		return true
+	}
 	switch {
 	case headingLevel(trimmed) > 0:
-		return true
-	case strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~"):
 		return true
 	case strings.HasPrefix(trimmed, "$$") || strings.HasPrefix(trimmed, `\[`):
 		return true

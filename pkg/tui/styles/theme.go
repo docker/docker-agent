@@ -1266,8 +1266,11 @@ func rebuildStyles() {
 	DiffAddStyle = BaseStyle.Background(DiffAddBg).Foreground(DiffAddFg)
 	DiffRemoveStyle = BaseStyle.Background(DiffRemoveBg).Foreground(DiffRemoveFg)
 	DiffUnchangedStyle = BaseStyle.Background(BackgroundAlt)
-	DiffAddEmphStyle = BaseStyle.Background(DiffAddEmphBg).Foreground(DiffAddFg).Bold(true)
-	DiffRemoveEmphStyle = BaseStyle.Background(DiffRemoveEmphBg).Foreground(DiffRemoveFg).Bold(true)
+	DiffAddEmphStyle = BaseStyle.Background(DiffAddEmphBg).Foreground(DiffAddFg)
+	DiffRemoveEmphStyle = BaseStyle.Background(DiffRemoveEmphBg).Foreground(DiffRemoveFg)
+	DiffAddGutterStyle = BaseStyle.Foreground(LineNumber).Background(DiffAddBg)
+	DiffRemoveGutterStyle = BaseStyle.Foreground(LineNumber).Background(DiffRemoveBg)
+	DiffHunkHeaderStyle = BaseStyle.Foreground(LineNumber).Background(BackgroundAlt)
 
 	// Syntax highlighting styles
 	LineNumberStyle = BaseStyle.Foreground(LineNumber).Background(BackgroundAlt)

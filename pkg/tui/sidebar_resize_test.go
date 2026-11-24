@@ -56,13 +56,14 @@ func TestSidebarResizeGuideStaysBelowForeground(t *testing.T) {
 			insideY := layer.GetY()
 			require.Positive(t, insideY, "the guide must also have uncovered rows")
 			require.Less(t, insideY, m.contentHeight, "the foreground must intersect the guide's vertical range")
-			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
+			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 2, Button: tea.MouseLeft})
 			_ = m.View() // the press changes the grip
-			m.Update(tea.MouseMotionMsg{X: insideX, Y: 1, Button: tea.MouseLeft})
+			m.Update(tea.MouseMotionMsg{X: insideX, Y: 2, Button: tea.MouseLeft})
 			require.Equal(t, insideX, requireSidebarGuide(t, m).X)
 			require.Nil(t, sidebarGuideTestTick(t, m, cmd))
 			require.True(t, m.viewCacheValid)
 			screen := func(frame string) uv.ScreenBuffer {
+				frame = strings.TrimPrefix(frame, m.topRow)
 				buf := uv.NewScreenBuffer(lipgloss.Width(frame), lipgloss.Height(frame))
 				uv.NewStyledString(frame).Draw(&buf, buf.Bounds())
 				return buf
@@ -73,7 +74,7 @@ func TestSidebarResizeGuideStaysBelowForeground(t *testing.T) {
 			}
 			assert.Equal(t, "│", full.CellAt(insideX, 0).String(), "guide still paints uncovered rows")
 
-			m.Update(tea.MouseMotionMsg{X: insideX + 1, Y: 1, Button: tea.MouseLeft})
+			m.Update(tea.MouseMotionMsg{X: insideX + 1, Y: 2, Button: tea.MouseLeft})
 			moved := screen(m.View().Content)
 			assert.Equal(t, base.CellAt(insideX, 0), moved.CellAt(insideX, 0), "moving restores the old column")
 			assert.Equal(t, "│", moved.CellAt(insideX+1, 0).String())
@@ -106,15 +107,15 @@ func TestSidebarResizeGuideShowsThroughNotificationGap(t *testing.T) {
 	require.GreaterOrEqual(t, guideX, layers[0].GetX())
 	require.Less(t, guideX, layers[1].GetX())
 
-	_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
-	m.Update(tea.MouseMotionMsg{X: guideX, Y: 1, Button: tea.MouseLeft})
+	_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 2, Button: tea.MouseLeft})
+	m.Update(tea.MouseMotionMsg{X: guideX, Y: 2, Button: tea.MouseLeft})
 	require.Equal(t, guideX, requireSidebarGuide(t, m).X)
 	require.Nil(t, sidebarGuideTestTick(t, m, cmd))
 	frame := m.View().Content
 	screen := uv.NewScreenBuffer(lipgloss.Width(frame), lipgloss.Height(frame))
 	uv.NewStyledString(frame).Draw(&screen, screen.Bounds())
-	assert.Equal(t, "─", screen.CellAt(guideX, layers[0].GetY()).String(), "guide stays under the wider toast border")
-	assert.Equal(t, "│", screen.CellAt(guideX, layers[1].GetY()).String(), "guide is visible beside the shorter toast")
+	assert.Equal(t, "─", screen.CellAt(guideX, m.topMargin()+layers[0].GetY()).String(), "guide stays under the wider toast border")
+	assert.Equal(t, "│", screen.CellAt(guideX, m.topMargin()+layers[1].GetY()).String(), "guide is visible beside the shorter toast")
 }
 
 func TestSidebarResizeGuideClipsKittyPlacements(t *testing.T) {
@@ -122,6 +123,7 @@ func TestSidebarResizeGuideClipsKittyPlacements(t *testing.T) {
 	var pngData, out bytes.Buffer
 	require.NoError(t, png.Encode(&pngData, image.NewGray(image.Rect(0, 0, 120, 32))))
 	m.imageWriter = tuiimage.NewWriter(&out)
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	tool := tools.Tool{Name: "image"}
 	call := tools.ToolCall{ID: "sidebar-image", Function: tools.FunctionCall{Name: tool.Name}}
 	result := &tools.ToolCallResult{Images: []tools.MediaContent{{MimeType: "image/png", Data: base64.StdEncoding.EncodeToString(pngData.Bytes())}}}
@@ -144,16 +146,16 @@ func TestSidebarResizeGuideClipsKittyPlacements(t *testing.T) {
 	}
 	checkPlacements(writeFrame(), "c=60,r=8")
 
-	_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
-	m.Update(tea.MouseMotionMsg{X: x + 7, Y: 1, Button: tea.MouseLeft})
+	_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 2, Button: tea.MouseLeft})
+	m.Update(tea.MouseMotionMsg{X: x + 7, Y: 2, Button: tea.MouseLeft})
 	require.Nil(t, sidebarGuideTestTick(t, m, cmd))
 	commands := writeFrame()
 	assert.Contains(t, commands, "\x1b_Ga=d,d=a,q=2", "remove the old uncropped placement")
 	assert.NotContains(t, commands, "\x1b_Ga=t,", "cropping must reuse the existing image upload")
 	checkPlacements(commands, "c=4,r=8,x=0,y=0,w=8,h=32", "c=55,r=8,x=10,y=0,w=110,h=32")
-	assert.Contains(t, commands, "\x1b[3;54H\x1b_Ga=p,", "right-hand placement starts after the guide")
+	assert.Contains(t, commands, "\x1b[4;54H\x1b_Ga=p,", "right-hand placement starts after the guide")
 
-	m.Update(tea.MouseMotionMsg{X: x + 9, Y: 1, Button: tea.MouseLeft})
+	m.Update(tea.MouseMotionMsg{X: x + 9, Y: 2, Button: tea.MouseLeft})
 	checkPlacements(writeFrame(), "c=6,r=8,x=0,y=0,w=12,h=32", "c=53,r=8,x=14,y=0,w=106,h=32")
 
 	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -180,6 +182,7 @@ func TestSidebarResizeGuideSkipsStandaloneViews(t *testing.T) {
 			var pngData, out bytes.Buffer
 			require.NoError(t, png.Encode(&pngData, image.NewGray(image.Rect(0, 0, 12, 4))))
 			m.imageWriter = tuiimage.NewWriter(&out)
+			m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 			imageFrame := strings.Repeat(" ", x-1) + tuiimage.KittySequence(pngData.Bytes(), 3, 1)
 			writeFrame := func(content string) string {
 				out.Reset()
@@ -189,7 +192,7 @@ func TestSidebarResizeGuideSkipsStandaloneViews(t *testing.T) {
 				return commands
 			}
 
-			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
+			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 2, Button: tea.MouseLeft})
 			require.Nil(t, sidebarGuideTestTick(t, m, cmd))
 			frame := m.View().Content
 			require.Contains(t, frame, "│")
@@ -206,11 +209,11 @@ func TestSidebarResizeGuideSkipsStandaloneViews(t *testing.T) {
 			} else {
 				m.ready = false
 				m.viewCacheValid = false
-				want = styles.CenterStyle.Width(m.wWidth).Height(m.wHeight).Render(styles.MutedStyle.Render("Loading…"))
+				want = styles.CenterStyle.Width(m.width).Height(m.height).Render(styles.MutedStyle.Render("Loading…"))
 			}
 			require.Equal(t, 0, requireSidebarGuide(t, m).Start, "the chat guide still starts on the first row")
 			for _, render := range []string{"first", "cached"} {
-				if got := m.View().Content; got != want {
+				if got := m.View().Content; got != m.topRow+want {
 					t.Errorf("%s standalone render differs from the unadorned view", render)
 				}
 			}

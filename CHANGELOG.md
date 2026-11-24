@@ -3,6 +3,76 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.164.0] - 2026-11-23
+
+This release brings several TUI polish improvements including scrollbar auto-hiding, scroll edge fading, a new `/btw` side-question dialog, and a searchable help dialog, alongside fixes for file editing on Windows CRLF files, Gemini 4 thinking level support, and various TUI rendering issues.
+
+## What's New
+
+- Adds `/btw` side-question dialog for asking isolated questions about the current conversation without affecting the conversation itself
+- Adds auto-hiding scrollbars to the TUI that only appear when scrolling or hovering near the scrollbar area
+- Adds subtle fade effect to scroll view edges when content is hidden above or below the visible area
+- Shows contextual keyboard help in the TUI with a searchable help dialog; status bar now shows only the `Ctrl+H` hint
+
+## Improvements
+
+- Polishes TUI resize grips for the input area and sidebar, including hover-to-reveal behavior and a positional guide line when resizing the sidebar
+- Removes agent badges from ordinary chat replies to reduce visual noise
+- Improves `edit_file` diff rendering and word-diff highlighting, including similarity-gated inline emphasis and cleaner split/unified diff display
+- Keeps TUI notifications from overlapping typed input text
+- Fixes stacked notifications so each uses only the space it needs, preventing empty space from covering chat output
+- Clips inline prompt history suggestions to the composer viewport to prevent overflow
+- Skips the sidebar resize guide on standalone views
+
+## Bug Fixes
+
+- Fixes `edit_file` failures on Windows CRLF files where LF-only `oldText` from models did not match CRLF file content
+- Fixes TUI crash when rendering diffs on files containing invalid UTF-8 bytes
+- Fixes the parent agent being killed when a sub-agent's max-iterations prompt is declined in `--exec` mode
+- Fixes NaN values being accepted as compaction thresholds in configuration
+- Fixes Gemini 4 models (e.g. `gemini-4-hydrogen`, `gemini-4-neon`) not reporting thinking level support and not sending `thinkingLevel` on API requests
+- Fixes Gemini configured thinking levels being clamped to model-supported values
+- Fixes TUI cached colors not refreshing on theme change, causing stale renders for user messages, input text, and spinners
+- Fixes copy controls missing from elicitation messages; adds Ctrl+O to copy the entire message as Markdown
+- Fixes preservation of fenced code blocks and nested quote edge cases when copying
+- Fixes incorrect CLI message stating the CLI stops instead of the capped agent when max-iterations is reached
+- Fixes markdown streaming boundary preservation
+
+## Technical Changes
+
+- Shrinks the Go small browser (WASM) build from 35.80 MiB to 28.28 MiB raw (~21% reduction) by running Binaryen `wasm-opt -Oz` and disabling Go inlining
+- Updates stale code comments following runtime package splits
+- Drops internal repository references from comments and test data
+### Pull Requests
+
+- [#4933](https://github.com/docker/docker-agent/pull/4933) - fix(filesystem): apply LF edit_file text to CRLF files
+- [#4956](https://github.com/docker/docker-agent/pull/4956) - fix(tui): keep invalid UTF-8 from overflowing diff wrapping
+- [#4958](https://github.com/docker/docker-agent/pull/4958) - fix(cli): keep the turn alive when a max-iterations prompt is declined
+- [#4960](https://github.com/docker/docker-agent/pull/4960) - fix(config): reject NaN compaction thresholds
+- [#4969](https://github.com/docker/docker-agent/pull/4969) - chore(devcontainer): update Go image to 1.27 and install gopls
+- [#4978](https://github.com/docker/docker-agent/pull/4978) - docs: update CHANGELOG.md for v1.163.0
+- [#4979](https://github.com/docker/docker-agent/pull/4979) - chore(deps): bump mcp from 1.28.1 to 1.30.0 in /examples/dhi/dhi_mcp_server in the pip group across 1 directory
+- [#4983](https://github.com/docker/docker-agent/pull/4983) - fix(gemini): support thinking levels on Gemini 4 models
+- [#4986](https://github.com/docker/docker-agent/pull/4986) - TUI - Polish resize grips and ux
+- [#4988](https://github.com/docker/docker-agent/pull/4988) - TUI - don't let prompt history suggestions overflow
+- [#4989](https://github.com/docker/docker-agent/pull/4989) - TUI - notifications, outta my way!
+- [#4990](https://github.com/docker/docker-agent/pull/4990) - TUI - fade scrollviews
+- [#4992](https://github.com/docker/docker-agent/pull/4992) - fix: add copy controls to elicitation messages
+- [#4993](https://github.com/docker/docker-agent/pull/4993) - TUI - skip sidebar resize guide on standalone views
+- [#4994](https://github.com/docker/docker-agent/pull/4994) - TUI - autohide scrollbars
+- [#4995](https://github.com/docker/docker-agent/pull/4995) - TUI - each notification in a stack should use its own space
+- [#4996](https://github.com/docker/docker-agent/pull/4996) - TUI - Remove agent badges from ordinary chat replies
+- [#4997](https://github.com/docker/docker-agent/pull/4997) - docs: auto-update for merged PRs (2026-11-22)
+- [#4998](https://github.com/docker/docker-agent/pull/4998) - TUI - refresh properly on theme changes
+- [#5000](https://github.com/docker/docker-agent/pull/5000) - TUI - clean up status bar and improve help dialog
+- [#5004](https://github.com/docker/docker-agent/pull/5004) - feat(tui): add /btw side-question dialog
+- [#5005](https://github.com/docker/docker-agent/pull/5005) - fix(tui): improve edit_file diff rendering and word-diff highlighting
+- [#5007](https://github.com/docker/docker-agent/pull/5007) - docs: auto-update for merged PRs (2026-11-23)
+- [#5009](https://github.com/docker/docker-agent/pull/5009) - chore: refresh models.dev snapshot (+297 -74 ~3472)
+- [#5012](https://github.com/docker/docker-agent/pull/5012) - perf(wasm): shrink the Go small browser build
+- [#5016](https://github.com/docker/docker-agent/pull/5016) - fix stale comments after the runtime package splits
+
+
 ## [v1.163.0] - 2026-11-19
 
 This release adds MCP elicitation and OAuth prompt support to the lean TUI, introduces new startup banner animations and a sunset gradient logo, and includes several bug fixes and internal refactoring.
@@ -7619,3 +7689,5 @@ This release improves the terminal user interface with better error handling and
 [v1.162.0]: https://github.com/docker/docker-agent/releases/tag/v1.162.0
 
 [v1.163.0]: https://github.com/docker/docker-agent/releases/tag/v1.163.0
+
+[v1.164.0]: https://github.com/docker/docker-agent/releases/tag/v1.164.0

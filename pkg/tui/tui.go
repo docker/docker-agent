@@ -199,8 +199,9 @@ type appModel struct {
 	visibilityGeneration uint64
 
 	// Window state
-	wWidth, wHeight int
-	width, height   int
+	width, height int
+	topRow        string
+	showTopMargin bool
 
 	// Content area height (height minus editor, tab bar, resize handle, status bar)
 	contentHeight int
@@ -574,6 +575,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
 		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
 		showBanner:                    userSettings.GetShowBanner(),
+		showTopMargin:                 userSettings.GetTopMargin(),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
 		appName:                       "docker agent",
@@ -960,6 +962,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.acknowledgeProgramStatus(msg)
+	msg = messages.LocalMouse(msg, 0, m.topMargin())
 	previousPage := m.activeTab.chatPage
 	pointerCmd := m.updateScrollbarPointer(msg)
 	stateCmd := m.applyTabEvent(m.activeTab, msg)
@@ -1161,9 +1164,6 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.imageWriter != nil {
 			m.imageWriter.Invalidate()
 		}
-		m.wWidth, m.wHeight = msg.Width, msg.Height
-		// Old geometry can push stale lean-mode lines into scrollback.
-		m.viewCacheInitialized = false
 		cmd := m.handleWindowResize(msg.Width, msg.Height)
 		return m, cmd
 
@@ -1416,6 +1416,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.ForkSessionMsg:
 		return m.handleForkSession()
+
+	case messages.AskSideQuestionMsg:
+		return m.handleAskSideQuestion(msg.Question)
 
 	// --- Session commands (slash commands, command palette) ---
 
@@ -2284,9 +2287,29 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// handleWindowResize handles window resize.
+func (m *appModel) topMargin() int { return min(1, len(m.topRow)) }
+
+func (m *appModel) topMarginForHeight(height int) int {
+	if m.showTopMargin && height > 24 {
+		return 1
+	}
+	return 0
+}
+
+// handleWindowResize lays out the UI from the full terminal dimensions.
 func (m *appModel) handleWindowResize(width, height int) tea.Cmd {
-	m.wWidth, m.wHeight = width, height
+	margin := m.topMarginForHeight(height)
+	m.topRow = ""
+	if margin != 0 {
+		m.topRow = strings.Repeat(" ", max(0, width)) + "\n"
+	}
+	height -= margin
+	if m.imageWriter != nil {
+		m.imageWriter.SetRowOffset(margin)
+	}
+	// Old geometry can push stale lean-mode lines into scrollback.
+	m.viewCacheInitialized = false
+	m.viewCacheValid = false
 	if !m.isDragging && (width != m.width || height != m.height) {
 		m.composerGrip.Reset()
 	}
@@ -2706,7 +2729,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 	if m.dialogMgr.Open() {
 		// Background dialogs (e.g. pending elicitations) let tab-bar clicks
 		// pass through so the user can keep navigating between tabs.
-		if m.dialogMgr.TopIsBackground() && !m.leanMode && m.hitTestRegion(msg.Y) == regionTabBar {
+		if m.dialogMgr.TopIsBackground() && !m.leanMode && m.hitTestRegion(msg.Y) == regionTabBar && !m.dialogMgr.ContainsTop(msg.X, msg.Y) {
 			adjustedMsg := msg
 			adjustedMsg.X = msg.X - styles.AppPadding
 			adjustedMsg.Y = msg.Y - m.contentHeight - 1
@@ -2938,10 +2961,14 @@ const (
 	regionTabBar
 	regionEditor
 	regionStatusBar
+	regionOutside
 )
 
 // hitTestRegion determines which layout region a Y coordinate falls in.
 func (m *appModel) hitTestRegion(y int) layoutRegion {
+	if y < 0 {
+		return regionOutside
+	}
 	if m.leanMode {
 		return hitTestLeanRegion(y, m.contentHeight)
 	}
@@ -3104,6 +3131,7 @@ func (m *appModel) View() tea.View {
 		return view
 	}
 	view := m.composeView()
+	view.Content = m.topRow + view.Content
 	m.viewCache = view
 	m.viewCacheValid = true
 	m.viewCacheInitialized = true
@@ -3126,8 +3154,8 @@ func (m *appModel) composeView() tea.View {
 	if !m.ready {
 		return toFullscreenView(
 			styles.CenterStyle.
-				Width(m.wWidth).
-				Height(m.wHeight).
+				Width(m.width).
+				Height(m.height).
 				Render(styles.MutedStyle.Render("Loading…")),
 			windowTitle,
 			false,

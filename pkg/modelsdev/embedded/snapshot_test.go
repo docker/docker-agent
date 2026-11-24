@@ -60,6 +60,30 @@ func TestEmbeddedSnapshotIncludesClaudeOpus5(t *testing.T) {
 	assert.Equal(t, "claude-opus", m.Family, "claude-opus-5 must belong to the claude-opus family")
 }
 
+// TestEmbeddedSnapshotIncludesGemini4Family verifies that the Gemini 4 models
+// (Argon, Carbon, Hydrogen, Neon) are present in the embedded snapshot with
+// their expected capabilities.
+func TestEmbeddedSnapshotIncludesGemini4Family(t *testing.T) {
+	t.Parallel()
+
+	db := Snapshot()
+	require.NotNil(t, db)
+	google, ok := db.Providers["google"]
+	require.True(t, ok, "embedded snapshot must contain the google provider")
+
+	for _, modelID := range []string{"gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-neon"} {
+		t.Run(modelID, func(t *testing.T) {
+			t.Parallel()
+			m, ok := google.Models[modelID]
+			require.True(t, ok, "embedded snapshot must contain google/%s", modelID)
+			assert.Equal(t, 1048576, m.Limit.Context, "google/%s must report the 1M context window", modelID)
+			assert.Positive(t, m.Limit.Output, "google/%s must report a positive output limit", modelID)
+			assert.True(t, m.Reasoning, "google/%s must be marked as a reasoning model", modelID)
+			assert.True(t, m.ToolCall, "google/%s must support tool calls", modelID)
+		})
+	}
+}
+
 func TestEmbeddedSnapshotKeepsLongContextTiers(t *testing.T) {
 	t.Parallel()
 

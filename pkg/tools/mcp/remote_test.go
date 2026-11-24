@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
@@ -839,6 +840,39 @@ func (s *headerCaptureMCPServer) valuesSince(from int, header string) []string {
 		out = append(out, h.Get(header))
 	}
 	return out
+}
+
+func TestNewRemoteToolsetFromConfig(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemoryTokenStore()
+	ctx := WithOAuthTokenStore(t.Context(), store)
+	env := &mutableEnvProvider{vals: map[string]string{"URL": "https://example.com/mcp", "TOKEN": "initial"}}
+	cfg := latest.Toolset{
+		Remote: latest.Remote{
+			URL:           "${env.URL}",
+			TransportType: "streamable",
+			Headers:       map[string]string{"X-Token": "${env.TOKEN}"},
+			OAuth:         &latest.RemoteOAuthConfig{ClientID: "demo"},
+			StandaloneSSE: true,
+		},
+		Experimental:    &latest.ToolsetExperimentalConfig{MCPEvents: true},
+		AllowPrivateIPs: new(true),
+		Lifecycle:       &latest.LifecycleConfig{CallTimeout: latest.Duration{Duration: time.Minute}},
+	}
+	ts := NewRemoteToolsetFromConfig(ctx, cfg, env)
+	assert.False(t, ts.IsStarted())
+	assert.Equal(t, time.Minute, ts.callTimeout)
+	client := ts.mcpClient.(*remoteMCPClient)
+	assert.Same(t, store, client.tokenStore)
+	assert.Equal(t, cfg.Remote.OAuth, client.oauthConfig)
+	assert.True(t, client.eventsEnabled())
+	assert.True(t, client.standaloneSSE)
+	assert.True(t, client.allowPrivateIPs)
+
+	env.set("TOKEN", "rotated")
+	assert.Equal(t, "https://example.com/mcp", client.url)
+	assert.Equal(t, "rotated", client.expandHeaders(ctx, client.headers)["X-Token"])
 }
 
 // TestRemoteClient_ExpandsEnvHeadersPerRequest is the stale-token regression

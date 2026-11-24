@@ -371,7 +371,7 @@ func (sm *SessionManager) sessionElicitationSink(sessionID string) func(runtime.
 // [runtime.LocalRuntime.MirrorsElicitationOnRunStream]). Consumers that copy
 // RunStream events into the session event log must skip that mirror copy or
 // the log would carry the same request twice. Runtimes without the
-// capability (e.g. RemoteRuntime, whose OnElicitationRequest is a no-op)
+// capability (e.g. remote.Runtime, whose OnElicitationRequest is a no-op)
 // deliver ONLY via RunStream, so their copy must never be skipped.
 type elicitationSinkMirror interface {
 	MirrorsElicitationOnRunStream()
@@ -2159,7 +2159,7 @@ var ErrSessionNotRunning = errors.New("session not found or not running")
 // active, the agent's configured default carries IsCurrent=true; if the
 // override points at an inline provider/model not present in the agent
 // config, a synthetic choice is appended (mirrors App.AvailableModels via
-// the shared runtime.DecorateModelChoices helper).
+// the shared modelcatalog.DecorateModelChoices helper).
 func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID string) (string, string, []modelcatalog.ModelChoice, error) {
 	rs, ok := sm.runtimeSessions.Load(sessionID)
 	if !ok {

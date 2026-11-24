@@ -436,19 +436,14 @@ func deriveEmphasisBg(hex string) color.Color {
 
 	h, s, l := rgbToHSL(r, g, b)
 
-	// Push saturation toward a strong, vivid value. Diff backgrounds are
-	// typically very desaturated (~0.1-0.25); we want emphasis to read as
-	// a distinct color block.
-	s = max(s, 0.55)
-
-	// Shift lightness away from the line background so the emphasis block
-	// is visible. For dark backgrounds (l < 0.5) we lift; for light ones we
-	// drop. The magnitude is intentionally modest so changed tokens remain
-	// readable against the surrounding row color.
+	// Keep emphasis a gentle, readable step above the row background so
+	// syntax-highlighted foreground text retains high contrast.
 	if l < 0.5 {
-		l = min(l+0.18, 0.50)
+		s = min(max(s*1.35, 0.30), 0.45)
+		l = min(l+0.08, 0.34)
 	} else {
-		l = max(l-0.18, 0.65)
+		s = min(max(s*1.35, 0.35), 0.55)
+		l = max(l-0.09, 0.72)
 	}
 
 	nr, ng, nb := hslToRGB(h, s, l)

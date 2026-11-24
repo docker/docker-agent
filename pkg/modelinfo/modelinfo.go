@@ -391,6 +391,24 @@ func UsesThinkingLevel(modelID string) bool {
 	return ok
 }
 
+// GeminiRejectsThinkingBudget reports whether a Google Gemini model rejects
+// the legacy token-based `thinkingBudget` parameter with HTTP 400.
+// Gemini 4+ models only accept `thinkingLevel`; Gemini 3 still accepted
+// `thinkingBudget` for backward compatibility.
+func GeminiRejectsThinkingBudget(modelID string) bool {
+	maj, _, ok := geminiGeneration(modelID)
+	return ok && maj >= 4
+}
+
+// HasGoogleQualifier reports whether modelID is explicitly vendor-qualified
+// with a "google/" or "gemini/" prefix, the convention gateways (Vercel AI
+// Gateway, OpenRouter, Cloudflare AI Gateway) use to route Google's Gemini
+// models through a shared endpoint.
+func HasGoogleQualifier(modelID string) bool {
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	return strings.HasPrefix(m, "google/") || strings.HasPrefix(m, "gemini/")
+}
+
 // IsBedrockClaudeID reports whether a model identifier looks like an Anthropic
 // Claude model on AWS Bedrock.
 //
@@ -837,6 +855,21 @@ func ResolveReasoningSupport(ctx context.Context, store *modelsdev.Store, id mod
 		return ReasoningSupported
 	}
 	return ReasoningUnsupported
+}
+
+// ResolveGeminiThinkingSupport reports whether a Gemini model supports
+// thinking configuration, consulting store first and falling back to suffix
+// exclusions (-image, -tts, -live) only when catalogue support is unknown.
+func ResolveGeminiThinkingSupport(ctx context.Context, store *modelsdev.Store, id modelsdev.ID, modelID string) bool {
+	switch ResolveReasoningSupport(ctx, store, id) {
+	case ReasoningUnsupported:
+		return false
+	case ReasoningSupported:
+		return true
+	default:
+		m := strings.ToLower(modelID)
+		return !strings.Contains(m, "-image") && !strings.Contains(m, "-tts") && !strings.Contains(m, "-live")
+	}
 }
 
 // ResolveOutputImage applies an explicit image-output override when present;

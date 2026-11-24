@@ -293,7 +293,7 @@ func stableBoundary(input string) int {
 	// loop below only indexes positions in [0, len(lineEnds)+1), which is
 	// always within bounds, but we still guard each access defensively to keep
 	// the function robust against future refactors of the helpers.
-	inFence := classifyFenceLines(input)
+	inFence, listFence := classifyFenceLines(input)
 	isListLike := classifyListLikeLines(input, inFence)
 
 	lineEnds := make([]int, 0, 64)
@@ -311,7 +311,8 @@ func stableBoundary(input string) int {
 		if input[i-1] != '\n' {
 			continue
 		}
-		if inFenceAt(inFence, k) {
+		// List-owned and empty fences need their surrounding spacing intact.
+		if inFenceAt(inFence, k) || inFenceAt(listFence, k-1) {
 			continue
 		}
 		boundary := i + 1
@@ -372,13 +373,12 @@ func classifyListLikeLines(input string, inFence []bool) []bool {
 	return lines
 }
 
-// classifyFenceLines returns a slice indexed by line number where each entry
-// is true when that line lies inside a fenced code block. The opening and
-// closing fence lines themselves are marked true so a boundary cannot land
-// directly on them.
-func classifyFenceLines(input string) []bool {
-	var lines []bool
+// classifyFenceLines marks fenced lines and those unsafe to split after.
+func classifyFenceLines(input string) ([]bool, []bool) {
+	var lines, listLines []bool
 	openFence := ""
+	listWidth, fenceListWidth, fenceIndent := 0, 0, 0
+	fenceInList, blankInList, fenceHasContent := false, false, false
 	lineStart := 0
 	for i := 0; i <= len(input); i++ {
 		if i < len(input) && input[i] != '\n' {
@@ -386,22 +386,37 @@ func classifyFenceLines(input string) []bool {
 		}
 		line := input[lineStart:i]
 		trimmed := strings.TrimLeft(line, " \t")
-		switch {
-		case openFence != "":
+		if openFence != "" {
 			lines = append(lines, true)
-			if strings.HasPrefix(strings.TrimSpace(trimmed), openFence) {
+			listLines = append(listLines, fenceInList || !fenceHasContent)
+			if closingFence(removeIndentation(line, fenceListWidth), openFence, fenceIndent) {
 				openFence = ""
+			} else if line != "" {
+				fenceHasContent = true
 			}
-		case strings.HasPrefix(trimmed, "```"):
-			lines = append(lines, true)
-			openFence = "```"
-		case strings.HasPrefix(trimmed, "~~~"):
-			lines = append(lines, true)
-			openFence = "~~~"
-		default:
-			lines = append(lines, false)
+		} else {
+			if blankInList && len(line) == len(trimmed) && !isListStart(trimmed) {
+				listWidth = 0
+			}
+			fence, _ := openingFence(trimmed)
+			lines = append(lines, fence != "")
+			fenceInList = fence != "" && listWidth > 0
+			listLines = append(listLines, fenceInList)
+			openFence = fence
+			fenceHasContent = false
+			switch {
+			case fence != "":
+				indent := indentationWidth(line[:len(line)-len(trimmed)])
+				fenceListWidth = min(listWidth, indent)
+				fenceIndent = indent - fenceListWidth
+			case isListStart(trimmed):
+				listWidth = listSourceWidth(line)
+			case strings.TrimSpace(line) != "" && !strings.HasPrefix(trimmed, ">"):
+				listWidth = 0
+			}
+			blankInList = strings.TrimSpace(line) == "" && listWidth > 0
 		}
 		lineStart = i + 1
 	}
-	return lines
+	return lines, listLines
 }
