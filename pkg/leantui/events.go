@@ -146,6 +146,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 	case *runtime.TeamInfoEvent:
 		m.applyTeamInfo(ctx, e)
+	case *runtime.ToolsetInfoEvent:
+		m.refreshCommands(ctx)
 	case *runtime.SessionTitleEvent:
 		if e.SessionID != "" && m.contentSession("") != "" && e.SessionID != m.contentSession("") {
 			return

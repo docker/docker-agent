@@ -281,7 +281,7 @@ func (f *debugFlags) runDebugSkillsCommand(cmd *cobra.Command, args []string) (c
 			if !ok {
 				continue
 			}
-			for _, skill := range st.Skills() {
+			for _, skill := range st.Skills(ctx) {
 				info.Skills = append(info.Skills, skillInfo{
 					Name:        skill.Name,
 					Description: skill.Description,

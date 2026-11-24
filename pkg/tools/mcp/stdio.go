@@ -79,6 +79,12 @@ func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequ
 		Version: "1.0.0",
 	}, opts)
 
+	if c.skillsEnabled() {
+		if err := c.enableSkills(client); err != nil {
+			return nil, err
+		}
+	}
+
 	var events *eventClient
 	if eventsEnabled {
 		var err error

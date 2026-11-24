@@ -586,7 +586,7 @@ func (m *appModel) handleShowToolsDialog() (tea.Model, tea.Cmd) {
 
 func (m *appModel) handleShowSkillsDialog() (tea.Model, tea.Cmd) {
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewSkillsDialog(m.application.CurrentAgentSkills()),
+		Model: dialog.NewSkillsDialog(m.application.CurrentAgentSkills(m.ctx())),
 	})
 }
 

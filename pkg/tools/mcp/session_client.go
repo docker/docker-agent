@@ -33,6 +33,8 @@ type sessionClient struct {
 	events                   *eventClient
 	nextEventID              atomic.Uint64
 	experimentalEvents       bool
+	skills                   *skillClient
+	experimentalSkills       bool
 	sanitizeError            func(error) error
 	serverAddress            string
 	toolListChangedHandler   func()
@@ -127,6 +129,7 @@ func (c *sessionClient) Wait() error {
 
 func (c *sessionClient) Close(context.Context) error {
 	c.closeEvents()
+	c.closeSkills()
 	if s := c.getSession(); s != nil {
 		return s.Close()
 	}

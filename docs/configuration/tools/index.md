@@ -179,6 +179,27 @@ Streamable HTTP; polling, webhooks, and legacy SSE are not supported.
 See [`examples/mcp-events`](https://github.com/docker/docker-agent/tree/main/examples/mcp-events)
 for runnable demos.
 
+## Experimental MCP Skills
+
+MCP Skills (`io.modelcontextprotocol/skills`, SEP-2640) are disabled by default.
+Enable them globally in `~/.config/cagent/config.yaml`:
+
+```yaml
+settings:
+  experimental:
+    mcp_skills: true
+```
+
+When an MCP server declares `resources` and the `io.modelcontextprotocol/skills`
+extension under protocol `2026-07-28`, docker-agent integrates its skills into
+the built-in skills system (`read_skill`, `read_skill_file`, and
+`<available_skills>`) under origin-scoped `mcp:<server>/<uri>` identifiers.
+Skill files are verified against their manifest size, SHA-256 digest, and YAML
+frontmatter before entering model context, and are tagged as untrusted external
+data without granting `allowed-tools` or local command expansion.
+See [`examples/mcp-skills`](https://github.com/docker/docker-agent/tree/main/examples/mcp-skills)
+for a runnable demo.
+
 ## Toolset Lifecycle
 
 Long-running toolsets — local MCP servers (stdio), remote MCP servers (Streamable HTTP / SSE), and LSP servers — are managed by a single supervisor that can auto-reconnect them when they crash, time out, or drop their session. The `lifecycle` block on the toolset lets you tune that supervisor per toolset. It applies to every `type: mcp` and `type: lsp` toolset.

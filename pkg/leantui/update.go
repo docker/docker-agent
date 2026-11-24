@@ -753,7 +753,7 @@ func (m *model) refreshCommands(ctx context.Context) {
 		}
 		cmds = append(cmds, ui.Command{Name: name, Desc: c.DisplayText(), Kind: ui.CmdAgent})
 	}
-	for _, sk := range m.app.CurrentAgentSkills() {
+	for _, sk := range m.app.CurrentAgentSkills(ctx) {
 		cmds = append(cmds, ui.Command{Name: sk.Name, Desc: sk.Description, Kind: ui.CmdAgent})
 	}
 	m.screen.Autocomplete.SetCommands(cmds)

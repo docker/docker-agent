@@ -159,7 +159,7 @@ agents:
 			}
 		}
 		require.NotNil(t, skillSet)
-		loaded := skillSet.Skills()
+		loaded := skillSet.Skills(t.Context())
 		require.Len(t, loaded, 2)
 		assert.Equal(t, "allowed", loaded[0].Name)
 		assert.Equal(t, filepath.Join(entry.dir, ".claude", "skills", "allowed", "SKILL.md"), loaded[0].FilePath)
