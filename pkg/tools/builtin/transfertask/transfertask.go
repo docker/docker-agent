@@ -32,6 +32,7 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:           ToolNameTransferTask,
 			RuntimeHandler: ToolNameTransferTask,
+			Delegation:     true,
 			Category:       "transfer",
 			Description: `Use this function to transfer a task to the selected team member.
             You must provide a clear and concise description of the task the member should achieve AND the expected output.`,
