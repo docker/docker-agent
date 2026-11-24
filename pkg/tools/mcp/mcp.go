@@ -41,8 +41,12 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	if err != nil {
 		return nil, err
 	}
+	userSettings := userconfig.Get()
 	if setter, ok := ts.(interface{ SetExperimentalEvents(enabled bool) }); ok {
-		setter.SetExperimentalEvents(userconfig.Get().MCPEventsEnabled())
+		setter.SetExperimentalEvents(userSettings.MCPEventsEnabled())
+	}
+	if setter, ok := ts.(interface{ SetExperimentalSkills(enabled bool) }); ok {
+		setter.SetExperimentalSkills(userSettings.MCPSkillsEnabled())
 	}
 	return ts, nil
 }
@@ -136,7 +140,9 @@ func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 // NewRemoteToolsetFromConfig builds an unstarted toolset for a validated remote.url declaration.
 func NewRemoteToolsetFromConfig(ctx context.Context, toolset latest.Toolset, envProvider environment.Provider) *Toolset {
 	ts := remoteToolsetFromConfig(ctx, toolset, envProvider)
-	ts.SetExperimentalEvents(userconfig.Get().MCPEventsEnabled())
+	userSettings := userconfig.Get()
+	ts.SetExperimentalEvents(userSettings.MCPEventsEnabled())
+	ts.SetExperimentalSkills(userSettings.MCPSkillsEnabled())
 	return ts
 }
 
@@ -765,7 +771,7 @@ func (ts *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 	for t, err := range resp {
 		if err != nil {
 			var rpcErr *jsonrpc.Error
-			if len(eventToolsList) > 0 && errors.As(err, &rpcErr) && rpcErr.Code == jsonrpc.CodeMethodNotFound {
+			if (len(eventToolsList) > 0 || ts.SupportsMCPSkills()) && errors.As(err, &rpcErr) && rpcErr.Code == jsonrpc.CodeMethodNotFound {
 				break
 			}
 			return nil, err

@@ -165,11 +165,19 @@ type ExperimentalSettings struct {
 	// MCPEvents enables experimental SEP-3415 event discovery and push
 	// subscriptions over stdio and Streamable HTTP.
 	MCPEvents bool `yaml:"mcp_events,omitempty"`
+	// MCPSkills enables experimental SEP-2640 MCP Skills discovery and
+	// verified loading over MCP.
+	MCPSkills bool `yaml:"mcp_skills,omitempty"`
 }
 
 // MCPEventsEnabled reports whether experimental MCP Events push subscriptions are enabled.
 func (s *Settings) MCPEventsEnabled() bool {
 	return s != nil && s.Experimental != nil && s.Experimental.MCPEvents
+}
+
+// MCPSkillsEnabled reports whether experimental MCP Skills support is enabled.
+func (s *Settings) MCPSkillsEnabled() bool {
+	return s != nil && s.Experimental != nil && s.Experimental.MCPSkills
 }
 
 // LayoutSettings customizes the TUI chat layout. The zero value is the

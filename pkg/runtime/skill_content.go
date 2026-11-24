@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -36,6 +37,7 @@ func (r *LocalRuntime) ReadSkillContent(ctx context.Context, sess *session.Sessi
 	var sessionID string
 	if sess != nil {
 		sessionID = sess.ID
+		ctx = httpclient.ContextWithSessionID(ctx, sess.ID)
 	}
 	return st.ReadSkillContent(ctx, name, skillRuntime{runtime: r, agent: a, sessionID: sessionID})
 }

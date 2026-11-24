@@ -175,7 +175,7 @@ func TestSkillsToolset_Skills(t *testing.T) {
 	}
 	st := New(input, "")
 
-	assert.Equal(t, input, st.Skills())
+	assert.Equal(t, input, st.Skills(t.Context()))
 }
 
 func TestSkillsToolset_HandleReadSkill(t *testing.T) {

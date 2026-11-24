@@ -175,6 +175,11 @@ func (c *remoteMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeReq
 		opts.Capabilities.AddExtension(eventsExtension, nil)
 	}
 	client := gomcp.NewClient(impl, opts)
+	if c.skillsEnabled() {
+		if err := c.enableSkills(client); err != nil {
+			return nil, err
+		}
+	}
 	if c.eventsEnabled() && (c.transportType == "streamable" || c.transportType == "streamable-http") {
 		if err := c.enableHTTPEvents(client, httpClient); err != nil {
 			return nil, err
