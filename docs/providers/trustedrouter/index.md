@@ -41,7 +41,8 @@ agents:
     instruction: You are a helpful assistant.
 ```
 
-Upstream models keep their prefixed IDs, for example
+For an upstream model, add the provider prefix to the ID from the model list:
+the model list shows `anthropic/claude-sonnet-4.5`, so the inline reference is
 `trustedrouter/anthropic/claude-sonnet-4.5`.
 
 ### Named Model
@@ -57,6 +58,10 @@ agents:
     model: trustedrouter_model
     instruction: You are a helpful assistant.
 ```
+
+In a named model, `model` is the ID from the model list as is, without the
+provider prefix: for example `provider: trustedrouter` with
+`model: anthropic/claude-sonnet-4.5`.
 
 When TrustedRouter is selected automatically from available credentials, the
 default model is `trustedrouter/auto`. Other routes include
