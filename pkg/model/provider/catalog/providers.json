@@ -11,6 +11,7 @@
   {
     "name": "openai",
     "api_type": "openai",
+    "api_flavor": "openai",
     "auto_responses": true,
     "openai_vendor": true,
     "default_model": "gpt-5.6",
@@ -24,6 +25,7 @@
     "auto_responses": true,
     "openai_vendor": true,
     "api_type": "openai",
+    "api_flavor": "openai",
     "base_url": "https://chatgpt.com/backend-api/codex",
     "default_model": "gpt-5.6",
     "hint": "sign in with your ChatGPT account: `docker agent setup`",
@@ -58,6 +60,7 @@
   {
     "name": "mistral",
     "api_type": "openai",
+    "api_flavor": "openai-compatible",
     "base_url": "https://api.mistral.ai/v1",
     "default_model": "mistral-small-latest",
     "token_env_vars": [
@@ -68,6 +71,7 @@
     "name": "openrouter",
     "merge_consecutive_messages": true,
     "api_type": "openai",
+    "api_flavor": "gateway",
     "base_url": "https://openrouter.ai/api/v1",
     "default_model": "meta-llama/llama-4-maverick",
     "token_env_vars": [
@@ -314,6 +318,7 @@
     "name": "azure",
     "requires_configuration": true,
     "openai_vendor": true,
+    "api_flavor": "openai",
     "query_params": {
       "api_version": "api-version"
     },
