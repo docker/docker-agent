@@ -32,6 +32,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 	"github.com/docker/docker-agent/pkg/tools/workingdir"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // CreateToolSet is used by the tools registry.
@@ -40,14 +41,10 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	if err != nil {
 		return nil, err
 	}
-	configureExperimentalEvents(ts, toolset.Experimental)
-	return ts, nil
-}
-
-func configureExperimentalEvents(ts tools.ToolSet, cfg *latest.ToolsetExperimentalConfig) {
 	if setter, ok := ts.(interface{ SetExperimentalEvents(enabled bool) }); ok {
-		setter.SetExperimentalEvents(cfg != nil && cfg.MCPEvents)
+		setter.SetExperimentalEvents(userconfig.Get().MCPEventsEnabled())
 	}
+	return ts, nil
 }
 
 func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
@@ -139,7 +136,7 @@ func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 // NewRemoteToolsetFromConfig builds an unstarted toolset for a validated remote.url declaration.
 func NewRemoteToolsetFromConfig(ctx context.Context, toolset latest.Toolset, envProvider environment.Provider) *Toolset {
 	ts := remoteToolsetFromConfig(ctx, toolset, envProvider)
-	configureExperimentalEvents(ts, toolset.Experimental)
+	ts.SetExperimentalEvents(userconfig.Get().MCPEventsEnabled())
 	return ts
 }
 

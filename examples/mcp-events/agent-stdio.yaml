@@ -10,8 +10,6 @@ agents:
     toolsets:
       - type: mcp
         name: demo
-        experimental:
-          mcp_events: true
         command: go
         args:
           - run

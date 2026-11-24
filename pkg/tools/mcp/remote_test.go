@@ -856,7 +856,6 @@ func TestNewRemoteToolsetFromConfig(t *testing.T) {
 			OAuth:         &latest.RemoteOAuthConfig{ClientID: "demo"},
 			StandaloneSSE: true,
 		},
-		Experimental:    &latest.ToolsetExperimentalConfig{MCPEvents: true},
 		AllowPrivateIPs: new(true),
 		Lifecycle:       &latest.LifecycleConfig{CallTimeout: latest.Duration{Duration: time.Minute}},
 	}
@@ -866,7 +865,6 @@ func TestNewRemoteToolsetFromConfig(t *testing.T) {
 	client := ts.mcpClient.(*remoteMCPClient)
 	assert.Same(t, store, client.tokenStore)
 	assert.Equal(t, cfg.Remote.OAuth, client.oauthConfig)
-	assert.True(t, client.eventsEnabled())
 	assert.True(t, client.standaloneSSE)
 	assert.True(t, client.allowPrivateIPs)
 

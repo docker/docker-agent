@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -15,16 +14,38 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 func TestCreateToolSetExperimentalEvents(t *testing.T) {
-	for _, experimental := range []*latest.ToolsetExperimentalConfig{nil, {}, {MCPEvents: true}} {
-		t.Run(fmt.Sprintf("experimental=%v", experimental), func(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		experimental *userconfig.ExperimentalSettings
+		want         bool
+	}{
+		{name: "unset", experimental: nil, want: false},
+		{name: "disabled", experimental: &userconfig.ExperimentalSettings{}, want: false},
+		{name: "enabled", experimental: &userconfig.ExperimentalSettings{MCPEvents: true}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths.SetConfigDir(t.TempDir())
+			t.Cleanup(func() { paths.SetConfigDir("") })
+			if tc.experimental != nil {
+				require.NoError(t, (&userconfig.Config{
+					Settings: &userconfig.Settings{Experimental: tc.experimental},
+				}).Save())
+			}
+
 			runConfig := &config.RuntimeConfig{EnvProviderOverride: environment.NewMapEnvProvider(nil)}
-			toolset, err := CreateToolSet(t.Context(), latest.Toolset{Type: "mcp", Experimental: experimental, Remote: latest.Remote{URL: "https://example.com/mcp", TransportType: "streamable"}}, runConfig)
+			cfg := latest.Toolset{Type: "mcp", Remote: latest.Remote{URL: "https://example.com/mcp", TransportType: "streamable"}}
+			toolset, err := CreateToolSet(t.Context(), cfg, runConfig)
 			require.NoError(t, err)
 			client := toolset.(*Toolset).mcpClient.(*remoteMCPClient)
-			assert.Equal(t, experimental != nil && experimental.MCPEvents, client.eventsEnabled())
+			assert.Equal(t, tc.want, client.eventsEnabled())
+
+			fromConfig := NewRemoteToolsetFromConfig(t.Context(), cfg, runConfig.EnvProvider())
+			assert.Equal(t, tc.want, fromConfig.mcpClient.(*remoteMCPClient).eventsEnabled())
 		})
 	}
 }
