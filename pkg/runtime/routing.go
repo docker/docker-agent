@@ -312,7 +312,11 @@ func (r *LocalRuntime) switchSessionAgent(sess *session.Session, name string) {
 		sess.SetRouteAgent(name)
 		return
 	}
-	if !sess.TryAgentHandoff(name) && sess.AgentName == "" {
+	if sess.TryAgentHandoff(name) {
+		r.agents.updateTransferAgent(sess.ID, name)
+		return
+	}
+	if sess.AgentName == "" {
 		r.setCurrentAgent(name)
 	}
 }

@@ -149,3 +149,153 @@ func TestAgentRouter_ConcurrentSafety(t *testing.T) {
 	got := r.Name()
 	assert.Contains(t, []string{"root", "child"}, got)
 }
+
+func TestAgentRouter_TransferStackOutOfOrderPop(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/mock-model"}
+	tm := team.New(team.WithAgents(
+		agent.New("root", "", agent.WithModel(prov)),
+		agent.New("alpha", "", agent.WithModel(prov)),
+		agent.New("beta", "", agent.WithModel(prov)),
+	))
+	r := newAgentRouter(tm, "root")
+
+	tokAlpha, baseA := r.pushTransfer("sess-alpha", "alpha")
+	assert.Equal(t, "root", baseA)
+	assert.Equal(t, "alpha", r.Name())
+	assert.True(t, r.isActiveTransfer("sess-alpha"))
+
+	tokBeta, baseB := r.pushTransfer("sess-beta", "beta")
+	assert.Equal(t, "root", baseB)
+	assert.Equal(t, "beta", r.Name())
+	assert.True(t, r.isActiveTransfer("sess-beta"))
+
+	restored, remaining := r.popTransfer(tokAlpha, "root")
+	assert.True(t, remaining)
+	assert.Equal(t, "beta", restored)
+	assert.Equal(t, "beta", r.Name())
+	assert.False(t, r.isActiveTransfer("sess-alpha"))
+	assert.True(t, r.isActiveTransfer("sess-beta"))
+
+	restored, remaining = r.popTransfer(tokBeta, "root")
+	assert.False(t, remaining)
+	assert.Equal(t, "root", restored)
+	assert.Equal(t, "root", r.Name())
+	assert.False(t, r.isActiveTransfer("sess-beta"))
+}
+
+func TestAgentRouter_SetDuringActiveTransferUpdatesBase(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/mock-model"}
+	tm := team.New(team.WithAgents(
+		agent.New("root", "", agent.WithModel(prov)),
+		agent.New("alpha", "", agent.WithModel(prov)),
+		agent.New("reviewer", "", agent.WithModel(prov)),
+	))
+	r := newAgentRouter(tm, "root")
+
+	tok, base := r.pushTransfer("sess-alpha", "alpha")
+	assert.Equal(t, "root", base)
+	assert.Equal(t, "alpha", r.Name())
+
+	r.Set("reviewer")
+	assert.Equal(t, "alpha", r.Name())
+
+	restored, remaining := r.popTransfer(tok, "root")
+	assert.False(t, remaining)
+	assert.Equal(t, "reviewer", restored)
+	assert.Equal(t, "reviewer", r.Name())
+}
+
+func TestAgentRouter_ConcurrentTransfersRestoreBase(t *testing.T) {
+	t.Parallel()
+
+	tm := newTestTeam(t)
+	r := newAgentRouter(tm, "root")
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 100 {
+				tok, _ := r.pushTransfer("s", "child")
+				_ = r.Name()
+				_ = r.isActiveTransfer("s")
+				r.popTransfer(tok, "root")
+			}
+		})
+	}
+	wg.Wait()
+
+	assert.Equal(t, "root", r.Name())
+	assert.False(t, r.isActiveTransfer("s"))
+}
+
+func TestAgentRouter_PopTransferUnknownAndFallback(t *testing.T) {
+	t.Parallel()
+
+	tm := newTestTeam(t)
+	r := newAgentRouter(tm, "")
+
+	assert.False(t, r.isActiveTransfer(""))
+
+	tok, base := r.pushTransfer("sess-a", "alpha")
+	assert.Empty(t, base)
+	assert.Equal(t, "alpha", r.Name())
+
+	// Unknown token leaves the active transfer untouched.
+	cur, remaining := r.popTransfer(tok+999, "fallback")
+	assert.True(t, remaining)
+	assert.Equal(t, "alpha", cur)
+	assert.True(t, r.isActiveTransfer("sess-a"))
+
+	// Empty transferBase falls back to fallback.
+	restored, remaining := r.popTransfer(tok, "fallback")
+	assert.False(t, remaining)
+	assert.Equal(t, "fallback", restored)
+	assert.Equal(t, "fallback", r.Name())
+
+	// Duplicate pop is a safe no-op.
+	restored, remaining = r.popTransfer(tok, "other")
+	assert.False(t, remaining)
+	assert.Equal(t, "fallback", restored)
+}
+
+func TestAgentRouter_UpdateTransferAgent(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/mock-model"}
+	tm := team.New(team.WithAgents(
+		agent.New("root", "", agent.WithModel(prov)),
+		agent.New("triage", "", agent.WithModel(prov)),
+		agent.New("specialist", "", agent.WithModel(prov)),
+		agent.New("helper", "", agent.WithModel(prov)),
+	))
+	r := newAgentRouter(tm, "root")
+
+	// No-op when session is not an active transfer or arguments are empty.
+	r.updateTransferAgent("", "specialist")
+	r.updateTransferAgent("unknown", "specialist")
+	assert.Equal(t, "root", r.Name())
+
+	tok1, _ := r.pushTransfer("sess-1", "triage")
+	assert.Equal(t, "triage", r.Name())
+
+	// Top active transfer update also updates current.
+	r.updateTransferAgent("sess-1", "specialist")
+	assert.Equal(t, "specialist", r.Name())
+
+	// Nested transfer pushes on top; popping it restores the updated handoff agent.
+	tok2, _ := r.pushTransfer("sess-2", "helper")
+	assert.Equal(t, "helper", r.Name())
+
+	restored, remaining := r.popTransfer(tok2, "root")
+	assert.True(t, remaining)
+	assert.Equal(t, "specialist", restored)
+	assert.Equal(t, "specialist", r.Name())
+
+	restored, remaining = r.popTransfer(tok1, "root")
+	assert.False(t, remaining)
+	assert.Equal(t, "root", restored)
+}

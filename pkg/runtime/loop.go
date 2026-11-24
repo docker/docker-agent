@@ -152,7 +152,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 }
 
 func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idleRetryPolicy idleStreamRetryPolicy) <-chan Event {
-	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.currentAgentName(), "session_id", sess.ID)
+	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.sessionAgentName(sess), "session_id", sess.ID)
 	events := make(chan Event, defaultEventChannelCapacity)
 	rootStream := !sess.IsSubSession()
 	if rootStream {
@@ -190,8 +190,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// gateway-bound HTTP call originating from this loop can correlate
 	// back to the originating session. Plumbing happens in
 	// pkg/httpclient/userAgentTransport, gated on `X-Cagent-Forward`.
+	initialAgent := r.sessionAgentName(sess)
 	ctx = httpclient.ContextWithSessionID(ctx, sess.ID)
-	r.telemetry.RecordSessionStart(ctx, r.currentAgentName(), sess.ID)
+	r.telemetry.RecordSessionStart(ctx, initialAgent, sess.ID)
 
 	// Seed `gen_ai.conversation.id` into baggage at the session
 	// boundary. Every span the runtime, providers, MCP client, RAG,
@@ -225,11 +226,11 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental.
 	sessionAttrs := []attribute.KeyValue{
 		attribute.String(genai.AttrConversationID, sess.ID),
-		attribute.String(genai.AttrAgentNameRuntime, r.currentAgentName()),
+		attribute.String(genai.AttrAgentNameRuntime, initialAgent),
 	}
 	if genai.EmitLegacyAttributes() {
 		sessionAttrs = append(sessionAttrs,
-			attribute.String("agent", r.currentAgentName()),
+			attribute.String("agent", initialAgent),
 			attribute.String("session.id", sess.ID),
 		)
 	}

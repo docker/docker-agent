@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -20,15 +21,21 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
+	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
+	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
+	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
 
 func TestBuildTaskSystemMessage(t *testing.T) {
@@ -1508,11 +1515,6 @@ func TestTransferTask_PinnedParentDoesNotMutateSharedCurrentAgent(t *testing.T) 
 	assert.Equal(t, "helper done", stops[0].StopResponse)
 }
 
-// TestTransferTask_ForegroundSwitchesAndRestoresCurrentAgent pins the
-// sequential semantics for ordinary foreground transfers: the shared current
-// agent is switched to the target while the child runs (the child session
-// stays unpinned and resolves through it), then restored, with entry and
-// return AgentSwitching events around the run.
 func TestTransferTask_ForegroundSwitchesAndRestoresCurrentAgent(t *testing.T) {
 	t.Parallel()
 
@@ -1554,7 +1556,8 @@ func TestTransferTask_ForegroundSwitchesAndRestoresCurrentAgent(t *testing.T) {
 
 	child := firstSubSession(sess)
 	require.NotNil(t, child)
-	assert.Empty(t, child.AgentName, "foreground transfer children stay unpinned")
+	assert.Equal(t, "librarian", child.AgentName)
+	assert.True(t, child.AllowsAgentHandoffs())
 
 	switches, completed := collectTransferEvents(evts)
 	require.Len(t, switches, 2, "entry and return AgentSwitching events must be emitted")
@@ -2180,4 +2183,605 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 		assert.Equal(t, "root", rt.CurrentAgent().Name(),
 			"the shared current agent must still be root after the whole chain")
 	})
+}
+
+type delegationFuncProvider struct {
+	id string
+	fn func(ctx context.Context, messages []chat.Message, toolDefs []tools.Tool) (chat.MessageStream, error)
+}
+
+func (p *delegationFuncProvider) ID() modelsdev.ID { return modelsdev.ParseIDOrZero(p.id) }
+func (p *delegationFuncProvider) CreateChatCompletionStream(ctx context.Context, messages []chat.Message, toolDefs []tools.Tool) (chat.MessageStream, error) {
+	return p.fn(ctx, messages, toolDefs)
+}
+
+func (p *delegationFuncProvider) BaseConfig() base.Config {
+	cfg := base.Config{}
+	cfg.RebuildProvider = func(context.Context, *latest.ModelConfig, ...options.Opt) (provider.Provider, error) { return p, nil }
+	return cfg
+}
+func (p *delegationFuncProvider) MaxTokens() int { return 0 }
+
+func TestTransferTask_ParallelForegroundFanOutStaysIsolated(t *testing.T) {
+	t.Parallel()
+
+	alphaEntered := make(chan struct{})
+	betaEntered := make(chan struct{})
+	alphaExited := make(chan struct{})
+
+	var alphaWrongTask, betaWrongTask atomic.Bool
+	var betaTurns atomic.Int32
+
+	alphaProv := &delegationFuncProvider{
+		id: "test/alpha-model",
+		fn: func(_ context.Context, msgs []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			for _, m := range msgs {
+				if strings.Contains(m.Content, "TASK_FOR_BETA") {
+					alphaWrongTask.Store(true)
+				}
+			}
+			close(alphaEntered)
+			<-betaEntered
+			return newStreamBuilder().AddContent("alpha-reply").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	betaProv := &delegationFuncProvider{
+		id: "test/beta-model",
+		fn: func(_ context.Context, msgs []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			for _, m := range msgs {
+				if strings.Contains(m.Content, "TASK_FOR_ALPHA") {
+					betaWrongTask.Store(true)
+				}
+			}
+			if betaTurns.Add(1) == 1 {
+				close(betaEntered)
+				<-alphaExited
+				return newStreamBuilder().AddToolCallWithStop("beta_probe", "probe", "{}").Build(), nil
+			}
+			return newStreamBuilder().AddContent("beta-reply").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	var rootTurns atomic.Int32
+	rootProv := &delegationFuncProvider{
+		id: "test/root-model",
+		fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			if rootTurns.Add(1) == 1 {
+				return newStreamBuilder().
+					AddToolCallName("tc_alpha", transfertask.ToolNameTransferTask).
+					AddToolCallArguments("tc_alpha", `{"agent":"alpha","task":"TASK_FOR_ALPHA"}`).
+					AddToolCallName("tc_beta", transfertask.ToolNameTransferTask).
+					AddToolCallArguments("tc_beta", `{"agent":"beta","task":"TASK_FOR_BETA"}`).
+					AddToolCallStopWithUsage(10, 5).
+					Build(), nil
+			}
+			return newStreamBuilder().AddContent("root-done").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	alpha := agent.New("alpha", "alpha agent", agent.WithModel(alphaProv))
+	beta := agent.New("beta", "beta agent",
+		agent.WithModel(betaProv),
+		agent.WithToolSets(newStubToolSet(nil, probeTool(func() {}), nil)),
+	)
+	root := agent.New("root", "root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(alpha, beta),
+		agent.WithToolSets(transfertask.New()),
+	)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, alpha, beta)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	sess := session.New(session.WithUserMessage("Do both"), session.WithToolsApproved(true))
+	events := rt.RunStream(t.Context(), sess)
+
+	var switches []*AgentSwitchingEvent
+	var lastAgentInfo string
+	var alphaClosedOnce sync.Once
+	for ev := range events {
+		switch e := ev.(type) {
+		case *AgentSwitchingEvent:
+			switches = append(switches, e)
+			if !e.Switching && e.FromAgent == "alpha" && e.ToAgent == "root" {
+				alphaClosedOnce.Do(func() { close(alphaExited) })
+			}
+		case *AgentInfoEvent:
+			lastAgentInfo = e.AgentName
+		}
+	}
+
+	assert.False(t, alphaWrongTask.Load())
+	assert.False(t, betaWrongTask.Load())
+	assert.Equal(t, int32(2), betaTurns.Load())
+	assert.Equal(t, "root", rt.CurrentAgent().Name())
+	assert.Equal(t, "root", lastAgentInfo)
+	assert.Equal(t, "root-done", sess.GetLastAssistantMessageContent())
+
+	var subAgents []string
+	for _, item := range sess.Messages {
+		if item.SubSession != nil {
+			subAgents = append(subAgents, item.SubSession.AgentName)
+			assert.True(t, item.SubSession.AllowsAgentHandoffs())
+		}
+	}
+	assert.ElementsMatch(t, []string{"alpha", "beta"}, subAgents)
+
+	assert.Len(t, switches, 4)
+}
+
+func TestTransferTask_ParallelWithHandoffPreservesHandoff(t *testing.T) {
+	t.Parallel()
+
+	alphaEntered := make(chan struct{})
+	handoffDone := make(chan struct{})
+
+	alphaProv := &delegationFuncProvider{
+		id: "test/alpha-model",
+		fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			close(alphaEntered)
+			<-handoffDone
+			return newStreamBuilder().AddContent("alpha-reply").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+	reviewerProv := &queueProvider{
+		id: "test/reviewer-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddContent("reviewer-done").AddStopWithUsage(10, 5).Build(),
+		},
+	}
+	rootProv := &queueProvider{
+		id: "test/root-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().
+				AddToolCallName("tc_alpha", transfertask.ToolNameTransferTask).
+				AddToolCallArguments("tc_alpha", `{"agent":"alpha","task":"inspect"}`).
+				AddToolCallName("tc_handoff", handoff.ToolNameHandoff).
+				AddToolCallArguments("tc_handoff", `{"agent":"reviewer"}`).
+				AddToolCallStopWithUsage(10, 5).
+				Build(),
+		},
+	}
+
+	alpha := agent.New("alpha", "alpha agent", agent.WithModel(alphaProv))
+	reviewer := agent.New("reviewer", "reviewer agent", agent.WithModel(reviewerProv))
+	root := agent.New("root", "root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(alpha),
+		agent.WithHandoffs(reviewer),
+		agent.WithToolSets(transfertask.New(), handoff.New()),
+	)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, alpha, reviewer)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	sess := session.New(session.WithUserMessage("Delegate and handoff"), session.WithToolsApproved(true))
+	events := rt.RunStream(t.Context(), sess)
+
+	var handoffOnce sync.Once
+	var lastAgentInfo string
+	for ev := range events {
+		switch e := ev.(type) {
+		case *ToolCallResponseEvent:
+			if e.ToolCallID == "tc_handoff" {
+				go func() {
+					<-alphaEntered
+					handoffOnce.Do(func() { close(handoffDone) })
+				}()
+			}
+		case *AgentInfoEvent:
+			lastAgentInfo = e.AgentName
+		}
+	}
+
+	assert.Equal(t, "reviewer", rt.CurrentAgent().Name())
+	assert.Equal(t, "reviewer", lastAgentInfo)
+	assert.Equal(t, "reviewer-done", sess.GetLastAssistantMessageContent())
+}
+
+func TestTransferTask_ChildHandoffThenNestedTransferRestoresHandoffAgent(t *testing.T) {
+	t.Parallel()
+
+	helperProv := &queueProvider{
+		id: "test/helper-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddContent("helper-done").AddStopWithUsage(10, 5).Build(),
+		},
+	}
+	specialistProv := &queueProvider{
+		id: "test/specialist-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddToolCallWithStop("tc_helper", transfertask.ToolNameTransferTask, `{"agent":"helper","task":"assist"}`).Build(),
+			newStreamBuilder().AddContent("specialist-done").AddStopWithUsage(10, 5).Build(),
+		},
+	}
+	triageProv := &queueProvider{
+		id: "test/triage-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddToolCallWithStop("tc_handoff", handoff.ToolNameHandoff, `{"agent":"specialist"}`).Build(),
+		},
+	}
+	rootProv := &queueProvider{
+		id: "test/root-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddToolCallWithStop("tc_triage", transfertask.ToolNameTransferTask, `{"agent":"triage","task":"handle"}`).Build(),
+			newStreamBuilder().AddContent("root-done").AddStopWithUsage(10, 5).Build(),
+		},
+	}
+
+	helper := agent.New("helper", "helper agent", agent.WithModel(helperProv))
+	specialist := agent.New("specialist", "specialist agent",
+		agent.WithModel(specialistProv),
+		agent.WithSubAgents(helper),
+		agent.WithToolSets(transfertask.New()),
+	)
+	triage := agent.New("triage", "triage agent",
+		agent.WithModel(triageProv),
+		agent.WithHandoffs(specialist),
+		agent.WithToolSets(handoff.New()),
+	)
+	root := agent.New("root", "root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(triage),
+		agent.WithToolSets(transfertask.New()),
+	)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, triage, specialist, helper)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	sess := session.New(session.WithUserMessage("Start"), session.WithToolsApproved(true))
+	events := rt.RunStream(t.Context(), sess)
+
+	var infoAgents []string
+	for ev := range events {
+		if info, ok := ev.(*AgentInfoEvent); ok {
+			infoAgents = append(infoAgents, info.AgentName)
+		}
+	}
+
+	assert.Equal(t, "root", rt.CurrentAgent().Name())
+	assert.Equal(t, "root-done", sess.GetLastAssistantMessageContent())
+	assert.Equal(t, []string{
+		"root",
+		"triage", "triage",
+		"specialist",
+		"helper", "helper",
+		"specialist", "specialist",
+		"root", "root",
+	}, infoAgents)
+}
+
+func TestTransferTask_ChildForceHandoffThenNestedTransferRestoresTarget(t *testing.T) {
+	t.Parallel()
+
+	helperProv := &queueProvider{
+		id: "test/helper-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddContent("helper-done").AddStopWithUsage(10, 5).Build(),
+		},
+	}
+	specialistProv := &queueProvider{
+		id: "test/specialist-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddToolCallWithStop("tc_helper", transfertask.ToolNameTransferTask, `{"agent":"helper","task":"assist"}`).Build(),
+			newStreamBuilder().AddContent("specialist-done").AddStopWithUsage(10, 5).Build(),
+		},
+	}
+	triageProv := &queueProvider{
+		id: "test/triage-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddContent("triage-summary").AddStopWithUsage(10, 5).Build(),
+		},
+	}
+	rootProv := &queueProvider{
+		id: "test/root-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddToolCallWithStop("tc_triage", transfertask.ToolNameTransferTask, `{"agent":"triage","task":"handle"}`).Build(),
+			newStreamBuilder().AddContent("root-done").AddStopWithUsage(10, 5).Build(),
+		},
+	}
+
+	helper := agent.New("helper", "helper agent", agent.WithModel(helperProv))
+	specialist := agent.New("specialist", "specialist agent",
+		agent.WithModel(specialistProv),
+		agent.WithSubAgents(helper),
+		agent.WithToolSets(transfertask.New()),
+	)
+	triage := agent.New("triage", "triage agent",
+		agent.WithModel(triageProv),
+		agent.WithForceHandoff(specialist),
+	)
+	root := agent.New("root", "root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(triage),
+		agent.WithToolSets(transfertask.New()),
+	)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, triage, specialist, helper)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	sess := session.New(session.WithUserMessage("Start"), session.WithToolsApproved(true))
+	events := rt.RunStream(t.Context(), sess)
+
+	var infoAgents []string
+	for ev := range events {
+		if info, ok := ev.(*AgentInfoEvent); ok {
+			infoAgents = append(infoAgents, info.AgentName)
+		}
+	}
+
+	assert.Equal(t, "root", rt.CurrentAgent().Name())
+	assert.Equal(t, "root-done", sess.GetLastAssistantMessageContent())
+	assert.Equal(t, []string{
+		"root",
+		"triage", "triage",
+		"specialist",
+		"helper", "helper",
+		"specialist", "specialist",
+		"root", "root",
+	}, infoAgents)
+}
+
+func TestTransferTask_ParallelWithRunSkillForkStaysIsolated(t *testing.T) {
+	t.Parallel()
+
+	alphaEntered := make(chan struct{})
+	skillEntered := make(chan struct{})
+
+	var alphaWrongTask, skillWrongTask atomic.Bool
+
+	alphaProv := &delegationFuncProvider{
+		id: "test/alpha-model",
+		fn: func(_ context.Context, msgs []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			for _, m := range msgs {
+				if strings.Contains(m.Content, "SKILL_FORK_BODY") {
+					alphaWrongTask.Store(true)
+				}
+			}
+			close(alphaEntered)
+			<-skillEntered
+			return newStreamBuilder().AddContent("alpha-reply").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	var rootCalls atomic.Int32
+	rootProv := &delegationFuncProvider{
+		id: "test/root-model",
+		fn: func(_ context.Context, msgs []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			for _, m := range msgs {
+				if strings.Contains(m.Content, "SKILL_FORK_BODY") {
+					for _, mm := range msgs {
+						if strings.Contains(mm.Content, "TASK_FOR_ALPHA") {
+							skillWrongTask.Store(true)
+						}
+					}
+					close(skillEntered)
+					<-alphaEntered
+					return newStreamBuilder().AddContent("skill-reply").AddStopWithUsage(10, 5).Build(), nil
+				}
+			}
+			if rootCalls.Add(1) == 1 {
+				return newStreamBuilder().
+					AddToolCallName("tc_alpha", transfertask.ToolNameTransferTask).
+					AddToolCallArguments("tc_alpha", `{"agent":"alpha","task":"TASK_FOR_ALPHA"}`).
+					AddToolCallName("tc_skill", skillstool.ToolNameRunSkill).
+					AddToolCallArguments("tc_skill", `{"name":"forked"}`).
+					AddToolCallStopWithUsage(10, 5).
+					Build(), nil
+			}
+			return newStreamBuilder().AddContent("root-done").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	st := skillstool.New([]skills.Skill{{Name: "forked", Context: "fork", InlineContent: "SKILL_FORK_BODY"}}, "")
+	alpha := agent.New("alpha", "alpha agent", agent.WithModel(alphaProv))
+	root := agent.New("root", "root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(alpha),
+		agent.WithToolSets(transfertask.New(), st),
+	)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, alpha)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	sess := session.New(session.WithUserMessage("Run both"), session.WithToolsApproved(true))
+	events := rt.RunStream(t.Context(), sess)
+
+	var lastAgentInfo string
+	for ev := range events {
+		if info, ok := ev.(*AgentInfoEvent); ok {
+			lastAgentInfo = info.AgentName
+		}
+	}
+
+	assert.False(t, alphaWrongTask.Load())
+	assert.False(t, skillWrongTask.Load())
+	assert.Equal(t, "root", rt.CurrentAgent().Name())
+	assert.Equal(t, "root", lastAgentInfo)
+	assert.Equal(t, "root-done", sess.GetLastAssistantMessageContent())
+}
+
+func TestTransferTask_ParallelChildHandoffStaysLocal(t *testing.T) {
+	t.Parallel()
+
+	triageHandedOff := make(chan struct{})
+	coderEntered := make(chan struct{})
+
+	specialistProv := &delegationFuncProvider{
+		id: "test/specialist-model",
+		fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			close(triageHandedOff)
+			<-coderEntered
+			return newStreamBuilder().AddContent("specialist-reply").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+	triageProv := &queueProvider{
+		id: "test/triage-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddToolCallWithStop("h1", handoff.ToolNameHandoff, `{"agent":"specialist"}`).Build(),
+		},
+	}
+
+	var coderTurns atomic.Int32
+	coderProv := &delegationFuncProvider{
+		id: "test/coder-model",
+		fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			if coderTurns.Add(1) == 1 {
+				<-triageHandedOff
+				close(coderEntered)
+				return newStreamBuilder().AddToolCallWithStop("p1", "probe", "{}").Build(), nil
+			}
+			return newStreamBuilder().AddContent("coder-reply").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	var rootTurns atomic.Int32
+	rootProv := &delegationFuncProvider{
+		id: "test/root-model",
+		fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			if rootTurns.Add(1) == 1 {
+				return newStreamBuilder().
+					AddToolCallName("tc_triage", transfertask.ToolNameTransferTask).
+					AddToolCallArguments("tc_triage", `{"agent":"triage","task":"triage task"}`).
+					AddToolCallName("tc_coder", transfertask.ToolNameTransferTask).
+					AddToolCallArguments("tc_coder", `{"agent":"coder","task":"coder task"}`).
+					AddToolCallStopWithUsage(10, 5).
+					Build(), nil
+			}
+			return newStreamBuilder().AddContent("root-done").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	specialist := agent.New("specialist", "specialist agent", agent.WithModel(specialistProv))
+	triage := agent.New("triage", "triage agent",
+		agent.WithModel(triageProv),
+		agent.WithHandoffs(specialist),
+		agent.WithToolSets(handoff.New()),
+	)
+	coder := agent.New("coder", "coder agent",
+		agent.WithModel(coderProv),
+		agent.WithToolSets(newStubToolSet(nil, probeTool(func() {}), nil)),
+	)
+	root := agent.New("root", "root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(triage, coder),
+		agent.WithToolSets(transfertask.New()),
+	)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, triage, specialist, coder)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	sess := session.New(session.WithUserMessage("Run both"), session.WithToolsApproved(true))
+	_, err = rt.Run(t.Context(), sess)
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(2), coderTurns.Load())
+	assert.Equal(t, "root", rt.CurrentAgent().Name())
+	assert.Equal(t, "root-done", sess.GetLastAssistantMessageContent())
+
+	byAgent := map[string]*session.Session{}
+	for _, item := range sess.Messages {
+		if item.SubSession != nil {
+			byAgent[item.SubSession.AgentName] = item.SubSession
+		}
+	}
+	require.Contains(t, byAgent, "triage")
+	require.Contains(t, byAgent, "coder")
+	assert.Equal(t, "specialist", byAgent["triage"].HandoffAgent())
+	assert.Equal(t, "specialist-reply", byAgent["triage"].GetLastAssistantMessageContent())
+	assert.Equal(t, "coder-reply", byAgent["coder"].GetLastAssistantMessageContent())
+}
+
+func TestTransferTask_NestedForegroundEmitsSwitchingAndRestores(t *testing.T) {
+	t.Parallel()
+
+	helper := agent.New("helper", "helper agent",
+		agent.WithModel(&queueProvider{
+			id: "test/helper-model",
+			streams: []chat.MessageStream{
+				newStreamBuilder().AddContent("helper-done").AddStopWithUsage(10, 5).Build(),
+			},
+		}),
+	)
+	lead := agent.New("lead", "lead agent",
+		agent.WithModel(&queueProvider{
+			id: "test/lead-model",
+			streams: []chat.MessageStream{
+				newStreamBuilder().AddToolCallWithStop("tc_helper", transfertask.ToolNameTransferTask, `{"agent":"helper","task":"help"}`).Build(),
+				newStreamBuilder().AddContent("lead-done").AddStopWithUsage(10, 5).Build(),
+			},
+		}),
+		agent.WithSubAgents(helper),
+		agent.WithToolSets(transfertask.New()),
+	)
+	root := agent.New("root", "root agent",
+		agent.WithModel(&queueProvider{
+			id: "test/root-model",
+			streams: []chat.MessageStream{
+				newStreamBuilder().AddToolCallWithStop("tc_lead", transfertask.ToolNameTransferTask, `{"agent":"lead","task":"coordinate"}`).Build(),
+				newStreamBuilder().AddContent("root-done").AddStopWithUsage(10, 5).Build(),
+			},
+		}),
+		agent.WithSubAgents(lead),
+		agent.WithToolSets(transfertask.New()),
+	)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, lead, helper)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	sess := session.New(session.WithUserMessage("Chain"), session.WithToolsApproved(true))
+	events := rt.RunStream(t.Context(), sess)
+
+	var switches []*AgentSwitchingEvent
+	for ev := range events {
+		if sw, ok := ev.(*AgentSwitchingEvent); ok {
+			switches = append(switches, sw)
+		}
+	}
+
+	assert.Equal(t, "root", rt.CurrentAgent().Name())
+	assert.Equal(t, "root-done", sess.GetLastAssistantMessageContent())
+	type switchHop struct {
+		switching bool
+		from, to  string
+	}
+	got := make([]switchHop, len(switches))
+	for i, sw := range switches {
+		got[i] = switchHop{switching: sw.Switching, from: sw.FromAgent, to: sw.ToAgent}
+	}
+	assert.Equal(t, []switchHop{
+		{true, "root", "lead"},
+		{true, "lead", "helper"},
+		{false, "helper", "lead"},
+		{false, "lead", "root"},
+	}, got)
 }

@@ -1,7 +1,10 @@
 package runtime
 
 import (
+	"cmp"
 	"log/slog"
+	"slices"
+	"sync"
 	"sync/atomic"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -9,25 +12,26 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 )
 
+type activeTransfer struct {
+	id        uint64
+	sessionID string
+	agent     string
+}
+
 // agentRouter owns the runtime's notion of "which agent is currently
-// driving the conversation". It is a thin wrapper around a team plus an
-// atomically-updated current-agent name, but pulling it out of *LocalRuntime
-// turns five methods (CurrentAgentName, setCurrentAgent, SetCurrentAgent,
-// CurrentAgent, resolveSessionAgent) that all touched the same two raw
-// fields into delegations to one type, and lets tests exercise the
-// session-pin-vs-current-agent fallback without instantiating a runtime.
-//
-// All methods are safe for concurrent use.
+// driving the conversation". All methods are safe for concurrent use.
 type agentRouter struct {
 	team *team.Team
-	// current is the only mutable field; team is set once at construction
-	// and read-only after, so an atomic pointer suffices to guard it.
-	current atomic.Pointer[string]
+
+	mu           sync.Mutex
+	current      atomic.Pointer[string]
+	nextTransfer uint64
+	transferBase string
+	transfers    []activeTransfer
 }
 
 // newAgentRouter builds an agentRouter with team t and an initial current
-// agent name. Callers are responsible for pre-validating that the initial
-// name exists in t (NewLocalRuntime does this).
+// agent name.
 func newAgentRouter(t *team.Team, initial string) *agentRouter {
 	r := &agentRouter{team: t}
 	r.current.Store(&initial)
@@ -42,12 +46,88 @@ func (r *agentRouter) Name() string {
 	return ""
 }
 
-// Set replaces the current agent name without validating that it exists
-// in the team. Callers resolve the name through the team first
-// (setCurrentAgent for delegation swaps and switchSessionAgent), and
-// WithCurrentAgent is checked by NewLocalRuntime after options apply.
+// Set updates the shared current agent, or defers the change to transferBase
+// while foreground transfers are active.
 func (r *agentRouter) Set(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.transfers) > 0 {
+		r.transferBase = name
+		return
+	}
 	r.current.Store(&name)
+}
+
+// pushTransfer records an active foreground transfer and switches current to target.
+func (r *agentRouter) pushTransfer(sessionID, target string) (uint64, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.transfers) == 0 {
+		r.transferBase = r.Name()
+	}
+	r.nextTransfer++
+	id := r.nextTransfer
+	r.transfers = append(r.transfers, activeTransfer{
+		id:        id,
+		sessionID: sessionID,
+		agent:     target,
+	})
+	r.current.Store(&target)
+	return id, r.transferBase
+}
+
+// popTransfer removes the transfer identified by id and restores current to
+// the next remaining transfer or transferBase (falling back to fallback).
+func (r *agentRouter) popTransfer(id uint64, fallback string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx := slices.IndexFunc(r.transfers, func(t activeTransfer) bool {
+		return t.id == id
+	})
+	if idx < 0 {
+		return r.Name(), len(r.transfers) > 0
+	}
+	r.transfers = slices.Delete(r.transfers, idx, idx+1)
+	if len(r.transfers) > 0 {
+		next := r.transfers[len(r.transfers)-1].agent
+		r.current.Store(&next)
+		return next, true
+	}
+	base := cmp.Or(r.transferBase, fallback)
+	r.transferBase = ""
+	r.current.Store(&base)
+	return base, false
+}
+
+// isActiveTransfer reports whether sessionID currently owns an active transfer.
+func (r *agentRouter) isActiveTransfer(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.ContainsFunc(r.transfers, func(t activeTransfer) bool {
+		return t.sessionID == sessionID
+	})
+}
+
+// updateTransferAgent updates the recorded agent for an active transfer session
+// after an in-session handoff so nested transfer returns restore the new agent.
+func (r *agentRouter) updateTransferAgent(sessionID, target string) {
+	if sessionID == "" || target == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.transfers) - 1; i >= 0; i-- {
+		if r.transfers[i].sessionID == sessionID {
+			r.transfers[i].agent = target
+			if i == len(r.transfers)-1 {
+				r.current.Store(&target)
+			}
+			return
+		}
+	}
 }
 
 // SetValidated checks that name exists in the team, then sets it as the

@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -201,19 +200,11 @@ type SubSessionConfig struct {
 type delegationRequest struct {
 	SubSessionConfig
 
-	// SwitchCurrentAgent, when true, swaps r.currentAgent to AgentName
-	// for the lifetime of the call and emits AgentSwitching/AgentInfo
-	// events on entry and exit. Used by transfer_task. Mutually
-	// exclusive in spirit with PinAgent: pinning is for concurrent
-	// sub-sessions that must NOT share the runtime's mutable
-	// currentAgent, while switching is for sequential delegations where
-	// the parent loop is blocked anyway.
-	//
-	// When the parent session is itself pinned (a background agent's
-	// session), runForwarding downgrades the switch to pinning the child
-	// to AgentName instead: the shared current agent belongs to the
-	// concurrent foreground loop and must not be mutated from a
-	// background task (#3886).
+	// SwitchCurrentAgent swaps the router's active agent for foreground
+	// delegations and emits AgentSwitching/AgentInfo events on entry and exit.
+	// The child is still pinned to AgentName so parallel transfer_task calls
+	// in the same tool batch cannot misroute each other; non-foreground pinned
+	// parents (background agents, skill forks) skip the shared switch.
 	SwitchCurrentAgent bool
 	// directNativeTransfer enables the idle-stream recovery reserved for the
 	// native transfer_task handler. Other runForwarding callers leave it false.
@@ -339,22 +330,24 @@ func mergeExcludedTools(parent, child []string) []string {
 // `from`, emits the counterpart events and the matching return-side hooks)
 // when invoked.
 //
-// Use as `defer r.swapCurrentAgent(ctx, sessionID, from, to, evts)()` so the
+// Use as `defer r.swapCurrentAgent(ctx, sessionID, childSessionID, from, to, evts)()` so the
 // swap takes effect immediately and the restore runs at function exit.
-func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, from, to *agent.Agent, evts EventSink) func() {
-	// Restore the shared agent the conversation actually had, not the caller:
-	// a hook-routed caller runs on a session-local agent, and writing it back
-	// would replace the conversation's entry agent.
-	shared := r.currentAgentName()
+func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID, childSessionID string, from, to *agent.Agent, evts EventSink) func() {
 	evts.Emit(AgentSwitching(true, from.Name(), to.Name()))
 	r.executeOnAgentSwitchHooks(ctx, from, sessionID, from.Name(), to.Name(), agentSwitchKindTransferTask)
-	r.setCurrentAgent(to.Name())
+	token, initialBase := r.agents.pushTransfer(childSessionID, to.Name())
 	evts.Emit(AgentInfo(to.Name(), agentModelLabel(ctx, to), to.Description(), to.WelcomeMessage()))
 	return func() {
-		r.setCurrentAgent(cmp.Or(shared, from.Name()))
+		restored, remaining := r.agents.popTransfer(token, from.Name())
 		evts.Emit(AgentSwitching(false, to.Name(), from.Name()))
 		r.executeOnAgentSwitchHooks(ctx, from, sessionID, to.Name(), from.Name(), agentSwitchKindTransferTaskReturn)
-		evts.Emit(AgentInfo(from.Name(), agentModelLabel(ctx, from), from.Description(), from.WelcomeMessage()))
+		restoredAgent := from
+		if remaining || (restored != "" && restored != initialBase) {
+			if active, err := r.team.Agent(restored); err == nil {
+				restoredAgent = active
+			}
+		}
+		evts.Emit(AgentInfo(restoredAgent.Name(), agentModelLabel(ctx, restoredAgent), restoredAgent.Description(), restoredAgent.WelcomeMessage()))
 	}
 }
 
@@ -374,10 +367,10 @@ func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, f
 // on whatever span is attached to ctx — a no-op if none.
 //
 // runForwarding handles every concern the callers used to duplicate:
-// rejecting a nil caller agent (callers resolve it), swapping the current agent
-// (if requested; downgraded to pinning the child when the parent session is
-// itself pinned), resolving the child agent, building the sub-session,
-// driving RunStream, and recording the sub-session on the parent.
+// rejecting a nil caller agent (callers resolve it), pinning the child and
+// swapping the current agent (when foreground or an active transfer),
+// resolving the child agent, building the sub-session, driving RunStream,
+// and recording the sub-session on the parent.
 func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Session, callerAgent *agent.Agent, evts EventSink, req delegationRequest) (*tools.ToolCallResult, error) {
 	span := trace.SpanFromContext(ctx)
 
@@ -390,22 +383,23 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 		return nil, err
 	}
 
+	switchCurrent := false
 	if req.SwitchCurrentAgent {
-		if parent.AgentName == "" {
-			defer r.swapCurrentAgent(ctx, parent.ID, callerAgent, child, evts)()
+		req.PinAgent = true
+		if parent.AgentName == "" || r.agents.isActiveTransfer(parent.ID) {
+			req.AllowHandoffs = true
+			switchCurrent = true
 		} else {
-			// Pinned parent (background delegation): the shared current
-			// agent belongs to the concurrent foreground loop and must not
-			// be mutated. Pin the child to the target instead — RunStream
-			// resolves pinned sessions directly, so the child still
-			// executes as the target agent, without switch events/hooks.
-			req.PinAgent = true
 			req.AllowHandoffs = parent.AllowsAgentHandoffs()
 		}
 	}
 
 	req.worktreePrompt = r.worktreePrompt
 	s := newSubSession(parent, req.SubSessionConfig, child)
+
+	if switchCurrent {
+		defer r.swapCurrentAgent(ctx, parent.ID, s.ID, callerAgent, child, evts)()
+	}
 
 	// subagent_stop fires after the child's stream has fully drained,
 	// using the *parent* agent's executor so handlers configured on the
