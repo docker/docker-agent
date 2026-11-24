@@ -216,24 +216,33 @@ func TestLegacyStateRule(t *testing.T) {
 }
 
 // An unreadable legacy root is not an empty one: adopting the new root would
-// hide the user's data behind a marker for good.
+// hide the user's data behind a marker for good. Every layout is exercised
+// because config and data share a directory on macOS, and data and cache on
+// Windows, where one root's marker must not stand in for another's.
 func TestUnreadableLegacyRootIsKept(t *testing.T) {
 	skipWithoutPermissionChecks(t)
-	home := freshInstall(t, runtime.GOOS)
-	legacy := filepath.Join(home, ".cagent")
-	writeState(t, legacy)
-	require.NoError(t, os.Chmod(legacy, 0))
-	t.Cleanup(func() { _ = os.Chmod(legacy, 0o700) })
-	_, target, _ := testutil.DefaultDirs(runtime.GOOS, home)
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			home := freshInstall(t, goos)
+			legacy := filepath.Join(home, ".cagent")
+			state := writeState(t, legacy)
+			require.NoError(t, os.Chmod(legacy, 0))
+			t.Cleanup(func() { _ = os.Chmod(legacy, 0o700) })
+			_, target, _ := testutil.DefaultDirs(goos, home)
 
-	assert.Equal(t, legacy, GetDataDir(), "before EnsureRoots")
+			assert.Equal(t, legacy, GetDataDir(), "before EnsureRoots")
 
-	warnings, err := EnsureRoots()
-	require.NoError(t, err)
-	require.Len(t, warnings, 1)
-	assert.Contains(t, warnings[0], "cannot read "+legacy)
-	assert.Equal(t, legacy, GetDataDir())
-	assert.NoDirExists(t, target, "no marker may pin the new root")
+			warnings, err := EnsureRoots()
+			require.NoError(t, err)
+			require.Len(t, warnings, 1)
+			assert.Contains(t, warnings[0], "cannot read "+legacy)
+			assert.Equal(t, legacy, GetDataDir())
+			assert.False(t, markerExists(target, dataRoot.marker()), "no marker may pin the new root")
+
+			require.NoError(t, os.Chmod(legacy, 0o700))
+			assert.FileExists(t, state, "existing state must not be moved or deleted")
+		})
+	}
 }
 
 func TestMarkerWinsOverRecreatedLegacyRoot(t *testing.T) {
