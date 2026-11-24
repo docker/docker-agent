@@ -58,6 +58,8 @@ $ docker agent run agent.yaml --lean
 
 File writes use the tool's display title (for example, **Write**) and preview file contents as tool arguments stream in, with theme-aware syntax highlighting based on the filename. Unknown file types remain plain text. By default, the preview follows the last 10 file lines. Press <kbd>Ctrl</kbd>+<kbd>O</kbd> to toggle compact (last 10 lines) and complete (full contents) previews for the current session, including already displayed file writes. In `/settings`, change **Written file preview** to **Full** to show the entire incoming file, or persist `settings.lean_full_file_preview: true` in your user config.
 
+The lean TUI sets the terminal window title to `docker agent: <session title>` once the session has a title, and updates it when you resume a session with `/sessions`. Running `/new` resets it to `docker agent`. Control characters are stripped from the title, and the title is not rewritten when it has not changed.
+
 The lean TUI uses a simplified terminal interface with minimal chrome. To make it the default for interactive runs, set `lean` in your user config:
 
 ```yaml
