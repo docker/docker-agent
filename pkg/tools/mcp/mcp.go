@@ -40,10 +40,14 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	if err != nil {
 		return nil, err
 	}
-	if mcpToolset, ok := ts.(interface{ SetExperimentalEvents(enabled bool) }); ok {
-		mcpToolset.SetExperimentalEvents(toolset.Experimental != nil && toolset.Experimental.MCPEvents)
-	}
+	configureExperimentalEvents(ts, toolset.Experimental)
 	return ts, nil
+}
+
+func configureExperimentalEvents(ts tools.ToolSet, cfg *latest.ToolsetExperimentalConfig) {
+	if setter, ok := ts.(interface{ SetExperimentalEvents(enabled bool) }); ok {
+		setter.SetExperimentalEvents(cfg != nil && cfg.MCPEvents)
+	}
 }
 
 func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
@@ -125,30 +129,37 @@ func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		return NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, cwd, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
 
 	case toolset.Remote.URL != "":
-		// The URL is expanded once: it identifies the connection for the
-		// toolset's lifetime. Headers are deliberately NOT expanded here —
-		// they may reference ${env.X} values backed by dynamic providers
-		// (e.g. rotating tokens), so the remote client re-expands them on
-		// every HTTP request (see remoteMCPClient.expandHeaders).
-		remoteURL := js.NewJsExpander(envProvider).Expand(ctx, toolset.Remote.URL, nil)
-
-		ts := newRemoteToolset(
-			toolset.Name,
-			remoteURL,
-			toolset.Remote.TransportType,
-			toolset.Remote.Headers,
-			toolset.Remote.OAuth,
-			toolset.AllowPrivateIPsEnabled(),
-			envProvider,
-			oauthTokenStoreFromContext(ctx),
-			lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
-		)
-		ts.SetStandaloneSSE(toolset.Remote.StandaloneSSE)
-		return ts, nil
+		return remoteToolsetFromConfig(ctx, toolset, envProvider), nil
 
 	default:
 		return nil, errors.New("mcp toolset requires either ref, command, or remote configuration")
 	}
+}
+
+// NewRemoteToolsetFromConfig builds an unstarted toolset for a validated remote.url declaration.
+func NewRemoteToolsetFromConfig(ctx context.Context, toolset latest.Toolset, envProvider environment.Provider) *Toolset {
+	ts := remoteToolsetFromConfig(ctx, toolset, envProvider)
+	configureExperimentalEvents(ts, toolset.Experimental)
+	return ts
+}
+
+func remoteToolsetFromConfig(ctx context.Context, toolset latest.Toolset, envProvider environment.Provider) *Toolset {
+	// The URL identifies the connection; headers may rotate between requests.
+	remoteURL := js.NewJsExpander(envProvider).Expand(ctx, toolset.Remote.URL, nil)
+
+	ts := newRemoteToolset(
+		toolset.Name,
+		remoteURL,
+		toolset.Remote.TransportType,
+		toolset.Remote.Headers,
+		toolset.Remote.OAuth,
+		toolset.AllowPrivateIPsEnabled(),
+		envProvider,
+		oauthTokenStoreFromContext(ctx),
+		lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
+	)
+	ts.SetStandaloneSSE(toolset.Remote.StandaloneSSE)
+	return ts
 }
 
 type mcpClient interface {
