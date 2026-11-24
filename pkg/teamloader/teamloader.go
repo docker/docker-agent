@@ -348,6 +348,13 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			return nil, err
 		}
 	}
+	if !skillLoadingEnabled {
+		for _, a := range cfg.Agents {
+			if a.Skills.Enabled() {
+				return nil, fmt.Errorf("agents.%s.skills: skill loading is not available in this build", a.Name)
+			}
+		}
+	}
 
 	// Toolsets referencing an MCP catalog server (ref: docker:...) need the
 	// catalog to be built. Kick the fetch off now so its network round-trip
@@ -889,8 +896,8 @@ func agentToolOptions(ctx context.Context, cfg *latest.Config, agentConfig *late
 	if requireTools && len(warnings) > 0 {
 		return nil, nil, fmt.Errorf("workspace tool creation failed: %s", strings.Join(warnings, "; "))
 	}
-	// Add skills toolset if skills are enabled
-	if agentConfig.Skills.Enabled() {
+	// A build without skill loading rejects skills before reaching tool creation.
+	if skillLoadingEnabled && agentConfig.Skills.Enabled() {
 		skillDir := runConfig.WorkingDir
 		if skillDir == "" {
 			skillDir, _ = os.Getwd()
