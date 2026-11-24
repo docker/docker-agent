@@ -3,6 +3,7 @@ package leantui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
@@ -52,10 +53,10 @@ func TestRenderToolWrapsCallInBox(t *testing.T) {
 }
 
 func TestRenderToolDoesNotLeakAnimationSubscription(t *testing.T) {
-	ui.RenderToolWithState(shellToolView(tuitypes.ToolStatusRunning), 80, 3, nil)
+	ui.RenderToolWithState(shellToolView(tuitypes.ToolStatusRunning), 80, 300*time.Millisecond, nil)
 	// RenderToolWithState owns a short-lived runtime and StopView cleanup. A
 	// second render must remain safe rather than depending on package globals.
-	ui.RenderToolWithState(shellToolView(tuitypes.ToolStatusRunning), 80, 4, nil)
+	ui.RenderToolWithState(shellToolView(tuitypes.ToolStatusRunning), 80, 400*time.Millisecond, nil)
 }
 
 func TestRenderToolKeepsLastLinesWhenArgumentsTemporarilyInvalid(t *testing.T) {
@@ -73,10 +74,10 @@ func TestRenderToolKeepsLastLinesWhenArgumentsTemporarilyInvalid(t *testing.T) {
 	first[0] = "mutated first render"
 
 	tv.Message().ToolCall.Function.Arguments += ","
-	second := ui.RenderToolWithState(tv, 80, 1, nil)
+	second := ui.RenderToolWithState(tv, 80, 100*time.Millisecond, nil)
 	require.Equal(t, want, strings.Join(second, "\n"))
 	second[0] = "mutated cached render"
-	assert.Equal(t, want, strings.Join(ui.RenderToolWithState(tv, 80, 2, nil), "\n"))
+	assert.Equal(t, want, strings.Join(ui.RenderToolWithState(tv, 80, 200*time.Millisecond, nil), "\n"))
 }
 
 func TestRenderWriteFileKeepsPathWhenArgumentsTemporarilyInvalid(t *testing.T) {
@@ -92,7 +93,7 @@ func TestRenderWriteFileKeepsPathWhenArgumentsTemporarilyInvalid(t *testing.T) {
 	require.Contains(t, strings.Join(first, "\n"), "/tmp/file")
 
 	tv.Message().ToolCall.Function.Arguments += ","
-	second := ui.RenderToolWithState(tv, 80, 1, nil)
+	second := ui.RenderToolWithState(tv, 80, 100*time.Millisecond, nil)
 	assert.Contains(t, strings.Join(second, "\n"), "/tmp/file")
 }
 

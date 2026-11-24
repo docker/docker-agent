@@ -385,8 +385,8 @@ type model struct {
 	// dot while any transfer_task hop is in flight. The frame counts shared
 	// coordinator ticks since the visible (innermost) hop appeared and is
 	// divided down to the rail phase (see transferPhase).
-	transferAnimation      animation.Subscription
-	transferAnimationFrame int
+	transferAnimation animation.Subscription
+	transferStartedAt time.Duration
 
 	ctx func() context.Context
 
@@ -742,12 +742,12 @@ func (m *model) resyncTransferPresentation(prev transferPresentation, prevOK boo
 	m.invalidateCache()
 	cur, ok := m.visibleTransfer()
 	if !ok {
-		m.transferAnimationFrame = 0
+		m.transferStartedAt = 0
 		m.transferAnimation.Stop()
 		return nil
 	}
 	if !prevOK || cur != prev {
-		m.transferAnimationFrame = 0
+		m.transferStartedAt = m.ar.Now()
 	}
 	return m.transferAnimation.Start()
 }
@@ -766,7 +766,7 @@ func (m *model) clearTransferPresentation() {
 	m.agentTransfers = nil
 	m.agentReturn = nil
 	m.transferAnimation.Stop()
-	m.transferAnimationFrame = 0
+	m.transferStartedAt = 0
 }
 
 // SetToolsetInfo sets the number of available tools and loading state
@@ -1486,13 +1486,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		needsInvalidate := false
 
-		// Advance the transfer-box rail on the shared animation tick while a
-		// transfer is in flight; the phase math divides the coordinator's
-		// 14 FPS down to a sober dot movement (see transferPhase).
 		if tick, isTick := msg.(animation.TickMsg); isTick && m.transferAnimation.IsActive() {
-			before := m.transferPhase()
-			m.transferAnimationFrame++
-			if before != m.transferPhase() {
+			before, after := tick.ElapsedBounds()
+			if m.transferPhaseAt(before) != m.transferPhaseAt(after) {
 				needsInvalidate = true
 				tick.MarkDirty()
 			}
@@ -2752,15 +2748,18 @@ const (
 	transferDot            = "●"
 	transferArrowHead      = "►"
 	transferRailCells      = 3
-
-	// transferFramesPerStep divides the shared 14 FPS animation tick down to
-	// a sober ~7 FPS dot movement.
-	transferFramesPerStep = 2
 )
 
 // transferPhase returns the rail cell currently occupied by the dot.
 func (m *model) transferPhase() int {
-	return m.transferAnimationFrame / transferFramesPerStep % transferRailCells
+	if !m.transferAnimation.IsActive() {
+		return 0
+	}
+	return m.transferPhaseAt(m.ar.Now())
+}
+
+func (m *model) transferPhaseAt(elapsed time.Duration) int {
+	return animation.TimedStep(elapsed-m.transferStartedAt, animation.TransferRailStepDuration) % transferRailCells
 }
 
 // transferRailView renders the animated rail: three track cells with the

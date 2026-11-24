@@ -75,7 +75,7 @@ func TestFinishedToolRetainsDuration(t *testing.T) {
 			require.NotNil(t, snapshot.message.FinishedAt)
 			first := RenderToolWithState(snapshot, 80, 0, nil)
 			assert.Contains(t, ansi.Strip(strings.Join(first, "\n")), label)
-			assert.Equal(t, first, RenderToolWithState(snapshot, 80, 100, nil))
+			assert.Equal(t, first, RenderToolWithState(snapshot, 80, 10*time.Second, nil))
 			assert.Contains(t, ansi.Strip(strings.Join(RenderToolWithState(snapshot, 40, 0, nil), "\n")), label)
 		}
 	}
@@ -98,7 +98,7 @@ func TestToolViewReusesInstanceRegistry(t *testing.T) {
 	})
 	assert.Zero(t, calls)
 	for frame := range 3 {
-		assert.NotEmpty(t, RenderToolWithState(view, 80, frame, nil))
+		assert.NotEmpty(t, RenderToolWithState(view, 80, time.Duration(frame)*100*time.Millisecond, nil))
 		assert.Same(t, registry, view.renderers)
 		assert.Equal(t, frame+1, calls, "reuse the registry, not the rendered model")
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/programstatus"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/sound"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -148,7 +149,7 @@ func Run(ctx context.Context, cfg Config) error {
 		m.enqueueFollowUp(msg, msg)
 	}
 
-	animationTicker := time.NewTicker(100 * time.Millisecond)
+	animationTicker := time.NewTicker(animation.ChatSpinnerFrameDuration)
 	defer animationTicker.Stop()
 	resizeTicker := time.NewTicker(250 * time.Millisecond)
 	defer resizeTicker.Stop()
@@ -186,7 +187,6 @@ func Run(ctx context.Context, cfg Config) error {
 			m.resize(term.Size())
 		case <-animationTicker.C:
 			if m.busy || m.screen.Transcript.ToolCount() > 0 {
-				m.spinnerFrame++
 				m.render()
 			}
 		case branch, ok := <-branchChanges:
@@ -317,7 +317,9 @@ type model struct {
 	streamStartTime     time.Time
 	playSound           func(context.Context, sound.Event)
 	busy                bool
-	spinnerFrame        int
+	spinnerElapsed      time.Duration
+	spinnerSampledAt    time.Time
+	spinnerActive       bool
 	runCancel           context.CancelFunc
 	cancelMarkerPending bool
 	queue               []ui.PendingUserMessage
@@ -429,8 +431,18 @@ func (m *model) resize(width, height int) {
 
 // render assembles the full frame and reconciles it with the terminal.
 func (m *model) render() {
+	m.sampleSpinner(time.Now())
 	lines, cursorLine, cursorCol := m.buildLines()
 	m.r.Frame(lines, cursorLine, cursorCol, m.screen.Transcript.LiveToolRows())
+}
+
+// sampleSpinner accumulates animation time only while the busy UI is visible.
+func (m *model) sampleSpinner(now time.Time) {
+	if m.spinnerActive {
+		m.spinnerElapsed += now.Sub(m.spinnerSampledAt)
+	}
+	m.spinnerSampledAt = now
+	m.spinnerActive = m.busy || m.screen.Transcript.ToolCount() > 0
 }
 
 // renderFinal repaints the current state, then erases the input box and footer
@@ -438,7 +450,7 @@ func (m *model) render() {
 func (m *model) renderFinal() {
 	m.screen.Transcript.FlushPending()
 	m.render()
-	m.r.EraseBelow(len(m.screen.Transcript.Lines(m.width, m.spinnerFrame, m.busy, m.sessionState, m.pendingUsers)))
+	m.r.EraseBelow(len(m.screen.Transcript.Lines(m.width, m.spinnerElapsed, m.busy, m.sessionState, m.pendingUsers)))
 }
 
 func (m *model) commitWelcome() {

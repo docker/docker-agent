@@ -3,14 +3,14 @@ package ui
 import (
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/streamcontent"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
-
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type blockKind int
 
@@ -243,7 +243,7 @@ func (t *Transcript) FinalizeTools(status tuitypes.ToolStatus, sessionState serv
 // Lines renders everything that scrolls: finalized blocks, the in-progress
 // streamed block, running tool calls, and user messages waiting to be accepted
 // by the runtime. A blank line separates each entry.
-func (t *Transcript) Lines(width, spinnerFrame int, _ bool, sessionState service.SessionStateReader, pendingUsers []PendingUserMessage) []string {
+func (t *Transcript) Lines(width int, elapsed time.Duration, _ bool, sessionState service.SessionStateReader, pendingUsers []PendingUserMessage) []string {
 	var lines []string
 	for _, b := range t.blocks {
 		lines = append(lines, b.lines(width)...)
@@ -256,7 +256,7 @@ func (t *Transcript) Lines(width, spinnerFrame int, _ bool, sessionState service
 	t.liveToolRows[0] = len(lines)
 	t.toolz.ForEach(func(tv *ToolView) {
 		tv.fullFilePreview = t.fullFilePreview
-		lines = append(lines, RenderToolWithState(tv, width, spinnerFrame, sessionState)...)
+		lines = append(lines, RenderToolWithState(tv, width, elapsed, sessionState)...)
 		lines = append(lines, "")
 	})
 	t.liveToolRows[1] = len(lines)
@@ -302,8 +302,8 @@ func (t *Transcript) pendingLines(width int) []string {
 	}
 }
 
-func spinnerLine(frame int) string {
-	f := spinnerFrames[frame%len(spinnerFrames)]
+func spinnerLine(elapsed time.Duration) string {
+	f := animation.Chat.FrameAt(elapsed)
 	return StAccent().Render(f) + " " + StMuted().Render("Working…")
 }
 

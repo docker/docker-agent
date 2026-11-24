@@ -191,6 +191,7 @@ func (m *mockEditor) AttachmentAt(int) (editor.AttachmentPreview, bool) {
 	return editor.AttachmentPreview{}, false
 }
 func (m *mockEditor) SetRecording(bool) tea.Cmd                   { return nil }
+func (m *mockEditor) SetHidden(bool) tea.Cmd                      { return nil }
 func (m *mockEditor) IsRecording() bool                           { return false }
 func (m *mockEditor) IsHistorySearchActive() bool                 { return false }
 func (m *mockEditor) EnterHistorySearch() (layout.Model, tea.Cmd) { return m, nil }

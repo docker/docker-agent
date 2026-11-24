@@ -66,9 +66,10 @@ func (f Frames) TimedFrameIndex(elapsed, frameDuration time.Duration) int {
 	return TimedStep(elapsed, frameDuration) % len(f)
 }
 
+// TimedStep returns the zero-based discrete step at elapsed time.
 func TimedStep(elapsed, frameDuration time.Duration) int {
 	if frameDuration <= 0 {
 		frameDuration = DefaultSpinnerFrameDuration
 	}
-	return int(elapsed / frameDuration)
+	return int(max(elapsed, 0) / frameDuration)
 }

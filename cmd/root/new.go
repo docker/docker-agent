@@ -163,18 +163,6 @@ func runTUIWrapped(ctx context.Context, rt runtime.Runtime, sess *session.Sessio
 
 	a := app.New(ctx, rt, sess, opts...)
 
-	coalescer := tuiinput.NewWheelCoalescer()
-	filter := func(model tea.Model, msg tea.Msg) tea.Msg {
-		wheelMsg, ok := msg.(tea.MouseWheelMsg)
-		if !ok {
-			return msg
-		}
-		if coalescer.Handle(wheelMsg) {
-			return nil
-		}
-		return msg
-	}
-
 	if cleanup == nil {
 		cleanup = func() {}
 	}
@@ -198,7 +186,21 @@ func runTUIWrapped(ctx context.Context, rt runtime.Runtime, sess *session.Sessio
 		tuiOpts = append(tuiOpts, tui.WithProgramStatusProbe(reporter))
 		defer reporter.Finish(os.Stdout)
 	}
-	model := tui.New(ctx, spawner, a, wd, cleanup, tuiOpts...)
+	fullscreenModel := tui.New(ctx, spawner, a, wd, cleanup, tuiOpts...)
+	coalescer := tuiinput.NewWheelCoalescer()
+	filter := func(_ tea.Model, msg tea.Msg) tea.Msg {
+		msg = tui.FilterTerminalHandoff(fullscreenModel, msg)
+		wheelMsg, ok := msg.(tea.MouseWheelMsg)
+		if !ok {
+			return msg
+		}
+		if coalescer.Handle(wheelMsg) {
+			return nil
+		}
+		return msg
+	}
+
+	model := fullscreenModel
 	if wrap != nil {
 		model = wrap(model)
 	}

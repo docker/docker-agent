@@ -23,6 +23,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -91,6 +92,8 @@ type Editor interface {
 	AttachmentAt(x int) (AttachmentPreview, bool)
 	// SetRecording sets the recording mode which shows animated dots as the cursor
 	SetRecording(recording bool) tea.Cmd
+	// SetHidden reports whether another tab owns the screen; recording continues.
+	SetHidden(hidden bool) tea.Cmd
 	// IsRecording returns true if the editor is in recording mode
 	IsRecording() bool
 	// IsHistorySearchActive returns true if the editor is in history search mode
@@ -158,9 +161,11 @@ type editor struct {
 	recording bool
 	// placeholder is the configured empty-editor placeholder, restored when
 	// transient placeholders (e.g. recording mode) end.
-	placeholder string
-	// recordingDotPhase tracks the animation phase for the recording dots cursor
-	recordingDotPhase int
+	placeholder        string
+	animationRuntime   *animation.Runtime
+	recordingAnimation animation.Subscription
+	recordingStartedAt time.Duration
+	hidden             bool
 
 	// fileLoadID is incremented each time we start a new file load to ignore stale results
 	fileLoadID uint64
@@ -179,6 +184,14 @@ type editor struct {
 
 // Option configures the Editor.
 type Option func(*editor)
+
+// WithAnimationRuntime binds recording dots to the program's animation clock.
+func WithAnimationRuntime(ar *animation.Runtime) Option {
+	return func(e *editor) {
+		e.animationRuntime = ar
+		e.recordingAnimation = ar.Subscribe()
+	}
+}
 
 // WithCompletions sets the available completions for the editor.
 func WithCompletions(comps ...completions.Completion) Option {
@@ -667,19 +680,17 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
-	case recordingDotsTickMsg:
-		if !e.recording {
-			return e, nil
+	case animation.TickMsg:
+		if e.recording {
+			_, elapsed := msg.ElapsedBounds()
+			phase := animation.TimedStep(elapsed-e.recordingStartedAt, animation.RecordingDotsStepDuration) % 4
+			placeholder := "🎤 Listening" + strings.Repeat("·", phase)
+			if e.textarea.Placeholder != placeholder {
+				e.textarea.Placeholder = placeholder
+				msg.MarkDirty()
+			}
 		}
-		// Cycle through dot phases: "·", "··", "···"
-		e.recordingDotPhase = (e.recordingDotPhase + 1) % 4
-		dots := strings.Repeat("·", e.recordingDotPhase)
-		if e.recordingDotPhase == 0 {
-			dots = ""
-		}
-		e.textarea.Placeholder = "🎤 Listening" + dots
-		cmd := e.tickRecordingDots()
-		return e, cmd
+		return e, nil
 	case tea.PasteMsg:
 		content, handled := e.handlePaste(msg.Content)
 		if handled {
@@ -1560,6 +1571,7 @@ func (e *editor) collectAttachments(content string) []messages.Attachment {
 
 // Cleanup removes any temporary paste files that haven't been sent yet.
 func (e *editor) Cleanup() {
+	e.recordingAnimation.Stop()
 	for _, att := range e.attachments {
 		if att.isTemp {
 			_ = os.Remove(att.path)
@@ -1573,22 +1585,28 @@ func (e *editor) Cleanup() {
 func (e *editor) SetRecording(recording bool) tea.Cmd {
 	e.recording = recording
 	if recording {
-		e.recordingDotPhase = 0
 		e.textarea.Placeholder = "🎤 Listening"
-		return e.tickRecordingDots()
+		if e.animationRuntime != nil {
+			e.recordingStartedAt = e.animationRuntime.Now()
+		}
+	} else {
+		e.textarea.Placeholder = e.placeholder
 	}
-	e.textarea.Placeholder = e.placeholder
-	return nil
+	return e.syncRecordingAnimation()
 }
 
-// recordingDotsTickMsg is sent periodically to animate the recording dots
-type recordingDotsTickMsg struct{}
+func (e *editor) SetHidden(hidden bool) tea.Cmd {
+	e.hidden = hidden
+	return e.syncRecordingAnimation()
+}
 
-// tickRecordingDots returns a command that ticks the recording dots animation
-func (e *editor) tickRecordingDots() tea.Cmd {
-	return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
-		return recordingDotsTickMsg{}
-	})
+// syncRecordingAnimation keeps the dots subscribed only while they can be seen.
+func (e *editor) syncRecordingAnimation() tea.Cmd {
+	if !e.recording || e.hidden || e.animationRuntime == nil {
+		e.recordingAnimation.Stop()
+		return nil
+	}
+	return e.recordingAnimation.Start()
 }
 
 // IsRecording returns true if the editor is in recording mode

@@ -3,6 +3,7 @@ package messages
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,33 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
+
+type slackScheduler struct {
+	now   time.Time
+	extra time.Duration
+}
+
+func (s *slackScheduler) Now() time.Time { return s.now }
+func (s *slackScheduler) Tick(d time.Duration, makeMsg func(time.Time) tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		s.now = s.now.Add(d + s.extra)
+		return makeMsg(s.now)
+	}
+}
+
+func tickSlack(t *testing.T, m *model) {
+	t.Helper()
+	sub := m.ar.Subscribe()
+	defer sub.Stop()
+	cmd := sub.Start()
+	if cmd == nil {
+		cmd = m.ar.Continue()
+	}
+	require.NotNil(t, cmd)
+	tick, ok := m.ar.Accept(cmd().(animation.TickMsg))
+	require.True(t, ok)
+	_, _ = m.Update(tick)
+}
 
 // shrinkingView is a layout.Model whose rendered height can be changed
 // between renders, simulating content shrinkage (e.g. tools fading out
@@ -74,7 +102,7 @@ func TestBottomSlackDecaysOnAnimationTick(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
-	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState).(*model)
+	m := NewScrollableView(animation.NewRuntimeWithScheduler(&slackScheduler{now: time.Unix(1, 0)}), 80, 24, sessionState).(*model)
 	m.SetSize(80, 24)
 
 	addShrinkingView(m, 10)
@@ -83,25 +111,46 @@ func TestBottomSlackDecaysOnAnimationTick(t *testing.T) {
 	// Pretend a previous shrinkage left some slack behind.
 	m.bottomSlack = 3
 
-	m.Update(animation.TickMsg{})
+	tickSlack(t, m)
 	assert.Equal(t, 2, m.bottomSlack, "tick should decay slack by one line")
 
-	m.Update(animation.TickMsg{})
+	tickSlack(t, m)
 	assert.Equal(t, 1, m.bottomSlack)
 
-	m.Update(animation.TickMsg{})
+	tickSlack(t, m)
 	assert.Equal(t, 0, m.bottomSlack, "slack should reach zero after enough ticks")
 
 	// Further ticks must not produce negative slack.
-	m.Update(animation.TickMsg{})
+	tickSlack(t, m)
 	assert.Equal(t, 0, m.bottomSlack)
+}
+
+func TestBottomSlackDecayUsesElapsedTime(t *testing.T) {
+	t.Parallel()
+	row := animation.TranscriptSlackRowDuration
+	for _, gaps := range [][]time.Duration{{row / 2, row + row/2 + 1}, {2 * row}} {
+		clock := &slackScheduler{now: time.Unix(1, 0)}
+		m := NewScrollableView(animation.NewRuntimeWithScheduler(clock), 80, 24, &service.SessionState{}).(*model)
+		addShrinkingView(m, 10)
+		m.View()
+		m.AdjustBottomSlack(4)
+		for _, gap := range gaps {
+			clock.extra = gap - animation.TickRate
+			tickSlack(t, m)
+		}
+		assert.Equal(t, 2, m.bottomSlack)
+		clock.extra = time.Hour
+		tickSlack(t, m)
+		assert.Zero(t, m.bottomSlack)
+		assert.False(t, m.slackAnimationSub.IsActive())
+	}
 }
 
 func TestBottomSlackAnimationSubscribesWhileDecaying(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
-	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState).(*model)
+	m := NewScrollableView(animation.NewRuntimeWithScheduler(&slackScheduler{now: time.Unix(1, 0)}), 80, 24, sessionState).(*model)
 	m.SetSize(80, 24)
 
 	addShrinkingView(m, 10)
@@ -116,13 +165,13 @@ func TestBottomSlackAnimationSubscribesWhileDecaying(t *testing.T) {
 	// is non-nil only for the first global subscriber, which is racy when
 	// tests touching the animation coordinator run in parallel.
 	m.bottomSlack = 2
-	m.Update(animation.TickMsg{})
+	tickSlack(t, m)
 	assert.True(t, m.slackAnimationSub.IsActive(),
 		"subscription should be active while slack > 0")
 
 	// Once slack hits zero, the subscription must release the global tick.
-	m.Update(animation.TickMsg{})
-	m.Update(animation.TickMsg{})
+	tickSlack(t, m)
+	tickSlack(t, m)
 	assert.Equal(t, 0, m.bottomSlack)
 	assert.False(t, m.slackAnimationSub.IsActive(),
 		"subscription should be released once slack reaches zero")
@@ -206,7 +255,7 @@ func TestBottomSlackDecayPausesWhenUserScrollsAway(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
-	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState).(*model)
+	m := NewScrollableView(animation.NewRuntimeWithScheduler(&slackScheduler{now: time.Unix(1, 0)}), 80, 24, sessionState).(*model)
 	m.SetSize(80, 24)
 
 	addShrinkingView(m, 10)
@@ -216,14 +265,14 @@ func TestBottomSlackDecayPausesWhenUserScrollsAway(t *testing.T) {
 	m.bottomSlack = 3
 
 	// First tick decays one line as expected.
-	m.Update(animation.TickMsg{})
+	tickSlack(t, m)
 	require.Equal(t, 2, m.bottomSlack)
 
 	// User scrolls away mid-decay. updateScrollState resets slack to zero
 	// for the userHasScrolled path; the next tick should leave it there
 	// and not produce a negative value.
 	m.userHasScrolled = true
-	m.Update(animation.TickMsg{})
+	tickSlack(t, m)
 	assert.Equal(t, 0, m.bottomSlack,
 		"slack must drop to zero (not be decayed below it) once the user scrolls away")
 }
