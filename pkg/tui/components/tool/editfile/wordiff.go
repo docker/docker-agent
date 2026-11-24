@@ -3,6 +3,7 @@ package editfile
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/aymanbagabas/go-udiff/lcs"
 )
@@ -22,34 +23,38 @@ type wordSegment struct {
 // punctuation/symbol runes. This granularity matches what users intuitively
 // recognize as a "word change" in a code diff (`foo` -> `bar`, `42` -> `43`),
 // while still picking up small edits like added punctuation.
+//
+// Tokens are sliced from the source instead of being re-encoded, so an invalid
+// byte (decoded as a one-byte U+FFFD) keeps its true size and the token stream
+// stays byte-identical to the line — segment offsets must line up with the
+// text applyWordEmphasis slices.
 func tokenizeForWordDiff(line string) []string {
 	if line == "" {
 		return nil
 	}
 
 	var tokens []string
-	var current strings.Builder
+	start := 0
 	currentKind := -1
 
-	flush := func() {
-		if current.Len() > 0 {
-			tokens = append(tokens, current.String())
-			current.Reset()
-		}
-	}
-
-	for _, r := range line {
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
 		k := runeKind(r)
 		// Identifier and whitespace runs are coalesced; everything else is
 		// emitted as a single-rune token so a lone added bracket or comma
 		// shows up as a precise highlight.
 		if k != currentKind || (k != kindIdent && k != kindSpace) {
-			flush()
+			if i > start {
+				tokens = append(tokens, line[start:i])
+			}
+			start = i
 			currentKind = k
 		}
-		current.WriteRune(r)
+		i += size
 	}
-	flush()
+	if start < len(line) {
+		tokens = append(tokens, line[start:])
+	}
 
 	return tokens
 }
