@@ -66,7 +66,7 @@ func (m *Model) pointerOverScrollbar() bool {
 	const proximity = 2
 	v := &m.visibility
 	return m.NeedsScrollbar() && v.x >= 0 && v.y >= 0 &&
-		v.x >= max(m.xPos, m.ScrollbarX()-proximity) && v.x <= m.ScrollbarX()+proximity &&
+		v.x >= max(m.xPos, m.ScrollbarX()-proximity) && v.x <= min(m.ScrollbarX()+proximity, m.xPos+m.width) &&
 		v.y >= m.yPos && v.y < m.yPos+m.height
 }
 
