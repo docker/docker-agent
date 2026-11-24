@@ -320,7 +320,7 @@ Secret redaction is enabled by default. The `redact_secrets` field controls scru
 
 1. A `tool_input_transform` built-in hook that scrubs detected secrets from the **arguments of every tool call**, before the tool sees them.
 2. A `before_llm_call` built-in hook that scrubs the same patterns from **outgoing chat messages** — message content, multi-part text content, prior reasoning content, and the JSON-encoded arguments of any tool call still in the conversation — before they reach the model provider.
-3. A `tool_response_transform` built-in hook that scrubs **tool output, its display metadata, and its inline document attachments at the source**, so the secret never reaches event consumers, the persisted session file, the `post_tool_use` hook input, or the next LLM call.
+3. A `tool_response_transform` built-in hook that scrubs **tool output, its display metadata, and its inline document attachments at the source**, so the secret never reaches event consumers, the persisted session file, the `post_tool_use` hook input, or the next LLM call. When other `tool_response_transform` hooks are configured, the auto-injected redactor runs once **before** them — command hooks receive the whole hook input as JSON on stdin, so they never see raw tool results — and once **after** them, so a later rewrite cannot reintroduce a secret.
 
 ```yaml
 agents:

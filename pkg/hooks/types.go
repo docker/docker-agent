@@ -704,7 +704,14 @@ type HookSpecificOutput struct {
 	//
 	// Hooks run in config order; each sees the preceding rewrite. The last
 	// non-nil rewrite is returned.
-	UpdatedToolDocuments []tools.DocumentContent `json:"updated_tool_documents,omitempty"`
+	//
+	// Tagged omitzero rather than omitempty: an empty but non-nil slice is
+	// the explicit "remove every attachment" rewrite, so it must keep its
+	// wire form (`[]`) when a Go hook marshals its output instead of being
+	// dropped as an empty omitempty value and silently turning the rewrite
+	// into a no-op. A literal `[]` on a command hook's stdout already
+	// decodes to a non-nil empty slice.
+	UpdatedToolDocuments []tools.DocumentContent `json:"updated_tool_documents,omitzero"`
 
 	// Transition is a control hook's route request. Only
 	// [EventBeforeAgentRun] and [EventAfterAgentComplete] accept it; any

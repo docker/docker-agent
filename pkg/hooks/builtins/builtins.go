@@ -161,8 +161,13 @@ type AutoInjector interface {
 	AutoInject(cfg *hooks.Config)
 }
 
-// ApplyAgentDefaults appends the stock builtin hook entries implied by
-// d to cfg. A nil cfg is treated as empty. Returns nil iff no hook
+// ApplyAgentDefaults adds the stock builtin hook entries implied by d to
+// cfg, appending them after any user-configured hooks. There is one
+// deliberate exception: when d.RedactSecrets is set and cfg already
+// carries configured tool_response_transform hooks, a named redaction
+// pass is inserted ahead of them so command hooks cannot observe raw
+// tool output, display metadata, or inline document attachments on
+// stdin. A nil cfg is treated as empty. Returns nil iff no hook
 // (user-configured or auto-injected) is present.
 //
 // Snapshot auto-injection is handled separately via [SnapshotController]
@@ -201,10 +206,40 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 			Hooks:   []hooks.Hook{builtinHook(RedactSecrets)},
 		})
 		cfg.BeforeLLMCall = append(cfg.BeforeLLMCall, builtinHook(RedactSecrets))
-		cfg.ToolResponseTransform = append(cfg.ToolResponseTransform, hooks.MatcherConfig{
+
+		// tool_response_transform carries the tool's textual output, its
+		// display metadata, and (since attachments became part of the hook
+		// protocol) the inline document attachments MCP servers return as
+		// text resources. Configured transforms must not see those fields
+		// unredacted: command hooks receive the whole hook input as JSON on
+		// stdin, so a hook that archives its input would record credentials
+		// that redact_secrets is supposed to keep out of downstream
+		// consumers. Run the redactor ahead of the configured transforms,
+		// and keep the trailing entry as the final pass so a later rewrite
+		// that reintroduces a secret is scrubbed before emission,
+		// persistence, and the next LLM call.
+		//
+		// The preamble is only injected when there are configured
+		// transforms to protect; with none there is no hook to leak to and
+		// a single pass keeps the per-tool-result cost unchanged. It also
+		// carries its own Name: the executor deduplicates identical hooks,
+		// and without the name it would collapse into the trailing pass.
+		responseRedactor := hooks.MatcherConfig{
 			Matcher: "*",
 			Hooks:   []hooks.Hook{builtinHook(RedactSecrets)},
-		})
+		}
+		if len(cfg.ToolResponseTransform) > 0 {
+			preamble := hooks.MatcherConfig{
+				Matcher: "*",
+				Hooks: []hooks.Hook{{
+					Name:    "redact_secrets (before configured hooks)",
+					Type:    hooks.HookTypeBuiltin,
+					Command: RedactSecrets,
+				}},
+			}
+			cfg.ToolResponseTransform = append([]hooks.MatcherConfig{preamble}, cfg.ToolResponseTransform...)
+		}
+		cfg.ToolResponseTransform = append(cfg.ToolResponseTransform, responseRedactor)
 	}
 	// Redact before the limiter writes oversized responses to disk.
 	cfg.ToolResponseTransform = append(cfg.ToolResponseTransform, hooks.MatcherConfig{

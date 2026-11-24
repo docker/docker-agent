@@ -845,25 +845,65 @@ func TestApplyAgentDefaultsAppendsToUserHooks(t *testing.T) {
 	assert.Equal(t, builtins.AddDate, got.TurnStart[1].Command)
 }
 
-func TestApplyAgentDefaultsOrdersTransformsBeforeLimiter(t *testing.T) {
+// TestApplyAgentDefaultsOrdersTransformsAroundRedaction pins the
+// tool_response_transform ordering: the always-on large-result limiter runs
+// last, and when redaction is enabled the auto-injected redaction pass
+// brackets the configured transforms — a preamble so command hooks cannot
+// observe raw tool results (the hook input is piped to their stdin as JSON)
+// and a trailing pass so a rewrite that reintroduces a secret is still
+// scrubbed. The two redaction entries are the same builtin, so the preamble
+// must stay distinguishable (by Name) from the trailing pass: the executor
+// deduplicates identical hooks and would otherwise drop the final pass.
+func TestApplyAgentDefaultsOrdersTransformsAroundRedaction(t *testing.T) {
 	t.Parallel()
 
-	for _, redact := range []bool{false, true} {
-		cfg := builtins.ApplyAgentDefaults(&hooks.Config{
-			ToolResponseTransform: []hooks.MatcherConfig{{Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "custom"}}}},
-		}, builtins.AgentDefaults{RedactSecrets: redact})
-		var names []string
-		for _, matcher := range cfg.ToolResponseTransform {
-			for _, hook := range matcher.Hooks {
-				names = append(names, hook.Command)
+	for _, tc := range []struct {
+		name       string
+		redact     bool
+		configured bool
+		want       []string
+	}{
+		{
+			name:       "no redaction",
+			configured: true,
+			want:       []string{"custom", builtins.LimitLargeToolResults},
+		},
+		{
+			name:       "redaction brackets configured transforms",
+			redact:     true,
+			configured: true,
+			want:       []string{builtins.RedactSecrets, "custom", builtins.RedactSecrets, builtins.LimitLargeToolResults},
+		},
+		{
+			name:   "redaction without configured transforms needs one pass",
+			redact: true,
+			want:   []string{builtins.RedactSecrets, builtins.LimitLargeToolResults},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := &hooks.Config{}
+			if tc.configured {
+				cfg.ToolResponseTransform = []hooks.MatcherConfig{{Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "custom"}}}}
 			}
-		}
-		want := []string{"custom"}
-		if redact {
-			want = append(want, builtins.RedactSecrets)
-		}
-		want = append(want, builtins.LimitLargeToolResults)
-		assert.Equal(t, want, names)
+			cfg = builtins.ApplyAgentDefaults(cfg, builtins.AgentDefaults{RedactSecrets: tc.redact})
+
+			var names []string
+			for _, matcher := range cfg.ToolResponseTransform {
+				for _, hook := range matcher.Hooks {
+					names = append(names, hook.Command)
+				}
+			}
+			assert.Equal(t, tc.want, names)
+
+			if tc.redact && tc.configured {
+				assert.NotEmpty(t, cfg.ToolResponseTransform[0].Hooks[0].Name,
+					"the pre-hook redaction pass needs a distinct identity to survive hook dedup")
+				assert.Empty(t, cfg.ToolResponseTransform[2].Hooks[0].Name,
+					"the trailing redaction pass must stay identical to the historical auto-injection")
+			}
+		})
 	}
 }
 

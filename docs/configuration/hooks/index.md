@@ -665,6 +665,8 @@ This is the symmetric counterpart of `tool_input_transform`'s `updated_input`, a
 
 Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_documents`, the inline document attachments the tool returned. MCP servers return text resources this way (the payload is in `text`), and those documents are emitted to event subscribers and persisted in the session next to the textual output. Only `tool_response_transform` hooks can rewrite the list, with `updated_tool_documents`; the rewritten attachments are what gets emitted and persisted, and `post_tool_use` hooks receive the already-transformed list. `redact_secrets` scrubs each attachment's name, URI, MIME type, and text, so a secret carried in an MCP inline-text resource never reaches the session file or the event stream.
 
+When the agent-level `redact_secrets` flag is on (the default) and other `tool_response_transform` hooks are configured, the auto-injected redactor runs both **before** and **after** them. The leading pass matters because command hooks receive the whole hook input as JSON on stdin: without it, a hook that archives its input would record the raw tool output, display metadata, and inline document attachments. The trailing pass is the final scrub, so a later rewrite that reintroduces a secret is still caught. Configured hooks therefore observe the already-redacted values, with detected secrets replaced by markers.
+
 Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_result_meta`, the structured display metadata a tool recorded alongside its text output (the TUI renders completed `edit_file` diffs from it). Only `tool_response_transform` hooks can rewrite it, with `updated_tool_result_meta` (independently of `updated_tool_response`); the rewritten metadata is what gets emitted and persisted. `post_tool_use` hooks receive the already-transformed metadata and cannot change it. `redact_secrets` also scrubs this metadata, and clears it when it cannot be serialized safely.
 
 ### Composing transformations
@@ -681,7 +683,12 @@ Hooks for the following events run **sequentially in configuration order**:
 Every matching hook on these events participates in the sequence, whether it
 rewrites, observes, or returns a verdict. Each hook sees the most recent
 successful rewrite. Hooks that return no rewrite leave the current value
-unchanged; the runtime receives the final result of the sequence.
+unchanged; the runtime receives the final result of the sequence. The
+runtime's auto-injected defaults respect that order: the always-on
+`limit_large_tool_results` runs last, and when `redact_secrets` is enabled it
+runs both ahead of the configured transforms (so command hooks never receive
+raw tool results on stdin) and after them (so a later rewrite is still
+scrubbed).
 
 `updated_input` patches replace only the top-level keys they supply. Other
 arguments are preserved; nested objects are replaced, not deep-merged. An empty
