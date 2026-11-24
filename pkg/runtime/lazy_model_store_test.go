@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -85,14 +86,17 @@ func TestLazyModelStore_DefersError(t *testing.T) {
 // unreachable. This exercises the exact store the request loop and session
 // compaction use in production.
 func TestLazyModelStore_GatesCustomProvider(t *testing.T) {
-	// Point the cache at an empty home so there is no on-disk catalog to fall
-	// back on: a cold start, as in a freshly-spawned pod. t.Setenv forbids
+	// Point the cache at an empty directory so there is no on-disk catalog to
+	// fall back on: a cold start, as in a freshly-spawned pod. t.Setenv forbids
 	// t.Parallel, which is fine here. modelsdev.NewStore resolves the cache
-	// dir via os.UserCacheDir, which derives from HOME on macOS and from
-	// XDG_CACHE_HOME or HOME on Linux.
+	// dir via os.UserCacheDir, which follows HOME on macOS, %LocalAppData% on
+	// Windows and an absolute XDG_CACHE_HOME on Linux. RunWithTempHome sets
+	// those for the whole suite, so they must be overridden here too.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LocalAppData", filepath.Join(home, "AppData", "Local"))
 
 	var store ModelStore = &lazyModelStore{}
 
