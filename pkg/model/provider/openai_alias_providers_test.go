@@ -133,6 +133,15 @@ var openAIAliasProviders = []openAIAliasProvider{
 		liveOptInEnvVar:      "DOCKER_AGENT_RUN_HOPBASE_LIVE_TEST",
 	},
 	{
+		provider:             "trustedrouter",
+		envVar:               "TRUSTEDROUTER_API_KEY",
+		testKey:              "sk-tr-v1-test-key",
+		model:                "trustedrouter/auto",
+		greeting:             "Hello from TrustedRouter",
+		mergesSystemMessages: true,
+		liveOptInEnvVar:      "DOCKER_AGENT_RUN_TRUSTEDROUTER_LIVE_TEST",
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",

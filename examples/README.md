@@ -227,6 +227,7 @@ remote MCP endpoints.
 | [`cloudgpu.yaml`](cloudgpu.yaml) | CloudGPU OpenAI-compatible provider (`cloudgpu`). |
 | [`obscurify.yaml`](obscurify.yaml) | Obscurify.ai multi-model provider (`obscurify`). |
 | [`hopbase.yaml`](hopbase.yaml) | HopBase multi-model gateway (`hopbase`). |
+| [`trustedrouter.yaml`](trustedrouter.yaml) | TrustedRouter OpenAI-compatible router (`trustedrouter`). |
 | [`cloudflare-workers-ai.yaml`](cloudflare-workers-ai.yaml) | Cloudflare Workers AI edge-hosted open models. |
 | [`cloudflare-ai-gateway.yaml`](cloudflare-ai-gateway.yaml) | Cloudflare AI Gateway multi-provider router. |
 | [`grok.yaml`](grok.yaml) | xAI Grok model. |
