@@ -89,6 +89,67 @@ func TestGitLogPathFilter(t *testing.T) {
 	require.NotContains(t, res.Output, "touch a")
 }
 
+func TestGitLogPathFilterDirectory(t *testing.T) {
+	t.Parallel()
+	dir, repo := newRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src", "sub"), 0o755))
+	addCommit(t, repo, dir, map[string]string{"README.md": "1\n"}, "touch readme")
+	addCommit(t, repo, dir, map[string]string{"src/a.txt": "1\n"}, "touch src a")
+	addCommit(t, repo, dir, map[string]string{"src/sub/b.txt": "1\n"}, "touch src sub b")
+	addCommit(t, repo, dir, map[string]string{"srcs.txt": "1\n"}, "touch srcs")
+
+	tests := []struct {
+		name    string
+		path    string
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "directory",
+			path:    "src",
+			want:    []string{"touch src a", "touch src sub b"},
+			notWant: []string{"touch readme", "touch srcs"},
+		},
+		{
+			name:    "directory with trailing slash",
+			path:    "src/",
+			want:    []string{"touch src a", "touch src sub b"},
+			notWant: []string{"touch readme", "touch srcs"},
+		},
+		{
+			name:    "nested directory",
+			path:    "src/sub",
+			want:    []string{"touch src sub b"},
+			notWant: []string{"touch readme", "touch src a", "touch srcs"},
+		},
+		{
+			name:    "file with leading dot slash",
+			path:    "./src/a.txt",
+			want:    []string{"touch src a"},
+			notWant: []string{"touch readme", "touch src sub b", "touch srcs"},
+		},
+		{
+			name: "repository root",
+			path: ".",
+			want: []string{"touch readme", "touch src a", "touch src sub b", "touch srcs"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			res, err := New(dir).log(t.Context(), LogArgs{Path: tt.path})
+			require.NoError(t, err)
+			require.False(t, res.IsError, res.Output)
+			for _, msg := range tt.want {
+				require.Contains(t, res.Output, msg)
+			}
+			for _, msg := range tt.notWant {
+				require.NotContains(t, res.Output, msg)
+			}
+		})
+	}
+}
+
 func TestGitShowExplicitAndInvalidRef(t *testing.T) {
 	t.Parallel()
 	dir, repo := newRepo(t)

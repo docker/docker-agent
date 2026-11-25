@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"sort"
 	"strings"
 
@@ -136,8 +137,11 @@ func (t *ToolSet) log(_ context.Context, args LogArgs) (*tools.ToolCallResult, e
 
 	opts := &gogit.LogOptions{Order: gogit.LogOrderCommitterTime}
 	if args.Path != "" {
-		p := args.Path
-		opts.FileName = &p
+		// Like `git log -- <path>`: a directory matches every file below it.
+		p := path.Clean(args.Path)
+		opts.PathFilter = func(name string) bool {
+			return p == "." || name == p || strings.HasPrefix(name, p+"/")
+		}
 	}
 	iter, err := repo.Log(opts)
 	if err != nil {
