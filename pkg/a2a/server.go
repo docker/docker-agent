@@ -69,6 +69,9 @@ type RunOptions struct {
 	// instead parks the task in TASK_STATE_INPUT_REQUIRED until the client
 	// replies with an approve/reject decision. Off by default.
 	ToolApproval bool
+
+	// approvals overrides the tool-approval registry (tests).
+	approvals *approvalRegistry
 }
 
 // pushDrainTimeout bounds how long shutdown waits for queued webhooks.
@@ -216,7 +219,10 @@ func newServer(ctx context.Context, t *team.Team, agentFilename, agentName strin
 	// The registry keeps runtimes alive between the request that parks on a
 	// tool confirmation and the request that answers it. ctx is the server
 	// lifetime: cancelling it (shutdown) cancels every parked run.
-	approvals := newApprovalRegistry(ctx, options.ToolApproval)
+	approvals := options.approvals
+	if approvals == nil {
+		approvals = newApprovalRegistry(ctx, options.ToolApproval)
+	}
 
 	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir, approvals)
 	if err != nil {
@@ -291,6 +297,7 @@ func newServer(ctx context.Context, t *team.Team, agentFilename, agentName strin
 			a2asrv.WithTaskStore(deps.tasks),
 			a2asrv.WithPushNotifications(deps.pushConfigs, deps.pushSender),
 			a2asrv.WithCapabilityChecks(&agentCard.Capabilities),
+			a2asrv.WithCallInterceptors(&approvalInterceptor{approvals: approvals}),
 		)),
 		"a2a.message",
 	)

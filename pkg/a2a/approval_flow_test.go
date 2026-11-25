@@ -1,0 +1,241 @@
+package a2a
+
+import (
+	"context"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	dagent "github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/tools"
+)
+
+func (p *sequentialMockProvider) calls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.next
+}
+
+func approvalTeamWith(tool tools.Tool, streams ...chat.MessageStream) (*team.Team, *sequentialMockProvider) {
+	provider := &sequentialMockProvider{id: modelsdev.NewID("test", "mock-model"), streams: streams}
+	root := dagent.New("root", "You are a test agent", dagent.WithModel(provider), dagent.WithTools(tool))
+	return team.New(team.WithAgents(root)), provider
+}
+
+func textThenToolCallStream(text, toolName string) chat.MessageStream {
+	return &mockStream{responses: []chat.MessageStreamResponse{
+		{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: text}}}},
+		{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ToolCalls: []tools.ToolCall{{
+			ID:       "tool-call",
+			Type:     "function",
+			Function: tools.FunctionCall{Name: toolName, Arguments: "{}"},
+		}}}}}},
+	}}
+}
+
+func sendText(t *testing.T, client *a2aclient.Client, contextID, text string) a2a.SendMessageResult {
+	t.Helper()
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(text))
+	msg.ContextID = contextID
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{Message: msg})
+	require.NoError(t, err)
+	return res
+}
+
+func requireInvalidParams(t *testing.T, err error, reason string) {
+	t.Helper()
+	require.ErrorIs(t, err, a2a.ErrInvalidParams)
+	var a2aErr *a2a.Error
+	require.ErrorAs(t, err, &a2aErr)
+	assert.Equal(t, reason, a2aErr.Details["reason"])
+}
+
+// A new task in the context of a task waiting for approval can neither answer
+// nor strand that approval; the waiting task still resumes afterwards.
+func TestServer_ToolApproval_OtherTaskInContextCannotTakeApproval(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int32
+	client := startToolApprovalServer(t, approvalTeam(&executions), session.NewInMemorySessionStore(), true)
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	wantReason := "task " + string(task.ID) + " is waiting for tool approval in this context; reply with its taskId or cancel it"
+
+	text := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("reject it"))
+	text.ContextID = task.ContextID
+	_, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{Message: text})
+	requireInvalidParams(t, err, wantReason)
+
+	answer := answerToolCall(task, callID, map[string]any{"decision": "approve"})
+	answer.TaskID = ""
+	_, err = client.SendMessage(t.Context(), &a2a.SendMessageRequest{Message: answer})
+	requireInvalidParams(t, err, wantReason)
+
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
+	})
+	require.NoError(t, err)
+	done, ok := res.(*a2a.Task)
+	require.True(t, ok, "expected a task, got %T", res)
+	assert.Equal(t, a2a.TaskStateCompleted, done.Status.State)
+	assert.Equal(t, int32(1), executions.Load())
+}
+
+// A reply after the janitor evicted the parked run fails the task instead of
+// starting a new model turn.
+func TestServer_ToolApproval_LateReplyFailsWithoutModelCall(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int32
+	tm, provider := approvalTeamWith(approvalCanaryTool(&executions), toolCallStream("approval_canary"), stopStream())
+	reg := newApprovalRegistry(t.Context(), true)
+	client := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true, approvals: reg})
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	callsBefore := provider.calls()
+	reg.evictExpired(time.Now().Add(2 * defaultApprovalTTL))
+
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
+	})
+	require.NoError(t, err)
+	failed, ok := res.(*a2a.Task)
+	require.True(t, ok, "expected a task, got %T", res)
+	assert.Equal(t, a2a.TaskStateFailed, failed.Status.State)
+	assert.Equal(t, callsBefore, provider.calls(), "a late reply must not call the model")
+	assert.Zero(t, executions.Load(), "a late reply must not run the tool")
+}
+
+// Cancelling a task while its approved tool runs cancels the tool.
+func TestServer_ToolApproval_CancelStopsApprovedTool(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	tool := tools.Tool{
+		Name:       "approval_canary",
+		Parameters: map[string]any{},
+		Handler: func(ctx context.Context, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+			close(started)
+			<-ctx.Done()
+			close(stopped)
+			return nil, ctx.Err()
+		},
+	}
+	tm, _ := approvalTeamWith(tool, toolCallStream("approval_canary"), stopStream())
+	client := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true})
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+
+	go func() {
+		_, _ = client.SendMessage(context.WithoutCancel(t.Context()), &a2a.SendMessageRequest{
+			Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("approved tool did not start")
+	}
+
+	cancelCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	canceled, err := client.CancelTask(cancelCtx, &a2a.CancelTaskRequest{ID: task.ID})
+	select {
+	case <-stopped:
+	case <-cancelCtx.Done():
+		t.Fatal("cancelling the task did not cancel the running tool")
+	}
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateCanceled, canceled.Status.State)
+}
+
+// approve-tool survives the session reload of the next turn.
+func TestServer_ToolApproval_ApproveToolPersistsAcrossTurns(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int32
+	tm, _ := approvalTeamWith(approvalCanaryTool(&executions),
+		toolCallStream("approval_canary"), stopStream(),
+		toolCallStream("approval_canary"), stopStream())
+	client := startApprovalServer(t, tm, newA2AResumeStore(t, "sqlite"), RunOptions{ToolApproval: true})
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve-tool"}),
+	})
+	require.NoError(t, err)
+	require.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
+
+	second, ok := sendText(t, client, task.ContextID, "run it again").(*a2a.Task)
+	require.True(t, ok)
+	assert.Equal(t, a2a.TaskStateCompleted, second.Status.State, "the approved tool must not ask again")
+	assert.Equal(t, int32(2), executions.Load())
+}
+
+// Text the model streams before asking for approval stays in the artifacts.
+func TestServer_ToolApproval_TextBeforeApprovalIsKept(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int32
+	tm, _ := approvalTeamWith(approvalCanaryTool(&executions),
+		textThenToolCallStream("Checking first.", "approval_canary"), answerStream("All done."))
+	client := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true})
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
+	})
+	require.NoError(t, err)
+	done := res.(*a2a.Task)
+	require.Equal(t, a2a.TaskStateCompleted, done.Status.State)
+
+	var text strings.Builder
+	for _, artifact := range done.Artifacts {
+		for _, part := range artifact.Parts {
+			text.WriteString(part.Text())
+		}
+	}
+	assert.Contains(t, text.String(), "Checking first.")
+	assert.Contains(t, text.String(), "All done.")
+}
+
+// An invalid decision is rejected with -32602 and leaves the task waiting with
+// its history unchanged.
+func TestServer_ToolApproval_InvalidDecisionKeepsTaskWaiting(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int32
+	client := startToolApprovalServer(t, approvalTeam(&executions), session.NewInMemorySessionStore(), true)
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	before, err := client.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
+	require.NoError(t, err)
+
+	_, err = client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "maybe"}),
+	})
+	requireInvalidParams(t, err, "decision 'maybe' not allowed; expected [approve, approve-tool, reject]")
+
+	after, err := client.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateInputRequired, after.Status.State)
+	assert.Len(t, after.History, len(before.History), "a rejected reply must not be recorded")
+
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
+	assert.Equal(t, int32(1), executions.Load())
+}

@@ -7,11 +7,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/adk/v2/model"
 	adksession "google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -30,12 +32,15 @@ const approvalJanitorInterval = time.Minute
 // whoever holds the pausedRun: the registry while it waits, or the adapter
 // goroutine once it takes it back to resume.
 type pausedRun struct {
-	rt       runtime.Runtime
-	events   <-chan runtime.Event
-	cancel   context.CancelFunc
-	toolName string // function name of the paused call, for approve-tool
-	callID   string // tool-call ID reported to the client as long-running
-	created  time.Time
+	taskID    a2a.TaskID
+	contextID string
+	rt        runtime.Runtime
+	sess      *session.Session
+	events    <-chan runtime.Event
+	cancel    context.CancelFunc
+	toolName  string // function name of the paused call, for approve-tool
+	callID    string // tool-call ID reported to the client as long-running
+	created   time.Time
 }
 
 func (p *pausedRun) cancelAndDrain() {
@@ -45,16 +50,17 @@ func (p *pausedRun) cancelAndDrain() {
 }
 
 // approvalRegistry keeps runtimes alive between the request that pauses on a
-// tool confirmation and the request that answers it, keyed by A2A contextId.
-// It is created per server; a disabled registry (tool approval off) is inert
-// beyond routing the run context, so the default A2A behaviour is unchanged.
+// tool confirmation and the request that answers it, keyed by A2A task ID so
+// another task in the same context can neither answer nor cancel it. It is
+// created per server; a disabled registry (tool approval off) is inert beyond
+// routing the run context, so the default A2A behaviour is unchanged.
 type approvalRegistry struct {
 	enabled bool
-	baseCtx context.Context //nolint:containedctx // server-lifetime context paused runs derive from
+	baseCtx context.Context //nolint:containedctx // server lifetime bounding detached runs
 	ttl     time.Duration
 
 	mu   sync.Mutex
-	runs map[string]*pausedRun
+	runs map[a2a.TaskID]*pausedRun
 }
 
 // newApprovalRegistry builds a registry. When enabled, a background janitor
@@ -65,7 +71,7 @@ func newApprovalRegistry(baseCtx context.Context, enabled bool) *approvalRegistr
 		enabled: enabled,
 		baseCtx: baseCtx,
 		ttl:     defaultApprovalTTL,
-		runs:    make(map[string]*pausedRun),
+		runs:    make(map[a2a.TaskID]*pausedRun),
 	}
 	if enabled {
 		go r.janitor()
@@ -79,48 +85,94 @@ func (r *approvalRegistry) toolApproval() bool {
 	return r != nil && r.enabled
 }
 
-// runContext returns the context a new run should derive its event stream
-// from. In approval mode it is the server-lifetime context, so a run that
-// parks on a tool confirmation survives the request that started it;
-// otherwise it is the per-invocation context, preserving the default
-// drain-on-request-cancel behaviour of the adapter.
-func (r *approvalRegistry) runContext(invocation context.Context) context.Context {
-	if r.toolApproval() {
-		return r.baseCtx
+// runContext returns the context a new run streams from. In approval mode it
+// keeps the invocation's values (trace, baggage) but not its cancellation, so
+// a run that parks survives the request that started it; server shutdown
+// still cancels it. Callers bind it to each invocation while the run is active
+// (see bindToInvocation). Otherwise it is the invocation context itself.
+func (r *approvalRegistry) runContext(invocation context.Context) (context.Context, context.CancelFunc) {
+	if !r.toolApproval() {
+		return context.WithCancel(invocation)
 	}
-	return invocation
+	ctx, cancel := context.WithCancel(context.WithoutCancel(invocation))
+	stop := context.AfterFunc(r.baseCtx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
-// store parks a run under its contextId. Any run already parked under the same
-// id is cancelled first: a client that re-asks replaces its pending call.
-func (r *approvalRegistry) store(contextID string, run *pausedRun) {
+// bindToInvocation cancels a run when the invocation serving it ends (request
+// gone, A2A cancel). The returned stop detaches it once the run is parked.
+func bindToInvocation(invocation context.Context, cancel context.CancelFunc) (stop func() bool) {
+	return context.AfterFunc(invocation, cancel)
+}
+
+// park stores a run under its task. A run already parked for the same task is
+// cancelled first.
+func (r *approvalRegistry) park(run *pausedRun) {
 	r.mu.Lock()
-	prev, replaced := r.runs[contextID]
-	r.runs[contextID] = run
+	prev, replaced := r.runs[run.taskID]
+	r.runs[run.taskID] = run
 	r.mu.Unlock()
 	if replaced && prev != run {
 		prev.cancelAndDrain()
 	}
 }
 
-// take removes and returns the run parked under contextID, if any.
-func (r *approvalRegistry) take(contextID string) (*pausedRun, bool) {
+// pending returns the run parked for taskID without removing it.
+func (r *approvalRegistry) pending(taskID a2a.TaskID) (*pausedRun, bool) {
 	if r == nil {
 		return nil, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	run, ok := r.runs[contextID]
-	if ok {
-		delete(r.runs, contextID)
-	}
+	run, ok := r.runs[taskID]
 	return run, ok
 }
 
-// cancel cancels and drops the run parked under contextID, if any. Used by the
-// A2A Cancel path to release a task abandoned before it was answered.
-func (r *approvalRegistry) cancel(contextID string) {
-	if run, ok := r.take(contextID); ok {
+// pendingInContext returns a task of contextID that is waiting for approval.
+func (r *approvalRegistry) pendingInContext(contextID string) (a2a.TaskID, bool) {
+	if r == nil || contextID == "" {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, run := range r.runs {
+		if run.contextID == contextID {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// take removes and returns the run parked for taskID, only if it waits on
+// callID.
+func (r *approvalRegistry) take(taskID a2a.TaskID, callID string) (*pausedRun, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	run, ok := r.runs[taskID]
+	if !ok || run.callID != callID {
+		return nil, false
+	}
+	delete(r.runs, taskID)
+	return run, true
+}
+
+// cancel cancels and drops the run parked for taskID, if any. Used by the A2A
+// Cancel path to release a task abandoned before it was answered.
+func (r *approvalRegistry) cancel(taskID a2a.TaskID) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	run, ok := r.runs[taskID]
+	delete(r.runs, taskID)
+	r.mu.Unlock()
+	if ok {
 		run.cancelAndDrain()
 	}
 }
@@ -134,13 +186,13 @@ func (r *approvalRegistry) janitor() {
 			r.cancelAll()
 			return
 		case <-ticker.C:
-			r.evictExpired()
+			r.evictExpired(time.Now())
 		}
 	}
 }
 
-func (r *approvalRegistry) evictExpired() {
-	deadline := time.Now().Add(-r.ttl)
+func (r *approvalRegistry) evictExpired(now time.Time) {
+	deadline := now.Add(-r.ttl)
 	var expired []*pausedRun
 	r.mu.Lock()
 	for id, run := range r.runs {
@@ -158,7 +210,7 @@ func (r *approvalRegistry) evictExpired() {
 func (r *approvalRegistry) cancelAll() {
 	r.mu.Lock()
 	runs := r.runs
-	r.runs = make(map[string]*pausedRun)
+	r.runs = make(map[a2a.TaskID]*pausedRun)
 	r.mu.Unlock()
 	for _, run := range runs {
 		run.cancelAndDrain()
@@ -192,55 +244,30 @@ func inputRequiredEvent(agentName string, tc tools.ToolCall) *adksession.Event {
 	}
 }
 
-// resumeDecision maps the FunctionResponse the client sent on the resume
-// request to a runtime ResumeRequest. ADK's HandleInputRequired has already
-// guaranteed a response with a matching ID is present before the agent runs;
-// an absent, malformed, or unrecognised decision is treated as a rejection so
-// the model is told rather than left hanging.
-func resumeDecision(content *genai.Content, run *pausedRun) runtime.ResumeRequest {
-	fr := matchingFunctionResponse(content, run.callID)
-	if fr == nil {
-		return runtime.ResumeReject("no approval decision provided")
-	}
+// resumeDecision maps a validated approval response to a runtime
+// ResumeRequest. The interceptor has already rejected unknown decisions.
+func resumeDecision(fr *genai.FunctionResponse, toolName string) runtime.ResumeRequest {
 	decision, _ := fr.Response["decision"].(string)
 	reason, _ := fr.Response["reason"].(string)
 	switch decision {
-	case "approve":
+	case decisionApprove:
 		return runtime.ResumeApprove()
-	case "approve-tool":
-		return runtime.ResumeApproveTool(run.toolName)
-	case "reject":
-		return runtime.ResumeReject(reason)
+	case decisionApproveTool:
+		return runtime.ResumeApproveTool(toolName)
 	default:
-		msg := "unrecognised approval decision"
-		if decision != "" {
-			msg += ": " + decision
-		}
-		if reason != "" {
-			msg += " (" + reason + ")"
-		}
-		return runtime.ResumeReject(msg)
+		return runtime.ResumeReject(reason)
 	}
 }
 
-// matchingFunctionResponse returns the FunctionResponse addressed to callID,
-// falling back to the first response present if none matches exactly (ADK only
-// lets us run when a matching-ID response exists, so the fallback is defensive).
-func matchingFunctionResponse(content *genai.Content, callID string) *genai.FunctionResponse {
+// functionResponse returns the FunctionResponse addressed to callID.
+func functionResponse(content *genai.Content, callID string) *genai.FunctionResponse {
 	if content == nil {
 		return nil
 	}
-	var fallback *genai.FunctionResponse
 	for _, part := range content.Parts {
-		if part == nil || part.FunctionResponse == nil {
-			continue
-		}
-		if part.FunctionResponse.ID == callID {
+		if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID == callID {
 			return part.FunctionResponse
 		}
-		if fallback == nil {
-			fallback = part.FunctionResponse
-		}
 	}
-	return fallback
+	return nil
 }

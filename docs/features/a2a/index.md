@@ -145,31 +145,40 @@ When a call needs confirmation, the task pauses in `TASK_STATE_INPUT_REQUIRED`
 and its status message carries the pending call as a data part:
 
 ```json
-{"kind":"data","data":{"id":"call_123","name":"shell","args":{"cmd":"ls"}},
+{"data":{"id":"call_123","name":"shell","args":{"cmd":"ls"}},
  "metadata":{"adk_type":"function_call","adk_is_long_running":true}}
 ```
 
-The client answers on the same task (`taskId` + `contextId`) with a matching
-function-response data part:
+The client answers with `SendMessage` on the same task (`taskId` is required,
+plus `contextId`) and a matching function-response data part:
 
 ```json
-{"kind":"data","data":{"id":"call_123","name":"shell","response":{"decision":"approve"}},
- "metadata":{"adk_type":"function_response"}}
+{"taskId":"…","contextId":"…",
+ "parts":[{"data":{"id":"call_123","name":"shell","response":{"decision":"approve"}},
+  "metadata":{"adk_type":"function_response"}}]}
 ```
 
-`decision` is one of `approve`, `approve-tool` (approve this tool for the rest of
-the session), or `reject` (with an optional `reason`). A free-text reply is
-rejected by the protocol: the response must carry the function-call `id`. An
-unrecognised or missing decision is treated as a rejection, which the model is
-told about so it can adapt.
+`decision` is one of `approve`, `approve-tool` (approve this tool for the rest
+of the conversation, persisted with the session), or `reject` (with an optional
+`reason`, passed to the model).
+
+A reply that does not answer the pending call (free text, another call `id`,
+or any other decision) is rejected with JSON-RPC `-32602` and a
+`reason` in the error data, e.g.
+`decision 'x' not allowed; expected [approve, approve-tool, reject]`. The task
+stays in `TASK_STATE_INPUT_REQUIRED`, nothing is added to its history, and no
+push notification is sent, so the client can retry.
 
 Notes and limits:
 
 - The switch is narrow: only top-level A2A sessions honour it. Background agents
   and `transfer_task` sub-sessions keep denying.
-- Pending approvals are held in memory. If the server restarts, they are lost
-  and the task fails when the client replies. Abandoned tasks are reclaimed after
-  a TTL, on A2A `cancel`, and at server shutdown.
+- A paused task holds its conversation: a new task in the same `contextId` is
+  rejected with `-32602` until the paused task is answered or canceled.
+- Pending approvals are held in memory and reclaimed after one hour, on A2A
+  `CancelTask`, and at server shutdown. A reply to an expired approval, or one
+  lost in a restart, fails the task without starting a new model turn.
+- Canceling a task also cancels a tool it is running after approval.
 - Without the flag the behaviour is unchanged: non-interactive sessions deny.
 
 ## Resuming conversations
