@@ -55,7 +55,20 @@ func (w *executorWrapper) Execute(ctx context.Context, execCtx *a2asrv.ExecutorC
 			runCtx = withResume(ctx, ticket)
 		}
 		for event, err := range fixArtifactEvents(w.executor.Execute(runCtx, execCtx)) {
-			annotateApprovalParts(event, w.approvals)
+			if isFinalStatus(event) {
+				// A concurrent CancelTask writes CANCELED to this execution's queue;
+				// a final event published first would win and strand the task.
+				canceling := w.approvals.isCanceling(execCtx.TaskID)
+				if !canceling {
+					annotateApprovalParts(event, w.approvals)
+				}
+				ok := canceling || yield(event, err)
+				w.approvals.runHook(hookAfterFinalEvent, execCtx.TaskID)
+				if !ok {
+					return
+				}
+				continue
+			}
 			if !yield(event, err) {
 				return
 			}
@@ -89,18 +102,42 @@ func (w *executorWrapper) takeResume(execCtx *a2asrv.ExecutorContext) (*resumeTi
 	return &resumeTicket{run: run, response: fr}, true
 }
 
+// Cancel marks the task as canceling before ADK emits CANCELED, so an execution
+// about to pause publishes nothing final. The parked run, if any, is released
+// in Cleanup once the outcome is known; an active run is cancelled with the
+// execution context the SDK cancels.
 func (w *executorWrapper) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
-	// A task waiting in INPUT_REQUIRED has a runtime parked in the registry.
-	// Cancelling the A2A task must cancel and release it so it does not leak.
-	// An active run is cancelled with the execution context the SDK cancels.
-	w.approvals.cancel(execCtx.TaskID)
+	if w.approvals.toolApproval() {
+		w.approvals.markCanceling(execCtx.TaskID)
+		w.approvals.runHook(hookBeforeCancelEvent, execCtx.TaskID)
+	}
 	return w.executor.Cancel(ctx, execCtx)
 }
 
-// Cleanup delegates to the ADK executor, which implements
+// Cleanup releases the run parked for the task unless the task is still
+// waiting for it, then delegates to the ADK executor, which implements
 // a2asrv.AgentExecutionCleaner; dropping it would change cleanup semantics.
+// The SDK joins the execution before calling it, so no park can follow.
 func (w *executorWrapper) Cleanup(ctx context.Context, execCtx *a2asrv.ExecutorContext, result a2a.SendMessageResult, err error) {
+	if w.approvals.toolApproval() {
+		state := a2a.TaskStateUnspecified
+		if task, ok := result.(*a2a.Task); ok {
+			state = task.Status.State
+		}
+		switch {
+		case execCtx.Message == nil:
+			w.approvals.resolveCancel(execCtx.TaskID, state == a2a.TaskStateCanceled)
+		case state != a2a.TaskStateInputRequired:
+			w.approvals.cancel(execCtx.TaskID)
+		}
+	}
 	w.executor.Cleanup(ctx, execCtx, result, err)
+}
+
+// isFinalStatus reports whether a2a-go ends the execution on event.
+func isFinalStatus(event a2a.Event) bool {
+	ev, ok := event.(*a2a.TaskStatusUpdateEvent)
+	return ok && (ev.Status.State.Terminal() || ev.Status.State == a2a.TaskStateInputRequired)
 }
 
 // fixArtifactEvents wraps an event sequence and fixes artifact update events

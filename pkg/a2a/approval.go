@@ -39,9 +39,21 @@ const abandonTimeout = 5 * time.Second
 // approval is dropped at server shutdown.
 const approvalShutdownReason = "Tool approval canceled: the A2A server shut down"
 
-// abandonFunc fails the A2A task of a parked run dropped without an answer, so
+// abandonFunc moves the A2A task of a parked run dropped without an answer to
+// state (failed, or canceled when a cancel lost the race to the pause), so
 // clients polling or watching it learn it will not resume.
-type abandonFunc func(ctx context.Context, run *pausedRun, reason string)
+type abandonFunc func(ctx context.Context, run *pausedRun, state a2a.TaskState, reason string)
+
+// approvalHookPoint names a step of the pause/cancel handoff; tests use hooks
+// to force interleavings.
+type approvalHookPoint int
+
+const (
+	hookBeforePark approvalHookPoint = iota
+	hookAfterPark
+	hookBeforeCancelEvent
+	hookAfterFinalEvent
+)
 
 // pausedRun captures a runtime parked inside askUser, waiting for the A2A
 // client to approve or reject a tool call on a subsequent request. Ownership
@@ -82,10 +94,13 @@ type approvalRegistry struct {
 
 	mu        sync.Mutex
 	runs      map[a2a.TaskID]*pausedRun
-	closed    bool // shutdown released the parked runs; later parks are abandoned
+	canceling map[a2a.TaskID]bool // CancelTask in progress: the execution must not pause
+	closed    bool                // shutdown released the parked runs; later parks are abandoned
 	onAbandon abandonFunc
 	live      int           // runtimes whose event stream is still open
 	idle      chan struct{} // closed while live is zero
+
+	hook func(approvalHookPoint, a2a.TaskID) // tests only
 }
 
 // newApprovalRegistry builds a registry. When enabled, a background janitor
@@ -96,13 +111,14 @@ func newApprovalRegistry(baseCtx context.Context, enabled bool) *approvalRegistr
 	idle := make(chan struct{})
 	close(idle)
 	r := &approvalRegistry{
-		enabled: enabled,
-		baseCtx: ctx,
-		stop:    stop,
-		done:    make(chan struct{}),
-		ttl:     defaultApprovalTTL,
-		runs:    make(map[a2a.TaskID]*pausedRun),
-		idle:    idle,
+		enabled:   enabled,
+		baseCtx:   ctx,
+		stop:      stop,
+		done:      make(chan struct{}),
+		ttl:       defaultApprovalTTL,
+		runs:      make(map[a2a.TaskID]*pausedRun),
+		canceling: make(map[a2a.TaskID]bool),
+		idle:      idle,
 	}
 	if enabled {
 		go r.janitor()
@@ -209,7 +225,7 @@ func (r *approvalRegistry) park(run *pausedRun) {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		r.abandon(run, approvalShutdownReason)
+		r.abandon(run, a2a.TaskStateFailed, approvalShutdownReason)
 		return
 	}
 	prev, replaced := r.runs[run.taskID]
@@ -262,8 +278,8 @@ func (r *approvalRegistry) take(taskID a2a.TaskID, callID string) (*pausedRun, b
 	return run, true
 }
 
-// cancel cancels and drops the run parked for taskID, if any. Used by the A2A
-// Cancel path to release a task abandoned before it was answered.
+// cancel cancels and drops the run parked for taskID, if any. Used once an
+// execution ends with its task no longer waiting for input.
 func (r *approvalRegistry) cancel(taskID a2a.TaskID) {
 	if r == nil {
 		return
@@ -274,6 +290,54 @@ func (r *approvalRegistry) cancel(taskID a2a.TaskID) {
 	r.mu.Unlock()
 	if ok {
 		run.cancelAndDrain()
+	}
+}
+
+// markCanceling records a CancelTask for taskID until its outcome is known
+// (see resolveCancel), so a concurrent execution does not pause the task.
+func (r *approvalRegistry) markCanceling(taskID a2a.TaskID) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.canceling[taskID] = true
+	r.mu.Unlock()
+}
+
+func (r *approvalRegistry) isCanceling(taskID a2a.TaskID) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.canceling[taskID]
+}
+
+// resolveCancel releases the run parked for taskID once a CancelTask is over.
+// If the task did not end canceled, the execution published INPUT_REQUIRED
+// before the cancel event (a2a-go then reports ErrTaskNotCancelable): the task
+// is canceled here instead, so it never advertises a dropped approval.
+func (r *approvalRegistry) resolveCancel(taskID a2a.TaskID, canceled bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	delete(r.canceling, taskID)
+	run, ok := r.runs[taskID]
+	delete(r.runs, taskID)
+	r.mu.Unlock()
+	switch {
+	case !ok:
+	case canceled:
+		run.cancelAndDrain()
+	default:
+		r.abandon(run, a2a.TaskStateCanceled, "")
+	}
+}
+
+func (r *approvalRegistry) runHook(point approvalHookPoint, taskID a2a.TaskID) {
+	if r != nil && r.hook != nil {
+		r.hook(point, taskID)
 	}
 }
 
@@ -304,7 +368,7 @@ func (r *approvalRegistry) evictExpired(now time.Time) {
 	}
 	r.mu.Unlock()
 	for _, run := range expired {
-		r.abandon(run, approvalExpiredReason)
+		r.abandon(run, a2a.TaskStateFailed, approvalExpiredReason)
 	}
 }
 
@@ -315,19 +379,20 @@ func (r *approvalRegistry) cancelAll() {
 	r.closed = true
 	r.mu.Unlock()
 	for _, run := range runs {
-		r.abandon(run, approvalShutdownReason)
+		r.abandon(run, a2a.TaskStateFailed, approvalShutdownReason)
 	}
 }
 
-// abandon fails the task of a run dropped without an answer, then releases it.
-func (r *approvalRegistry) abandon(run *pausedRun, reason string) {
+// abandon moves the task of a run dropped without an answer to state, then
+// releases the run.
+func (r *approvalRegistry) abandon(run *pausedRun, state a2a.TaskState, reason string) {
 	r.mu.Lock()
 	fn := r.onAbandon
 	r.mu.Unlock()
 	if fn != nil {
 		// Detached: at shutdown the server context is already canceled.
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.baseCtx), abandonTimeout)
-		fn(ctx, run, reason)
+		fn(ctx, run, state, reason)
 		cancel()
 	}
 	run.cancelAndDrain()

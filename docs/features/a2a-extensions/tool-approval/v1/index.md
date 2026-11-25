@@ -168,7 +168,8 @@ retry.
 ## Lifecycle
 
 - `CancelTask` on a paused task cancels it and drops the pending approval.
-  It also cancels a tool already running after approval.
+  It also cancels a tool already running after approval. A cancel that races
+  the pause ends the task canceled.
 - A server MAY expire pending approvals. Docker Agent keeps them in memory
   for one hour and drops them at shutdown. A reply to an expired or lost
   approval fails the task without starting a new model turn.

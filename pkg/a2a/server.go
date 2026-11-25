@@ -222,10 +222,10 @@ func recoverInterruptedTasks(ctx context.Context, store *a2astore.Store, sender 
 	return nil
 }
 
-// failAbandonedTask fails the task of a parked run dropped without an answer
-// and notifies its webhooks: nothing would ever resume it.
+// failAbandonedTask moves the task of a parked run dropped without an answer
+// to state and notifies its webhooks: nothing would ever resume it.
 func failAbandonedTask(deps taskDeps) abandonFunc {
-	return func(ctx context.Context, run *pausedRun, reason string) {
+	return func(ctx context.Context, run *pausedRun, state a2a.TaskState, reason string) {
 		// The task store resolves the owner from the call context.
 		ctx, callCtx := a2asrv.NewCallContext(ctx, nil)
 		if run.user != nil {
@@ -240,17 +240,20 @@ func failAbandonedTask(deps taskDeps) abandonFunc {
 			return
 		}
 		task := *stored.Task
-		msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, &task, a2a.NewTextPart(reason))
-		event := a2a.NewStatusUpdateEvent(&task, a2a.TaskStateFailed, msg)
+		var msg *a2a.Message
+		if reason != "" {
+			msg = a2a.NewMessageForTask(a2a.MessageRoleAgent, &task, a2a.NewTextPart(reason))
+		}
+		event := a2a.NewStatusUpdateEvent(&task, state, msg)
 		task.Status = event.Status
 		if _, err := deps.tasks.Update(ctx, &taskstore.UpdateRequest{
 			Task: &task, Event: event, PrevTask: stored.Task, PrevVersion: stored.Version,
 		}); err != nil {
 			// A concurrent reply already moved the task on.
-			slog.WarnContext(ctx, "Failed to fail abandoned A2A task", "task_id", run.taskID, "error", err)
+			slog.WarnContext(ctx, "Failed to update abandoned A2A task", "task_id", run.taskID, "error", err)
 			return
 		}
-		slog.InfoContext(ctx, "Failed A2A task with an abandoned tool approval", "task_id", run.taskID)
+		slog.InfoContext(ctx, "Ended A2A task with an abandoned tool approval", "task_id", run.taskID, "state", state)
 		configs, err := deps.pushConfigs.List(ctx, run.taskID)
 		if err != nil {
 			slog.WarnContext(ctx, "Failed to list push configs of abandoned task", "task_id", run.taskID, "error", err)

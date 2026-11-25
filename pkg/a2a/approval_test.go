@@ -165,7 +165,9 @@ func TestApprovalRegistry_ParkAfterCloseAbandons(t *testing.T) {
 
 	reg := newApprovalRegistry(t.Context(), true)
 	var reasons []string
-	reg.setAbandonHandler(func(_ context.Context, _ *pausedRun, reason string) { reasons = append(reasons, reason) })
+	reg.setAbandonHandler(func(_ context.Context, _ *pausedRun, _ a2a.TaskState, reason string) {
+		reasons = append(reasons, reason)
+	})
 	reg.close()
 
 	canceled := false

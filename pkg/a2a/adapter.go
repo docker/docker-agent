@@ -268,7 +268,9 @@ func pumpEvents(ctx agent.InvocationContext, yield func(*adksession.Event, error
 			parked.grant = permissions.ScopedPermissionPattern(ctx, e.ToolCall)
 			parked.callID = e.ToolCall.ID
 			parked.created = time.Now()
+			reg.runHook(hookBeforePark, run.taskID)
 			reg.park(&parked)
+			reg.runHook(hookAfterPark, run.taskID)
 			yield(inputRequiredEvent(agentName, e.ToolCall), nil)
 			return true
 

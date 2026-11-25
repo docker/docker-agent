@@ -503,6 +503,98 @@ func shellCallStream(args string) chat.MessageStream {
 	}}}
 }
 
+// A CancelTask racing the pause must leave a terminal task and no parked run,
+// whichever side of the park and of the INPUT_REQUIRED publication it lands.
+func TestServer_ToolApproval_CancelDuringPauseHandoff(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		at   approvalHookPoint
+	}{
+		{"before park", hookBeforePark},
+		{"after park", hookAfterPark},
+		{"after publish", hookAfterFinalEvent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var executions atomic.Int32
+			reg := newApprovalRegistry(t.Context(), true)
+			paused := make(chan a2a.TaskID, 1)
+			release := make(chan struct{})
+			finalHandled := make(chan struct{}, 1)
+			reg.hook = func(point approvalHookPoint, id a2a.TaskID) {
+				switch point {
+				case tc.at:
+					paused <- id
+					<-release
+				case hookBeforeCancelEvent:
+					// Let the execution reach its final event before ADK emits
+					// CANCELED: the order a2a-go cannot recover from on its own.
+					close(release)
+					if tc.at != hookAfterFinalEvent {
+						select {
+						case <-finalHandled:
+						case <-time.After(10 * time.Second):
+						}
+					}
+				}
+				if point == hookAfterFinalEvent {
+					select {
+					case finalHandled <- struct{}{}:
+					default:
+					}
+				}
+			}
+			client, _ := startApprovalServer(t, approvalTeam(&executions), session.NewInMemorySessionStore(), RunOptions{ToolApproval: true, approvals: reg})
+
+			go func() {
+				_, _ = client.SendMessage(context.WithoutCancel(t.Context()), &a2a.SendMessageRequest{
+					Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("run the tool")),
+				})
+			}()
+			var taskID a2a.TaskID
+			select {
+			case taskID = <-paused:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the run did not reach the pause")
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			// The SDK stores the first task event asynchronously; a client can
+			// only cancel a task it has seen.
+			require.Eventually(t, func() bool {
+				_, err := client.GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+				return err == nil
+			}, 10*time.Second, 5*time.Millisecond)
+			canceled, err := client.CancelTask(ctx, &a2a.CancelTaskRequest{ID: taskID})
+			if tc.at != hookAfterFinalEvent {
+				require.NoError(t, err)
+				assert.Equal(t, a2a.TaskStateCanceled, canceled.Status.State)
+			}
+
+			got, err := client.GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+			require.NoError(t, err)
+			assert.Equal(t, a2a.TaskStateCanceled, got.Status.State)
+			_, parked := reg.pending(taskID)
+			assert.False(t, parked, "no run may stay parked for a canceled task")
+			_, held := reg.pendingInContext(got.ContextID)
+			assert.False(t, held, "a canceled task must not hold its context")
+			reg.mu.Lock()
+			idle := reg.idle
+			reg.mu.Unlock()
+			select {
+			case <-idle:
+			case <-ctx.Done():
+				t.Fatal("the runtime of the canceled task is still running")
+			}
+			assert.Zero(t, executions.Load())
+		})
+	}
+}
+
 // A JSON null part reaches the interceptor as a nil *Part: the reply is
 // rejected with -32602 instead of panicking in ADK's converter.
 func TestServer_ToolApproval_NullPartKeepsTaskWaiting(t *testing.T) {

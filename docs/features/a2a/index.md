@@ -246,7 +246,8 @@ Notes and limits:
   rejected with `-32602` until the paused task is answered or canceled.
 - Pending approvals are held in memory. After one hour, or at server shutdown,
   the task moves to `TASK_STATE_FAILED` and registered webhooks are notified;
-  on A2A `CancelTask` it is canceled. A server restart fails tasks left in
+  on A2A `CancelTask` it is canceled, even when the cancel lands while the
+  task is pausing. A server restart fails tasks left in
   `TASK_STATE_INPUT_REQUIRED`. None of these start a new model turn.
 - After approval, the run continues under the trace of the request that
   started it; the reply request's span links to it.
