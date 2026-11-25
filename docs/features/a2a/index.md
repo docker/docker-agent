@@ -109,8 +109,9 @@ A task still submitted or working when the server stops cannot finish. On the
 next start it is marked failed, and its webhooks are sent that final status on
 the same best-effort terms as any other update. Updates lost before the stop,
 including the final one of a task that had already completed, are not
-re-sent: read the task with `GetTask`. Tasks waiting for input or
-authentication are left unchanged.
+re-sent: read the task with `GetTask`. A task waiting for tool approval
+(`TASK_STATE_INPUT_REQUIRED`) is failed too: its paused run is held in memory
+and cannot be resumed. Tasks waiting for authentication are left unchanged.
 
 ## Tool safety and migration
 
