@@ -249,6 +249,8 @@
       url: /providers/popnow/
     - title: Runcrate
       url: /providers/runcrate/
+    - title: TeamoRouter
+      url: /providers/teamorouter/
     - title: Together AI
       url: /providers/together/
     - title: Vercel AI Gateway

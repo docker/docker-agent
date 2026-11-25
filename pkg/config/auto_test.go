@@ -143,6 +143,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "hopbase",
 		},
 		{
+			name: "teamorouter api key present",
+			envVars: map[string]string{
+				"TEAMOROUTER_API_KEY": "test-key",
+			},
+			expectedProvider: "teamorouter",
+		},
+		{
 			name: "baseten api key present",
 			envVars: map[string]string{
 				"BASETEN_API_KEY": "test-key",
@@ -440,6 +447,15 @@ func TestAutoModelConfig(t *testing.T) {
 			},
 			expectedProvider:  "hopbase",
 			expectedModel:     "glm-5.3",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "teamorouter provider",
+			envVars: map[string]string{
+				"TEAMOROUTER_API_KEY": "test-key",
+			},
+			expectedProvider:  "teamorouter",
+			expectedModel:     "deepseek-v4-flash",
 			expectedMaxTokens: 32000,
 		},
 		{
