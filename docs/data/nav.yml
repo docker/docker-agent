@@ -251,6 +251,8 @@
       url: /providers/rapid-mlx/
     - title: Runcrate
       url: /providers/runcrate/
+    - title: Straitly
+      url: /providers/straitly/
     - title: Together AI
       url: /providers/together/
     - title: Vercel AI Gateway
