@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -95,8 +97,8 @@ func TestServer_ToolApproval_OtherTaskInContextCannotTakeApproval(t *testing.T) 
 	assert.Equal(t, int32(1), executions.Load())
 }
 
-// A reply after the janitor evicted the parked run fails the task instead of
-// starting a new model turn.
+// A reply to a task whose parked run is gone (lost before it could be failed)
+// fails the task instead of starting a new model turn.
 func TestServer_ToolApproval_LateReplyFailsWithoutModelCall(t *testing.T) {
 	t.Parallel()
 
@@ -107,7 +109,9 @@ func TestServer_ToolApproval_LateReplyFailsWithoutModelCall(t *testing.T) {
 
 	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
 	callsBefore := provider.calls()
-	reg.evictExpired(time.Now().Add(2 * defaultApprovalTTL))
+	lost, ok := reg.take(task.ID, callID)
+	require.True(t, ok)
+	lost.cancelAndDrain()
 
 	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
 		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
@@ -118,6 +122,89 @@ func TestServer_ToolApproval_LateReplyFailsWithoutModelCall(t *testing.T) {
 	assert.Equal(t, a2a.TaskStateFailed, failed.Status.State)
 	assert.Equal(t, callsBefore, provider.calls(), "a late reply must not call the model")
 	assert.Zero(t, executions.Load(), "a late reply must not run the tool")
+}
+
+// pausedTaskWithWebhook parks a task on approval with a webhook registered for
+// it and returns the task and the events the webhook receives.
+func pausedTaskWithWebhook(t *testing.T, client *a2aclient.Client) (*a2a.Task, string, <-chan a2a.Event) {
+	t.Helper()
+	received := make(chan a2a.Event, 16)
+	webhook := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		var sr a2a.StreamResponse
+		if assert.NoError(t, json.NewDecoder(r.Body).Decode(&sr)) {
+			received <- sr.Event
+		}
+	}))
+	t.Cleanup(webhook.Close)
+
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("run the tool")),
+		Config:  &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: webhook.URL, Token: "tok"}},
+	})
+	require.NoError(t, err)
+	task, callID := requireInputRequired(t, res)
+	return task, callID, received
+}
+
+func statusText(task *a2a.Task) string {
+	if task.Status.Message == nil {
+		return ""
+	}
+	var text strings.Builder
+	for _, part := range task.Status.Message.Parts {
+		text.WriteString(part.Text())
+	}
+	return text.String()
+}
+
+// An approval the janitor evicts fails its task right away: polling clients and
+// webhooks learn it without having to reply first.
+func TestServer_ToolApproval_ExpiredApprovalFailsTask(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int32
+	tm, provider := approvalTeamWith(approvalCanaryTool(&executions), toolCallStream("approval_canary"), stopStream())
+	reg := newApprovalRegistry(t.Context(), true)
+	client, _ := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true, approvals: reg})
+
+	task, callID, received := pausedTaskWithWebhook(t, client)
+	callsBefore := provider.calls()
+	reg.evictExpired(time.Now().Add(2 * defaultApprovalTTL))
+
+	got, err := client.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateFailed, got.Status.State)
+	assert.Equal(t, approvalExpiredReason, statusText(got))
+	waitPushState(t, received, a2a.TaskStateFailed)
+
+	_, _ = client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
+	})
+	assert.Equal(t, callsBefore, provider.calls(), "a late reply must not call the model")
+	assert.Zero(t, executions.Load(), "a late reply must not run the tool")
+}
+
+// Shutdown fails paused tasks and notifies their webhooks before returning.
+func TestServer_ToolApproval_ShutdownFailsPausedTask(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int32
+	serverCtx, stopServer := context.WithCancel(t.Context())
+	deps := newTestTaskDeps(t)
+	reg := newApprovalRegistry(serverCtx, true)
+	client, _ := startApprovalServerWith(t, serverCtx, approvalTeam(&executions), session.NewInMemorySessionStore(), deps, RunOptions{ToolApproval: true, approvals: reg})
+
+	task, _, received := pausedTaskWithWebhook(t, client)
+	stopServer()
+	reg.close()
+
+	ctx, _ := a2asrv.NewCallContext(t.Context(), nil)
+	stored, err := deps.tasks.Get(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateFailed, stored.Task.Status.State)
+	assert.Equal(t, approvalShutdownReason, statusText(stored.Task))
+	waitPushState(t, received, a2a.TaskStateFailed)
+	assert.Zero(t, executions.Load())
 }
 
 // Cancelling a task while its approved tool runs cancels the tool.

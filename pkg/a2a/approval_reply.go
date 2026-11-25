@@ -32,7 +32,7 @@ type approvalInterceptor struct {
 
 func (i *approvalInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	sendReq, ok := req.Payload.(*a2a.SendMessageRequest)
-	if !ok || sendReq.Message == nil {
+	if !ok || sendReq.Message == nil || !i.approvals.toolApproval() {
 		return ctx, nil, nil
 	}
 	ext := toolApprovalExtension()

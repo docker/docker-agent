@@ -10,6 +10,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
@@ -122,6 +123,70 @@ func TestApprovalRegistry_RunContextKeepsValuesAndServerLifetime(t *testing.T) {
 	require.Eventually(t, func() bool { return runCtx.Err() != nil }, time.Second, 5*time.Millisecond)
 }
 
+// Shutdown waits for runtimes to stop before the stores they write to close.
+func TestApprovalRegistry_CloseWaitsForRuntimes(t *testing.T) {
+	t.Parallel()
+
+	reg := newApprovalRegistry(t.Context(), true)
+	src := make(chan runtime.Event)
+	out := reg.track(src)
+	go func() {
+		for range out {
+		}
+	}()
+
+	closed := make(chan struct{})
+	go func() {
+		reg.close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("close returned while a runtime was still streaming")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(src)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close did not return after the runtime stopped")
+	}
+}
+
+// A run that parks after shutdown released the registry is abandoned, not leaked.
+func TestApprovalRegistry_ParkAfterCloseAbandons(t *testing.T) {
+	t.Parallel()
+
+	reg := newApprovalRegistry(t.Context(), true)
+	var reasons []string
+	reg.setAbandonHandler(func(_ context.Context, _ *pausedRun, reason string) { reasons = append(reasons, reason) })
+	reg.close()
+
+	canceled := false
+	reg.park(&pausedRun{taskID: "task-1", callID: "call-1", events: closedEvents(), cancel: func() { canceled = true }})
+
+	assert.True(t, canceled)
+	assert.Equal(t, []string{approvalShutdownReason}, reasons)
+	_, ok := reg.pending("task-1")
+	assert.False(t, ok)
+}
+
+// Without --tool-approval the server must not report the extension as active.
+func TestApprovalInterceptor_ActivatesExtensionOnlyWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	for _, enabled := range []bool{false, true} {
+		ctx, callCtx := a2asrv.NewCallContext(t.Context(), a2asrv.NewServiceParams(map[string][]string{
+			a2a.SvcParamExtensions: {toolApprovalExtensionURI},
+		}))
+		interceptor := &approvalInterceptor{approvals: newApprovalRegistry(t.Context(), enabled)}
+		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))
+		_, _, err := interceptor.Before(ctx, callCtx, &a2asrv.Request{Payload: &a2a.SendMessageRequest{Message: msg}})
+		require.NoError(t, err)
+		assert.Equal(t, enabled, callCtx.Extensions().Active(toolApprovalExtension()), "enabled=%v", enabled)
+	}
+}
+
 func TestValidateReply(t *testing.T) {
 	t.Parallel()
 
@@ -205,13 +270,19 @@ func startApprovalServer(t *testing.T, tm *team.Team, store session.Store, opts 
 // lifetime: cancelling ctx stops the server, as on shutdown.
 func startApprovalServerCtx(t *testing.T, ctx context.Context, tm *team.Team, store session.Store, opts RunOptions) (*a2aclient.Client, string) {
 	t.Helper()
+	return startApprovalServerWith(t, ctx, tm, store, newTestTaskDeps(t), opts)
+}
+
+// startApprovalServerWith is startApprovalServerCtx with explicit task deps.
+func startApprovalServerWith(t *testing.T, ctx context.Context, tm *team.Team, store session.Store, deps taskDeps, opts RunOptions) (*a2aclient.Client, string) {
+	t.Helper()
 
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	// Strict always asks for confirmation, so the call reaches askUser (where
 	// the tool-approval switch lives) rather than being auto-allowed or denied
 	// by the mode itself.
-	e, err := newServer(ctx, tm, "test.yaml", "root", store, newTestTaskDeps(t),
+	e, err := newServer(ctx, tm, "test.yaml", "root", store, deps,
 		servesafety.Resolved{Policy: session.SafetyPolicyStrict}, testWorkspaceRoot, ln.Addr().String(), opts)
 	require.NoError(t, err)
 	go func() { _ = e.Server.Serve(ln) }()

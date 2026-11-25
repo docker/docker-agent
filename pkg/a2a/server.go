@@ -160,6 +160,13 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	baseURL := &url.URL{Scheme: "http", Host: routableAddr(ln.Addr().String())}
 	slog.DebugContext(ctx, "A2A server listening", "url", baseURL.String())
 
+	if options.approvals == nil {
+		options.approvals = newApprovalRegistry(ctx, options.ToolApproval)
+	}
+	// Runs before the push drain and store closes: failing parked tasks pushes
+	// and writes, and stopped runtimes persist their final state.
+	defer options.approvals.close()
+
 	workingDir, err := session.CaptureLocalWorkingDir(runConfig.WorkingDir)
 	if err != nil {
 		return err
@@ -215,6 +222,48 @@ func recoverInterruptedTasks(ctx context.Context, store *a2astore.Store, sender 
 	return nil
 }
 
+// failAbandonedTask fails the task of a parked run dropped without an answer
+// and notifies its webhooks: nothing would ever resume it.
+func failAbandonedTask(deps taskDeps) abandonFunc {
+	return func(ctx context.Context, run *pausedRun, reason string) {
+		// The task store resolves the owner from the call context.
+		ctx, callCtx := a2asrv.NewCallContext(ctx, nil)
+		if run.user != nil {
+			callCtx.User = run.user
+		}
+		stored, err := deps.tasks.Get(ctx, run.taskID)
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to load abandoned A2A task", "task_id", run.taskID, "error", err)
+			return
+		}
+		if stored.Task.Status.State != a2a.TaskStateInputRequired {
+			return
+		}
+		task := *stored.Task
+		msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, &task, a2a.NewTextPart(reason))
+		event := a2a.NewStatusUpdateEvent(&task, a2a.TaskStateFailed, msg)
+		task.Status = event.Status
+		if _, err := deps.tasks.Update(ctx, &taskstore.UpdateRequest{
+			Task: &task, Event: event, PrevTask: stored.Task, PrevVersion: stored.Version,
+		}); err != nil {
+			// A concurrent reply already moved the task on.
+			slog.WarnContext(ctx, "Failed to fail abandoned A2A task", "task_id", run.taskID, "error", err)
+			return
+		}
+		slog.InfoContext(ctx, "Failed A2A task with an abandoned tool approval", "task_id", run.taskID)
+		configs, err := deps.pushConfigs.List(ctx, run.taskID)
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to list push configs of abandoned task", "task_id", run.taskID, "error", err)
+			return
+		}
+		for _, cfg := range configs {
+			if err := deps.pushSender.SendPush(ctx, cfg, event); err != nil {
+				slog.WarnContext(ctx, "Failed to notify abandoned task", "task_id", run.taskID, "error", err)
+			}
+		}
+	}
+}
+
 func newServer(ctx context.Context, t *team.Team, agentFilename, agentName string, sessStore session.Store, deps taskDeps, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
 	// The registry keeps runtimes alive between the request that parks on a
 	// tool confirmation and the request that answers it. ctx is the server
@@ -223,6 +272,7 @@ func newServer(ctx context.Context, t *team.Team, agentFilename, agentName strin
 	if approvals == nil {
 		approvals = newApprovalRegistry(ctx, options.ToolApproval)
 	}
+	approvals.setAbandonHandler(failAbandonedTask(deps))
 
 	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir, approvals)
 	if err != nil {

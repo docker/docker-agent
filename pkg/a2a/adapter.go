@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -151,9 +152,15 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		// survives it; while active it is still cancelled with the invocation.
 		streamCtx, cancel := reg.runContext(ctx)
 		stop := bindToInvocation(ctx, cancel)
-		eventsChan := rt.RunStream(streamCtx, sess)
+		eventsChan := reg.track(rt.RunStream(streamCtx, sess))
 		info := taskInfoFrom(ctx)
-		run := &pausedRun{taskID: info.TaskID, contextID: info.ContextID, rt: rt, sess: sess, events: eventsChan, cancel: cancel}
+		run := &pausedRun{
+			taskID: info.TaskID, contextID: info.ContextID, rt: rt, sess: sess, events: eventsChan, cancel: cancel,
+			spanCtx: trace.SpanContextFromContext(ctx),
+		}
+		if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
+			run.user = callCtx.User
+		}
 		if !pumpEvents(ctx, yield, reg, agentName, run, stop) {
 			stop()
 			run.cancelAndDrain()
@@ -167,6 +174,11 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 // unless the run parks again.
 func resumePausedRun(ctx agent.InvocationContext, yield func(*adksession.Event, error) bool, reg *approvalRegistry, sessStore session.Store, agentName string, ticket *resumeTicket) {
 	paused := ticket.run
+	// The run keeps the context of the request that started it, so its spans
+	// stay under that trace; link this request to it.
+	if span := trace.SpanFromContext(ctx); span.IsRecording() && paused.spanCtx.IsValid() {
+		span.AddLink(trace.Link{SpanContext: paused.spanCtx})
+	}
 	stop := bindToInvocation(ctx, paused.cancel)
 	req := resumeDecision(ticket.response, paused.grant)
 	if req.Type == runtime.ResumeTypeApproveTool {

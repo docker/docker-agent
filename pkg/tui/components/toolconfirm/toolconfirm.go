@@ -70,7 +70,7 @@ func (d Decision) Resume(pattern, reason string) runtime.ResumeRequest {
 // [permissions.BuildPermissionPattern].
 func BuildPermissionPattern(toolCall tools.ToolCall) string {
 	// Dialogs have no request context; it only scopes argument-repair logs.
-	return permissions.BuildPermissionPattern(context.Background(), toolCall) //rubocop:disable Lint/ContextConnectivity
+	return permissions.BuildPermissionPattern(context.Background(), toolCall)
 }
 
 // AlwaysAllowLabel labels an "always allow" pattern; see

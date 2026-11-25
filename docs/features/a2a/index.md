@@ -240,9 +240,12 @@ Notes and limits:
   and `transfer_task` sub-sessions keep denying.
 - A paused task holds its conversation: a new task in the same `contextId` is
   rejected with `-32602` until the paused task is answered or canceled.
-- Pending approvals are held in memory and reclaimed after one hour, on A2A
-  `CancelTask`, and at server shutdown. A reply to an expired approval, or one
-  lost in a restart, fails the task without starting a new model turn.
+- Pending approvals are held in memory. After one hour, or at server shutdown,
+  the task moves to `TASK_STATE_FAILED` and registered webhooks are notified;
+  on A2A `CancelTask` it is canceled. A server restart fails tasks left in
+  `TASK_STATE_INPUT_REQUIRED`. None of these start a new model turn.
+- After approval, the run continues under the trace of the request that
+  started it; the reply request's span links to it.
 - Canceling a task also cancels a tool it is running after approval.
 - Without the flag the behaviour is unchanged: non-interactive sessions deny,
   and the agent card declares no extension.

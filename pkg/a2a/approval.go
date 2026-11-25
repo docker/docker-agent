@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/adk/v2/model"
 	adksession "google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
@@ -26,6 +28,21 @@ const defaultApprovalTTL = time.Hour
 // approvalJanitorInterval is how often the registry sweeps for expired runs.
 const approvalJanitorInterval = time.Minute
 
+// approvalShutdownTimeout bounds how long shutdown waits for runtimes to stop
+// before the stores they write to are closed.
+const approvalShutdownTimeout = 10 * time.Second
+
+// abandonTimeout bounds failing the task of a run dropped without an answer.
+const abandonTimeout = 5 * time.Second
+
+// approvalShutdownReason is the status message of a task whose pending
+// approval is dropped at server shutdown.
+const approvalShutdownReason = "Tool approval canceled: the A2A server shut down"
+
+// abandonFunc fails the A2A task of a parked run dropped without an answer, so
+// clients polling or watching it learn it will not resume.
+type abandonFunc func(ctx context.Context, run *pausedRun, reason string)
+
 // pausedRun captures a runtime parked inside askUser, waiting for the A2A
 // client to approve or reject a tool call on a subsequent request. Ownership
 // of the runtime — and the obligation to cancel and drain it — belongs to
@@ -41,6 +58,8 @@ type pausedRun struct {
 	grant     string // permission pattern approve-in-context persists (shell:cmd=ls* for commands)
 	callID    string // tool-call ID reported to the client as long-running
 	created   time.Time
+	user      *a2asrv.User      // caller that owns the task in the task store
+	spanCtx   trace.SpanContext // invocation that started the run, linked from resumes
 }
 
 func (p *pausedRun) cancelAndDrain() {
@@ -57,26 +76,102 @@ func (p *pausedRun) cancelAndDrain() {
 type approvalRegistry struct {
 	enabled bool
 	baseCtx context.Context //nolint:containedctx // server lifetime bounding detached runs
+	stop    context.CancelFunc
+	done    chan struct{} // closed once the janitor has released every parked run
 	ttl     time.Duration
 
-	mu   sync.Mutex
-	runs map[a2a.TaskID]*pausedRun
+	mu        sync.Mutex
+	runs      map[a2a.TaskID]*pausedRun
+	closed    bool // shutdown released the parked runs; later parks are abandoned
+	onAbandon abandonFunc
+	live      int           // runtimes whose event stream is still open
+	idle      chan struct{} // closed while live is zero
 }
 
 // newApprovalRegistry builds a registry. When enabled, a background janitor
 // evicts expired paused runs and cancels everything on server shutdown
-// (baseCtx cancellation). When disabled, no goroutine is started.
+// (baseCtx cancellation or close). When disabled, no goroutine is started.
 func newApprovalRegistry(baseCtx context.Context, enabled bool) *approvalRegistry {
+	ctx, stop := context.WithCancel(baseCtx)
+	idle := make(chan struct{})
+	close(idle)
 	r := &approvalRegistry{
 		enabled: enabled,
-		baseCtx: baseCtx,
+		baseCtx: ctx,
+		stop:    stop,
+		done:    make(chan struct{}),
 		ttl:     defaultApprovalTTL,
 		runs:    make(map[a2a.TaskID]*pausedRun),
+		idle:    idle,
 	}
 	if enabled {
 		go r.janitor()
+	} else {
+		close(r.done)
 	}
 	return r
+}
+
+// setAbandonHandler installs the callback that fails the task of a parked run
+// dropped on expiry or shutdown.
+func (r *approvalRegistry) setAbandonHandler(fn abandonFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onAbandon = fn
+}
+
+// close cancels every parked run, fails its task, and waits (bounded) for all
+// runtimes to stop so they no longer write to the stores closed after it.
+func (r *approvalRegistry) close() {
+	if r == nil {
+		return
+	}
+	r.stop()
+	timeout := time.NewTimer(approvalShutdownTimeout)
+	defer timeout.Stop()
+	select {
+	case <-r.done:
+	case <-timeout.C:
+		return
+	}
+	r.mu.Lock()
+	idle := r.idle
+	r.mu.Unlock()
+	select {
+	case <-idle:
+	case <-timeout.C:
+	}
+}
+
+// track relays a runtime's event stream, counting the runtime as live until
+// the stream closes.
+func (r *approvalRegistry) track(events <-chan runtime.Event) <-chan runtime.Event {
+	if r == nil {
+		return events
+	}
+	r.mu.Lock()
+	if r.live == 0 {
+		r.idle = make(chan struct{})
+	}
+	r.live++
+	r.mu.Unlock()
+
+	out := make(chan runtime.Event)
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			r.live--
+			if r.live == 0 {
+				close(r.idle)
+			}
+			r.mu.Unlock()
+		}()
+		defer close(out)
+		for ev := range events {
+			out <- ev
+		}
+	}()
+	return out
 }
 
 // toolApproval reports whether out-of-band tool approval is enabled. Nil-safe
@@ -112,6 +207,11 @@ func bindToInvocation(invocation context.Context, cancel context.CancelFunc) (st
 // cancelled first.
 func (r *approvalRegistry) park(run *pausedRun) {
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		r.abandon(run, approvalShutdownReason)
+		return
+	}
 	prev, replaced := r.runs[run.taskID]
 	r.runs[run.taskID] = run
 	r.mu.Unlock()
@@ -178,6 +278,7 @@ func (r *approvalRegistry) cancel(taskID a2a.TaskID) {
 }
 
 func (r *approvalRegistry) janitor() {
+	defer close(r.done)
 	ticker := time.NewTicker(approvalJanitorInterval)
 	defer ticker.Stop()
 	for {
@@ -203,7 +304,7 @@ func (r *approvalRegistry) evictExpired(now time.Time) {
 	}
 	r.mu.Unlock()
 	for _, run := range expired {
-		run.cancelAndDrain()
+		r.abandon(run, approvalExpiredReason)
 	}
 }
 
@@ -211,10 +312,25 @@ func (r *approvalRegistry) cancelAll() {
 	r.mu.Lock()
 	runs := r.runs
 	r.runs = make(map[a2a.TaskID]*pausedRun)
+	r.closed = true
 	r.mu.Unlock()
 	for _, run := range runs {
-		run.cancelAndDrain()
+		r.abandon(run, approvalShutdownReason)
 	}
+}
+
+// abandon fails the task of a run dropped without an answer, then releases it.
+func (r *approvalRegistry) abandon(run *pausedRun, reason string) {
+	r.mu.Lock()
+	fn := r.onAbandon
+	r.mu.Unlock()
+	if fn != nil {
+		// Detached: at shutdown the server context is already canceled.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.baseCtx), abandonTimeout)
+		fn(ctx, run, reason)
+		cancel()
+	}
+	run.cancelAndDrain()
 }
 
 // inputRequiredEvent builds the ADK event that drives the A2A task into
