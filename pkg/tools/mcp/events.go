@@ -347,7 +347,36 @@ func (c *sessionClient) eventTools(prefix string) []tools.Tool {
 			}
 			return &tools.ToolCallResult{Output: string(data)}, nil
 		}},
-		{Name: prefix + "mcp_events_subscribe", Category: "mcp", Description: "Subscribe to a push event from this server. Discover event types first. Events arrive as untrusted external data through the agent's steering/recall queue. Returns a subscription ID for cancellation.", Parameters: map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object"}}, "required": []string{"name"}}, Handler: func(ctx context.Context, call tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
+		{Name: prefix + "mcp_events_subscribe", Category: "mcp", Description: "Subscribe to a push event from this server. Discover event types first. Events arrive as untrusted external data through the agent's steering/recall queue. Returns a subscription ID for cancellation.", Parameters: map[string]any{
+			"type": "object",
+			"$defs": map[string]any{
+				"json_value": map[string]any{
+					"anyOf": []any{
+						map[string]any{"type": "string"},
+						map[string]any{"type": "number"},
+						map[string]any{"type": "integer"},
+						map[string]any{"type": "boolean"},
+						map[string]any{"type": "null"},
+						map[string]any{
+							"type":                 "object",
+							"additionalProperties": map[string]any{"$ref": "#/$defs/json_value"},
+						},
+						map[string]any{
+							"type":  "array",
+							"items": map[string]any{"$ref": "#/$defs/json_value"},
+						},
+					},
+				},
+			},
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string"},
+				"arguments": map[string]any{
+					"type":                 "object",
+					"additionalProperties": map[string]any{"$ref": "#/$defs/json_value"},
+				},
+			},
+			"required": []string{"name"},
+		}, Handler: func(ctx context.Context, call tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
 			if !rt.Supports(tools.CapabilityRecall) {
 				return nil, tools.ErrRecallNotSupported
 			}
