@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/docker/go-units"
 
@@ -206,8 +205,6 @@ func (d *filePickerDialog) loadDirectory() {
 
 	d.filtered = d.entries
 }
-
-func (d *filePickerDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *filePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// Scrollview handles mouse click/motion/release, wheel, and pgup/pgdn/home/end.

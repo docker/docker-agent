@@ -28,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -252,10 +253,12 @@ type model struct {
 	focused              bool // Whether the messages component is focused
 
 	// Inline editing state
-	inlineEditMsgIndex      int            // Index of message being edited (-1 = not editing)
-	inlineEditSessionPos    int            // Session position for branching
-	inlineEditTextarea      textarea.Model // Textarea for inline editing
-	inlineEditPrevSelection int            // Previous selection index before entering inline edit (-1 = was not in selection mode)
+	inlineEditMsgIndex      int         // Index of message being edited (-1 = not editing)
+	inlineEditSessionPos    int         // Session position for branching
+	inlineEditTextarea      *input.Area // Textarea for inline editing
+	inlineEditPrevSelection int         // Previous selection index before entering inline edit (-1 = was not in selection mode)
+	inlineEditBlinkDirty    bool
+	inlineEditBlinkLines    []string // Caret-only overlay, sharing the cached edit's geometry.
 
 	// Hover state for showing action labels (copy, edit) on messages
 	hoveredMessageIndex int // Index of message under mouse (-1 = none)
@@ -722,7 +725,7 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		if key.Matches(msg, m.inlineEditTextarea.KeyMap.InsertNewline) {
 			// Forward to textarea for newline insertion
 			var cmd tea.Cmd
-			m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
+			*m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
 			m.invalidateItem(m.inlineEditMsgIndex)
 			m.renderDirty = true
 			return m, cmd
@@ -743,7 +746,7 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		default:
 			// Forward all other keys to the textarea
 			var cmd tea.Cmd
-			m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
+			*m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
 			m.invalidateItem(m.inlineEditMsgIndex)
 			m.renderDirty = true
 			return m, cmd
@@ -881,6 +884,12 @@ func (m *model) renderedLine(global int) string {
 	}
 	if s := m.activeSegments; s != nil && global >= s.start && global < s.start+s.height() {
 		return s.line(global - s.start)
+	}
+	if len(m.inlineEditBlinkLines) > 0 {
+		local := global - m.lineOffsets[m.inlineEditMsgIndex]
+		if local >= 0 && local < len(m.inlineEditBlinkLines) {
+			return m.inlineEditBlinkLines[local]
+		}
 	}
 	if global < len(m.renderedLines) {
 		return m.renderedLines[global]
@@ -1576,8 +1585,12 @@ func (m *model) needsSeparator(index int) bool {
 
 func (m *model) ensureAllItemsRendered() {
 	if !m.renderDirty && (len(m.renderedLines) > 0 || m.activeSegments != nil) {
-		return
+		if !m.inlineEditBlinkDirty || m.refreshInlineEditBlink() {
+			return
+		}
 	}
+	m.inlineEditBlinkDirty = false
+	m.inlineEditBlinkLines = nil
 
 	// A cache smaller than the item count would evict every entry during the
 	// sequential scan below, making each rebuild a full re-render.
@@ -1636,6 +1649,28 @@ func (m *model) ensureAllItemsRendered() {
 	m.renderDirty = false
 }
 
+// A caret phase changes styling, not text or geometry. Keep the flattened
+// transcript immutable so the scrollview retains its memoized line widths.
+func (m *model) refreshInlineEditBlink() bool {
+	index := m.inlineEditMsgIndex
+	if index < 0 || index >= len(m.lineOffsets) {
+		return false
+	}
+	start, end := m.lineOffsets[index], len(m.renderedLines)
+	if index+1 < len(m.lineOffsets) {
+		// An edited user message is nonempty and always has a separator
+		// when followed by another message.
+		end = m.lineOffsets[index+1] - 1
+	}
+	item := m.renderItem(index, m.views[index])
+	if item.height != end-start {
+		return false
+	}
+	m.inlineEditBlinkLines = item.lines
+	m.inlineEditBlinkDirty = false
+	return true
+}
+
 //nolint:unparam // Boolean result is retained for cache-refresh callers.
 func (m *model) refreshRenderedItem(index int) bool {
 	wasAtBottom := m.isAtBottom()
@@ -1653,6 +1688,10 @@ func (m *model) refreshRenderedItem(index int) bool {
 	}
 	m.renderedItems.Delete(index)
 	item := m.renderItem(index, m.views[index])
+	if index == m.inlineEditMsgIndex {
+		m.inlineEditBlinkDirty = false
+		m.inlineEditBlinkLines = nil
+	}
 	if item.segments != nil && index == len(m.views)-1 {
 		// The final assistant has exactly one line owner. It may previously have
 		// been flattened (selection/full Render) or virtual (stream segmentation),
@@ -2829,9 +2868,8 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	m.inlineEditSessionPos = sessionPosition
 
 	// Create and configure the textarea
-	ta := textarea.New()
+	ta := input.NewArea()
 	ta.SetValue(content)
-	ta.Focus()
 
 	// Configure appearance - use a style similar to user message
 	innerWidth := m.contentWidth() - styles.UserMessageStyle.GetHorizontalFrameSize()
@@ -2861,12 +2899,19 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	ta.KeyMap.InsertNewline.SetKeys(newlineKeys...)
 	ta.KeyMap.InsertNewline.SetEnabled(true)
 
-	m.inlineEditTextarea = ta
+	ta.Focus()
+	ta.OnCursorChange(func() {
+		if m.inlineEditTextarea == &ta {
+			m.inlineEditBlinkDirty = true
+			m.invalidateView()
+		}
+	})
+	m.inlineEditTextarea = &ta
 	m.invalidateItem(msgIndex)
 	m.renderDirty = true
 
 	// Invalidate statusbar cache since bindings have changed
-	return tea.Batch(ta.Focus(), core.CmdHandler(messages.InvalidateStatusBarMsg{}))
+	return core.CmdHandler(messages.InvalidateStatusBarMsg{})
 }
 
 // CancelInlineEdit cancels the current inline edit and restores the original content.
@@ -2880,7 +2925,7 @@ func (m *model) CancelInlineEdit() tea.Cmd {
 
 	m.inlineEditMsgIndex = -1
 	m.inlineEditSessionPos = -1
-	m.inlineEditTextarea = textarea.Model{}
+	m.inlineEditTextarea = nil
 	m.inlineEditPrevSelection = -1
 
 	// Restore the previous selection state if we were in keyboard selection mode
@@ -2902,6 +2947,13 @@ func (m *model) CancelInlineEdit() tea.Cmd {
 		core.CmdHandler(InlineEditCancelledMsg{WasInSelectionMode: prevSelection >= 0}),
 		core.CmdHandler(messages.InvalidateStatusBarMsg{}),
 	)
+}
+
+func (m *model) CursorInput() input.Cursor {
+	if m.IsInlineEditing() {
+		return m.inlineEditTextarea
+	}
+	return nil
 }
 
 // IsInlineEditing returns true if inline editing is currently active.
@@ -2926,7 +2978,7 @@ func (m *model) commitInlineEdit() tea.Cmd {
 	// Reset editing state
 	m.inlineEditMsgIndex = -1
 	m.inlineEditSessionPos = -1
-	m.inlineEditTextarea = textarea.Model{}
+	m.inlineEditTextarea = nil
 
 	m.invalidateAllItems()
 

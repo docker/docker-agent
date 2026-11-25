@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
@@ -21,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -150,7 +150,7 @@ func workspaceDisplayDir(dir string) string {
 type sessionBrowserDialog struct {
 	BaseDialog
 
-	textInput  textinput.Model
+	textInput  input.Text
 	sessions   []session.Summary
 	filtered   []session.Summary
 	selected   int
@@ -177,7 +177,7 @@ type sessionBrowserDialog struct {
 // workspaceDir is the directory of the active session; sessions started
 // there are grouped first and can be filtered with the workspace filter.
 func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string) Dialog {
-	ti := textinput.New()
+	ti := input.NewText()
 	ti.Placeholder = "Type to search sessions…"
 	ti.Focus()
 	ti.CharLimit = 100
@@ -216,7 +216,11 @@ func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string) Di
 }
 
 func (d *sessionBrowserDialog) Init() tea.Cmd {
-	return textinput.Blink
+	return nil
+}
+
+func (d *sessionBrowserDialog) CursorInput() input.Cursor {
+	return &d.textInput
 }
 
 func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {

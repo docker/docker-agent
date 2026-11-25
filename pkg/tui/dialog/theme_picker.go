@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -105,8 +104,6 @@ func themeSortKeys(t ThemeChoice) pickerSortKeys {
 		Tiebreak:  t.Ref,
 	}
 }
-
-func (d *themePickerDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *themePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end.

@@ -72,7 +72,7 @@ func TestLeanHelpKeepsKeyRoutingWithoutAnOverlay(t *testing.T) {
 	m := newHelpTestModel(t, WithLeanMode())
 	before := m.View()
 	openHelpWithKey(t, m, tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
-	require.Equal(t, before, m.View())
+	require.Equal(t, ansi.Strip(before.Content), ansi.Strip(m.View().Content), "Help remains hidden in lean mode even though it takes keyboard focus")
 
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	require.Empty(t, m.activeTab.editor.Value(), "the open dialog still receives keys before the composer")
@@ -233,15 +233,17 @@ func TestHelpInModalLeavesCtrlHToTextInput(t *testing.T) {
 	before = palette.View()
 	open := openHelpWithKey(t, m, tea.KeyPressMsg{Code: tea.KeyF1})
 	require.Contains(t, ansi.Strip(open.Model.View()), "Command palette")
+	covered := palette.View()
 	_, _ = m.Update(tea.PasteMsg{Content: "run selectedx"})
 	require.Contains(t, ansi.Strip(open.Model.View()), "No matching shortcuts.")
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
 	require.Contains(t, ansi.Strip(open.Model.View()), "Run selected command")
-	require.Equal(t, before, palette.View(), "search input stays in Help")
+	require.Equal(t, covered, palette.View(), "search input stays in Help")
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyF1})
 	require.Nil(t, cmd, "F1 must not stack Help on itself")
 	_, _ = m.Update(dialog.CloseDialogMsg{})
 	require.Same(t, palette, m.dialogMgr.TopDialog())
+	require.Equal(t, before, palette.View(), "closing Help restores the palette cursor and input")
 }
 
 func TestHelpUsesConfiguredBindingsAndOmitsShadowedAliases(t *testing.T) {

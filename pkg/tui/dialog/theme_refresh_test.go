@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -30,22 +31,26 @@ func switchToContrastingTheme(t *testing.T) textinput.Styles {
 	return before
 }
 
-func TestPickerInputsRefreshOnThemeChange(t *testing.T) {
+func TestDialogTextInputsRefreshOnThemeChange(t *testing.T) {
 	cases := map[string]struct {
 		dialog func() Dialog
-		input  func(Dialog) *textinput.Model
+		input  func(Dialog) *input.Text
 	}{
 		"model picker": {
 			dialog: func() Dialog { return NewModelPickerDialog(nil) },
-			input:  func(d Dialog) *textinput.Model { return &d.(*modelPickerDialog).textInput },
+			input:  func(d Dialog) *input.Text { return &d.(*modelPickerDialog).textInput },
 		},
 		"command palette": {
 			dialog: func() Dialog { return NewCommandPaletteDialog(nil) },
-			input:  func(d Dialog) *textinput.Model { return &d.(*commandPaletteDialog).textInput },
+			input:  func(d Dialog) *input.Text { return &d.(*commandPaletteDialog).textInput },
+		},
+		"help search": {
+			dialog: func() Dialog { return NewHelpDialog(nil) },
+			input:  func(d Dialog) *input.Text { return &d.(*helpDialog).input },
 		},
 		"file picker": {
 			dialog: func() Dialog { return NewFilePickerDialog(t.TempDir()) },
-			input:  func(d Dialog) *textinput.Model { return &d.(*filePickerDialog).textInput },
+			input:  func(d Dialog) *input.Text { return &d.(*filePickerDialog).textInput },
 		},
 	}
 	for name, tc := range cases {

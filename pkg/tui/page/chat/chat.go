@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	tooldefaults "github.com/docker/docker-agent/pkg/tui/components/tool/defaults"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/internal/resizegrip"
@@ -1829,6 +1830,13 @@ func (p *chatPage) FocusMessageAt(x, y int) tea.Cmd {
 // BlurMessages removes focus from the messages panel
 func (p *chatPage) BlurMessages() {
 	p.messages.Blur()
+}
+
+func (p *chatPage) CursorInput() input.Cursor {
+	if p.sidebar.IsEditingTitle() {
+		return input.CursorOf(p.sidebar)
+	}
+	return input.CursorOf(p.messages)
 }
 
 // ScrollToBottom scrolls the messages viewport to the bottom if auto-scroll is active.

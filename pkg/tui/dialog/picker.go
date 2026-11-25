@@ -6,12 +6,12 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -92,7 +92,7 @@ type pickerLayout struct {
 type pickerCore struct {
 	BaseDialog
 
-	textInput  textinput.Model
+	textInput  input.Text
 	scrollview *scrollview.Model
 	keyMap     pickerKeyMap
 	layout     pickerLayout
@@ -107,7 +107,7 @@ type pickerCore struct {
 // newPickerCore returns a pickerCore initialised with a focused, blank text
 // input, a scroll-bar-reserving scrollview, and the default key map.
 func newPickerCore(layout pickerLayout, placeholder string) pickerCore {
-	ti := textinput.New()
+	ti := input.NewText()
 	ti.SetStyles(styles.DialogInputStyle)
 	ti.Placeholder = placeholder
 	ti.Focus()
@@ -121,6 +121,13 @@ func newPickerCore(layout pickerLayout, placeholder string) pickerCore {
 		layout:         layout,
 		lastClickIndex: -1,
 	}
+}
+
+func (p *pickerCore) Init() tea.Cmd { return nil }
+
+// CursorInput returns the text input whose cursor follows the dialog stack.
+func (p *pickerCore) CursorInput() input.Cursor {
+	return &p.textInput
 }
 
 // -----------------------------------------------------------------------------
@@ -173,7 +180,7 @@ func (p *pickerCore) updateScrollviewPosition() {
 // -----------------------------------------------------------------------------
 
 // updateInput feeds msg into the embedded text input and runs the optional
-// filter callback. It returns the textinput command (typically Blink) so the
+// filter callback. It returns the input command so the
 // caller can pass it back from Update.
 func (p *pickerCore) updateInput(msg tea.Msg, filter func()) tea.Cmd {
 	var cmd tea.Cmd
