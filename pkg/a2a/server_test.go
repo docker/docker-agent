@@ -132,11 +132,12 @@ func TestServerSecurity(t *testing.T) {
 
 	response = request(http.MethodOptions, "/invoke", map[string]string{
 		"Origin": "https://app.example.com", "Access-Control-Request-Method": http.MethodPost,
-		"Access-Control-Request-Headers": "authorization,content-type",
+		"Access-Control-Request-Headers": "authorization,content-type,a2a-extensions",
 	})
 	require.Equal(t, http.StatusNoContent, response.Code)
 	require.Equal(t, "https://app.example.com", response.Header().Get("Access-Control-Allow-Origin"))
 	require.Contains(t, response.Header().Get("Access-Control-Allow-Headers"), "Authorization")
+	require.Contains(t, response.Header().Get("Access-Control-Allow-Headers"), "A2A-Extensions")
 }
 
 func TestCorsMiddlewareConfigRejectsInvalidOrigin(t *testing.T) {

@@ -368,7 +368,7 @@ func corsMiddlewareConfig(spec string) (middleware.CORSConfig, error) {
 	cfg := middleware.CORSConfig{
 		AllowOrigins: origins.Literals(),
 		AllowMethods: []string{http.MethodPost, http.MethodOptions},
-		AllowHeaders: []string{"Authorization", "Content-Type", "Accept"},
+		AllowHeaders: []string{"Authorization", "Content-Type", "Accept", a2a.SvcParamExtensions},
 		MaxAge:       86400,
 	}
 	if origins.HasPatterns() {

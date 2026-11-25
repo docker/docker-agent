@@ -46,7 +46,8 @@ declares it only when started with `--tool-approval`.
 ```
 
 A client activates the extension for a call by listing its URI in the message
-`extensions` field or in the `A2A-Extensions` header. The server validates
+`extensions` field or in the `A2A-Extensions` header (allowed by the CORS
+policy for browser clients). The server validates
 replies the same way whether or not the extension is activated.
 
 ## Approval request
