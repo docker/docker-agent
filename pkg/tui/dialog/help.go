@@ -4,11 +4,11 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -25,20 +25,20 @@ type helpDialog struct {
 	readOnlyScrollDialog
 
 	sections []HelpSection
-	input    textinput.Model
+	input    input.Text
 }
 
 // NewHelpDialog displays searchable shortcut groups, with the current context first.
 func NewHelpDialog(sections []HelpSection) Dialog {
-	input := textinput.New()
-	input.SetStyles(styles.DialogInputStyle)
-	input.Placeholder = "Search..."
-	input.CharLimit = 256
+	search := input.NewText()
+	search.SetStyles(styles.DialogInputStyle)
+	search.Placeholder = "Search..."
+	search.CharLimit = 256
 	// Terminal paste is routed to Help; asynchronous clipboard replies could
 	// otherwise reach the underlying text input after Help closes.
-	input.KeyMap.Paste.SetEnabled(false)
-	input.Focus()
-	d := &helpDialog{sections: sections, input: input}
+	search.KeyMap.Paste.SetEnabled(false)
+	search.Focus()
+	d := &helpDialog{sections: sections, input: search}
 	d.readOnlyScrollDialog = newReadOnlyScrollDialog(
 		readOnlyScrollDialogSize{
 			widthPercent:  90,
@@ -53,6 +53,9 @@ func NewHelpDialog(sections []HelpSection) Dialog {
 	d.closeKey.SetKeys("esc", "enter")
 	return d
 }
+
+// CursorInput returns the search input whose cursor follows the dialog stack.
+func (d *helpDialog) CursorInput() input.Cursor { return &d.input }
 
 // IsHelpDialog reports whether a dialog is the contextual Help overlay.
 func IsHelpDialog(d Dialog) bool {

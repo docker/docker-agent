@@ -35,6 +35,8 @@ type sessionClient struct {
 	experimentalEvents       bool
 	skills                   *skillClient
 	experimentalSkills       bool
+	tasks                    *taskClient
+	experimentalTasks        bool
 	sanitizeError            func(error) error
 	serverAddress            string
 	toolListChangedHandler   func()
@@ -61,9 +63,17 @@ func (c *sessionClient) safeError(err error) error {
 
 // setSession stores the session under the write lock.
 func (c *sessionClient) setSession(s *gomcp.ClientSession) {
+	c.setSessionWithTasks(s, nil)
+}
+
+// setSessionWithTasks stores the session and its associated task client
+// atomically under the write lock so in-flight calls on a previous session
+// retain their own task state during reconnects.
+func (c *sessionClient) setSessionWithTasks(s *gomcp.ClientSession, tasks *taskClient) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.session = s
+	c.tasks = tasks
 }
 
 // ServerAddress returns the connection identifier captured at construction
@@ -80,6 +90,14 @@ func (c *sessionClient) getSession() *gomcp.ClientSession {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.session
+}
+
+// getSessionAndTasks returns the current session and its associated task
+// client together under the read lock.
+func (c *sessionClient) getSessionAndTasks() (*gomcp.ClientSession, *taskClient) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.session, c.tasks
 }
 
 // notificationHandlers returns ToolListChanged and PromptListChanged closures
@@ -130,6 +148,7 @@ func (c *sessionClient) Wait() error {
 func (c *sessionClient) Close(context.Context) error {
 	c.closeEvents()
 	c.closeSkills()
+	c.closeTasks()
 	if s := c.getSession(); s != nil {
 		return s.Close()
 	}
@@ -187,7 +206,7 @@ func (c *sessionClient) ListTools(ctx context.Context, request *gomcp.ListToolsP
 }
 
 func (c *sessionClient) CallTool(ctx context.Context, request *gomcp.CallToolParams) (*gomcp.CallToolResult, error) {
-	s := c.getSession()
+	s, tasks := c.getSessionAndTasks()
 	if s == nil {
 		return nil, errors.New("session not initialized")
 	}
@@ -210,6 +229,17 @@ func (c *sessionClient) CallTool(ctx context.Context, request *gomcp.CallToolPar
 	callID := c.registerCallContext(spanCtx)
 	defer c.unregisterCallContext(callID)
 	result, err := s.CallTool(spanCtx, request)
+	if err == nil && result != nil && tasks != nil {
+		if token, ok := result.Meta[internalTaskTokenMeta].(string); ok && tasks.ownsToken(token) {
+			delete(result.Meta, internalTaskTokenMeta)
+			if task, found := tasks.takeCreatedTask(token); found {
+				result, err = tasks.waitForTask(spanCtx, s, task, c.invokeElicitationHandler)
+			} else {
+				result = nil
+				err = &taskExecutionError{err: errors.New("MCP task state was cleared before task execution could start")}
+			}
+		}
+	}
 	if err != nil {
 		err = c.safeError(err)
 		span.RecordError(err, "")
@@ -331,7 +361,15 @@ func (c *sessionClient) elicitationContext(fallback context.Context) (context.Co
 func (c *sessionClient) handleElicitationRequest(ctx context.Context, req *gomcp.ElicitRequest) (*gomcp.ElicitResult, error) {
 	ctx, release := c.elicitationContext(ctx)
 	defer release()
-	slog.DebugContext(ctx, "Received elicitation request from MCP server", "message", req.Params.Message)
+	return c.invokeElicitationHandler(ctx, req.Params)
+}
+
+// invokeElicitationHandler invokes the registered elicitation handler directly
+// using ctx as-is, without inferring or stripping handler scope. Callers that
+// already hold the owning call's context (such as task input requests) use
+// this directly.
+func (c *sessionClient) invokeElicitationHandler(ctx context.Context, params *gomcp.ElicitParams) (*gomcp.ElicitResult, error) {
+	slog.DebugContext(ctx, "Received elicitation request from MCP server", "message", params.Message)
 
 	c.mu.RLock()
 	handler := c.elicitationHandler
@@ -341,7 +379,7 @@ func (c *sessionClient) handleElicitationRequest(ctx context.Context, req *gomcp
 		return nil, errors.New("no elicitation handler configured")
 	}
 
-	result, err := handler(ctx, req.Params)
+	result, err := handler(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("elicitation failed: %w", err)
 	}

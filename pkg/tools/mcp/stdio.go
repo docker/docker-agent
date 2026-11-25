@@ -74,6 +74,10 @@ func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequ
 	if eventsEnabled {
 		opts.Capabilities.AddExtension(eventsExtension, nil)
 	}
+	tasksEnabled := c.tasksEnabled()
+	if tasksEnabled {
+		opts.Capabilities.AddExtension(tasksExtension, nil)
+	}
 	client := gomcp.NewClient(&gomcp.Implementation{
 		Name:    "docker agent",
 		Version: "1.0.0",
@@ -97,6 +101,16 @@ func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequ
 		c.mu.Lock()
 		c.events = events
 		c.mu.Unlock()
+	}
+
+	var tasks *taskClient
+	if tasksEnabled {
+		var err error
+		tasks, err = newTaskClient(client)
+		if err != nil {
+			return nil, err
+		}
+		tasks.sanitizeError = c.safeError
 	}
 
 	connectCtx, processCtx := ctx, ctx
@@ -123,7 +137,10 @@ func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequ
 	transport := &trackedCommandTransport{CommandTransport: gomcp.CommandTransport{Command: cmd}}
 	var connectionTransport gomcp.Transport = transport
 	if eventsEnabled {
-		connectionTransport = &eventTransport{Transport: transport, events: events}
+		connectionTransport = &eventTransport{Transport: connectionTransport, events: events}
+	}
+	if tasksEnabled {
+		connectionTransport = &taskTransport{Transport: connectionTransport, tasks: tasks}
 	}
 	session, err := client.Connect(connectCtx, connectionTransport, nil)
 	if err != nil {
@@ -141,7 +158,7 @@ func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequ
 		return nil, connectCtx.Err()
 	}
 
-	c.setSession(session)
+	c.setSessionWithTasks(session, tasks)
 
 	return session.InitializeResult(), nil
 }

@@ -707,6 +707,7 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 		// plumb the resulting *RemoteOAuthConfig through here.
 		mcpToolset := mcp.NewRemoteToolsetWithAllowPrivateIPs(id, server.URL, server.Transport, nil, nil, server.allowPrivateIPs)
 		mcpToolset.SetExperimentalEvents(userconfig.Get().MCPEventsEnabled())
+		mcpToolset.SetExperimentalTasks(userconfig.Get().MCPTasksEnabled())
 
 		// Re-attach the captured handlers so OAuth flows behave
 		// identically to a YAML-declared mcp.remote toolset. Apply

@@ -39,3 +39,69 @@ func TestBetaToolsRetainNestedDeclarationOrder(t *testing.T) {
 	assert.Equal(t, 2, bytes.Count(data, []byte(`"properties":{"zulu":`)))
 	assert.NotContains(t, string(data), "x-docker-agent-property-order")
 }
+
+func TestConvertTools_PreservesRootDefsNonStrict(t *testing.T) {
+	t.Parallel()
+
+	params := map[string]any{
+		"type": "object",
+		"$defs": map[string]any{
+			"json_value": map[string]any{
+				"anyOf": []any{
+					map[string]any{"type": "string"},
+					map[string]any{"type": "integer"},
+					map[string]any{
+						"type":                 "object",
+						"additionalProperties": map[string]any{"$ref": "#/$defs/json_value"},
+					},
+					map[string]any{
+						"type":  "array",
+						"items": map[string]any{"$ref": "#/$defs/json_value"},
+					},
+				},
+			},
+		},
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string"},
+			"arguments": map[string]any{
+				"type":                 "object",
+				"additionalProperties": map[string]any{"$ref": "#/$defs/json_value"},
+			},
+		},
+		"required": []string{"name"},
+	}
+
+	reqTools := []tools.Tool{{Name: "mcp_events_subscribe", Parameters: params}}
+
+	t.Run("standard", func(t *testing.T) {
+		t.Parallel()
+		converted, err := convertTools(reqTools)
+		require.NoError(t, err)
+		wire, err := json.Marshal(converted)
+		require.NoError(t, err)
+
+		var decoded []map[string]any
+		require.NoError(t, json.Unmarshal(wire, &decoded))
+		require.Len(t, decoded, 1)
+		inputSchema := decoded[0]["input_schema"].(map[string]any)
+		defs, ok := inputSchema["$defs"].(map[string]any)
+		require.True(t, ok, "standard wire schema must preserve root $defs")
+		assert.Contains(t, defs, "json_value")
+	})
+
+	t.Run("beta", func(t *testing.T) {
+		t.Parallel()
+		converted, err := convertBetaTools(reqTools)
+		require.NoError(t, err)
+		wire, err := json.Marshal(converted)
+		require.NoError(t, err)
+
+		var decoded []map[string]any
+		require.NoError(t, json.Unmarshal(wire, &decoded))
+		require.Len(t, decoded, 1)
+		inputSchema := decoded[0]["input_schema"].(map[string]any)
+		defs, ok := inputSchema["$defs"].(map[string]any)
+		require.True(t, ok, "beta wire schema must preserve root $defs")
+		assert.Contains(t, defs, "json_value")
+	})
+}

@@ -87,3 +87,14 @@ func TestDragPinsActiveStyleWithoutTicking(t *testing.T) {
 	assert.Zero(t, ar.ActiveCount())
 	assert.Zero(t, r.edge)
 }
+
+func TestSidebarNearHoverBrightness(t *testing.T) {
+	t.Parallel()
+	var r Reveal
+	r.Set(true, false, false)
+	base := styles.ResizeHandleStyle
+	want := base.Foreground(blend(base.GetForeground(), styles.TextPrimary, 0.30))
+	_, grip := r.RenderOnSeparator(0)
+	assert.Equal(t, want.Render("│"), grip)
+	assert.Equal(t, base.Render("─"), r.Render("─", 1))
+}

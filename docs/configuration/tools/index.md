@@ -200,6 +200,25 @@ data without granting `allowed-tools` or local command expansion.
 See [`examples/mcp-skills`](https://github.com/docker/docker-agent/tree/main/examples/mcp-skills)
 for a runnable demo.
 
+## Experimental MCP Tasks
+
+MCP Tasks (`io.modelcontextprotocol/tasks`, SEP-2663) are disabled by default.
+Enable them globally in `~/.config/cagent/config.yaml`:
+
+```yaml
+settings:
+  experimental:
+    mcp_tasks: true
+```
+
+When enabled over stdio or Streamable HTTP under protocol `2026-07-28`,
+docker-agent advertises the `io.modelcontextprotocol/tasks` extension capability
+on requests. If a compatible MCP server responds to `tools/call` with a
+`CreateTaskResult` (`resultType: "task"`), docker-agent transparently polls
+`tasks/get`, fulfills mid-flight `input_required` elicitation requests via
+`tasks/update`, sends cooperative `tasks/cancel` on cancellation, and returns
+the completed tool result to the model.
+
 ## Toolset Lifecycle
 
 Long-running toolsets — local MCP servers (stdio), remote MCP servers (Streamable HTTP / SSE), and LSP servers — are managed by a single supervisor that can auto-reconnect them when they crash, time out, or drop their session. The `lifecycle` block on the toolset lets you tune that supervisor per toolset. It applies to every `type: mcp` and `type: lsp` toolset.

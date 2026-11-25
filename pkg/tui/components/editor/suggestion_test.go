@@ -3,11 +3,16 @@ package editor
 import (
 	"strings"
 	"testing"
+	"testing/synctest"
 
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/history"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 func TestApplySuggestionOverlay(t *testing.T) {
@@ -91,6 +96,34 @@ func TestApplySuggestionOverlay(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSuggestionOverlayFollowsCursorBlink(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		e := New(nil).(*editor)
+		e.SetValue("hello ")
+		e.suggestion = "world"
+		e.hasSuggestion = true
+
+		cursorCell := func(view string) uv.Cell {
+			lines := uv.NewStyledString(view).Lines(ansi.GraphemeWidth)
+			cell := lines[1][styles.AppPadding+len("hello ")]
+			require.Equal(t, "w", cell.Content)
+			return cell
+		}
+		cmd := input.Expose(nil, e.CursorInput())
+		visible := e.View()
+		require.Equal(t, styles.Accent, cursorCell(visible).Style.Bg)
+		cmd = cmd().(*input.BlinkMsg).Apply(e.CursorInput())
+		require.NotNil(t, cmd)
+		hidden := e.View()
+		require.NotEqual(t, styles.Accent, cursorCell(hidden).Style.Bg)
+		require.Equal(t, ansi.Strip(visible), ansi.Strip(hidden))
+
+		cmd().(*input.BlinkMsg).Apply(e.CursorInput())
+		require.Equal(t, visible, e.View())
+	})
 }
 
 func TestApplySuggestionOverlayScrolledView(t *testing.T) {
