@@ -844,6 +844,14 @@ func ConvertParametersToSchema(params any) (anthropic.ToolInputSchemaParam, erro
 	}
 	tools.OrderedSchemaProperties(m)
 	schema.Properties = m["properties"]
+	for _, key := range []string{"$defs", "definitions"} {
+		if defs, ok := m[key]; ok {
+			if schema.ExtraFields == nil {
+				schema.ExtraFields = make(map[string]any)
+			}
+			schema.ExtraFields[key] = defs
+		}
+	}
 	return schema, nil
 }
 

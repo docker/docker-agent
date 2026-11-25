@@ -1368,6 +1368,86 @@ func assertNoNullableContainerTypePairs(t *testing.T, schema map[string]any) {
 	})
 }
 
+func TestConvertParametersToSchema_MCPEventsSubscribeArguments(t *testing.T) {
+	t.Parallel()
+
+	params := map[string]any{
+		"type": "object",
+		"$defs": map[string]any{
+			"json_value": map[string]any{
+				"anyOf": []any{
+					map[string]any{"type": "string"},
+					map[string]any{"type": "number"},
+					map[string]any{"type": "integer"},
+					map[string]any{"type": "boolean"},
+					map[string]any{"type": "null"},
+					map[string]any{
+						"type":                 "object",
+						"additionalProperties": map[string]any{"$ref": "#/$defs/json_value"},
+					},
+					map[string]any{
+						"type":  "array",
+						"items": map[string]any{"$ref": "#/$defs/json_value"},
+					},
+				},
+			},
+		},
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string"},
+			"arguments": map[string]any{
+				"type":                 "object",
+				"additionalProperties": map[string]any{"$ref": "#/$defs/json_value"},
+			},
+		},
+		"required": []string{"name"},
+	}
+
+	out, strict, err := ConvertParametersToSchema(params)
+	require.NoError(t, err)
+	assert.False(t, strict, "schema-form additionalProperties must disable strict mode")
+
+	// Verify $ref nodes and nested object/array definitions are preserved intact.
+	props := out["properties"].(map[string]any)
+	argSchema := props["arguments"].(map[string]any)
+	objVariant := argSchema["anyOf"].([]any)[0].(map[string]any)
+	assert.Equal(t, map[string]any{"$ref": "#/$defs/json_value"}, objVariant["additionalProperties"])
+
+	defs := out["$defs"].(map[string]any)
+	jsonVal := defs["json_value"].(map[string]any)
+	_, hasType := jsonVal["type"]
+	assert.False(t, hasType, "anyOf json_value must not gain a conflicting type")
+
+	// Validate real subscription payloads (scalars, nonempty nested objects, non-string arrays, null)
+	// against the converted schema.
+	raw, err := json.Marshal(out)
+	require.NoError(t, err)
+	var js jsonschema.Schema
+	require.NoError(t, json.Unmarshal(raw, &js))
+	resolved, err := js.Resolve(nil)
+	require.NoError(t, err)
+
+	validPayloads := []map[string]any{
+		{
+			"name": "github.pr.state",
+			"arguments": map[string]any{
+				"owner":     "docker",
+				"repo":      "sandboxes",
+				"pr_number": 10436,
+				"filter":    map[string]any{"owner": "docker", "nested": map[string]any{"ok": true}},
+				"ids":       []any{1, 2, 3},
+				"items":     []any{map[string]any{"k": "v"}},
+			},
+		},
+		{
+			"name":      "ticker",
+			"arguments": nil,
+		},
+	}
+	for _, payload := range validPayloads {
+		require.NoError(t, resolved.Validate(payload))
+	}
+}
+
 // TestConvertParametersToSchema_EnumConstNullability checks typeless and
 // nullable enum/const properties through the full conversion by validating
 // instances against the result: optional ones must still accept null once
