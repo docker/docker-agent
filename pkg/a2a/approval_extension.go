@@ -5,6 +5,8 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	adka2a "google.golang.org/adk/v2/server/adka2a/v2"
+
+	"github.com/docker/docker-agent/pkg/permissions"
 )
 
 // toolApprovalExtensionURI identifies the tool-approval A2A extension: the
@@ -27,7 +29,7 @@ func toolApprovalExtension() *a2a.AgentExtension {
 // approvalResponseSchema is the JSON Schema of the function response a client
 // sends back, readable by a UI and by a model. A2A metadata only accepts
 // []any slices.
-func approvalResponseSchema() map[string]any {
+func approvalResponseSchema(grant string) map[string]any {
 	enum := make([]any, len(allowedDecisions))
 	for i, d := range allowedDecisions {
 		enum[i] = d
@@ -38,8 +40,9 @@ func approvalResponseSchema() map[string]any {
 			"decision": map[string]any{
 				"type": "string",
 				"enum": enum,
-				"description": "approve: run this call; approve-tool: run it and allow this tool for the rest " +
-					"of the conversation; reject: skip it",
+				"description": fmt.Sprintf("approve: run this call only; approve-in-context: run it and allow later calls "+
+					"matching %q in this context (contextId); reject: skip it. "+
+					"approve-tool is a deprecated alias of approve-in-context", grant),
 			},
 			"reason": map[string]any{
 				"type":        "string",
@@ -51,10 +54,15 @@ func approvalResponseSchema() map[string]any {
 }
 
 // annotateApprovalParts adds the extension metadata to the pending
-// function-call parts of an INPUT_REQUIRED status update.
-func annotateApprovalParts(event a2a.Event) {
+// function-call parts of an INPUT_REQUIRED status update. The grant comes from
+// the parked run, so what is announced is exactly what approve-in-context stores.
+func annotateApprovalParts(event a2a.Event, approvals *approvalRegistry) {
 	ev, ok := event.(*a2a.TaskStatusUpdateEvent)
 	if !ok || ev.Status.State != a2a.TaskStateInputRequired || ev.Status.Message == nil {
+		return
+	}
+	run, ok := approvals.pending(ev.TaskID)
+	if !ok {
 		return
 	}
 	for _, part := range ev.Status.Message.Parts {
@@ -62,10 +70,15 @@ func annotateApprovalParts(event a2a.Event) {
 		if !ok || part.Meta()[metaKeyType] != "function_call" || part.Meta()[metaKeyLongRunning] != true {
 			continue
 		}
+		if id, _ := data["id"].(string); id != run.callID {
+			continue
+		}
 		name, _ := data["name"].(string)
 		part.SetMeta(toolApprovalExtensionURI, map[string]any{
 			"prompt":         fmt.Sprintf("Tool %q requires approval", name),
-			"responseSchema": approvalResponseSchema(),
+			"grant":          run.grant,
+			"grantLabel":     "allow " + permissions.PatternLabel(run.grant) + " in this context",
+			"responseSchema": approvalResponseSchema(run.grant),
 		})
 	}
 }

@@ -19,6 +19,7 @@ import (
 
 	dagent "github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
+	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
@@ -167,11 +168,14 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 func resumePausedRun(ctx agent.InvocationContext, yield func(*adksession.Event, error) bool, reg *approvalRegistry, sessStore session.Store, agentName string, ticket *resumeTicket) {
 	paused := ticket.run
 	stop := bindToInvocation(ctx, paused.cancel)
-	req := resumeDecision(ticket.response, paused.toolName)
+	req := resumeDecision(ticket.response, paused.grant)
+	if decision, _ := ticket.response.Response["decision"].(string); decision == decisionApproveTool {
+		slog.WarnContext(ctx, "A2A tool-approval decision approve-tool is deprecated; use approve-in-context")
+	}
 	if req.Type == runtime.ResumeTypeApproveTool {
 		// The next turn reloads the session from the store; persist the grant
 		// now, as serve api does, so it does not ask again.
-		paused.sess.AppendPermissionAllow(paused.toolName)
+		paused.sess.AppendPermissionAllow(paused.grant)
 		if err := sessStore.UpdateSession(ctx, paused.sess); err != nil {
 			slog.WarnContext(ctx, "Failed to persist tool approval", "session_id", paused.sess.ID, "error", err)
 		}
@@ -250,7 +254,8 @@ func pumpEvents(ctx agent.InvocationContext, yield func(*adksession.Event, error
 				}
 			}
 			parked := *run
-			parked.toolName = e.ToolCall.Function.Name
+			// Computed once: the grant announced to the client is the one stored.
+			parked.grant = permissions.BuildPermissionPattern(ctx, e.ToolCall)
 			parked.callID = e.ToolCall.ID
 			parked.created = time.Now()
 			reg.park(&parked)

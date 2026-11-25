@@ -151,16 +151,19 @@ https://docker.github.io/docker-agent/a2a/extensions/tool-approval/v1
 ```
 
 The function-call part carries the extension's metadata: a human-readable
-`prompt` and a JSON Schema `responseSchema` for the reply, readable by a UI or a
-model.
+`prompt`, the permission pattern `approve-in-context` would store (`grant`)
+with its display label (`grantLabel`), and a JSON Schema `responseSchema` for
+the reply, readable by a UI or a model.
 
 ```json
 {"data":{"id":"call_123","name":"shell","args":{"cmd":"ls"}},
  "metadata":{"adk_type":"function_call","adk_is_long_running":true,
   "https://docker.github.io/docker-agent/a2a/extensions/tool-approval/v1":{
    "prompt":"Tool \"shell\" requires approval",
+   "grant":"shell:cmd=ls*",
+   "grantLabel":"allow ls* in this context",
    "responseSchema":{"type":"object","required":["decision"],"properties":{
-    "decision":{"type":"string","enum":["approve","approve-tool","reject"]},
+    "decision":{"type":"string","enum":["approve","approve-in-context","reject"]},
     "reason":{"type":"string"}}}}}}
 ```
 
@@ -176,14 +179,22 @@ activates it for the call:
   "metadata":{"adk_type":"function_response"}}]}
 ```
 
-`decision` is one of `approve`, `approve-tool` (approve this tool for the rest
-of the conversation, persisted with the session), or `reject` (with an optional
-`reason`, passed to the model).
+`decision` is one of:
+
+- `approve`: run this call only; the next matching call asks again.
+- `approve-in-context`: run it and allow later calls matching `grant` in
+  this `contextId` (persisted with the session, so it survives a restart). As in
+  the TUI, a shell command grants its first word (`ls` → `shell:cmd=ls*`), not
+  every shell command; other tools grant the tool name.
+- `reject`: skip it, with an optional `reason` passed to the model.
+
+`approve-tool` is a deprecated alias of `approve-in-context`: still accepted, no
+longer advertised in the schema.
 
 A reply that does not answer the pending call (free text, another call `id`,
 or a decision outside the enum) is rejected with JSON-RPC `-32602` and a
 `reason` in the error data, e.g.
-`decision 'x' not allowed; expected [approve, approve-tool, reject]`. The task
+`decision 'x' not allowed; expected [approve, approve-in-context, reject]`. The task
 stays in `TASK_STATE_INPUT_REQUIRED`, nothing is added to its history, and no
 push notification is sent, so the client can retry.
 

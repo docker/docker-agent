@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -162,8 +164,38 @@ func TestServer_ToolApproval_CancelStopsApprovedTool(t *testing.T) {
 	assert.Equal(t, a2a.TaskStateCanceled, canceled.Status.State)
 }
 
-// approve-tool survives the session reload of the next turn.
-func TestServer_ToolApproval_ApproveToolPersistsAcrossTurns(t *testing.T) {
+// approve-in-context (and its deprecated alias approve-tool) survives the session
+// reload of the next turn.
+func TestServer_ToolApproval_ApproveInContextPersistsAcrossTurns(t *testing.T) {
+	t.Parallel()
+
+	for _, decision := range []string{"approve-in-context", "approve-tool"} {
+		t.Run(decision, func(t *testing.T) {
+			t.Parallel()
+
+			var executions atomic.Int32
+			tm, _ := approvalTeamWith(approvalCanaryTool(&executions),
+				toolCallStream("approval_canary"), stopStream(),
+				toolCallStream("approval_canary"), stopStream())
+			client, _ := startApprovalServer(t, tm, newA2AResumeStore(t, "sqlite"), RunOptions{ToolApproval: true})
+
+			task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+			res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+				Message: answerToolCall(task, callID, map[string]any{"decision": decision}),
+			})
+			require.NoError(t, err)
+			require.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
+
+			second, ok := sendText(t, client, task.ContextID, "run it again").(*a2a.Task)
+			require.True(t, ok)
+			assert.Equal(t, a2a.TaskStateCompleted, second.Status.State, "the approved tool must not ask again")
+			assert.Equal(t, int32(2), executions.Load())
+		})
+	}
+}
+
+// approve covers the pending call only: the next call asks again.
+func TestServer_ToolApproval_ApproveIsOneShot(t *testing.T) {
 	t.Parallel()
 
 	var executions atomic.Int32
@@ -174,15 +206,67 @@ func TestServer_ToolApproval_ApproveToolPersistsAcrossTurns(t *testing.T) {
 
 	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
 	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
-		Message: answerToolCall(task, callID, map[string]any{"decision": "approve-tool"}),
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
 	})
 	require.NoError(t, err)
 	require.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
 
-	second, ok := sendText(t, client, task.ContextID, "run it again").(*a2a.Task)
-	require.True(t, ok)
-	assert.Equal(t, a2a.TaskStateCompleted, second.Status.State, "the approved tool must not ask again")
-	assert.Equal(t, int32(2), executions.Load())
+	requireInputRequired(t, sendText(t, client, task.ContextID, "run it again"))
+	assert.Equal(t, int32(1), executions.Load())
+}
+
+// approve-in-context on a shell call grants that command, as the TUI does, not
+// every shell command.
+func TestServer_ToolApproval_ApproveInContextScopesShellToCommand(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		next    string
+		allowed bool
+	}{
+		{next: `{"cmd":"ls"}`, allowed: true},
+		{next: `{"cmd":"ls -la /tmp"}`, allowed: true},
+		{next: `{"cmd":"lsblk"}`},
+		{next: `{"cmd":"rm -rf /tmp/x"}`},
+		{next: `{"cmd":"ls && rm -rf ~"}`},
+	} {
+		t.Run(tc.next, func(t *testing.T) {
+			t.Parallel()
+
+			var executions atomic.Int32
+			shell := approvalCanaryTool(&executions)
+			shell.Name = "shell"
+			tm, _ := approvalTeamWith(shell,
+				toolCallStreamArgs("shell", `{"cmd":"ls"}`), stopStream(),
+				toolCallStreamArgs("shell", tc.next), stopStream())
+			client, _ := startApprovalServer(t, tm, newA2AResumeStore(t, "sqlite"), RunOptions{ToolApproval: true})
+
+			task, callID := requireInputRequired(t, sendText(t, client, "", "list files"))
+			var grant map[string]any
+			for _, part := range task.Status.Message.Parts {
+				if m, ok := part.Meta()[toolApprovalExtensionURI].(map[string]any); ok {
+					grant = m
+				}
+			}
+			require.NotNil(t, grant)
+			assert.Equal(t, "shell:cmd=ls*", grant["grant"])
+			assert.Equal(t, "allow ls* in this context", grant["grantLabel"])
+
+			answer := answerToolCall(task, callID, map[string]any{"decision": "approve-in-context"})
+			res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{Message: answer})
+			require.NoError(t, err)
+			require.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
+
+			next := sendText(t, client, task.ContextID, "again")
+			if tc.allowed {
+				assert.Equal(t, a2a.TaskStateCompleted, next.(*a2a.Task).Status.State)
+				assert.Equal(t, int32(2), executions.Load())
+				return
+			}
+			requireInputRequired(t, next)
+			assert.Equal(t, int32(1), executions.Load())
+		})
+	}
 }
 
 // Text the model streams before asking for approval stays in the artifacts.
@@ -227,7 +311,7 @@ func TestServer_ToolApproval_InvalidDecisionKeepsTaskWaiting(t *testing.T) {
 	_, err = client.SendMessage(t.Context(), &a2a.SendMessageRequest{
 		Message: answerToolCall(task, callID, map[string]any{"decision": "maybe"}),
 	})
-	requireInvalidParams(t, err, "decision 'maybe' not allowed; expected [approve, approve-tool, reject]")
+	requireInvalidParams(t, err, "decision 'maybe' not allowed; expected [approve, approve-in-context, reject]")
 
 	after, err := client.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
 	require.NoError(t, err)
@@ -286,6 +370,55 @@ func TestServer_ToolApproval_Extension(t *testing.T) {
 		schema, ok := meta["responseSchema"].(map[string]any)
 		require.True(t, ok)
 		decision := schema["properties"].(map[string]any)["decision"].(map[string]any)
-		assert.Equal(t, []any{"approve", "approve-tool", "reject"}, decision["enum"])
+		assert.Equal(t, []any{"approve", "approve-in-context", "reject"}, decision["enum"])
+		assert.Equal(t, "approval_canary", meta["grant"])
+		assert.Equal(t, "allow approval_canary in this context", meta["grantLabel"])
 	})
+}
+
+// approve-in-context survives a server restart: the grant lives in the session store.
+func TestServer_ToolApproval_ApproveToolSurvivesRestart(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "sessions.db")
+	openStore := func() session.Store {
+		store, err := sqlitestore.New(t.Context(), dbPath)
+		require.NoError(t, err)
+		return store
+	}
+
+	var executions atomic.Int32
+	tm, _ := approvalTeamWith(approvalCanaryTool(&executions), toolCallStream("approval_canary"), stopStream())
+	serverCtx, stopServer := context.WithCancel(t.Context())
+	store := openStore()
+	client, _ := startApprovalServerCtx(t, serverCtx, tm, store, RunOptions{ToolApproval: true})
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve-in-context"}),
+	})
+	require.NoError(t, err)
+	require.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
+	stopServer()
+	require.NoError(t, store.Close())
+
+	tm2, _ := approvalTeamWith(approvalCanaryTool(&executions), toolCallStream("approval_canary"), stopStream())
+	restarted := openStore()
+	t.Cleanup(func() { require.NoError(t, restarted.Close()) })
+	client2, _ := startApprovalServer(t, tm2, restarted, RunOptions{ToolApproval: true})
+
+	second, ok := sendText(t, client2, task.ContextID, "run it again").(*a2a.Task)
+	require.True(t, ok)
+	assert.Equal(t, a2a.TaskStateCompleted, second.Status.State, "the grant must survive a restart")
+	assert.Equal(t, int32(2), executions.Load())
+}
+
+func toolCallStreamArgs(name, args string) chat.MessageStream {
+	return &mockStream{responses: []chat.MessageStreamResponse{{
+		Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ToolCalls: []tools.ToolCall{{
+			ID:       "tool-call",
+			Type:     "function",
+			Function: tools.FunctionCall{Name: name, Arguments: args},
+		}}}}},
+	}}}
 }

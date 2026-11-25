@@ -68,12 +68,13 @@ func TestResumeDecision(t *testing.T) {
 		wantMsg  string
 	}{
 		{name: "approve", response: map[string]any{"decision": "approve"}, wantType: runtime.ResumeTypeApprove},
-		{name: "approve-tool", response: map[string]any{"decision": "approve-tool"}, wantType: runtime.ResumeTypeApproveTool, wantTool: "shell"},
+		{name: "approve-in-context", response: map[string]any{"decision": "approve-in-context"}, wantType: runtime.ResumeTypeApproveTool, wantTool: "shell:cmd=ls*"},
+		{name: "deprecated approve-tool", response: map[string]any{"decision": "approve-tool"}, wantType: runtime.ResumeTypeApproveTool, wantTool: "shell:cmd=ls*"},
 		{name: "reject with reason", response: map[string]any{"decision": "reject", "reason": "nope"}, wantType: runtime.ResumeTypeReject, wantMsg: "nope"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := resumeDecision(&genai.FunctionResponse{ID: "call-1", Name: "shell", Response: tc.response}, "shell")
+			req := resumeDecision(&genai.FunctionResponse{ID: "call-1", Name: "shell", Response: tc.response}, "shell:cmd=ls*")
 			assert.Equal(t, tc.wantType, req.Type)
 			assert.Equal(t, tc.wantTool, req.ToolName)
 			assert.Equal(t, tc.wantMsg, req.Reason)
@@ -147,8 +148,10 @@ func TestValidateReply(t *testing.T) {
 		{name: "approve", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "approve"}))},
 		{name: "reject", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "reject"}))},
 		{name: "other task untouched", msg: reply("task-2", "ctx-2", a2a.NewTextPart("hi"))},
-		{name: "unknown decision", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "x"})), reason: "decision 'x' not allowed; expected [approve, approve-tool, reject]"},
-		{name: "missing decision", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{})), reason: "decision '' not allowed; expected [approve, approve-tool, reject]"},
+		{name: "approve-in-context", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "approve-in-context"}))},
+		{name: "deprecated approve-tool", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "approve-tool"}))},
+		{name: "unknown decision", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "x"})), reason: "decision 'x' not allowed; expected [approve, approve-in-context, reject]"},
+		{name: "missing decision", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{})), reason: "decision '' not allowed; expected [approve, approve-in-context, reject]"},
 		{name: "wrong call ID", msg: reply("task-1", "ctx-1", response("call-9", map[string]any{"decision": "approve"})), reason: "expected a function_response for call 'call-1'"},
 		{name: "free text", msg: reply("task-1", "ctx-1", a2a.NewTextPart("yes")), reason: "expected a function_response for call 'call-1'"},
 		{name: "new task in waiting context", msg: reply("", "ctx-1", a2a.NewTextPart("hi")), reason: "task task-1 is waiting for tool approval in this context; reply with its taskId or cancel it"},
@@ -196,17 +199,28 @@ func startToolApprovalServer(t *testing.T, tm *team.Team, store session.Store, t
 // startApprovalServer serves tm and returns a client and the listen address.
 func startApprovalServer(t *testing.T, tm *team.Team, store session.Store, opts RunOptions) (*a2aclient.Client, string) {
 	t.Helper()
+	return startApprovalServerCtx(t, t.Context(), tm, store, opts)
+}
+
+// startApprovalServerCtx is startApprovalServer with an explicit server
+// lifetime: cancelling ctx stops the server, as on shutdown.
+func startApprovalServerCtx(t *testing.T, ctx context.Context, tm *team.Team, store session.Store, opts RunOptions) (*a2aclient.Client, string) {
+	t.Helper()
 
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	// Strict always asks for confirmation, so the call reaches askUser (where
 	// the tool-approval switch lives) rather than being auto-allowed or denied
 	// by the mode itself.
-	e, err := newServer(t.Context(), tm, "test.yaml", "root", store, newTestTaskDeps(t),
+	e, err := newServer(ctx, tm, "test.yaml", "root", store, newTestTaskDeps(t),
 		servesafety.Resolved{Policy: session.SafetyPolicyStrict}, testWorkspaceRoot, ln.Addr().String(), opts)
 	require.NoError(t, err)
 	go func() { _ = e.Server.Serve(ln) }()
-	t.Cleanup(func() { require.NoError(t, e.Server.Close()) })
+	stop := context.AfterFunc(ctx, func() { _ = e.Server.Close() })
+	t.Cleanup(func() {
+		stop()
+		_ = e.Server.Close()
+	})
 
 	client, err := a2aclient.NewFromEndpoints(t.Context(), []*a2a.AgentInterface{
 		a2a.NewAgentInterface(fmt.Sprintf("http://%s/invoke", ln.Addr().String()), a2a.TransportProtocolJSONRPC),

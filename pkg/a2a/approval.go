@@ -38,7 +38,7 @@ type pausedRun struct {
 	sess      *session.Session
 	events    <-chan runtime.Event
 	cancel    context.CancelFunc
-	toolName  string // function name of the paused call, for approve-tool
+	grant     string // permission pattern approve-in-context persists (shell:cmd=ls* for commands)
 	callID    string // tool-call ID reported to the client as long-running
 	created   time.Time
 }
@@ -246,14 +246,14 @@ func inputRequiredEvent(agentName string, tc tools.ToolCall) *adksession.Event {
 
 // resumeDecision maps a validated approval response to a runtime
 // ResumeRequest. The interceptor has already rejected unknown decisions.
-func resumeDecision(fr *genai.FunctionResponse, toolName string) runtime.ResumeRequest {
+func resumeDecision(fr *genai.FunctionResponse, grant string) runtime.ResumeRequest {
 	decision, _ := fr.Response["decision"].(string)
 	reason, _ := fr.Response["reason"].(string)
 	switch decision {
 	case decisionApprove:
 		return runtime.ResumeApprove()
-	case decisionApproveTool:
-		return runtime.ResumeApproveTool(toolName)
+	case decisionApproveInContext, decisionApproveTool:
+		return runtime.ResumeApproveTool(grant)
 	default:
 		return runtime.ResumeReject(reason)
 	}
