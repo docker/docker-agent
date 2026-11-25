@@ -48,6 +48,9 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	if setter, ok := ts.(interface{ SetExperimentalSkills(enabled bool) }); ok {
 		setter.SetExperimentalSkills(userSettings.MCPSkillsEnabled())
 	}
+	if setter, ok := ts.(interface{ SetExperimentalTasks(enabled bool) }); ok {
+		setter.SetExperimentalTasks(userSettings.MCPTasksEnabled())
+	}
 	return ts, nil
 }
 
@@ -143,6 +146,7 @@ func NewRemoteToolsetFromConfig(ctx context.Context, toolset latest.Toolset, env
 	userSettings := userconfig.Get()
 	ts.SetExperimentalEvents(userSettings.MCPEventsEnabled())
 	ts.SetExperimentalSkills(userSettings.MCPSkillsEnabled())
+	ts.SetExperimentalTasks(userSettings.MCPTasksEnabled())
 	return ts
 }
 
@@ -886,8 +890,9 @@ func (ts *Toolset) callTool(ctx context.Context, toolCall tools.ToolCall, _ tool
 
 	// If the call failed with a connection or session error (e.g. the
 	// server restarted), trigger or wait for a reconnection and retry
-	// the call once.
-	if err != nil && !ts.sessionOwned && isConnectionError(err) && callCtx.Err() == nil {
+	// the call once. Skip retry if a task was already created so we never
+	// duplicate a non-idempotent async tool call.
+	if err != nil && !ts.sessionOwned && !isTaskExecutionError(err) && isConnectionError(err) && callCtx.Err() == nil {
 		slog.WarnContext(ctx, "MCP call failed, forcing reconnect and retrying", "tool", toolCall.Function.Name, "server", ts.logID, "error", err)
 		if waitErr := ts.supervisor.RestartAndWait(callCtx, sessionMissingRetryTimeout); waitErr != nil {
 			return nil, ts.classifyCallToolError(ctx, callCtx, toolCall, start, fmt.Errorf("failed to reconnect after call failure: %w", waitErr))

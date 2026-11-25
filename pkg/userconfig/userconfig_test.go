@@ -1639,6 +1639,26 @@ func TestConfig_Settings_ExperimentalMCPSkills(t *testing.T) {
 	assert.True(t, cfg.GetSettings().MCPSkillsEnabled())
 }
 
+func TestConfig_Settings_ExperimentalMCPTasks(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, (*Settings)(nil).MCPTasksEnabled())
+	assert.False(t, (&Settings{}).MCPTasksEnabled())
+	assert.False(t, (&Settings{Experimental: &ExperimentalSettings{}}).MCPTasksEnabled())
+	assert.True(t, (&Settings{Experimental: &ExperimentalSettings{MCPTasks: true}}).MCPTasksEnabled())
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`settings:
+  experimental:
+    mcp_tasks: true
+`), 0o644))
+
+	cfg, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	assert.True(t, cfg.GetSettings().MCPTasksEnabled())
+}
+
 func TestConfig_Settings_SafetyRestricted(t *testing.T) {
 	t.Parallel()
 
