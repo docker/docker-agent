@@ -102,8 +102,10 @@ pending call, with:
 }
 ```
 
-Clients SHOULD read the allowed decisions from `responseSchema` rather than
-hard-code them.
+`grant` and `grantLabel` are absent when the call cannot be scoped (a command
+tool call with an empty command, or a glob, `:` or `\` in its first word); the enum then
+omits `approve-in-context`. Clients SHOULD read the allowed decisions from
+`responseSchema` rather than hard-code them.
 
 ## Approval reply
 
@@ -143,7 +145,7 @@ data part with:
 | `decision` | Effect |
 |---|---|
 | `approve` | Run this call only. The next matching call asks again. |
-| `approve-in-context` | Run this call and allow later calls matching `grant` in the same `contextId`. The grant is stored with the session. |
+| `approve-in-context` | Run this call and allow later calls matching `grant` in the same `contextId`. The grant is stored with the session. Only allowed when `grant` is present. |
 | `reject` | Skip the call. The optional `reason` string is passed to the model. |
 
 ## Errors

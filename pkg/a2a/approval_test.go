@@ -80,6 +80,12 @@ func TestResumeDecision(t *testing.T) {
 			assert.Equal(t, tc.wantMsg, req.Reason)
 		})
 	}
+
+	t.Run("approve-in-context without a grant", func(t *testing.T) {
+		t.Parallel()
+		req := resumeDecision(&genai.FunctionResponse{ID: "call-1", Name: "shell", Response: map[string]any{"decision": "approve-in-context"}}, "")
+		assert.Equal(t, runtime.ResumeTypeReject, req.Type, "an empty grant must never become a whole-tool grant")
+	})
 }
 
 func TestApprovalRegistry_BoundToTaskAndCall(t *testing.T) {
@@ -191,7 +197,8 @@ func TestValidateReply(t *testing.T) {
 	t.Parallel()
 
 	reg := newApprovalRegistry(t.Context(), true)
-	reg.park(&pausedRun{taskID: "task-1", contextID: "ctx-1", callID: "call-1", events: closedEvents(), cancel: func() {}})
+	reg.park(&pausedRun{taskID: "task-1", contextID: "ctx-1", callID: "call-1", grant: "shell:cmd=ls*", events: closedEvents(), cancel: func() {}})
+	reg.park(&pausedRun{taskID: "task-3", contextID: "ctx-3", callID: "call-3", events: closedEvents(), cancel: func() {}})
 
 	reply := func(taskID a2a.TaskID, contextID string, parts ...*a2a.Part) *a2a.Message {
 		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
@@ -220,6 +227,8 @@ func TestValidateReply(t *testing.T) {
 		{name: "free text", msg: reply("task-1", "ctx-1", a2a.NewTextPart("yes")), reason: "expected a function_response for call 'call-1'"},
 		{name: "new task in waiting context", msg: reply("", "ctx-1", a2a.NewTextPart("hi")), reason: "task task-1 is waiting for tool approval in this context; reply with its taskId or cancel it"},
 		{name: "null part", msg: reply("task-1", "ctx-1", nil, response("call-1", map[string]any{"decision": "approve"})), reason: "message parts must not be null"},
+		{name: "unscoped call has no approve-in-context", msg: reply("task-3", "ctx-3", response("call-3", map[string]any{"decision": "approve-in-context"})), reason: "decision 'approve-in-context' not allowed; expected [approve, reject]"},
+		{name: "unscoped call can be approved once", msg: reply("task-3", "ctx-3", response("call-3", map[string]any{"decision": "approve"}))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

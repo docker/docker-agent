@@ -30,18 +30,23 @@ func toolApprovalExtension() *a2a.AgentExtension {
 // sends back, readable by a UI and by a model. A2A metadata only accepts
 // []any slices.
 func approvalResponseSchema(grant string) map[string]any {
-	enum := make([]any, len(allowedDecisions))
-	for i, d := range allowedDecisions {
+	decisions := allowedDecisions(grant)
+	enum := make([]any, len(decisions))
+	for i, d := range decisions {
 		enum[i] = d
+	}
+	description := "approve: run this call only; reject: skip it"
+	if grant != "" {
+		description = fmt.Sprintf("approve: run this call only; approve-in-context: run it and allow later calls "+
+			"matching %q in this context (contextId); reject: skip it", grant)
 	}
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"decision": map[string]any{
-				"type": "string",
-				"enum": enum,
-				"description": fmt.Sprintf("approve: run this call only; approve-in-context: run it and allow later calls "+
-					"matching %q in this context (contextId); reject: skip it", grant),
+				"type":        "string",
+				"enum":        enum,
+				"description": description,
 			},
 			"reason": map[string]any{
 				"type":        "string",
@@ -73,11 +78,14 @@ func annotateApprovalParts(event a2a.Event, approvals *approvalRegistry) {
 			continue
 		}
 		name, _ := data["name"].(string)
-		part.SetMeta(toolApprovalExtensionURI, map[string]any{
+		meta := map[string]any{
 			"prompt":         fmt.Sprintf("Tool %q requires approval", name),
-			"grant":          run.grant,
-			"grantLabel":     "allow " + permissions.PatternLabel(run.grant) + " in this context",
 			"responseSchema": approvalResponseSchema(run.grant),
-		})
+		}
+		if run.grant != "" {
+			meta["grant"] = run.grant
+			meta["grantLabel"] = "allow " + permissions.PatternLabel(run.grant) + " in this context"
+		}
+		part.SetMeta(toolApprovalExtensionURI, meta)
 	}
 }

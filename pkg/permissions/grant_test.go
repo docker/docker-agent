@@ -102,3 +102,27 @@ func TestAlwaysAllowLabel(t *testing.T) {
 	assert.Equal(t, "always allow docker run*", AlwaysAllowLabel("shell:cmd=docker  run*"))
 	assert.Equal(t, "always allow echo hi", AlwaysAllowLabel("shell:cmd=echo\nhi"))
 }
+
+func TestScopedPermissionPattern(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		call tools.ToolCall
+		want string
+	}{
+		{name: "shell scoped to its command", call: shellCall("ls -la"), want: "shell:cmd=ls*"},
+		{name: "empty command", call: shellCall(""), want: ""},
+		{name: "whitespace-only command", call: shellCall(`\t\n`), want: ""},
+		{name: "glob command word", call: shellCall("* -rf"), want: ""},
+		{name: "question mark command word", call: shellCall("l? /"), want: ""},
+		{name: "missing command", call: tools.ToolCall{Function: tools.FunctionCall{Name: "shell", Arguments: `{}`}}, want: ""},
+		{name: "malformed arguments", call: tools.ToolCall{Function: tools.FunctionCall{Name: "shell", Arguments: `{`}}, want: ""},
+		{name: "non-command tool keeps its name", call: tools.ToolCall{Function: tools.FunctionCall{Name: "read_file", Arguments: `{}`}}, want: "read_file"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, ScopedPermissionPattern(t.Context(), tt.call))
+		})
+	}
+}

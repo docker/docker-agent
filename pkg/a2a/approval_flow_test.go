@@ -317,8 +317,8 @@ func TestServer_ToolApproval_ApproveInContextScopesShellToCommand(t *testing.T) 
 			shell := approvalCanaryTool(&executions)
 			shell.Name = "shell"
 			tm, _ := approvalTeamWith(shell,
-				toolCallStreamArgs("shell", `{"cmd":"ls"}`), stopStream(),
-				toolCallStreamArgs("shell", tc.next), stopStream())
+				shellCallStream(`{"cmd":"ls"}`), stopStream(),
+				shellCallStream(tc.next), stopStream())
 			client, _ := startApprovalServer(t, tm, newA2AResumeStore(t, "sqlite"), RunOptions{ToolApproval: true})
 
 			task, callID := requireInputRequired(t, sendText(t, client, "", "list files"))
@@ -493,12 +493,12 @@ func TestServer_ToolApproval_ApproveToolSurvivesRestart(t *testing.T) {
 	assert.Equal(t, int32(2), executions.Load())
 }
 
-func toolCallStreamArgs(name, args string) chat.MessageStream {
+func shellCallStream(args string) chat.MessageStream {
 	return &mockStream{responses: []chat.MessageStreamResponse{{
 		Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ToolCalls: []tools.ToolCall{{
 			ID:       "tool-call",
 			Type:     "function",
-			Function: tools.FunctionCall{Name: name, Arguments: args},
+			Function: tools.FunctionCall{Name: "shell", Arguments: args},
 		}}}}},
 	}}}
 }
@@ -555,4 +555,52 @@ func TestServer_ToolApproval_NullPartKeepsTaskWaiting(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
 	assert.Equal(t, int32(1), executions.Load())
+}
+
+// A command call with no usable command word offers no approve-in-context: it
+// would be stored as a whole-tool grant allowing every later command.
+func TestServer_ToolApproval_UnscopableCommandLeavesNoToolGrant(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int32
+	shell := approvalCanaryTool(&executions)
+	shell.Name = "shell"
+	tm, _ := approvalTeamWith(shell,
+		shellCallStream(`{"cmd":""}`), stopStream(),
+		shellCallStream(`{"cmd":"rm -rf /tmp/x"}`), stopStream())
+	store := newA2AResumeStore(t, "sqlite")
+	client, _ := startApprovalServer(t, tm, store, RunOptions{ToolApproval: true})
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run something"))
+	var meta map[string]any
+	for _, part := range task.Status.Message.Parts {
+		if m, ok := part.Meta()[toolApprovalExtensionURI].(map[string]any); ok {
+			meta = m
+		}
+	}
+	require.NotNil(t, meta)
+	assert.NotContains(t, meta, "grant")
+	assert.NotContains(t, meta, "grantLabel")
+	decision := meta["responseSchema"].(map[string]any)["properties"].(map[string]any)["decision"].(map[string]any)
+	assert.Equal(t, []any{"approve", "reject"}, decision["enum"])
+
+	_, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve-in-context"}),
+	})
+	requireInvalidParams(t, err, "decision 'approve-in-context' not allowed; expected [approve, reject]")
+
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
+	})
+	require.NoError(t, err)
+	require.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
+
+	stored, err := store.GetSessionByOrigin(t.Context(), task.ContextID, "a2a")
+	require.NoError(t, err)
+	if stored.Permissions != nil {
+		assert.NotContains(t, stored.Permissions.Allow, "shell")
+	}
+
+	requireInputRequired(t, sendText(t, client, task.ContextID, "again"))
+	assert.Equal(t, int32(1), executions.Load(), "a later command must ask again")
 }

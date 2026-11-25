@@ -156,7 +156,9 @@ The URI resolves to the [extension specification](../a2a-extensions/tool-approva
 The function-call part carries the extension's metadata: a human-readable
 `prompt`, the permission pattern `approve-in-context` would store (`grant`)
 with its display label (`grantLabel`), and a JSON Schema `responseSchema` for
-the reply, readable by a UI or a model.
+the reply, readable by a UI or a model. A shell call that cannot be scoped to
+one command (empty command, or a glob, `:` or `\` in its first word) has no `grant` and no
+`approve-in-context` in the enum.
 
 ```json
 {
@@ -225,7 +227,8 @@ activates it for the call:
 - `approve-in-context`: run it and allow later calls matching `grant` in
   this `contextId` (persisted with the session, so it survives a restart). As in
   the TUI, a shell command grants its first word (`ls` → `shell:cmd=ls*`), not
-  every shell command; other tools grant the tool name.
+  every shell command; other tools grant the tool name. Only offered when
+  `grant` is present.
 - `reject`: skip it, with an optional `reason` passed to the model.
 
 A reply that does not answer the pending call (free text, another call `id`,

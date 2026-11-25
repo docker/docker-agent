@@ -19,8 +19,15 @@ const (
 	decisionReject           = "reject"
 )
 
-// allowedDecisions are the accepted decisions, in schema order.
-var allowedDecisions = []string{decisionApprove, decisionApproveInContext, decisionReject}
+// allowedDecisions are the decisions accepted for a call, in schema order.
+// approve-in-context needs a grant: a command call that cannot be scoped to
+// its command has none.
+func allowedDecisions(grant string) []string {
+	if grant == "" {
+		return []string{decisionApprove, decisionReject}
+	}
+	return []string{decisionApprove, decisionApproveInContext, decisionReject}
+}
 
 // approvalInterceptor validates approval replies before the SDK records them,
 // so an invalid reply leaves the task waiting with its history untouched.
@@ -70,8 +77,8 @@ func (r *approvalRegistry) validateReply(msg *a2a.Message) error {
 		return invalidReply(fmt.Sprintf("expected a function_response for call '%s'", run.callID))
 	}
 	decision, _ := fr.Response["decision"].(string)
-	if !slices.Contains(allowedDecisions, decision) {
-		return invalidReply(fmt.Sprintf("decision '%s' not allowed; expected [%s]", decision, strings.Join(allowedDecisions, ", ")))
+	if allowed := allowedDecisions(run.grant); !slices.Contains(allowed, decision) {
+		return invalidReply(fmt.Sprintf("decision '%s' not allowed; expected [%s]", decision, strings.Join(allowed, ", ")))
 	}
 	return nil
 }

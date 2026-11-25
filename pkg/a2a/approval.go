@@ -55,7 +55,7 @@ type pausedRun struct {
 	sess      *session.Session
 	events    <-chan runtime.Event
 	cancel    context.CancelFunc
-	grant     string // permission pattern approve-in-context persists (shell:cmd=ls* for commands)
+	grant     string // permission pattern approve-in-context persists (shell:cmd=ls* for commands); "" disables it
 	callID    string // tool-call ID reported to the client as long-running
 	created   time.Time
 	user      *a2asrv.User      // caller that owns the task in the task store
@@ -369,6 +369,10 @@ func resumeDecision(fr *genai.FunctionResponse, grant string) runtime.ResumeRequ
 	case decisionApprove:
 		return runtime.ResumeApprove()
 	case decisionApproveInContext:
+		if grant == "" {
+			// ResumeApproveTool("") would grant the whole tool.
+			return runtime.ResumeReject(reason)
+		}
 		return runtime.ResumeApproveTool(grant)
 	default:
 		return runtime.ResumeReject(reason)

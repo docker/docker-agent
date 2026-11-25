@@ -264,7 +264,8 @@ func pumpEvents(ctx agent.InvocationContext, yield func(*adksession.Event, error
 			}
 			parked := *run
 			// Computed once: the grant announced to the client is the one stored.
-			parked.grant = permissions.BuildPermissionPattern(ctx, e.ToolCall)
+			// Empty for a command call that cannot be scoped to its command.
+			parked.grant = permissions.ScopedPermissionPattern(ctx, e.ToolCall)
 			parked.callID = e.ToolCall.ID
 			parked.created = time.Now()
 			reg.park(&parked)

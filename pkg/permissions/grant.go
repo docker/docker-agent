@@ -33,6 +33,24 @@ func BuildPermissionPattern(ctx context.Context, toolCall tools.ToolCall) string
 	return toolName
 }
 
+// ScopedPermissionPattern is BuildPermissionPattern for a grant stored
+// without showing the user the resulting rule. It returns "" for a command
+// tool call whose pattern is not limited to one command (no command word, or
+// a glob or separator in it): the matcher reads those as allowing every
+// command.
+func ScopedPermissionPattern(ctx context.Context, toolCall tools.ToolCall) string {
+	pattern := BuildPermissionPattern(ctx, toolCall)
+	if !safety.IsCommandTool(toolCall.Function.Name) {
+		return pattern
+	}
+	_, cmd, ok := strings.Cut(pattern, ":cmd=")
+	word := strings.TrimSuffix(cmd, "*")
+	if !ok || word == "" || strings.ContainsAny(word, `*?[\:`) {
+		return ""
+	}
+	return pattern
+}
+
 // AlwaysAllowLabel is the descriptive label of the "always allow" option
 // for a pattern from BuildPermissionPattern: the command pattern for shell
 // ("always allow ls*"), the tool name otherwise. Whitespace runs are
