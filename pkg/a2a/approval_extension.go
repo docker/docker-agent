@@ -11,7 +11,7 @@ import (
 
 // toolApprovalExtensionURI identifies the tool-approval A2A extension: the
 // contract a client follows to answer a TASK_STATE_INPUT_REQUIRED tool call.
-const toolApprovalExtensionURI = "https://docker.github.io/docker-agent/a2a/extensions/tool-approval/v1"
+const toolApprovalExtensionURI = "https://docker.github.io/docker-agent/features/a2a-extensions/tool-approval/v1"
 
 var (
 	metaKeyType        = adka2a.ToA2AMetaKey("type")

@@ -147,8 +147,10 @@ contract follows the `tool-approval/v1` extension, declared in the agent card
 (`capabilities.extensions`, `required: false`) only when the flag is set:
 
 ```text
-https://docker.github.io/docker-agent/a2a/extensions/tool-approval/v1
+https://docker.github.io/docker-agent/features/a2a-extensions/tool-approval/v1
 ```
+
+The URI resolves to the [extension specification](../a2a-extensions/tool-approval/v1/index.md).
 
 The function-call part carries the extension's metadata: a human-readable
 `prompt`, the permission pattern `approve-in-context` would store (`grant`)
@@ -156,15 +158,37 @@ with its display label (`grantLabel`), and a JSON Schema `responseSchema` for
 the reply, readable by a UI or a model.
 
 ```json
-{"data":{"id":"call_123","name":"shell","args":{"cmd":"ls"}},
- "metadata":{"adk_type":"function_call","adk_is_long_running":true,
-  "https://docker.github.io/docker-agent/a2a/extensions/tool-approval/v1":{
-   "prompt":"Tool \"shell\" requires approval",
-   "grant":"shell:cmd=ls*",
-   "grantLabel":"allow ls* in this context",
-   "responseSchema":{"type":"object","required":["decision"],"properties":{
-    "decision":{"type":"string","enum":["approve","approve-in-context","reject"]},
-    "reason":{"type":"string"}}}}}}
+{
+  "data": {
+    "id": "call_123",
+    "name": "shell",
+    "args": {
+      "cmd": "ls"
+    }
+  },
+  "metadata": {
+    "adk_type": "function_call",
+    "adk_is_long_running": true,
+    "https://docker.github.io/docker-agent/features/a2a-extensions/tool-approval/v1": {
+      "prompt": "Tool \"shell\" requires approval",
+      "grant": "shell:cmd=ls*",
+      "grantLabel": "allow ls* in this context",
+      "responseSchema": {
+        "type": "object",
+        "required": ["decision"],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": ["approve", "approve-in-context", "reject"]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
 ```
 
 The client answers with `SendMessage` on the same task (`taskId` is required,
@@ -173,10 +197,25 @@ extension URI in the message `extensions` (or the `A2A-Extensions` header)
 activates it for the call:
 
 ```json
-{"taskId":"…","contextId":"…",
- "extensions":["https://docker.github.io/docker-agent/a2a/extensions/tool-approval/v1"],
- "parts":[{"data":{"id":"call_123","name":"shell","response":{"decision":"approve"}},
-  "metadata":{"adk_type":"function_response"}}]}
+{
+  "taskId": "…",
+  "contextId": "…",
+  "extensions": ["https://docker.github.io/docker-agent/features/a2a-extensions/tool-approval/v1"],
+  "parts": [
+    {
+      "data": {
+        "id": "call_123",
+        "name": "shell",
+        "response": {
+          "decision": "approve"
+        }
+      },
+      "metadata": {
+        "adk_type": "function_response"
+      }
+    }
+  ]
+}
 ```
 
 `decision` is one of:
