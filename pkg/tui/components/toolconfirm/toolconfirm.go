@@ -11,14 +11,13 @@
 package toolconfirm
 
 import (
-	"encoding/json"
-	"strings"
+	"context"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/runtime"
-	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -67,43 +66,17 @@ func (d Decision) Resume(pattern, reason string) runtime.ResumeRequest {
 	}
 }
 
-// BuildPermissionPattern creates the permission pattern granted by the
-// "always allow" decision. For command tools (shell, run_background_job)
-// it extracts the first word of the command and creates a pattern like
-// "shell:cmd=ls*" matching all invocations of that command; for other
-// tools it returns the tool name.
+// BuildPermissionPattern returns the pattern granted by "always allow"; see
+// [permissions.BuildPermissionPattern].
 func BuildPermissionPattern(toolCall tools.ToolCall) string {
-	toolName := toolCall.Function.Name
-
-	if safety.IsCommandTool(toolName) {
-		var args map[string]any
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err == nil {
-			// Resolve cmd/command the way the handler will, so the grant
-			// is built from the command that actually runs. First word
-			// only ("ls -la /tmp" -> "ls"); the trailing * matches any
-			// arguments.
-			cmd, _ := safety.CommandArg(args)
-			for field := range strings.FieldsSeq(cmd) {
-				return toolName + ":cmd=" + field + "*"
-			}
-		}
-	}
-
-	return toolName
+	// Dialogs have no request context; it only scopes argument-repair logs.
+	return permissions.BuildPermissionPattern(context.Background(), toolCall) //rubocop:disable Lint/ContextConnectivity
 }
 
-// AlwaysAllowLabel is the descriptive label of the "always allow" option
-// for a pattern from BuildPermissionPattern: the command pattern for shell
-// ("always allow ls*"), the tool name otherwise. Whitespace runs are
-// collapsed: a newline would split the label's help row across physical
-// lines, breaking the one-line-per-row contract click hit-testing relies
-// on, and an interior double space would read like the separator between
-// options.
+// AlwaysAllowLabel labels an "always allow" pattern; see
+// [permissions.AlwaysAllowLabel].
 func AlwaysAllowLabel(pattern string) string {
-	if _, cmdPattern, ok := strings.Cut(pattern, ":cmd="); ok {
-		pattern = cmdPattern
-	}
-	return "always allow " + strings.Join(strings.Fields(pattern), " ")
+	return permissions.AlwaysAllowLabel(pattern)
 }
 
 // ActionKeys are the uppercase action letters of the decision row, in

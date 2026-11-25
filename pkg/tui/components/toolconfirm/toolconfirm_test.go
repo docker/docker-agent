@@ -7,103 +7,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-func shellCall(cmd string) tools.ToolCall {
-	return tools.ToolCall{
-		Function: tools.FunctionCall{
-			Name:      "shell",
-			Arguments: `{"cmd":` + jsonString(cmd) + `}`,
-		},
-	}
-}
-
-func jsonString(s string) string {
-	return `"` + s + `"`
-}
-
-func TestBuildPermissionPattern(t *testing.T) {
+// The pattern logic is tested in pkg/permissions; this guards the delegation.
+func TestPermissionHelpersDelegate(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
-		call tools.ToolCall
-		want string
-	}{
-		{
-			name: "shell extracts the command",
-			call: shellCall("ls -la /tmp"),
-			want: "shell:cmd=ls*",
-		},
-		{
-			name: "shell with single word",
-			call: shellCall("ls"),
-			want: "shell:cmd=ls*",
-		},
-		{
-			name: "shell with leading whitespace and newlines",
-			call: shellCall(`\tgit\nstatus`), // decodes to "\tgit\nstatus"
-			want: "shell:cmd=git*",
-		},
-		{
-			name: "shell with empty command falls back to tool name",
-			call: shellCall(""),
-			want: "shell",
-		},
-		{
-			name: "shell with whitespace-only command falls back to tool name",
-			call: shellCall(`\t\n\u2003`),
-			want: "shell",
-		},
-		{
-			name: "shell with Unicode whitespace",
-			call: shellCall(`\u2003git\u00a0status`),
-			want: "shell:cmd=git*",
-		},
-		{
-			name: "shell with invalid arguments falls back to tool name",
-			call: tools.ToolCall{Function: tools.FunctionCall{Name: "shell", Arguments: "not json"}},
-			want: "shell",
-		},
-		{
-			name: "background job extracts the command",
-			call: tools.ToolCall{Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"cmd":"npm run dev"}`}},
-			want: "run_background_job:cmd=npm*",
-		},
-		{
-			name: "command alias is honoured",
-			call: tools.ToolCall{Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"command":"npm run dev"}`}},
-			want: "run_background_job:cmd=npm*",
-		},
-		{
-			name: "blank cmd falls back to command like the handler",
-			call: tools.ToolCall{Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"  ","command":"rm -rf /tmp/x"}`}},
-			want: "shell:cmd=rm*",
-		},
-		{
-			name: "other tools use the tool name",
-			call: tools.ToolCall{Function: tools.FunctionCall{Name: "write_file", Arguments: `{"path":"/x"}`}},
-			want: "write_file",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, BuildPermissionPattern(tt.call))
-		})
-	}
-}
-
-func TestAlwaysAllowLabel(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, "always allow ls*", AlwaysAllowLabel("shell:cmd=ls*"))
-	assert.Equal(t, "always allow write_file", AlwaysAllowLabel("write_file"))
-
-	// Whitespace runs collapse: the click hit-test walks the rendered
-	// help row using "  " as the segment separator, and a newline would
-	// wrap the row and break row-based hit-testing entirely.
-	assert.Equal(t, "always allow docker run*", AlwaysAllowLabel("shell:cmd=docker  run*"))
-	assert.Equal(t, "always allow echo hi", AlwaysAllowLabel("shell:cmd=echo\nhi"))
+	call := tools.ToolCall{Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"ls -la"}`}}
+	assert.Equal(t, permissions.BuildPermissionPattern(t.Context(), call), BuildPermissionPattern(call))
+	assert.Equal(t, permissions.AlwaysAllowLabel("shell:cmd=ls*"), AlwaysAllowLabel("shell:cmd=ls*"))
 }
 
 func TestOptionsHelpUsesThePattern(t *testing.T) {
