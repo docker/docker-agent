@@ -41,8 +41,7 @@ func approvalResponseSchema(grant string) map[string]any {
 				"type": "string",
 				"enum": enum,
 				"description": fmt.Sprintf("approve: run this call only; approve-in-context: run it and allow later calls "+
-					"matching %q in this context (contextId); reject: skip it. "+
-					"approve-tool is a deprecated alias of approve-in-context", grant),
+					"matching %q in this context (contextId); reject: skip it", grant),
 			},
 			"reason": map[string]any{
 				"type":        "string",

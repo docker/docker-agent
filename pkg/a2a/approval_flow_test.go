@@ -164,34 +164,27 @@ func TestServer_ToolApproval_CancelStopsApprovedTool(t *testing.T) {
 	assert.Equal(t, a2a.TaskStateCanceled, canceled.Status.State)
 }
 
-// approve-in-context (and its deprecated alias approve-tool) survives the session
-// reload of the next turn.
+// approve-in-context survives the session reload of the next turn.
 func TestServer_ToolApproval_ApproveInContextPersistsAcrossTurns(t *testing.T) {
 	t.Parallel()
 
-	for _, decision := range []string{"approve-in-context", "approve-tool"} {
-		t.Run(decision, func(t *testing.T) {
-			t.Parallel()
+	var executions atomic.Int32
+	tm, _ := approvalTeamWith(approvalCanaryTool(&executions),
+		toolCallStream("approval_canary"), stopStream(),
+		toolCallStream("approval_canary"), stopStream())
+	client, _ := startApprovalServer(t, tm, newA2AResumeStore(t, "sqlite"), RunOptions{ToolApproval: true})
 
-			var executions atomic.Int32
-			tm, _ := approvalTeamWith(approvalCanaryTool(&executions),
-				toolCallStream("approval_canary"), stopStream(),
-				toolCallStream("approval_canary"), stopStream())
-			client, _ := startApprovalServer(t, tm, newA2AResumeStore(t, "sqlite"), RunOptions{ToolApproval: true})
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve-in-context"}),
+	})
+	require.NoError(t, err)
+	require.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
 
-			task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
-			res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
-				Message: answerToolCall(task, callID, map[string]any{"decision": decision}),
-			})
-			require.NoError(t, err)
-			require.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
-
-			second, ok := sendText(t, client, task.ContextID, "run it again").(*a2a.Task)
-			require.True(t, ok)
-			assert.Equal(t, a2a.TaskStateCompleted, second.Status.State, "the approved tool must not ask again")
-			assert.Equal(t, int32(2), executions.Load())
-		})
-	}
+	second, ok := sendText(t, client, task.ContextID, "run it again").(*a2a.Task)
+	require.True(t, ok)
+	assert.Equal(t, a2a.TaskStateCompleted, second.Status.State, "the approved tool must not ask again")
+	assert.Equal(t, int32(2), executions.Load())
 }
 
 // approve covers the pending call only: the next call asks again.

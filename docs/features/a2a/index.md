@@ -188,9 +188,6 @@ activates it for the call:
   every shell command; other tools grant the tool name.
 - `reject`: skip it, with an optional `reason` passed to the model.
 
-`approve-tool` is a deprecated alias of `approve-in-context`: still accepted, no
-longer advertised in the schema.
-
 A reply that does not answer the pending call (free text, another call `id`,
 or a decision outside the enum) is rejected with JSON-RPC `-32602` and a
 `reason` in the error data, e.g.

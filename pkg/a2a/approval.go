@@ -252,7 +252,7 @@ func resumeDecision(fr *genai.FunctionResponse, grant string) runtime.ResumeRequ
 	switch decision {
 	case decisionApprove:
 		return runtime.ResumeApprove()
-	case decisionApproveInContext, decisionApproveTool:
+	case decisionApproveInContext:
 		return runtime.ResumeApproveTool(grant)
 	default:
 		return runtime.ResumeReject(reason)

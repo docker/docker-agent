@@ -17,17 +17,10 @@ const (
 	decisionApprove          = "approve"
 	decisionApproveInContext = "approve-in-context"
 	decisionReject           = "reject"
-	// Deprecated: use decisionApproveInContext. Accepted for compatibility but
-	// no longer advertised.
-	decisionApproveTool = "approve-tool"
 )
 
-// allowedDecisions are the advertised decisions, in schema order.
+// allowedDecisions are the accepted decisions, in schema order.
 var allowedDecisions = []string{decisionApprove, decisionApproveInContext, decisionReject}
-
-func acceptedDecision(decision string) bool {
-	return decision == decisionApproveTool || slices.Contains(allowedDecisions, decision)
-}
 
 // approvalInterceptor validates approval replies before the SDK records them,
 // so an invalid reply leaves the task waiting with its history untouched.
@@ -72,7 +65,7 @@ func (r *approvalRegistry) validateReply(msg *a2a.Message) error {
 		return invalidReply(fmt.Sprintf("expected a function_response for call '%s'", run.callID))
 	}
 	decision, _ := fr.Response["decision"].(string)
-	if !acceptedDecision(decision) {
+	if !slices.Contains(allowedDecisions, decision) {
 		return invalidReply(fmt.Sprintf("decision '%s' not allowed; expected [%s]", decision, strings.Join(allowedDecisions, ", ")))
 	}
 	return nil

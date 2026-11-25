@@ -169,9 +169,6 @@ func resumePausedRun(ctx agent.InvocationContext, yield func(*adksession.Event, 
 	paused := ticket.run
 	stop := bindToInvocation(ctx, paused.cancel)
 	req := resumeDecision(ticket.response, paused.grant)
-	if decision, _ := ticket.response.Response["decision"].(string); decision == decisionApproveTool {
-		slog.WarnContext(ctx, "A2A tool-approval decision approve-tool is deprecated; use approve-in-context")
-	}
 	if req.Type == runtime.ResumeTypeApproveTool {
 		// The next turn reloads the session from the store; persist the grant
 		// now, as serve api does, so it does not ask again.

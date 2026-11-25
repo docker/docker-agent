@@ -69,7 +69,6 @@ func TestResumeDecision(t *testing.T) {
 	}{
 		{name: "approve", response: map[string]any{"decision": "approve"}, wantType: runtime.ResumeTypeApprove},
 		{name: "approve-in-context", response: map[string]any{"decision": "approve-in-context"}, wantType: runtime.ResumeTypeApproveTool, wantTool: "shell:cmd=ls*"},
-		{name: "deprecated approve-tool", response: map[string]any{"decision": "approve-tool"}, wantType: runtime.ResumeTypeApproveTool, wantTool: "shell:cmd=ls*"},
 		{name: "reject with reason", response: map[string]any{"decision": "reject", "reason": "nope"}, wantType: runtime.ResumeTypeReject, wantMsg: "nope"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,7 +148,7 @@ func TestValidateReply(t *testing.T) {
 		{name: "reject", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "reject"}))},
 		{name: "other task untouched", msg: reply("task-2", "ctx-2", a2a.NewTextPart("hi"))},
 		{name: "approve-in-context", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "approve-in-context"}))},
-		{name: "deprecated approve-tool", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "approve-tool"}))},
+		{name: "approve-tool is not an A2A decision", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "approve-tool"})), reason: "decision 'approve-tool' not allowed; expected [approve, approve-in-context, reject]"},
 		{name: "unknown decision", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{"decision": "x"})), reason: "decision 'x' not allowed; expected [approve, approve-in-context, reject]"},
 		{name: "missing decision", msg: reply("task-1", "ctx-1", response("call-1", map[string]any{})), reason: "decision '' not allowed; expected [approve, approve-in-context, reject]"},
 		{name: "wrong call ID", msg: reply("task-1", "ctx-1", response("call-9", map[string]any{"decision": "approve"})), reason: "expected a function_response for call 'call-1'"},
