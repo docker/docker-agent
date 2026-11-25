@@ -89,11 +89,13 @@ func TestCheckModelAvailable(t *testing.T) {
 
 	t.Run("endpoint unreachable", func(t *testing.T) {
 		t.Parallel()
-		server := newServer(`{"data":[]}`)
-		server.Close() // unreachable from the start
+		dialErr := errors.New("model endpoint unreachable")
+		client := &http.Client{Transport: dmrRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, dialErr
+		})}
 
-		err := checkModelAvailable(t.Context(), server.Client(), server.URL+"/", "ai/qwen3")
-		require.Error(t, err)
+		err := checkModelAvailable(t.Context(), client, "http://model-runner.invalid/", "ai/qwen3")
+		require.ErrorIs(t, err, dialErr)
 		assert.Contains(t, err.Error(), "cannot query Docker Model Runner")
 		assert.Contains(t, err.Error(), "https://docs.docker.com/ai/model-runner/get-started/")
 	})
