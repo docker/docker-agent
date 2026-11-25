@@ -54,6 +54,7 @@ func (w *executorWrapper) Execute(ctx context.Context, execCtx *a2asrv.ExecutorC
 			runCtx = withResume(ctx, ticket)
 		}
 		for event, err := range fixArtifactEvents(w.executor.Execute(runCtx, execCtx)) {
+			annotateApprovalParts(event)
 			if !yield(event, err) {
 				return
 			}

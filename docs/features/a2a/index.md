@@ -142,18 +142,36 @@ $ docker agent serve a2a ./agent.yaml --safety strict --tool-approval
 ```
 
 When a call needs confirmation, the task pauses in `TASK_STATE_INPUT_REQUIRED`
-and its status message carries the pending call as a data part:
+and its status message carries the pending call as a data part. The reply
+contract follows the `tool-approval/v1` extension, declared in the agent card
+(`capabilities.extensions`, `required: false`) only when the flag is set:
+
+```text
+https://docker.github.io/docker-agent/a2a/extensions/tool-approval/v1
+```
+
+The function-call part carries the extension's metadata: a human-readable
+`prompt` and a JSON Schema `responseSchema` for the reply, readable by a UI or a
+model.
 
 ```json
 {"data":{"id":"call_123","name":"shell","args":{"cmd":"ls"}},
- "metadata":{"adk_type":"function_call","adk_is_long_running":true}}
+ "metadata":{"adk_type":"function_call","adk_is_long_running":true,
+  "https://docker.github.io/docker-agent/a2a/extensions/tool-approval/v1":{
+   "prompt":"Tool \"shell\" requires approval",
+   "responseSchema":{"type":"object","required":["decision"],"properties":{
+    "decision":{"type":"string","enum":["approve","approve-tool","reject"]},
+    "reason":{"type":"string"}}}}}}
 ```
 
 The client answers with `SendMessage` on the same task (`taskId` is required,
-plus `contextId`) and a matching function-response data part:
+plus `contextId`) and a matching function-response data part. Listing the
+extension URI in the message `extensions` (or the `A2A-Extensions` header)
+activates it for the call:
 
 ```json
 {"taskId":"…","contextId":"…",
+ "extensions":["https://docker.github.io/docker-agent/a2a/extensions/tool-approval/v1"],
  "parts":[{"data":{"id":"call_123","name":"shell","response":{"decision":"approve"}},
   "metadata":{"adk_type":"function_response"}}]}
 ```
@@ -163,7 +181,7 @@ of the conversation, persisted with the session), or `reject` (with an optional
 `reason`, passed to the model).
 
 A reply that does not answer the pending call (free text, another call `id`,
-or any other decision) is rejected with JSON-RPC `-32602` and a
+or a decision outside the enum) is rejected with JSON-RPC `-32602` and a
 `reason` in the error data, e.g.
 `decision 'x' not allowed; expected [approve, approve-tool, reject]`. The task
 stays in `TASK_STATE_INPUT_REQUIRED`, nothing is added to its history, and no
@@ -179,7 +197,8 @@ Notes and limits:
   `CancelTask`, and at server shutdown. A reply to an expired approval, or one
   lost in a restart, fails the task without starting a new model turn.
 - Canceling a task also cancels a tool it is running after approval.
-- Without the flag the behaviour is unchanged: non-interactive sessions deny.
+- Without the flag the behaviour is unchanged: non-interactive sessions deny,
+  and the agent card declares no extension.
 
 ## Resuming conversations
 

@@ -249,6 +249,9 @@ func newServer(ctx context.Context, t *team.Team, agentFilename, agentName strin
 		DefaultInputModes:   []string{},
 		DefaultOutputModes:  []string{},
 	}
+	if approvals.toolApproval() {
+		agentCard.Capabilities.Extensions = []a2a.AgentExtension{*toolApprovalExtension()}
+	}
 
 	executor := newExecutorWrapper(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{

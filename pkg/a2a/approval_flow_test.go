@@ -2,6 +2,8 @@ package a2a
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -99,7 +101,7 @@ func TestServer_ToolApproval_LateReplyFailsWithoutModelCall(t *testing.T) {
 	var executions atomic.Int32
 	tm, provider := approvalTeamWith(approvalCanaryTool(&executions), toolCallStream("approval_canary"), stopStream())
 	reg := newApprovalRegistry(t.Context(), true)
-	client := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true, approvals: reg})
+	client, _ := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true, approvals: reg})
 
 	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
 	callsBefore := provider.calls()
@@ -133,7 +135,7 @@ func TestServer_ToolApproval_CancelStopsApprovedTool(t *testing.T) {
 		},
 	}
 	tm, _ := approvalTeamWith(tool, toolCallStream("approval_canary"), stopStream())
-	client := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true})
+	client, _ := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true})
 
 	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
 
@@ -168,7 +170,7 @@ func TestServer_ToolApproval_ApproveToolPersistsAcrossTurns(t *testing.T) {
 	tm, _ := approvalTeamWith(approvalCanaryTool(&executions),
 		toolCallStream("approval_canary"), stopStream(),
 		toolCallStream("approval_canary"), stopStream())
-	client := startApprovalServer(t, tm, newA2AResumeStore(t, "sqlite"), RunOptions{ToolApproval: true})
+	client, _ := startApprovalServer(t, tm, newA2AResumeStore(t, "sqlite"), RunOptions{ToolApproval: true})
 
 	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
 	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
@@ -190,7 +192,7 @@ func TestServer_ToolApproval_TextBeforeApprovalIsKept(t *testing.T) {
 	var executions atomic.Int32
 	tm, _ := approvalTeamWith(approvalCanaryTool(&executions),
 		textThenToolCallStream("Checking first.", "approval_canary"), answerStream("All done."))
-	client := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true})
+	client, _ := startApprovalServer(t, tm, session.NewInMemorySessionStore(), RunOptions{ToolApproval: true})
 
 	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
 	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
@@ -238,4 +240,52 @@ func TestServer_ToolApproval_InvalidDecisionKeepsTaskWaiting(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
 	assert.Equal(t, int32(1), executions.Load())
+}
+
+func TestServer_ToolApproval_Extension(t *testing.T) {
+	t.Parallel()
+
+	card := func(t *testing.T, addr string) *a2a.AgentCard {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+"/.well-known/agent-card.json", http.NoBody)
+		require.NoError(t, err)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		var c a2a.AgentCard
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&c))
+		return &c
+	}
+
+	t.Run("disabled", func(t *testing.T) {
+		t.Parallel()
+		var executions atomic.Int32
+		_, addr := startApprovalServer(t, approvalTeam(&executions), session.NewInMemorySessionStore(), RunOptions{})
+		assert.Empty(t, card(t, addr).Capabilities.Extensions)
+	})
+
+	t.Run("enabled", func(t *testing.T) {
+		t.Parallel()
+		var executions atomic.Int32
+		client, addr := startApprovalServer(t, approvalTeam(&executions), session.NewInMemorySessionStore(), RunOptions{ToolApproval: true})
+
+		exts := card(t, addr).Capabilities.Extensions
+		require.Len(t, exts, 1)
+		assert.Equal(t, toolApprovalExtensionURI, exts[0].URI)
+		assert.False(t, exts[0].Required)
+
+		task, _ := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+		var meta map[string]any
+		for _, part := range task.Status.Message.Parts {
+			if m, ok := part.Meta()[toolApprovalExtensionURI].(map[string]any); ok {
+				meta = m
+			}
+		}
+		require.NotNil(t, meta, "the pending call must carry the extension metadata")
+		assert.Equal(t, `Tool "approval_canary" requires approval`, meta["prompt"])
+		schema, ok := meta["responseSchema"].(map[string]any)
+		require.True(t, ok)
+		decision := schema["properties"].(map[string]any)["decision"].(map[string]any)
+		assert.Equal(t, []any{"approve", "approve-tool", "reject"}, decision["enum"])
+	})
 }

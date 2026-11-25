@@ -189,11 +189,12 @@ func approvalCanaryTool(executions *atomic.Int32) tools.Tool {
 
 func startToolApprovalServer(t *testing.T, tm *team.Team, store session.Store, toolApproval bool) *a2aclient.Client {
 	t.Helper()
-	return startApprovalServer(t, tm, store, RunOptions{ToolApproval: toolApproval})
+	client, _ := startApprovalServer(t, tm, store, RunOptions{ToolApproval: toolApproval})
+	return client
 }
 
-// startApprovalServer serves tm and returns a client.
-func startApprovalServer(t *testing.T, tm *team.Team, store session.Store, opts RunOptions) *a2aclient.Client {
+// startApprovalServer serves tm and returns a client and the listen address.
+func startApprovalServer(t *testing.T, tm *team.Team, store session.Store, opts RunOptions) (*a2aclient.Client, string) {
 	t.Helper()
 
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -211,7 +212,7 @@ func startApprovalServer(t *testing.T, tm *team.Team, store session.Store, opts 
 		a2a.NewAgentInterface(fmt.Sprintf("http://%s/invoke", ln.Addr().String()), a2a.TransportProtocolJSONRPC),
 	})
 	require.NoError(t, err)
-	return client
+	return client, ln.Addr().String()
 }
 
 func approvalTeam(executions *atomic.Int32) *team.Team {

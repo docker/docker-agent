@@ -29,10 +29,14 @@ type approvalInterceptor struct {
 	approvals *approvalRegistry
 }
 
-func (i *approvalInterceptor) Before(ctx context.Context, _ *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+func (i *approvalInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	sendReq, ok := req.Payload.(*a2a.SendMessageRequest)
 	if !ok || sendReq.Message == nil {
 		return ctx, nil, nil
+	}
+	ext := toolApprovalExtension()
+	if callCtx.Extensions().Requested(ext) || slices.Contains(sendReq.Message.Extensions, ext.URI) {
+		callCtx.Extensions().Activate(ext)
 	}
 	return ctx, nil, i.approvals.validateReply(sendReq.Message)
 }
