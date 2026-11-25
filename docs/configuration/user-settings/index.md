@@ -65,6 +65,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `layout` | object | _unset_ | Sidebar position and section visibility. See [Layout Settings](#layout-settings) below. |
 | `experimental.mcp_events` | boolean | `false` | Enable experimental MCP Events push subscriptions (proposed SEP-3415) over stdio and Streamable HTTP. |
 | `experimental.mcp_skills` | boolean | `false` | Enable experimental MCP Skills discovery and verified loading (`io.modelcontextprotocol/skills`, SEP-2640). |
+| `experimental.mcp_tasks` | boolean | `false` | Enable experimental MCP Tasks asynchronous tool execution (`io.modelcontextprotocol/tasks`, SEP-2663) over stdio and Streamable HTTP. |
 
 ## Layout Settings
 
