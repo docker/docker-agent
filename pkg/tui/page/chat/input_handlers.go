@@ -123,8 +123,8 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 
 	case TargetSidebarResizeHandle:
 		if msg.Button == tea.MouseLeft {
-			cmd := p.startSidebarDrag(msg.X)
-			return p, cmd
+			p.startSidebarDrag(msg.X)
+			return p, p.messages.FadeOutScrollbar()
 		}
 
 	case TargetSidebarStar:
@@ -223,7 +223,12 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 		if msg.Button == tea.MouseLeft {
 			delta := msg.X - p.sidebarDragStartX
 			p.sidebarDragMoved = p.sidebarDragMoved || max(delta, -delta) >= dragThreshold
-			p.sidebarDragWidth = p.sidebarDropWidth(msg.X, p.appliedLayout)
+			width := max(sidebar.MinWidth, p.sidebarDropWidth(msg.X, p.appliedLayout))
+			if width != p.sidebarDragWidth {
+				p.sidebarDragWidth = width
+				cmd := p.setSize(p.width, p.height, true)
+				return p, cmd
+			}
 		}
 		return p, nil
 	}
@@ -266,7 +271,7 @@ func (p *chatPage) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, te
 			return p, nil
 		}
 		drop := p.finishSidebarDrag(p.sidebarDropWidth(msg.X, p.appliedLayout))
-		return p, tea.Batch(drop, p.updateSidebarGrip(msg.X, msg.Y))
+		return p, tea.Batch(drop, p.SetScrollbarPointer(msg.X, msg.Y), p.updateSidebarGrip(msg.X, msg.Y))
 	}
 
 	var cmds []tea.Cmd
