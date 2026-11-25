@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"iter"
+	"slices"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -70,7 +71,7 @@ const approvalExpiredReason = "Tool approval expired: the paused run is no longe
 // pending call.
 func (w *executorWrapper) takeResume(execCtx *a2asrv.ExecutorContext) (*resumeTicket, bool) {
 	run, ok := w.approvals.pending(execCtx.TaskID)
-	if !ok || execCtx.Message == nil {
+	if !ok || execCtx.Message == nil || slices.Contains(execCtx.Message.Parts, nil) {
 		return nil, false
 	}
 	parts, err := adka2a.ToGenAIParts(execCtx.Message.Parts)

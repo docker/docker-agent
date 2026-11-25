@@ -219,6 +219,7 @@ func TestValidateReply(t *testing.T) {
 		{name: "wrong call ID", msg: reply("task-1", "ctx-1", response("call-9", map[string]any{"decision": "approve"})), reason: "expected a function_response for call 'call-1'"},
 		{name: "free text", msg: reply("task-1", "ctx-1", a2a.NewTextPart("yes")), reason: "expected a function_response for call 'call-1'"},
 		{name: "new task in waiting context", msg: reply("", "ctx-1", a2a.NewTextPart("hi")), reason: "task task-1 is waiting for tool approval in this context; reply with its taskId or cancel it"},
+		{name: "null part", msg: reply("task-1", "ctx-1", nil, response("call-1", map[string]any{"decision": "approve"})), reason: "message parts must not be null"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

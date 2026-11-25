@@ -156,6 +156,7 @@ The server rejects the following messages with JSON-RPC error `-32602`
 | Reply on a paused task without a `function_response` for the pending call `id` | `expected a function_response for call 'call_123'` |
 | Reply with a `decision` outside the enum | `decision 'x' not allowed; expected [approve, approve-in-context, reject]` |
 | Reply with parts that can't be decoded | `malformed approval reply` |
+| Message with a `null` part | `message parts must not be null` |
 | New task (no `taskId`) in a `contextId` held by a paused task | `task … is waiting for tool approval in this context; reply with its taskId or cancel it` |
 
 After a rejected reply, the task stays in `TASK_STATE_INPUT_REQUIRED`, nothing

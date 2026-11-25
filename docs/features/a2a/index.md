@@ -229,7 +229,7 @@ activates it for the call:
 - `reject`: skip it, with an optional `reason` passed to the model.
 
 A reply that does not answer the pending call (free text, another call `id`,
-or a decision outside the enum) is rejected with JSON-RPC `-32602` and a
+a decision outside the enum, or a `null` part) is rejected with JSON-RPC `-32602` and a
 `reason` in the error data, e.g.
 `decision 'x' not allowed; expected [approve, approve-in-context, reject]`. The task
 stays in `TASK_STATE_INPUT_REQUIRED`, nothing is added to its history, and no

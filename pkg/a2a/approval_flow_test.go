@@ -502,3 +502,57 @@ func toolCallStreamArgs(name, args string) chat.MessageStream {
 		}}}}},
 	}}}
 }
+
+// A JSON null part reaches the interceptor as a nil *Part: the reply is
+// rejected with -32602 instead of panicking in ADK's converter.
+func TestServer_ToolApproval_NullPartKeepsTaskWaiting(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int32
+	client, addr := startApprovalServer(t, approvalTeam(&executions), session.NewInMemorySessionStore(), RunOptions{ToolApproval: true})
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	before, err := client.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
+	require.NoError(t, err)
+
+	valid, err := json.Marshal(answerToolCall(task, callID, map[string]any{"decision": "approve"}))
+	require.NoError(t, err)
+	var msg map[string]any
+	require.NoError(t, json.Unmarshal(valid, &msg))
+	validPart := msg["parts"].([]any)[0]
+
+	for _, parts := range [][]any{{nil}, {nil, validPart}} {
+		msg["parts"] = parts
+		body, err := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+			"params": map[string]any{"message": msg},
+		})
+		require.NoError(t, err)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+addr+"/invoke", strings.NewReader(string(body)))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		var rpc struct {
+			Error *struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&rpc))
+		resp.Body.Close()
+		require.NotNil(t, rpc.Error, "parts %v must be rejected", parts)
+		assert.Equal(t, -32602, rpc.Error.Code)
+	}
+
+	after, err := client.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateInputRequired, after.Status.State)
+	assert.Len(t, after.History, len(before.History), "a rejected reply must not be recorded")
+
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, a2a.TaskStateCompleted, res.(*a2a.Task).Status.State)
+	assert.Equal(t, int32(1), executions.Load())
+}

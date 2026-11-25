@@ -46,6 +46,11 @@ func (i *approvalInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallCo
 // without a valid decision for its pending call, and a new task in a context
 // whose conversation is held by such a task.
 func (r *approvalRegistry) validateReply(msg *a2a.Message) error {
+	// a2a-go decodes a JSON null part as a nil *Part, which ADK's converters
+	// dereference.
+	if slices.Contains(msg.Parts, nil) {
+		return invalidReply("message parts must not be null")
+	}
 	if msg.TaskID == "" {
 		if id, ok := r.pendingInContext(msg.ContextID); ok {
 			return invalidReply(fmt.Sprintf("task %s is waiting for tool approval in this context; reply with its taskId or cancel it", id))
