@@ -1367,7 +1367,7 @@ func (s *Session) lastMessageContentByRole(role chat.MessageRole) (string, bool)
 	for _, item := range slices.Backward(s.Messages) {
 		switch {
 		case item.IsMessage() && item.Message.Message.Role != chat.MessageRoleSystem:
-			if isUsageOnlyMessage(&item.Message.Message) {
+			if omittedFromContext(&item.Message.Message) {
 				continue
 			}
 			if item.Message.Message.Role == role {
@@ -1387,6 +1387,13 @@ func isUsageOnlyMessage(msg *chat.Message) bool {
 	return msg.Role == chat.MessageRoleAssistant && msg.Usage != nil &&
 		strings.TrimSpace(msg.Content) == "" && len(msg.MultiContent) == 0 &&
 		len(msg.ToolCalls) == 0 && msg.FunctionCall == nil
+}
+
+// omittedFromContext identifies messages kept in the transcript that the
+// model must not see: usage-only records and messages cut off mid-generation.
+func omittedFromContext(msg *chat.Message) bool {
+	return isUsageOnlyMessage(msg) ||
+		msg.Role == chat.MessageRoleAssistant && msg.FinishReason == chat.FinishReasonIncomplete
 }
 
 // AddMessageUsageRecord appends a usage record for remote mode where messages aren't stored locally.
@@ -1716,7 +1723,7 @@ func visibleExchanges(items []Item) []chat.Message {
 			continue
 		}
 		msg := item.Message.Message
-		if strings.TrimSpace(msg.Content) == "" || len(msg.ToolCalls) > 0 {
+		if strings.TrimSpace(msg.Content) == "" || len(msg.ToolCalls) > 0 || omittedFromContext(&msg) {
 			continue
 		}
 		if msg.Role != chat.MessageRoleUser && msg.Role != chat.MessageRoleAssistant {
@@ -2570,7 +2577,7 @@ func (s *Session) getMessages(a *agent.Agent, state *InstructionContextState, ex
 			})
 			updateIndex++
 		}
-		if i < len(items) && items[i].IsMessage() && !isUsageOnlyMessage(&items[i].Message.Message) {
+		if i < len(items) && items[i].IsMessage() && !omittedFromContext(&items[i].Message.Message) {
 			messages = append(messages, items[i].Message.Message)
 		}
 	}
@@ -2747,6 +2754,9 @@ func normalizeMessageContent(messages []chat.Message) []chat.Message {
 	return out
 }
 
+// missingToolResult stands in for a tool call that has no recorded result.
+const missingToolResult = "The tool call was interrupted before it returned a result; it may or may not have run."
+
 // sanitizeToolCalls ensures the tool_use/tool_result blocks sent to the
 // provider are always balanced, in both directions:
 //
@@ -2779,7 +2789,7 @@ func sanitizeToolCalls(messages []chat.Message) []chat.Message {
 				out = append(out, chat.Message{
 					Role:       chat.MessageRoleTool,
 					ToolCallID: tc.ID,
-					Content:    "No result provided",
+					Content:    missingToolResult,
 					IsError:    true,
 				})
 			}

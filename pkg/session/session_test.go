@@ -625,7 +625,7 @@ func TestSanitizeToolCalls(t *testing.T) {
 		assert.Equal(t, chat.MessageRoleTool, result[2].Role)
 		assert.Equal(t, "tc1", result[2].ToolCallID)
 		assert.True(t, result[2].IsError)
-		assert.Equal(t, "No result provided", result[2].Content)
+		assert.Equal(t, missingToolResult, result[2].Content)
 	})
 
 	t.Run("handles multiple tool calls with partial results", func(t *testing.T) {

@@ -219,6 +219,8 @@ func (p *PersistenceObserver) persistStreamingContent(ctx context.Context, sessi
 			MessageID:        p.streaming.logicalID,
 			Content:          p.streaming.content.String(),
 			ReasoningContent: p.streaming.reasoningContent.String(),
+			// Replaced when MessageAdded completes the row.
+			FinishReason: chat.FinishReasonIncomplete,
 		},
 	}
 

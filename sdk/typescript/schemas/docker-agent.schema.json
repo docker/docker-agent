@@ -2754,7 +2754,8 @@
         "length",
         "tool_calls",
         "refusal",
-        "null"
+        "null",
+        "incomplete"
       ]
     },
     "FollowUpResponse": {

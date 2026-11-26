@@ -178,6 +178,10 @@ const (
 	FinishReasonRefusal FinishReason = "refusal"
 	// FinishReasonNull means no finish reason was provided
 	FinishReasonNull FinishReason = "null"
+	// FinishReasonIncomplete marks a message saved while it was still being
+	// generated. One that keeps this reason was cut off, so it stays in the
+	// transcript but is left out of model requests.
+	FinishReasonIncomplete FinishReason = "incomplete"
 )
 
 // MessageDelta represents a delta/chunk in a streaming response

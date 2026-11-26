@@ -67,7 +67,7 @@ export interface DocumentSource {
 }
 
 /** Go: pkg/chat/chat.go FinishReason */
-export type FinishReason = 'stop' | 'length' | 'tool_calls' | 'refusal' | 'null';
+export type FinishReason = 'stop' | 'length' | 'tool_calls' | 'refusal' | 'null' | 'incomplete';
 
 /** Go: pkg/chat/chat.go ImageURLDetail */
 export type ImageURLDetail = 'high' | 'low' | 'auto';
