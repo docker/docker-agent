@@ -161,6 +161,8 @@ type InMemorySessionStore struct {
 	scratchpadMu     sync.Mutex
 	scratchpads      map[string]map[ScratchpadKey][]string
 	scratchpadOwners map[string]string
+	runsMu           sync.Mutex
+	runs             map[string]Run
 	messageID        atomic.Int64 // counter for message IDs, incremented via Add(1)
 }
 
@@ -307,6 +309,7 @@ func (s *InMemorySessionStore) DeleteSession(ctx context.Context, id string) err
 			delete(s.scratchpadOwners, sessionID)
 		}
 	}
+	s.forgetRuns(seen)
 	return nil
 }
 
@@ -1140,6 +1143,9 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 	if _, err := tx.ExecContext(ctx, subtree+"DELETE FROM think_scratchpad WHERE session_id IN (SELECT id FROM subtree) OR root_id IN (SELECT id FROM subtree)", id); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, subtree+"DELETE FROM session_runs WHERE session_id IN (SELECT id FROM subtree)", id); err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
 	if err != nil {
 		return err
@@ -1308,14 +1314,17 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, sessionID string, m
 	if sessionID == "" {
 		return 0, ErrEmptyID
 	}
+	return insertMessage(ctx, s.db, sessionID, msg)
+}
 
+// insertMessage appends msg at the session's next position.
+func insertMessage(ctx context.Context, q querier, sessionID string, msg *Message) (int64, error) {
 	msgJSON, err := json.Marshal(msg.Message)
 	if err != nil {
 		return 0, fmt.Errorf("marshaling message: %w", err)
 	}
 
-	// Insert a new message at the next position
-	result, err := s.db.ExecContext(ctx,
+	result, err := q.ExecContext(ctx,
 		`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit)
 		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'message', ?, ?, ?)`,
 		sessionID, sessionID, msg.AgentName, string(msgJSON), msg.Implicit)

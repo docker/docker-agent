@@ -500,6 +500,21 @@ func getAllMigrations() []Migration {
 			`,
 			DownSQL: `DROP TABLE think_scratchpad`,
 		},
+		{
+			ID:          32,
+			Name:        "032_add_session_runs",
+			Description: "Record runs in flight so one cut off by a crash or a host shutdown can be continued",
+			UpSQL: `
+				CREATE TABLE session_runs (
+					session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+					agent TEXT NOT NULL DEFAULT '',
+					current_agent TEXT NOT NULL DEFAULT '',
+					suspended BOOLEAN NOT NULL DEFAULT 0,
+					crashes INTEGER NOT NULL DEFAULT 0
+				)
+			`,
+			DownSQL: `DROP TABLE IF EXISTS session_runs`,
+		},
 	}
 }
 
