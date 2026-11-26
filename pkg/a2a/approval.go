@@ -176,11 +176,11 @@ func (r *approvalRegistry) track(events <-chan runtime.Event) <-chan runtime.Eve
 	go func() {
 		defer func() {
 			r.mu.Lock()
+			defer r.mu.Unlock()
 			r.live--
 			if r.live == 0 {
 				close(r.idle)
 			}
-			r.mu.Unlock()
 		}()
 		defer close(out)
 		for ev := range events {
@@ -300,8 +300,8 @@ func (r *approvalRegistry) markCanceling(taskID a2a.TaskID) {
 		return
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.canceling[taskID] = true
-	r.mu.Unlock()
 }
 
 func (r *approvalRegistry) isCanceling(taskID a2a.TaskID) bool {
