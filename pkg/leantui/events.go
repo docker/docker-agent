@@ -32,6 +32,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		m.statusSession.Apply(m.contentSession(""), ev)
 	}
 	switch e := ev.(type) {
+	case sideQueryDone:
+		m.handleSideQueryDone(e)
 	case fileCompletionsLoaded:
 		m.screen.Autocomplete.SetFiles(e)
 		m.screen.Autocomplete.Sync(m.screen.Editor.Text())
@@ -146,6 +148,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 	case *runtime.TeamInfoEvent:
 		m.applyTeamInfo(ctx, e)
+	case *runtime.ToolsetInfoEvent:
+		m.refreshCommands(ctx)
 	case *runtime.SessionTitleEvent:
 		if e.SessionID != "" && m.contentSession("") != "" && e.SessionID != m.contentSession("") {
 			return

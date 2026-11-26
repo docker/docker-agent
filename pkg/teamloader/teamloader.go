@@ -38,6 +38,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 const defaultMaxTokens int64 = 32000
@@ -896,6 +897,7 @@ func agentToolOptions(ctx context.Context, cfg *latest.Config, agentConfig *late
 	if requireTools && len(warnings) > 0 {
 		return nil, nil, fmt.Errorf("workspace tool creation failed: %s", strings.Join(warnings, "; "))
 	}
+	var skillSet *skillstool.ToolSet
 	// A build without skill loading rejects skills before reaching tool creation.
 	if skillLoadingEnabled && agentConfig.Skills.Enabled() {
 		skillDir := runConfig.WorkingDir
@@ -912,7 +914,7 @@ func agentToolOptions(ctx context.Context, cfg *latest.Config, agentConfig *late
 		// always exposed and never subject to the include filter.
 		loadedSkills = overrideWithInlineSkills(loadedSkills, inlineSkills(agentConfig.Skills.Inline))
 		if len(loadedSkills) > 0 {
-			skillSet := skillstool.New(loadedSkills, runConfig.WorkingDir)
+			skillSet = skillstool.New(loadedSkills, runConfig.WorkingDir)
 			// Resolve the additional toolsets each fork skill exposes in
 			// its sub-session from the top-level toolsets section.
 			forkToolSets, forkWarnings, err := forkSkillToolSets(ctx, cfg, agentConfig, loadedSkills, parentDir, runConfig, configName, loadOpts, expander)
@@ -927,6 +929,20 @@ func agentToolOptions(ctx context.Context, cfg *latest.Config, agentConfig *late
 			}
 			warnings = append(warnings, forkWarnings...)
 			agentTools = append(agentTools, skillSet)
+		}
+	}
+
+	if skillLoadingEnabled && userconfig.Get().MCPSkillsEnabled() {
+		var mcpSkillProviders []skills.MCPSkillProvider
+		for _, ts := range agentTools {
+			mcpSkillProviders = append(mcpSkillProviders, tools.FindAll[skills.MCPSkillProvider](ts)...)
+		}
+		if len(mcpSkillProviders) > 0 {
+			if skillSet == nil {
+				skillSet = skillstool.New(nil, runConfig.WorkingDir)
+				agentTools = append(agentTools, skillSet)
+			}
+			skillSet.SetMCPProviders(mcpSkillProviders)
 		}
 	}
 

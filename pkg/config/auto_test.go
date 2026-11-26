@@ -143,6 +143,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "hopbase",
 		},
 		{
+			name: "straitly api key present",
+			envVars: map[string]string{
+				"STRAITLY_API_KEY": "test-key",
+			},
+			expectedProvider: "straitly",
+		},
+		{
 			name: "baseten api key present",
 			envVars: map[string]string{
 				"BASETEN_API_KEY": "test-key",
@@ -440,6 +447,15 @@ func TestAutoModelConfig(t *testing.T) {
 			},
 			expectedProvider:  "hopbase",
 			expectedModel:     "glm-5.3",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "straitly provider",
+			envVars: map[string]string{
+				"STRAITLY_API_KEY": "test-key",
+			},
+			expectedProvider:  "straitly",
+			expectedModel:     "deepseek/deepseek-v4-1-flash",
 			expectedMaxTokens: 32000,
 		},
 		{

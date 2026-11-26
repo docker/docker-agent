@@ -57,6 +57,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/mcp"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 const (
@@ -705,6 +706,8 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 		// client_id / a non-default callback, extend Auth in servers.go and
 		// plumb the resulting *RemoteOAuthConfig through here.
 		mcpToolset := mcp.NewRemoteToolsetWithAllowPrivateIPs(id, server.URL, server.Transport, nil, nil, server.allowPrivateIPs)
+		mcpToolset.SetExperimentalEvents(userconfig.Get().MCPEventsEnabled())
+		mcpToolset.SetExperimentalTasks(userconfig.Get().MCPTasksEnabled())
 
 		// Re-attach the captured handlers so OAuth flows behave
 		// identically to a YAML-declared mcp.remote toolset. Apply

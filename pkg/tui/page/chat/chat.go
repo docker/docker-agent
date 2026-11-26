@@ -13,6 +13,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
@@ -26,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	tooldefaults "github.com/docker/docker-agent/pkg/tui/components/tool/defaults"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/internal/resizegrip"
@@ -295,14 +297,12 @@ type chatPage struct {
 	commandParser *commands.Parser
 
 	// Sidebar drag state
-	sidebarGrip       resizegrip.Reveal
-	sidebarGuide      animation.Transition
-	sidebarGuideFrom  SidebarGuide
-	sidebarGuideTo    SidebarGuide
-	isDraggingSidebar bool // True while dragging the sidebar resize handle
-	sidebarDragStartX int  // X position when drag started
-	sidebarDragWidth  int  // Prospective width; zero previews collapse
-	sidebarDragMoved  bool // True if mouse moved beyond threshold during drag
+	sidebarGrip           resizegrip.Reveal
+	isDraggingSidebar     bool // True while dragging the sidebar resize handle
+	sidebarDragStartX     int  // X position when drag started
+	sidebarDragWidth      int
+	sidebarDragStartWidth int
+	sidebarDragMoved      bool // True if mouse moved beyond threshold during drag
 
 	// appliedLayout is the layout geometry last pushed to child components by
 	// SetSize. Update compares it against the live layout to catch silent
@@ -353,7 +353,11 @@ func (p *chatPage) computeSidebarLayout() sidebarLayout {
 
 	switch mode {
 	case sidebarVertical:
-		l.sidebarWidth = p.sidebar.ClampWidth(p.sidebar.GetPreferredWidth(), innerWidth)
+		width := p.sidebar.GetPreferredWidth()
+		if p.isDraggingSidebar {
+			width = p.sidebarDragWidth
+		}
+		l.sidebarWidth = p.sidebar.ClampWidth(width, innerWidth)
 		l.chatWidth = max(1, innerWidth-l.sidebarWidth)
 		l.handleX = l.dividerX(l.sidebarWidth)
 		if l.sidebarOnLeft {
@@ -427,7 +431,6 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 		showStartupBanner: true,
 		bannerTransition:  ar.Transition(),
 		sidebarGrip:       resizegrip.NewReveal(ar),
-		sidebarGuide:      ar.Transition(),
 	}
 
 	for _, opt := range opts {
@@ -632,8 +635,6 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case animation.TickMsg:
 		p.sidebarGrip.Tick(msg)
-		// Guide-only ticks are painted over the cached frame by the root.
-		p.sidebarGuide.Tick()
 		if p.bannerTransition.Running() {
 			p.bannerTransition.Tick()
 			msg.MarkDirty()
@@ -905,15 +906,22 @@ func (p *chatPage) View() string {
 
 	switch sl.mode {
 	case sidebarVertical:
+		if p.clippedChatColumns() > 0 {
+			// Crop the visible rows; the transcript rewraps once, on release.
+			lines := strings.Split(messagesView, "\n")
+			for i, line := range lines {
+				lines[i] = ansi.Truncate(line, sl.chatWidth, "")
+			}
+			messagesView = strings.Join(lines, "\n")
+		}
 		chatView := p.renderChatPane(messagesView, sl.chatWidth, sl.chatHeight)
-
-		toggleCol := p.renderSidebarHandle(sl.chatHeight)
 
 		sidebarView := lipgloss.NewStyle().
 			Width(sl.sidebarWidth-toggleColumnWidth).
 			Height(sl.chatHeight).
 			Align(lipgloss.Left, lipgloss.Top).
 			Render(p.sidebar.View())
+		toggleCol := p.renderSidebarHandle(sl.chatHeight)
 
 		if sl.sidebarOnLeft {
 			bodyContent = lipgloss.JoinHorizontal(lipgloss.Left, sidebarView, toggleCol, chatView)
@@ -966,7 +974,7 @@ type scrollbarPointer interface {
 
 func (p *chatPage) SetScrollbarPointer(x, y int) tea.Cmd {
 	var cmds []tea.Cmd
-	if owner, ok := p.messages.(scrollbarPointer); ok {
+	if owner, ok := p.messages.(scrollbarPointer); ok && !p.isDraggingSidebar {
 		cmds = append(cmds, owner.SetScrollbarPointer(x, y))
 	}
 	if owner, ok := p.sidebar.(scrollbarPointer); ok {
@@ -984,7 +992,7 @@ func (p *chatPage) ClearScrollbarPointer() {
 	}
 }
 
-func (p *chatPage) setSize(width, height int, fromSidebarDrop bool) tea.Cmd {
+func (p *chatPage) setSize(width, height int, fromSidebarDrag bool) tea.Cmd {
 	p.width = width
 	p.height = height
 
@@ -993,9 +1001,11 @@ func (p *chatPage) setSize(width, height int, fromSidebarDrop bool) tea.Cmd {
 	// Compute layout once and use it for all sizing
 	sl := p.computeSidebarLayout()
 	old := p.appliedLayout
-	if !fromSidebarDrop && sl != old && (sl.mode != sidebarVertical || sl.chatHeight != old.chatHeight ||
-		p.isDraggingSidebar || p.sidebarGuide.Running() || (sl.sidebarOnLeft == old.sidebarOnLeft && sl.handleX != old.handleX)) {
-		ResetSidebarGrip(p)
+	if !fromSidebarDrag && sl != old && (sl.mode != sidebarVertical || sl.chatHeight != old.chatHeight ||
+		p.isDraggingSidebar || (sl.sidebarOnLeft == old.sidebarOnLeft && sl.handleX != old.handleX)) {
+		p.isDraggingSidebar = false
+		p.sidebarGrip.Reset()
+		sl = p.computeSidebarLayout()
 	}
 	p.appliedLayout = sl
 
@@ -1022,7 +1032,9 @@ func (p *chatPage) setSize(width, height int, fromSidebarDrop bool) tea.Cmd {
 		)
 	}
 
-	cmds = append(cmds, p.messages.SetSize(sl.chatWidth, sl.chatHeight))
+	if !p.isDraggingSidebar {
+		cmds = append(cmds, p.messages.SetSize(sl.chatWidth, sl.chatHeight))
+	}
 	if p.bannerTransition.Running() && !p.bannerVisible(sl) {
 		p.bannerTransition.Cancel()
 	}
@@ -1818,6 +1830,13 @@ func (p *chatPage) FocusMessageAt(x, y int) tea.Cmd {
 // BlurMessages removes focus from the messages panel
 func (p *chatPage) BlurMessages() {
 	p.messages.Blur()
+}
+
+func (p *chatPage) CursorInput() input.Cursor {
+	if p.sidebar.IsEditingTitle() {
+		return input.CursorOf(p.sidebar)
+	}
+	return input.CursorOf(p.messages)
 }
 
 // ScrollToBottom scrolls the messages viewport to the bottom if auto-scroll is active.

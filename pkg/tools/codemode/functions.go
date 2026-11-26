@@ -25,11 +25,11 @@ func toolToTypeScript(tool tools.Tool) string {
 	writeDocComment(&doc, tool.Description)
 
 	if isObjectSchema(input) {
-		fmt.Fprintf(&doc, "interface %s %s\n\n", inputName, objectType(input, input, 0))
+		fmt.Fprintf(&doc, "interface %s %s\n\n", inputName, objectType(input, input))
 	} else {
-		fmt.Fprintf(&doc, "type %s = %s;\n\n", inputName, schemaType(input, input, 0))
+		fmt.Fprintf(&doc, "type %s = %s;\n\n", inputName, schemaType(input, input))
 	}
-	fmt.Fprintf(&doc, "type %s = %s;\n\n", outputName, schemaType(output, output, 0))
+	fmt.Fprintf(&doc, "type %s = %s;\n\n", outputName, schemaType(output, output))
 	fmt.Fprintf(&doc, "declare function %s(args: %s): Promise<%s>;\n", baseName, inputName, outputName)
 
 	return doc.String()
@@ -46,13 +46,22 @@ func schemaMap(schema any) map[string]any {
 	return result
 }
 
-func schemaType(schema, root map[string]any, level int) string {
+func schemaType(schema, root map[string]any) string {
+	return schemaTypeWithVisited(schema, root, 0, map[string]bool{})
+}
+
+func schemaTypeWithVisited(schema, root map[string]any, level int, visiting map[string]bool) string {
 	if schema == nil {
 		return "unknown"
 	}
 	if ref, ok := schema["$ref"].(string); ok {
+		if visiting[ref] {
+			return "unknown"
+		}
 		if resolved := resolveRef(root, ref); resolved != nil {
-			return schemaType(resolved, root, level)
+			visiting[ref] = true
+			defer delete(visiting, ref)
+			return schemaTypeWithVisited(resolved, root, level, visiting)
 		}
 	}
 	if value, ok := schema["const"]; ok {
@@ -73,7 +82,7 @@ func schemaType(schema, root map[string]any, level int) string {
 			parts := make([]string, 0, len(variants))
 			for _, variant := range variants {
 				if variantSchema, ok := variant.(map[string]any); ok {
-					parts = append(parts, schemaType(variantSchema, root, level))
+					parts = append(parts, schemaTypeWithVisited(variantSchema, root, level, visiting))
 				}
 			}
 			if len(parts) > 0 {
@@ -88,7 +97,7 @@ func schemaType(schema, root map[string]any, level int) string {
 		for _, typ := range types {
 			schemaCopy := maps.Clone(schema)
 			schemaCopy["type"] = typ
-			parts = append(parts, schemaType(schemaCopy, root, level))
+			parts = append(parts, schemaTypeWithVisited(schemaCopy, root, level, visiting))
 		}
 		return strings.Join(parts, " | ")
 	}
@@ -108,10 +117,10 @@ func schemaType(schema, root map[string]any, level int) string {
 
 	switch typ {
 	case "object":
-		return objectType(schema, root, level)
+		return objectTypeWithVisited(schema, root, level, visiting)
 	case "array":
 		itemSchema, _ := schema["items"].(map[string]any)
-		itemType := schemaType(itemSchema, root, level)
+		itemType := schemaTypeWithVisited(itemSchema, root, level, visiting)
 		if strings.Contains(itemType, " | ") || strings.Contains(itemType, " & ") {
 			itemType = "(" + itemType + ")"
 		}
@@ -129,7 +138,11 @@ func schemaType(schema, root map[string]any, level int) string {
 	}
 }
 
-func objectType(schema, root map[string]any, level int) string {
+func objectType(schema, root map[string]any) string {
+	return objectTypeWithVisited(schema, root, 0, map[string]bool{})
+}
+
+func objectTypeWithVisited(schema, root map[string]any, level int, visiting map[string]bool) string {
 	properties, _ := schema["properties"].(map[string]any)
 	required := stringSet(schema["required"])
 	keys := tools.SchemaPropertyNames(schema)
@@ -149,7 +162,7 @@ func objectType(schema, root map[string]any, level int) string {
 			result.WriteByte('?')
 		}
 		result.WriteString(": ")
-		result.WriteString(schemaType(property, root, level+1))
+		result.WriteString(schemaTypeWithVisited(property, root, level+1, visiting))
 		result.WriteString(";\n")
 	}
 
@@ -161,7 +174,7 @@ func objectType(schema, root map[string]any, level int) string {
 		}
 		additionalType := "unknown"
 		if additionalSchema, ok := additional.(map[string]any); ok {
-			additionalType = schemaType(additionalSchema, root, level+1)
+			additionalType = schemaTypeWithVisited(additionalSchema, root, level+1, visiting)
 		}
 		result.WriteString(childIndent)
 		fmt.Fprintf(&result, "[key: string]: %s;\n", additionalType)

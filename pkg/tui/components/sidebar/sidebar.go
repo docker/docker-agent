@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -31,6 +30,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tab"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/todotool"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
@@ -154,6 +154,7 @@ type Model interface {
 	UpdateTitleInput(msg tea.Msg) tea.Cmd
 	// SetTitleRegenerating sets the title regeneration state and returns a command to start/stop spinner
 	SetTitleRegenerating(regenerating bool) tea.Cmd
+	ScrollbarOpacity() float64
 	// IsScrollbarDragging returns true when the scrollbar thumb is being dragged.
 	IsScrollbarDragging() bool
 	// VisualGeneration increments whenever an update changes rendered sidebar state.
@@ -374,7 +375,7 @@ type model struct {
 	titleGenerated       bool     // true once a title has been generated or set (hides pencil until then)
 	preferredWidth       int      // user's preferred width (persisted across collapse/expand)
 	editingTitle         bool     // true when inline title editing is active
-	titleInput           textinput.Model
+	titleInput           input.Text
 	lastTitleClickTime   time.Time         // for double-click detection on title
 	sectionVisibility    SectionVisibility // which optional sections are rendered
 	sectionGap           int               // blank lines between sections in vertical mode
@@ -425,7 +426,7 @@ type model struct {
 
 // New creates a new sidebar bound to the given session state.
 func New(ar *animation.Runtime, ctx context.Context, sessionState *service.SessionState) Model {
-	ti := textinput.New()
+	ti := input.NewText()
 	ti.Placeholder = "Session title"
 	ti.CharLimit = 50
 	ti.Prompt = "" // No prompt to maximize usable width in collapsed sidebar
@@ -461,6 +462,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		layoutDirty:      true, // First render must probe scrollbar visibility
 		usageReadingLine: -1,   // No usage zone recorded until the first render
 	}
+	m.titleInput.OnCursorChange(m.invalidateAnimation)
 	m.scrollview.SetAnimationRuntime(ar)
 
 	return m
@@ -845,6 +847,8 @@ func (m *model) SetTitleRegenerating(regenerating bool) tea.Cmd {
 	m.stopSpinner()
 	return nil
 }
+
+func (m *model) ScrollbarOpacity() float64 { return m.scrollview.ScrollbarOpacity() }
 
 func (m *model) SetScrollbarPointer(x, y int) tea.Cmd {
 	if m.mode == ModeVertical {
@@ -3116,6 +3120,13 @@ func (m *model) BeginTitleEdit() {
 	m.titleInput.Focus()
 	m.titleInput.CursorEnd()
 	m.invalidateCache()
+}
+
+func (m *model) CursorInput() input.Cursor {
+	if m.editingTitle {
+		return &m.titleInput
+	}
+	return nil
 }
 
 // IsEditingTitle returns true if the title is being edited

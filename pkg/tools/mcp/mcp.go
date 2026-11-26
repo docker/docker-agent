@@ -32,6 +32,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 	"github.com/docker/docker-agent/pkg/tools/workingdir"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // CreateToolSet is used by the tools registry.
@@ -40,14 +41,17 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	if err != nil {
 		return nil, err
 	}
-	configureExperimentalEvents(ts, toolset.Experimental)
-	return ts, nil
-}
-
-func configureExperimentalEvents(ts tools.ToolSet, cfg *latest.ToolsetExperimentalConfig) {
+	userSettings := userconfig.Get()
 	if setter, ok := ts.(interface{ SetExperimentalEvents(enabled bool) }); ok {
-		setter.SetExperimentalEvents(cfg != nil && cfg.MCPEvents)
+		setter.SetExperimentalEvents(userSettings.MCPEventsEnabled())
 	}
+	if setter, ok := ts.(interface{ SetExperimentalSkills(enabled bool) }); ok {
+		setter.SetExperimentalSkills(userSettings.MCPSkillsEnabled())
+	}
+	if setter, ok := ts.(interface{ SetExperimentalTasks(enabled bool) }); ok {
+		setter.SetExperimentalTasks(userSettings.MCPTasksEnabled())
+	}
+	return ts, nil
 }
 
 func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
@@ -139,7 +143,10 @@ func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 // NewRemoteToolsetFromConfig builds an unstarted toolset for a validated remote.url declaration.
 func NewRemoteToolsetFromConfig(ctx context.Context, toolset latest.Toolset, envProvider environment.Provider) *Toolset {
 	ts := remoteToolsetFromConfig(ctx, toolset, envProvider)
-	configureExperimentalEvents(ts, toolset.Experimental)
+	userSettings := userconfig.Get()
+	ts.SetExperimentalEvents(userSettings.MCPEventsEnabled())
+	ts.SetExperimentalSkills(userSettings.MCPSkillsEnabled())
+	ts.SetExperimentalTasks(userSettings.MCPTasksEnabled())
 	return ts
 }
 
@@ -768,7 +775,7 @@ func (ts *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 	for t, err := range resp {
 		if err != nil {
 			var rpcErr *jsonrpc.Error
-			if len(eventToolsList) > 0 && errors.As(err, &rpcErr) && rpcErr.Code == jsonrpc.CodeMethodNotFound {
+			if (len(eventToolsList) > 0 || ts.SupportsMCPSkills()) && errors.As(err, &rpcErr) && rpcErr.Code == jsonrpc.CodeMethodNotFound {
 				break
 			}
 			return nil, err
@@ -883,8 +890,9 @@ func (ts *Toolset) callTool(ctx context.Context, toolCall tools.ToolCall, _ tool
 
 	// If the call failed with a connection or session error (e.g. the
 	// server restarted), trigger or wait for a reconnection and retry
-	// the call once.
-	if err != nil && !ts.sessionOwned && isConnectionError(err) && callCtx.Err() == nil {
+	// the call once. Skip retry if a task was already created so we never
+	// duplicate a non-idempotent async tool call.
+	if err != nil && !ts.sessionOwned && !isTaskExecutionError(err) && isConnectionError(err) && callCtx.Err() == nil {
 		slog.WarnContext(ctx, "MCP call failed, forcing reconnect and retrying", "tool", toolCall.Function.Name, "server", ts.logID, "error", err)
 		if waitErr := ts.supervisor.RestartAndWait(callCtx, sessionMissingRetryTimeout); waitErr != nil {
 			return nil, ts.classifyCallToolError(ctx, callCtx, toolCall, start, fmt.Errorf("failed to reconnect after call failure: %w", waitErr))

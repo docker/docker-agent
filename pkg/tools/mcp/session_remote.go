@@ -87,9 +87,27 @@ func (c *sessionRemoteClient) Initialize(ctx context.Context, _ *gomcp.Initializ
 	if c.eventsEnabled() && c.transport == "streamable" {
 		opts.Capabilities.AddExtension(eventsExtension, nil)
 	}
+	if c.tasksEnabled() && c.transport == "streamable" {
+		opts.Capabilities.AddExtension(tasksExtension, nil)
+	}
 	client := gomcp.NewClient(&gomcp.Implementation{Name: "docker agent", Version: "1.0.0"}, opts)
+	if c.skillsEnabled() {
+		if err := c.enableSkills(client); err != nil {
+			cancel()
+			return nil, err
+		}
+	}
 	if c.eventsEnabled() && c.transport == "streamable" {
 		if err := c.enableHTTPEvents(client, httpClient); err != nil {
+			cancel()
+			return nil, err
+		}
+	}
+	var tasks *taskClient
+	if c.tasksEnabled() && c.transport == "streamable" {
+		var err error
+		tasks, err = c.enableHTTPTasks(client, httpClient)
+		if err != nil {
 			cancel()
 			return nil, err
 		}
@@ -110,7 +128,7 @@ func (c *sessionRemoteClient) Initialize(ctx context.Context, _ *gomcp.Initializ
 		h.wait()
 		return nil, parent.Err()
 	}
-	c.setSession(session)
+	c.setSessionWithTasks(session, tasks)
 	if c.eventsEnabled() && c.transport == "streamable" {
 		c.watchEventConnection()
 	}
@@ -140,6 +158,8 @@ func (t *sessionRemoteTransport) Connect(ctx context.Context) (gomcp.Connection,
 
 func (c *sessionRemoteClient) forceClose() {
 	c.closeEvents()
+	c.closeSkills()
+	c.closeTasks()
 	c.mu.Lock()
 	cancel, conn := c.cancel, c.connection
 	c.mu.Unlock()

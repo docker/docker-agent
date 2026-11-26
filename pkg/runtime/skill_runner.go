@@ -50,6 +50,7 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 		return tools.ResultError("no skills are available for agent " + ca), nil
 	}
 
+	toolRuntime := rt
 	if rt == nil {
 		rt = skillRuntime{runtime: r, agent: caller, sessionID: sess.ID}
 	}
@@ -98,6 +99,10 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 	)
 	defer span.End()
 
+	if err := confirmForkStartup(ctx, sess, prepared, toolRuntime); err != nil {
+		return tools.ResultError(err.Error()), nil
+	}
+
 	slog.DebugContext(ctx, "Running skill as sub-agent",
 		"agent", ca,
 		"skill", prepared.SkillName,
@@ -144,4 +149,40 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 		// child is exempt from tool-mode structured-output enforcement.
 		DisableStructuredOutput: true,
 	})
+}
+
+// confirmForkStartup keeps the pre-hint approval boundary for fork skills
+// whose toolsets start background work. Listing those tools can spawn a stdio
+// MCP server before the child dispatcher sees any call, so ask (or deny under
+// restricted) before the child session starts them. Strict already approved
+// the launch; autonomous intentionally does not prompt.
+func confirmForkStartup(ctx context.Context, sess *session.Session, prepared *skills.PreparedSkillFork, rt tools.Runtime) error {
+	if rt == nil || !hasStartableToolSet(prepared.ToolSets) {
+		return nil
+	}
+	switch sess.GetSafetyPolicy() {
+	case "", session.SafetyPolicyBalanced, session.SafetyPolicyRestricted:
+	default:
+		return nil
+	}
+	_, err := rt.ConfirmAndRun(ctx, tools.ConfirmedRun{
+		ToolName: skills.ToolNameRunSkill,
+		Args:     map[string]any{"name": prepared.SkillName, "task": prepared.Task},
+		Metadata: map[string]string{"skill": prepared.SkillName, "reason": "startup"},
+	}, func(context.Context, tools.ConfirmedRun) (string, error) {
+		return "", nil
+	})
+	return err
+}
+
+func hasStartableToolSet(toolsets []tools.ToolSet) bool {
+	for _, ts := range toolsets {
+		if _, ok := tools.As[tools.Startable](ts); ok {
+			return true
+		}
+		if _, ok := tools.As[tools.Runnable](ts); ok {
+			return true
+		}
+	}
+	return false
 }

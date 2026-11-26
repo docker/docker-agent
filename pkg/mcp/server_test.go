@@ -508,6 +508,23 @@ func TestAgentToolAnnotationsJSONKeepsFalseHints(t *testing.T) {
 	assert.Contains(t, string(data), `"idempotentHint":false`)
 }
 
+// TestAgentToolAnnotationsDelegationIsNotReadOnly keeps the MCP claim
+// conservative: a wrapper that can start a writing child makes the whole
+// agent non-read-only even when every top-level tool is annotated read-only.
+func TestAgentToolAnnotationsDelegationIsNotReadOnly(t *testing.T) {
+	t.Parallel()
+
+	falseHint := new(bool)
+	ag := agent.New("test", "test agent", agent.WithTools(
+		tools.Tool{Name: "read_file", Annotations: annot(true, true, falseHint, falseHint)},
+		tools.Tool{Name: "run_skill", Delegation: true, Annotations: annot(true, true, falseHint, falseHint)},
+	))
+	annotations, err := agentToolAnnotations(t.Context(), ag)
+	require.NoError(t, err)
+	require.False(t, annotations.ReadOnlyHint)
+	require.False(t, annotations.IdempotentHint)
+}
+
 func TestNewToolCallSession(t *testing.T) {
 	t.Parallel()
 

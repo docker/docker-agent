@@ -182,19 +182,9 @@ func TestHistorySuggestionFollowsComposerResize(t *testing.T) {
 	assert.Equal(t, entry, m.activeTab.editor.Value())
 }
 
-type sidebarGuideScheduler struct {
-	now  time.Time
-	step time.Duration
-}
-
-func (s *sidebarGuideScheduler) Now() time.Time { return s.now }
-func (s *sidebarGuideScheduler) Tick(_ time.Duration, f func(time.Time) tea.Msg) tea.Cmd {
-	return func() tea.Msg { s.now = s.now.Add(s.step); return f(s.now) }
-}
-
-func sidebarResizeTestRoot(t *testing.T, position messages.SidebarPosition) (*appModel, int, *sidebarGuideScheduler) {
+func sidebarResizeTestRoot(t *testing.T, position messages.SidebarPosition) (*appModel, int) {
 	t.Helper()
-	scheduler := &sidebarGuideScheduler{now: time.Unix(1, 0), step: animation.ShortDuration}
+	scheduler := &rootImmediateScheduler{now: time.Unix(1, 0)}
 	ar := animation.NewRuntimeWithScheduler(scheduler)
 	m, _, _ := harnessRoot(t, 160, 40, ar)
 	chat.Cleanup(m.activeTab.chatPage)
@@ -205,7 +195,7 @@ func sidebarResizeTestRoot(t *testing.T, position messages.SidebarPosition) (*ap
 	p.SetSidebarSettings(chat.SidebarSettings{PreferredWidth: 45})
 	m.showTopMargin = true
 	m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
-	return m, renderedSidebarDivider(t, m.View().Content, position), scheduler
+	return m, renderedSidebarDivider(t, m.View().Content, position)
 }
 
 func renderedSidebarDivider(t *testing.T, frame string, position messages.SidebarPosition) int {
@@ -219,151 +209,59 @@ func renderedSidebarDivider(t *testing.T, frame string, position messages.Sideba
 	return lipgloss.Width(before[strings.LastIndexByte(before, '\n')+1:])
 }
 
-func sidebarGuideTestTick(t *testing.T, m *appModel, cmd tea.Cmd) tea.Cmd {
+func settleSidebarGrip(t *testing.T, m *appModel, cmd tea.Cmd) {
 	t.Helper()
-	var tick animation.TickMsg
-	var found bool
-	for _, msg := range collectMsgs(cmd) {
-		if next, ok := msg.(animation.TickMsg); ok {
-			require.False(t, found, "guide uses exactly one shared tick chain")
-			tick, found = next, true
-		}
+	for m.ar.HasActive() {
+		msgs := collectMsgs(cmd)
+		require.Equal(t, 1, countOfType[animation.TickMsg](msgs), "grip uses exactly one shared tick chain")
+		tick, _ := firstOfType[animation.TickMsg](msgs)
+		_, cmd = m.Update(tick)
 	}
-	require.True(t, found, "active animation did not schedule a tick")
-	_, next := m.Update(tick)
-	return next
 }
 
-func requireSidebarGuide(t *testing.T, m *appModel) chat.SidebarGuide {
-	t.Helper()
-	guide, ok := chat.SidebarResizeGuide(m.activeTab.chatPage)
-	require.True(t, ok)
-	return guide
-}
-
-func TestSidebarResizeGuidePreviewsBeforeCommitting(t *testing.T) {
-	for _, tc := range []struct {
-		dock      messages.SidebarPosition
-		direction int
-	}{{messages.SidebarLeft, 1}, {messages.SidebarRight, -1}} {
-		t.Run(string(tc.dock), func(t *testing.T) {
-			m, x, clock := sidebarResizeTestRoot(t, tc.dock)
+func TestSidebarDividerMovesWhileDragging(t *testing.T) {
+	for _, dock := range []messages.SidebarPosition{messages.SidebarLeft, messages.SidebarRight} {
+		t.Run(string(dock), func(t *testing.T) {
+			m, x := sidebarResizeTestRoot(t, dock)
 			p := m.activeTab.chatPage
 			initial := p.GetSidebarSettings()
-			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: 2, Button: tea.MouseLeft})
-			require.True(t, chat.IsResizingSidebar(p))
-			compact := requireSidebarGuide(t, m)
-			assert.Equal(t, 3, compact.End-compact.Start)
-			_ = m.View()
-			base, generation := m.viewCache.Content, p.VisualGeneration()
-
-			previewX := x + 5*tc.direction
-			m.Update(tea.MouseMotionMsg{X: previewX, Y: m.height + 1, Button: tea.MouseLeft})
-			require.True(t, m.viewCacheValid, "captured motion does not rebuild the root")
-			assert.Equal(t, previewX, requireSidebarGuide(t, m).X)
-			clock.step = animation.ShortDuration / 4
-			cmd = sidebarGuideTestTick(t, m, cmd)
-			growing := requireSidebarGuide(t, m)
-			assert.Less(t, growing.Start, compact.Start)
-			assert.Greater(t, growing.End, compact.End)
-			clock.step = animation.ShortDuration
-			require.Nil(t, sidebarGuideTestTick(t, m, cmd))
-			assert.False(t, m.ar.HasActive(), "a fully extended guide stops ticking")
-			require.True(t, m.viewCacheValid, "guide-only ticks do not rebuild the root")
-			assert.Equal(t, base, m.viewCache.Content)
-			assert.Equal(t, generation, p.VisualGeneration(), "preview doesn't relayout the transcript")
-			assert.Equal(t, initial, p.GetSidebarSettings())
-			shown := requireSidebarGuide(t, m)
-			assert.Equal(t, chat.SidebarGuide{X: previewX, Start: 0, End: m.contentHeight, Opacity: 1}, shown)
-			rows := strings.Split(ansi.Strip(m.View().Content), "\n")
-			for y := m.topMargin(); y < m.topMargin()+m.contentHeight; y++ {
-				assert.Equal(t, "│", ansi.Cut(rows[y], previewX, previewX+1), "guide row %d", y)
+			for _, cancel := range []bool{true, false} {
+				m.Update(tea.MouseClickMsg{X: x, Y: 2, Button: tea.MouseLeft})
+				for _, delta := range []int{4, 7, 3} {
+					m.Update(tea.MouseMotionMsg{X: x + delta, Y: m.height + 1, Button: tea.MouseLeft})
+					require.Equal(t, x+delta, renderedSidebarDivider(t, m.View().Content, dock))
+					require.Equal(t, initial, p.GetSidebarSettings())
+				}
+				if cancel {
+					m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+					require.Equal(t, x, renderedSidebarDivider(t, m.View().Content, dock))
+				} else {
+					m.Update(tea.MouseReleaseMsg{X: x + 5, Y: -1, Button: tea.MouseLeft})
+					require.Equal(t, x+5, renderedSidebarDivider(t, m.View().Content, dock))
+					require.NotEqual(t, initial, p.GetSidebarSettings())
+				}
+				require.False(t, chat.IsResizingSidebar(p))
 			}
-			assert.Equal(t, strings.Split(ansi.Strip(base), "\n")[m.topMargin()+m.contentHeight:], rows[m.topMargin()+m.contentHeight:])
-			m.Update(agentruntime.UserMessage("LIVE-RESIZE-PREVIEW-MARKER", "profile", nil))
-			assert.Contains(t, ansi.Strip(m.View().Content), "-RESIZE-PREVIEW-MARKER", "content stays live under preview")
-
-			drop := tea.MouseReleaseMsg{X: x + 7*tc.direction, Y: -1, Button: tea.MouseLeft}
-			_, cmd = m.Update(drop)
-			require.False(t, chat.IsResizingSidebar(p))
-			assert.Equal(t, initial.PreferredWidth+7, p.GetSidebarSettings().PreferredWidth)
-			assert.Equal(t, shown, requireSidebarGuide(t, m), "retraction starts at the last visible preview")
-			_ = m.View()
-			assert.Equal(t, drop.X, renderedSidebarDivider(t, m.viewCache.Content, tc.dock))
-			generation = p.VisualGeneration()
-			m.Update(tea.MouseReleaseMsg{X: x, Y: -1, Button: tea.MouseLeft})
-			assert.Equal(t, initial.PreferredWidth+7, p.GetSidebarSettings().PreferredWidth, "a second release cannot commit")
-			assert.Equal(t, generation, p.VisualGeneration())
-			require.Nil(t, sidebarGuideTestTick(t, m, cmd))
-			assert.Equal(t, m.viewCache.Content, m.View().Content)
-		})
-	}
-}
-
-func TestSidebarResizeGuideEndsWithoutCommit(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		interrupt func(*appModel, int, int) tea.Cmd
-		retract   bool
-	}{
-		{"escape", func(m *appModel, _, _ int) tea.Cmd {
-			_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-			return cmd
-		}, true},
-		{"lost button", func(m *appModel, x, y int) tea.Cmd { _, cmd := m.Update(tea.MouseMotionMsg{X: x, Y: y}); return cmd }, true},
-		{"blur", func(m *appModel, _, _ int) tea.Cmd { m.Update(tea.BlurMsg{}); return nil }, false},
-		{"hidden", func(m *appModel, _, _ int) tea.Cmd { return m.setPaneHidden(true) }, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m, x, clock := sidebarResizeTestRoot(t, messages.SidebarRight)
-			p, y := m.activeTab.chatPage, m.contentHeight/2
-			initial := p.GetSidebarSettings()
-			_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-			m.Update(tea.MouseMotionMsg{X: x - 9, Y: y, Button: tea.MouseLeft})
-			clock.step = animation.ShortDuration / 2
-			cmd = sidebarGuideTestTick(t, m, cmd)
-			preview := requireSidebarGuide(t, m)
-			require.Equal(t, x-9, preview.X)
-			require.NotEqual(t, m.View().Content, m.viewCache.Content)
-			assert.Nil(t, tc.interrupt(m, x, y), "no extra tick chain on interruption")
-			require.False(t, chat.IsResizingSidebar(p))
-			if tc.retract {
-				assert.Equal(t, preview, requireSidebarGuide(t, m), "retraction starts without a jump")
-				cmd = sidebarGuideTestTick(t, m, cmd)
-				mid := requireSidebarGuide(t, m)
-				assert.Greater(t, mid.X, preview.X, "returns toward the original divider")
-				assert.Less(t, mid.End-mid.Start, preview.End-preview.Start)
-				assert.Positive(t, mid.Opacity)
-				assert.Less(t, mid.Opacity, preview.Opacity)
-			}
-			require.Nil(t, sidebarGuideTestTick(t, m, cmd), "a queued tick cannot restart a cleared guide")
-			assert.False(t, m.ar.HasActive())
-			_, visible := chat.SidebarResizeGuide(p)
-			assert.False(t, visible)
-			m.Update(tea.FocusMsg{})
-			m.Update(tea.MouseReleaseMsg{X: x - 9, Y: -1, Button: tea.MouseLeft})
-			assert.Equal(t, initial, p.GetSidebarSettings(), "a stale release cannot commit")
-			assert.Equal(t, m.viewCache.Content, m.View().Content)
 		})
 	}
 }
 
 func TestSidebarGripFadesWhenPointerLeavesChat(t *testing.T) {
-	m, x, _ := sidebarResizeTestRoot(t, messages.SidebarRight)
+	m, x := sidebarResizeTestRoot(t, messages.SidebarRight)
 	rest := m.View().Content
 	y := m.contentHeight / 2
 	_, cmd := m.Update(tea.MouseMotionMsg{X: x, Y: y})
 	require.True(t, m.ar.HasActive())
-	require.Nil(t, sidebarGuideTestTick(t, m, cmd))
+	settleSidebarGrip(t, m, cmd)
 	assert.Contains(t, m.View().Content, styles.ResizeHandleHoverStyle.Render("│"))
 	_, cmd = m.Update(tea.MouseMotionMsg{X: x, Y: m.height - 1})
 	require.True(t, m.ar.HasActive())
-	require.Nil(t, sidebarGuideTestTick(t, m, cmd))
+	settleSidebarGrip(t, m, cmd)
 	assert.Equal(t, rest, m.View().Content, "fade needs no second motion inside chat")
 }
 
 func TestTopMarginFollowsTerminalHeight(t *testing.T) {
-	m, x, _ := sidebarResizeTestRoot(t, messages.SidebarRight)
+	m, x := sidebarResizeTestRoot(t, messages.SidebarRight)
 	m.hideSidebar = false
 	m.Update(agentruntime.SessionTitle("profile", strings.Repeat("a", 2080)))
 	for _, collapsed := range []bool{false, true} {
@@ -417,4 +315,25 @@ func TestTopMarginAppliesOnSaveAndSurvivesRestart(t *testing.T) {
 	// A second restart checks that disabling the setting also persists.
 	restarted, _, _ = frozenClockRoot(t, width, height)
 	check(restarted, false)
+}
+
+func TestLeftDividerRepaintsOnCaptureLossAndResize(t *testing.T) {
+	m, x := sidebarResizeTestRoot(t, messages.SidebarLeft)
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 16})
+	y := m.topMargin() + 1
+	edge := func() string { return ansi.Cut(strings.Split(ansi.Strip(m.View().Content), "\n")[y], x, x+1) }
+	for near := x; near >= x-6 && edge() != " "; near-- {
+		_, cmd := m.Update(tea.MouseMotionMsg{X: near, Y: y})
+		settleSidebarGrip(t, m, cmd)
+	}
+	require.Equal(t, " ", edge(), "revealed scrollbar hides divider")
+	m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	require.True(t, chat.IsResizingSidebar(m.activeTab.chatPage))
+	require.Equal(t, "│", edge())
+	m.Update(tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseNone})
+	require.False(t, chat.IsResizingSidebar(m.activeTab.chatPage))
+	require.Equal(t, " ", edge(), "first frame after capture loss")
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 100})
+	y = m.topMargin() + 1
+	require.Equal(t, "│", edge(), "first frame after sidebar content fits")
 }

@@ -21,6 +21,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tools"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 const clientMCPSetupTimeout = 30 * time.Second
@@ -272,6 +273,8 @@ func prepareClientMCP(ctx context.Context, servers []clientMCPServer, workingDir
 		} else {
 			server = mcptools.NewSessionRemoteToolset(name, spec.url, spec.transport, spec.headers)
 		}
+		server.SetExperimentalEvents(userconfig.Get().MCPEventsEnabled())
+		server.SetExperimentalTasks(userconfig.Get().MCPTasksEnabled())
 		tools.ConfigureHandlers(server, tools.ScopedElicitationHandler, nil, false, "")
 		g.servers = append(g.servers, server)
 		if err := server.Start(ctx); err != nil {

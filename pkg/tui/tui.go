@@ -43,6 +43,7 @@ import (
 	tooldefaults "github.com/docker/docker-agent/pkg/tui/components/tool/defaults"
 	"github.com/docker/docker-agent/pkg/tui/components/tour"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/internal/editorname"
@@ -64,6 +65,13 @@ type SessionSpawner = supervisor.SessionSpawner
 
 // FocusedPanel represents which panel is currently focused
 type FocusedPanel string
+
+type terminalFocus uint8
+
+const (
+	terminalFocused terminalFocus = iota + 1
+	terminalBlurred
+)
 
 const (
 	PanelContent FocusedPanel = "content"
@@ -189,11 +197,6 @@ type appModel struct {
 	viewCacheValid       bool
 	viewCacheInitialized bool
 	foreground           viewForeground
-	sidebarGuideCache    struct {
-		guide   chat.SidebarGuide
-		content string
-	}
-
 	paneHidden           bool
 	tmuxVisibilityProbe  func(context.Context) bool
 	visibilityGeneration uint64
@@ -238,13 +241,10 @@ type appModel struct {
 	// dockerDesktop enables terminal mode restoration after a focus change.
 	dockerDesktop bool
 
-	// focused tracks whether the terminal currently has focus. Used to
-	// filter spurious FocusMsg events (RestoreTerminal re-enables focus
-	// reporting and delivers one even though we never blurred). Starts
-	// at the zero value (false) so the first FocusMsg is treated as a
-	// real focus event — in Docker Desktop that runs the release/restore
-	// cycle which re-emits terminal mode escape sequences.
-	focused bool
+	// Before the terminal reports focus, allow blinking but still handle
+	// the first FocusMsg (Docker Desktop needs it to restore terminal modes).
+	terminalFocus terminalFocus
+	exposedInput  input.Cursor
 
 	// lightDarkModeSet is true while DEC mode 2031 (terminal color-scheme
 	// reports) is enabled. Set when the auto theme turns the mode on, so the
@@ -916,7 +916,7 @@ func (m *appModel) init() tea.Cmd {
 		tabID := m.pendingActiveTab
 		m.pendingActiveTab = ""
 		_, switchCmd := m.handleSwitchTab(tabID)
-		return tea.Batch(m.dialogMgr.Init(), switchCmd, shutdownCmd)
+		return tea.Batch(m.dialogMgr.Init(), switchCmd, m.syncInputCursor(), shutdownCmd)
 	}
 
 	// If the initial tab has a pending session restore, go through
@@ -938,7 +938,7 @@ func (m *appModel) init() tea.Cmd {
 				cmd = tea.Batch(cmd, m.applySidebarCollapsed(activeID))
 				m.persistActiveTab(sess.ID)
 
-				return tea.Batch(m.dialogMgr.Init(), cmd, shutdownCmd)
+				return tea.Batch(m.dialogMgr.Init(), cmd, m.syncInputCursor(), shutdownCmd)
 			}
 		}
 	}
@@ -950,6 +950,7 @@ func (m *appModel) init() tea.Cmd {
 		chat.WatchGitBranch(m.activeTab.chatPage),
 		m.activeTab.editor.Init(),
 		m.activeTab.editor.Focus(),
+		m.syncInputCursor(),
 		m.application.SendFirstMessage(),
 	)
 }
@@ -958,6 +959,15 @@ func (m *appModel) init() tea.Cmd {
 // observe every message that flows through the TUI (to detect completed
 // steps) without ever consuming it.
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if tick, ok := msg.(*input.BlinkMsg); ok {
+		visible := m.exposedInput != nil && m.exposedInput.VirtualCursor()
+		cmd := tick.Apply(m.exposedInput)
+		if m.exposedInput != nil && visible != m.exposedInput.VirtualCursor() {
+			m.viewCacheValid = false
+		}
+		return m, cmd
+	}
+
 	if m.application != nil && !m.application.IsCurrentOperation(msg) {
 		return m, nil
 	}
@@ -978,8 +988,37 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if obs := m.tour.Observe(msg); obs != nil {
 		cmd = tea.Batch(cmd, obs)
 	}
-	cmd = tea.Batch(cmd, pointerCmd, m.syncNotificationAvoidance(), m.refreshProgramStatus())
+	var cursorCmd tea.Cmd
+	if _, tick := msg.(animation.TickMsg); !tick {
+		cursorCmd = m.syncInputCursor()
+	}
+	cmd = tea.Batch(cmd, pointerCmd, cursorCmd, m.syncNotificationAvoidance(), m.refreshProgramStatus())
 	return model, cmd
+}
+
+// syncInputCursor supplies the input with the app's visibility/focus decision.
+// Timing and delivery to the individual input do not depend on screen updates.
+func (m *appModel) syncInputCursor() tea.Cmd {
+	var current input.Cursor
+	if !m.paneHidden && m.terminalFocus != terminalBlurred {
+		switch {
+		case m.dialogMgr != nil && m.dialogMgr.Open():
+			current = input.CursorOf(m.dialogMgr.TopDialog())
+		case m.focusedPanel == PanelEditor:
+			current = input.CursorOf(m.activeTab.editor)
+		case m.focusedPanel == PanelContent:
+			current = input.CursorOf(m.activeTab.chatPage)
+		}
+	}
+	if current != nil && !current.Focused() {
+		current = nil
+	}
+	cmd := input.Expose(m.exposedInput, current)
+	if m.exposedInput != current {
+		m.exposedInput = current
+		m.viewCacheValid = false
+	}
+	return cmd
 }
 
 func tabVisualGeneration(tabBar *tabbar.TabBar) uint64 {
@@ -1169,7 +1208,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.BlurMsg:
 		m.resetResizeGrips()
-		m.focused = false
+		m.terminalFocus = terminalBlurred
 		return m, nil
 
 	case tea.FocusMsg:
@@ -1178,10 +1217,10 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		resume := m.setPaneHidden(false)
 		// Filter spurious FocusMsg: RestoreTerminal re-enables focus
 		// reporting which delivers a FocusMsg even when we never blurred.
-		if m.focused {
+		if m.terminalFocus == terminalFocused {
 			return m, resume
 		}
-		m.focused = true
+		m.terminalFocus = terminalFocused
 
 		cmds := []tea.Cmd{resume}
 		if styles.AutoThemeEnabled() {
@@ -2655,10 +2694,9 @@ func (m *appModel) canRestorePointerCache(msg tea.Msg) bool {
 	if !m.viewCacheValid || m.activeTab.chatPage == nil {
 		return false
 	}
-	// A captured left drag updates only its own grip. A changed composer
-	// divider invalidates via contentHeight; a sidebar guide is separate.
+	// A changed composer divider invalidates via contentHeight.
 	if motion, ok := msg.(tea.MouseMotionMsg); ok && motion.Button == tea.MouseLeft &&
-		(m.isDragging || chat.IsResizingSidebar(m.activeTab.chatPage)) {
+		m.isDragging {
 		return true
 	}
 	if m.tabBar == nil || m.dialogMgr == nil || m.dialogMgr.Open() || m.activeTab.chatPage.IsSelecting() || m.notification.Open() {
@@ -2667,7 +2705,7 @@ func (m *appModel) canRestorePointerCache(msg tea.Msg) bool {
 	var x, y int
 	switch msg := msg.(type) {
 	case tea.MouseMotionMsg:
-		if msg.Button == tea.MouseLeft && !m.tabBar.IsDragging() {
+		if chat.IsResizingSidebar(m.activeTab.chatPage) || (msg.Button == tea.MouseLeft && !m.tabBar.IsDragging()) {
 			return false
 		}
 		x, y = msg.X, msg.Y
@@ -3117,10 +3155,9 @@ func anyRunningTab(tabs []messages.TabInfo) bool {
 // View renders the model.
 func (m *appModel) View() tea.View {
 	if m.viewCacheValid {
-		return m.withSidebarResizeGuide(m.viewCache)
+		return m.viewCache
 	}
 	if m.paneHidden && m.viewCacheInitialized && m.err == nil {
-		m.clearSidebarResizeGuide()
 		// Keep completion signals live without composing the hidden transcript.
 		view := m.viewCache
 		view.WindowTitle = m.windowTitle()
@@ -3135,8 +3172,7 @@ func (m *appModel) View() tea.View {
 	m.viewCache = view
 	m.viewCacheValid = true
 	m.viewCacheInitialized = true
-	m.sidebarGuideCache.content = ""
-	return m.withSidebarResizeGuide(view)
+	return view
 }
 
 func (m *appModel) composeView() tea.View {
@@ -3256,10 +3292,13 @@ func (m *appModel) composeView() tea.View {
 
 	if m.imageWriter != nil {
 		// Extract markers before the compositor consumes their APC sequences.
-		baseView = m.imageWriter.SetContent(baseView, foregroundBounds(m.foreground.layers)...)
+		masks := foregroundBounds(m.foreground.layers)
+		if mask := chat.SidebarDragImageMask(m.activeTab.chatPage); !mask.Empty() {
+			masks = append(masks, mask)
+		}
+		baseView = m.imageWriter.SetContent(baseView, masks...)
 	}
 	if len(m.foreground.layers) > 0 {
-		m.foreground.base = baseView
 		baseView = m.foreground.compose(baseView)
 	}
 	return toFullscreenView(baseView, windowTitle, m.activeTab.chatPage.IsWorking(), m.leanMode)

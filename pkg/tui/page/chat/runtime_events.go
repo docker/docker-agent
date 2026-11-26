@@ -189,7 +189,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, notification.InfoCmd(routeSummary(msg))
 
 	case *runtime.ToolsetInfoEvent:
-		p.sidebar.SetSkillsInfo(len(p.app.CurrentAgentSkills()))
+		p.sidebar.SetSkillsInfo(len(p.app.CurrentAgentSkills(p.ctx())))
 		return true, p.forwardToSidebar(msg)
 
 	case *runtime.SessionTitleEvent:

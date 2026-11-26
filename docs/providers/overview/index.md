@@ -20,6 +20,7 @@ _Docker Agent supports multiple AI model providers. Choose the right one for you
 - [**Docker Model Runner**](../dmr/index.md) — run models locally with Docker. No API keys, no costs.
 - [**Local Models**](../local/index.md) — run Ollama, vLLM, or LocalAI locally. No API key required.
 - [**Nativ**](../nativ/index.md) — run MLX models locally on Apple Silicon through a custom provider.
+- [**Rapid-MLX**](../rapid-mlx/index.md) — serve MLX models locally on Apple Silicon through a custom provider.
 - [**Provider Definitions**](../custom/index.md) — define reusable provider configurations with shared defaults for any provider type.
 
 ## Quick Comparison
@@ -77,6 +78,7 @@ Use this table to find a built-in provider's config key and authentication metho
 | CloudGPU       | [`cloudgpu`](../cloudgpu/index.md) | `CLOUDGPU_API_KEY`                  |
 | Obscurify.ai   | [`obscurify`](../obscurify/index.md) | `OBSCURIFY_API_KEY`                 |
 | HopBase        | [`hopbase`](../hopbase/index.md) | `HOPBASE_API_KEY`                   |
+| Straitly       | [`straitly`](../straitly/index.md) | `STRAITLY_API_KEY`                  |
 | Azure OpenAI   | `azure`          | `AZURE_API_KEY` + `base_url` (override the key with `token_key`) |
 | [Ollama](../local/index.md) | `ollama` | None (local; optional `base_url`) |
 | GitHub Copilot | `github-copilot` | `GITHUB_TOKEN` or `GH_TOKEN` (PAT with `copilot` scope) |

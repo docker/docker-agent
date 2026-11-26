@@ -235,7 +235,7 @@ tasks:
   cross:
     desc: Build binaries for multiple platforms
     cmds:
-      - docker buildx build --target=cross --build-arg GIT_TAG --build-arg GIT_COMMIT --platform linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64 --output=./dist .
+      - docker buildx build --target=cross --build-arg GIT_TAG --build-arg GIT_COMMIT --platform linux/amd64,linux/arm64,linux/riscv64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64 --output=./dist .
 
   build-image:
     desc: Build Docker image

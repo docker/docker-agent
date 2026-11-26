@@ -364,12 +364,12 @@ func (a *App) CurrentAgentCommands(ctx context.Context) types.Commands {
 }
 
 // CurrentAgentSkills returns the available skills if skills are enabled for the current agent.
-func (a *App) CurrentAgentSkills() []skills.Skill {
+func (a *App) CurrentAgentSkills(ctx context.Context) []skills.Skill {
 	st := a.runtime.CurrentAgentSkillsToolset()
 	if st == nil {
 		return nil
 	}
-	return st.Skills()
+	return st.Skills(ctx)
 }
 
 // ResolveSkillCommand checks if the input matches a skill slash command (e.g. /skill-name args).
@@ -390,7 +390,7 @@ func (a *App) ResolveSkillCommand(ctx context.Context, input string) (string, er
 	cmd, arg, _ := strings.Cut(input[1:], " ")
 	arg = strings.TrimSpace(arg)
 
-	for _, skill := range st.Skills() {
+	for _, skill := range st.Skills(ctx) {
 		if skill.Name != cmd {
 			continue
 		}
@@ -424,7 +424,7 @@ func (a *App) ResolveSkillCommand(ctx context.Context, input string) (string, er
 // SkillCommandFork returns (skillName, task, true) when input is a slash
 // command for a `context: fork` skill, otherwise (_, _, false). Chat layers
 // must call this before ResolveInput and route to RunSkillFork on a hit.
-func (a *App) SkillCommandFork(_ context.Context, input string) (skillName, task string, ok bool) {
+func (a *App) SkillCommandFork(ctx context.Context, input string) (skillName, task string, ok bool) {
 	if !strings.HasPrefix(input, "/") {
 		return "", "", false
 	}
@@ -437,7 +437,7 @@ func (a *App) SkillCommandFork(_ context.Context, input string) (skillName, task
 	cmd, arg, _ := strings.Cut(input[1:], " ")
 	arg = strings.TrimSpace(arg)
 
-	for _, skill := range st.Skills() {
+	for _, skill := range st.Skills(ctx) {
 		if skill.Name != cmd {
 			continue
 		}

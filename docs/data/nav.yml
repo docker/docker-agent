@@ -249,8 +249,12 @@
       url: /providers/ovhcloud/
     - title: PopNow
       url: /providers/popnow/
+    - title: Rapid-MLX
+      url: /providers/rapid-mlx/
     - title: Runcrate
       url: /providers/runcrate/
+    - title: Straitly
+      url: /providers/straitly/
     - title: Together AI
       url: /providers/together/
     - title: Vercel AI Gateway

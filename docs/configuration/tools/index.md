@@ -165,14 +165,12 @@ Installed binaries are placed in `<data-dir>/tools/bin/` and cached so they are 
 ## Experimental MCP Events
 
 MCP Events push subscriptions (proposed SEP-3415) are disabled by default.
-Enable them per MCP toolset:
+Enable them globally in `~/.config/cagent/config.yaml`:
 
 ```yaml
-toolsets:
-  - type: mcp
-    command: my-mcp-server
-    experimental:
-      mcp_events: true
+settings:
+  experimental:
+    mcp_events: true
 ```
 
 Compatible servers expose event discovery, subscription, and cancellation tools.
@@ -180,6 +178,46 @@ Events enter the agent's recall/steering queue. Push delivery supports stdio and
 Streamable HTTP; polling, webhooks, and legacy SSE are not supported.
 See [`examples/mcp-events`](https://github.com/docker/docker-agent/tree/main/examples/mcp-events)
 for runnable demos.
+
+## Experimental MCP Skills
+
+MCP Skills (`io.modelcontextprotocol/skills`, SEP-2640) are disabled by default.
+Enable them globally in `~/.config/cagent/config.yaml`:
+
+```yaml
+settings:
+  experimental:
+    mcp_skills: true
+```
+
+When an MCP server declares `resources` and the `io.modelcontextprotocol/skills`
+extension under protocol `2026-07-28`, docker-agent integrates its skills into
+the built-in skills system (`read_skill`, `read_skill_file`, and
+`<available_skills>`) under origin-scoped `mcp:<server>/<uri>` identifiers.
+Skill files are verified against their manifest size, SHA-256 digest, and YAML
+frontmatter before entering model context, and are tagged as untrusted external
+data without granting `allowed-tools` or local command expansion.
+See [`examples/mcp-skills`](https://github.com/docker/docker-agent/tree/main/examples/mcp-skills)
+for a runnable demo.
+
+## Experimental MCP Tasks
+
+MCP Tasks (`io.modelcontextprotocol/tasks`, SEP-2663) are disabled by default.
+Enable them globally in `~/.config/cagent/config.yaml`:
+
+```yaml
+settings:
+  experimental:
+    mcp_tasks: true
+```
+
+When enabled over stdio or Streamable HTTP under protocol `2026-07-28`,
+docker-agent advertises the `io.modelcontextprotocol/tasks` extension capability
+on requests. If a compatible MCP server responds to `tools/call` with a
+`CreateTaskResult` (`resultType: "task"`), docker-agent transparently polls
+`tasks/get`, fulfills mid-flight `input_required` elicitation requests via
+`tasks/update`, sends cooperative `tasks/cancel` on cancellation, and returns
+the completed tool result to the model.
 
 ## Toolset Lifecycle
 

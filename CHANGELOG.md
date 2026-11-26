@@ -3,6 +3,101 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.166.0] - 2026-11-26
+
+This release adds A2A push notification support, experimental MCP Skills and Tasks extensions, a new Straitly provider, and several TUI and bug fixes.
+
+## What's New
+
+- Adds A2A push notification support to `docker agent serve a2a`, including webhook registration, SQLite-backed persistent task state, and hardened push-notification delivery
+- Adds experimental MCP Skills extension support (`io.modelcontextprotocol/skills`) behind a global user setting (`settings.experimental.mcp_skills`)
+- Adds experimental MCP Tasks extension support (`io.modelcontextprotocol/tasks`) behind a global user setting (`settings.experimental.mcp_tasks`)
+- Adds Straitly to the built-in provider catalog
+- Adds a subtle sidebar separator to the TUI
+- Adds a Rapid-MLX provider guide to the documentation
+
+## Bug Fixes
+
+- Fixes A2A push notifications being dropped under backpressure (final notifications are now always delivered)
+- Fixes A2A tasks not being marked as failed when interrupted by a server restart
+- Fixes A2A push redirects that would drop the POST body
+- Fixes A2A push deliveries not being scoped to the registered webhook origin
+- Fixes A2A store not holding an exclusive lock, and scopes it to a private session directory
+- Fixes `run_skill` missing a `ReadOnlyHint`, causing unnecessary confirmation prompts for read-only fork skills
+- Fixes the file picker incorrectly truncating multi-byte (e.g. Unicode) directory paths by byte length instead of display width
+- Fixes text cursor blinking in the TUI
+- Fixes the experimental `mcp_events` setting location, moving it from agent toolset YAML config to global user settings (`~/.config/cagent/config.yaml`)
+- Fixes `mcp_events_subscribe` schema to allow arbitrary argument types instead of rejecting non-string properties
+
+## Technical Changes
+
+- Adds `api_flavor` classification (`openai`, `openai-compatible`, `gateway`) to the provider catalog
+- Adds `linux/riscv64` to the cross-compilation build target
+- Moves A2A push-notification logging to emit only an error category and status code for failed deliveries
+### Pull Requests
+
+- [#4660](https://github.com/docker/docker-agent/pull/4660) - docs: add Rapid-MLX provider guide
+- [#4818](https://github.com/docker/docker-agent/pull/4818) - refactor(catalog): add api_flavor classification
+- [#4915](https://github.com/docker/docker-agent/pull/4915) - fix(skills): treat run_skill as a delegation wrapper
+- [#4965](https://github.com/docker/docker-agent/pull/4965) - feat(a2a): support push notifications with persistent config store
+- [#5001](https://github.com/docker/docker-agent/pull/5001) - TUI - make cursors blink again
+- [#5008](https://github.com/docker/docker-agent/pull/5008) - feat: add Straitly to the built-in provider catalog
+- [#5026](https://github.com/docker/docker-agent/pull/5026) - fix(tui): truncate the file picker's directory by display width
+- [#5029](https://github.com/docker/docker-agent/pull/5029) - docs: update CHANGELOG.md for v1.165.0
+- [#5033](https://github.com/docker/docker-agent/pull/5033) - TUI - subtle sidebar separator
+- [#5034](https://github.com/docker/docker-agent/pull/5034) - fix(mcp): move experimental mcp_events setting to global user settings
+- [#5035](https://github.com/docker/docker-agent/pull/5035) - feat(mcp): add experimental MCP Skills extension support
+- [#5037](https://github.com/docker/docker-agent/pull/5037) - feat(mcp): add experimental MCP Tasks extension support
+- [#5039](https://github.com/docker/docker-agent/pull/5039) - fix(mcp): allow arbitrary arguments in mcp_events_subscribe schema
+- [#5040](https://github.com/docker/docker-agent/pull/5040) - test(dmr): stop reusing a closed httptest server port in TestCheckModelAvailable
+- [#5042](https://github.com/docker/docker-agent/pull/5042) - build(cross): add linux/riscv64 to the cross target
+
+
+## [v1.165.0] - 2026-11-24
+
+This release adds experimental MCP Events push subscriptions, improves Gemini 4 model support, expands the browser WASM profile, and includes several TUI enhancements and bug fixes.
+
+## What's New
+
+- Adds experimental MCP Events push subscriptions (SEP-3415 event discovery over stdio and Streamable HTTP), gated behind per-toolset `experimental.mcp_events: true`
+- Adds an optional top margin in taller terminals (enabled via `Settings → Appearance → Show top margin`)
+- Sets the terminal window title from the session title in the lean TUI, formatted as `<appName>: <session title>`
+- Includes Anthropic (Claude) support in the small browser WASM profile alongside OpenAI
+
+## Improvements
+
+- Improves Gemini 4 thinking, gateway effort forwarding, and catalog support; refreshes the `models.dev` snapshot to include `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-hydrogen`, and `gemini-4-argon`
+- Applies low thinking and output headroom for Gemini title generation
+- Honors `NoThinking` budget 0 on Gemini 2.5 title generation
+- Shrinks the small browser WASM profile by excluding unused HTTP tracing, skill loading, image codecs, unsupported hooks, and unused Anthropic dependency code
+
+## Bug Fixes
+
+- Fixes run registry incorrectly treating a process as dead when `kill(pid, 0)` returns `EPERM` (process exists but belongs to another user)
+- Fixes TUI crash on files containing invalid UTF-8 bytes during word-diff tokenizing
+- Preserves invalid UTF-8 bytes correctly in word-diff tokenizing (previously expanded one-byte U+FFFD to three bytes)
+
+## Technical Changes
+
+- Fixes flaky script-expansion test on Linux CI caused by `ETXTBSY` when parallel tests fork processes during script writes
+### Pull Requests
+
+- [#4895](https://github.com/docker/docker-agent/pull/4895) - feat: add experimental MCP Events push subscriptions
+- [#4956](https://github.com/docker/docker-agent/pull/4956) - fix(tui): keep invalid UTF-8 from overflowing diff wrapping
+- [#4982](https://github.com/docker/docker-agent/pull/4982) - fix(runregistry): keep runs whose pid we may not signal
+- [#5003](https://github.com/docker/docker-agent/pull/5003) - fix(gemini): improve Gemini 4 thinking, gateway effort, and catalog support
+- [#5004](https://github.com/docker/docker-agent/pull/5004) - feat(tui): add /btw side-question dialog
+- [#5006](https://github.com/docker/docker-agent/pull/5006) - chore(deps): bump the actions group across 1 directory with 2 updates
+- [#5015](https://github.com/docker/docker-agent/pull/5015) - TUI  - Add top margin
+- [#5019](https://github.com/docker/docker-agent/pull/5019) - docs: update CHANGELOG.md for v1.164.0
+- [#5020](https://github.com/docker/docker-agent/pull/5020) - test(skills): fix flaky script-expansion test (ETXTBSY)
+- [#5021](https://github.com/docker/docker-agent/pull/5021) - feat(leantui): set terminal title from session title
+- [#5023](https://github.com/docker/docker-agent/pull/5023) - fix(tui): preserve invalid UTF-8 bytes in word-diff tokenizing
+- [#5025](https://github.com/docker/docker-agent/pull/5025) - docs: auto-update for merged PRs (2026-11-24)
+- [#5027](https://github.com/docker/docker-agent/pull/5027) - feat(wasm): include Anthropic in the small browser profile
+- [#5028](https://github.com/docker/docker-agent/pull/5028) - perf(wasm): shrink the small browser profile
+
+
 ## [v1.164.0] - 2026-11-23
 
 This release brings several TUI polish improvements including scrollbar auto-hiding, scroll edge fading, a new `/btw` side-question dialog, and a searchable help dialog, alongside fixes for file editing on Windows CRLF files, Gemini 4 thinking level support, and various TUI rendering issues.
@@ -7691,3 +7786,7 @@ This release improves the terminal user interface with better error handling and
 [v1.163.0]: https://github.com/docker/docker-agent/releases/tag/v1.163.0
 
 [v1.164.0]: https://github.com/docker/docker-agent/releases/tag/v1.164.0
+
+[v1.165.0]: https://github.com/docker/docker-agent/releases/tag/v1.165.0
+
+[v1.166.0]: https://github.com/docker/docker-agent/releases/tag/v1.166.0

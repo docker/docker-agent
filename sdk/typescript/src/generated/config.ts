@@ -533,7 +533,6 @@ export interface MCPToolset {
   ref?: string;
   remote: Remote;
   config?: unknown;
-  experimental?: ToolsetExperimentalConfig;
   version?: string;
   name?: string;
   env?: Record<string, string>;
@@ -559,7 +558,6 @@ export interface MCPToolsetDefinition {
   ref?: string;
   remote: Remote;
   config?: unknown;
-  experimental?: ToolsetExperimentalConfig;
   version?: string;
   name?: string;
   url?: string;
@@ -839,7 +837,6 @@ export interface RAGToolsetDefinition {
   ref?: string;
   remote: Remote;
   config?: unknown;
-  experimental?: ToolsetExperimentalConfig;
   version?: string;
   name?: string;
   url?: string;
@@ -1101,11 +1098,6 @@ export type Toolset =
   | TodoToolset
   | UserPromptToolset
   | WebhookToolset;
-
-/** Go: pkg/config/latest/types.go ToolsetExperimentalConfig */
-export interface ToolsetExperimentalConfig {
-  mcp_events?: boolean;
-}
 
 /** Go: pkg/config/latest/types.go Toolset */
 export interface UserPromptToolset {

@@ -89,6 +89,6 @@ func TestWorkspaceInitialSkillsDefaultToProcessDirectory(t *testing.T) {
 	require.Len(t, a.ToolSets(), 1)
 	skillSet, ok := tools.As[*skillstool.ToolSet](a.ToolSets()[0])
 	require.True(t, ok)
-	require.Len(t, skillSet.Skills(), 1)
-	assert.Equal(t, path, skillSet.Skills()[0].FilePath)
+	require.Len(t, skillSet.Skills(t.Context()), 1)
+	assert.Equal(t, path, skillSet.Skills(t.Context())[0].FilePath)
 }
