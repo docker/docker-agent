@@ -570,10 +570,9 @@ func TestServer_ToolApproval_CancelDuringPauseHandoff(t *testing.T) {
 				return err == nil
 			}, 10*time.Second, 5*time.Millisecond)
 			canceled, err := client.CancelTask(ctx, &a2a.CancelTaskRequest{ID: taskID})
-			if tc.at != hookAfterFinalEvent {
-				require.NoError(t, err)
-				assert.Equal(t, a2a.TaskStateCanceled, canceled.Status.State)
-			}
+			require.NoError(t, err, "the cancel request canceled the task")
+			assert.Equal(t, a2a.TaskStateCanceled, canceled.Status.State)
+			assert.Equal(t, taskID, canceled.ID)
 
 			got, err := client.GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
 			require.NoError(t, err)

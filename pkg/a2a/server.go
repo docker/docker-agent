@@ -225,7 +225,7 @@ func recoverInterruptedTasks(ctx context.Context, store *a2astore.Store, sender 
 // failAbandonedTask moves the task of a parked run dropped without an answer
 // to state and notifies its webhooks: nothing would ever resume it.
 func failAbandonedTask(deps taskDeps) abandonFunc {
-	return func(ctx context.Context, run *pausedRun, state a2a.TaskState, reason string) {
+	return func(ctx context.Context, run *pausedRun, state a2a.TaskState, reason string) *a2a.Task {
 		// The task store resolves the owner from the call context.
 		ctx, callCtx := a2asrv.NewCallContext(ctx, nil)
 		if run.user != nil {
@@ -234,10 +234,10 @@ func failAbandonedTask(deps taskDeps) abandonFunc {
 		stored, err := deps.tasks.Get(ctx, run.taskID)
 		if err != nil {
 			slog.WarnContext(ctx, "Failed to load abandoned A2A task", "task_id", run.taskID, "error", err)
-			return
+			return nil
 		}
 		if stored.Task.Status.State != a2a.TaskStateInputRequired {
-			return
+			return nil
 		}
 		task := *stored.Task
 		var msg *a2a.Message
@@ -251,19 +251,20 @@ func failAbandonedTask(deps taskDeps) abandonFunc {
 		}); err != nil {
 			// A concurrent reply already moved the task on.
 			slog.WarnContext(ctx, "Failed to update abandoned A2A task", "task_id", run.taskID, "error", err)
-			return
+			return nil
 		}
 		slog.InfoContext(ctx, "Ended A2A task with an abandoned tool approval", "task_id", run.taskID, "state", state)
 		configs, err := deps.pushConfigs.List(ctx, run.taskID)
 		if err != nil {
 			slog.WarnContext(ctx, "Failed to list push configs of abandoned task", "task_id", run.taskID, "error", err)
-			return
+			return &task
 		}
 		for _, cfg := range configs {
 			if err := deps.pushSender.SendPush(ctx, cfg, event); err != nil {
 				slog.WarnContext(ctx, "Failed to notify abandoned task", "task_id", run.taskID, "error", err)
 			}
 		}
+		return &task
 	}
 }
 

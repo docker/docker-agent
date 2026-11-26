@@ -165,8 +165,9 @@ func TestApprovalRegistry_ParkAfterCloseAbandons(t *testing.T) {
 
 	reg := newApprovalRegistry(t.Context(), true)
 	var reasons []string
-	reg.setAbandonHandler(func(_ context.Context, _ *pausedRun, _ a2a.TaskState, reason string) {
+	reg.setAbandonHandler(func(_ context.Context, _ *pausedRun, _ a2a.TaskState, reason string) *a2a.Task {
 		reasons = append(reasons, reason)
+		return nil
 	})
 	reg.close()
 
@@ -442,4 +443,38 @@ func TestServer_ToolApproval_DisabledDeniesInsteadOfParking(t *testing.T) {
 		assert.NotEqual(t, a2a.TaskStateInputRequired, task.Status.State, "no flag must never park in INPUT_REQUIRED")
 	}
 	assert.Zero(t, executions.Load(), "denied tool must not run")
+}
+
+// Only a task the cancel cleanup itself canceled turns ErrTaskNotCancelable
+// into a success; any other cancel failure reaches the client unchanged.
+func TestApprovalInterceptor_CancelResult(t *testing.T) {
+	t.Parallel()
+
+	reg := newApprovalRegistry(t.Context(), true)
+	t.Cleanup(reg.close)
+	interceptor := &approvalInterceptor{approvals: reg}
+	notCancelable := fmt.Errorf("failed to cancel: %w", a2a.ErrTaskNotCancelable)
+
+	call := func(taskID a2a.TaskID, err error) *a2asrv.Response {
+		ctx, _, beforeErr := interceptor.Before(t.Context(), nil, &a2asrv.Request{Payload: &a2a.CancelTaskRequest{ID: taskID}})
+		require.NoError(t, beforeErr)
+		resp := &a2asrv.Response{Err: err}
+		require.NoError(t, interceptor.After(ctx, nil, resp))
+		return resp
+	}
+
+	resp := call("task-1", notCancelable)
+	require.ErrorIs(t, resp.Err, a2a.ErrTaskNotCancelable, "no fallback cancel: the failure is genuine")
+	assert.Nil(t, resp.Payload)
+
+	canceled := &a2a.Task{ID: "task-1", Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}
+	reg.mu.Lock()
+	reg.canceled["task-1"] = canceled
+	reg.mu.Unlock()
+	resp = call("task-1", notCancelable)
+	require.NoError(t, resp.Err)
+	assert.Same(t, canceled, resp.Payload)
+
+	resp = call("task-1", notCancelable)
+	require.ErrorIs(t, resp.Err, a2a.ErrTaskNotCancelable, "the fallback is reported once")
 }
