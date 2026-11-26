@@ -24,10 +24,19 @@ type stopTrackingToolSet struct {
 	stopped atomic.Int32
 }
 
-func (s *stopTrackingToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
-func (s *stopTrackingToolSet) Start(context.Context) error { s.started.Add(1); return nil }
+func (s *stopTrackingToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return nil, nil
+}
 
-func (s *stopTrackingToolSet) Stop(context.Context) error { s.stopped.Add(1); return nil }
+func (s *stopTrackingToolSet) Start(context.Context) error {
+	s.started.Add(1)
+	return nil
+}
+
+func (s *stopTrackingToolSet) Stop(context.Context) error {
+	s.stopped.Add(1)
+	return nil
+}
 
 // closeTrackingRuntime records Close and tolerates the sink resets finishSessionDeletion
 // performs on server-owned runtimes.
