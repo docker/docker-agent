@@ -9,7 +9,6 @@ import (
 	"uuid"
 
 	"github.com/docker/docker-agent/pkg/agent"
-	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/session"
 )
@@ -37,13 +36,17 @@ type routeState struct {
 	activated string
 }
 
+// newRouteState starts an invocation for the newest user request, with the
+// visible conversation that request arrived in. Once the request has its
+// reply, a new invocation brings no input and has the whole conversation
+// behind it.
 func newRouteState(sess *session.Session) *routeState {
-	exchanges := sess.VisibleExchanges()
 	state := &routeState{invocationID: uuid.NewV4().String()}
-	if n := len(exchanges); n > 0 && exchanges[n-1].Role == chat.MessageRoleUser {
-		state.input = exchanges[n-1].Content
-		exchanges = exchanges[:n-1]
+	input, exchanges, answered := sess.NewestRequest()
+	if answered {
+		input, exchanges = "", sess.VisibleExchanges()
 	}
+	state.input = input
 	if len(exchanges) > maxRoutingConversation {
 		exchanges = exchanges[len(exchanges)-maxRoutingConversation:]
 	}

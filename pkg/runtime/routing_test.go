@@ -265,6 +265,54 @@ func TestRouting_FollowUpRequestKeepsVisibleConversationOnly(t *testing.T) {
 	}, state["conversation"])
 }
 
+func TestRouting_RequestWithoutTextIsNotRoutedOnAnEarlierOne(t *testing.T) {
+	t.Parallel()
+	attachment := chat.MessagePart{
+		Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,AAAA"},
+	}
+	tests := []struct {
+		name string
+		// answered says whether the earlier request got its reply.
+		answered bool
+		history  []hooks.ConversationMessage
+	}{
+		{
+			name:     "after an exchange",
+			answered: true,
+			history: []hooks.ConversationMessage{
+				{Role: "user", Content: "What does EXPOSE do?"},
+				{Role: "assistant", Content: "quick answer"},
+			},
+		},
+		{
+			name:    "after a request that got no reply",
+			history: []hooks.ConversationMessage{{Role: "user", Content: "What does EXPOSE do?"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newEvaluatorRoutingFixture(t,
+				scriptedAnswer{result: choiceResult("simple", defaultProbabilities("simple", 0.95))},
+				scriptedAnswer{result: choiceResult("simple", defaultProbabilities("simple", 0.95))},
+			)
+			sess := session.New(session.WithUserMessage("What does EXPOSE do?"), session.WithNonInteractive(true))
+			if tt.answered {
+				runRouted(t, f.rt, sess)
+			}
+
+			sess.AddMessage(session.UserMessage("", attachment))
+			events := runRouted(t, f.rt, sess)
+
+			assert.Empty(t, routedErrors(events))
+			state, ok := f.eval.states[len(f.eval.states)-1].(map[string]any)
+			require.True(t, ok)
+			assert.Empty(t, state["input"], "the request has no text of its own to route on")
+			assert.Equal(t, tt.history, state["conversation"])
+		})
+	}
+}
+
 func TestRouting_EvaluatorFallbacks(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
