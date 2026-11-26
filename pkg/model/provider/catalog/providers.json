@@ -180,7 +180,6 @@
   },
   {
     "name": "teamorouter",
-    "merge_consecutive_messages": true,
     "api_type": "openai",
     "base_url": "https://api.teamorouter.com/v1",
     "default_model": "deepseek-v4-flash",
