@@ -59,7 +59,7 @@ func (r *agentRouter) Set(name string) {
 }
 
 // pushTransfer records an active foreground transfer and switches current to target.
-func (r *agentRouter) pushTransfer(sessionID, target string) (uint64, string) {
+func (r *agentRouter) pushTransfer(sessionID, target string) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.transfers) == 0 {
@@ -73,7 +73,7 @@ func (r *agentRouter) pushTransfer(sessionID, target string) (uint64, string) {
 		agent:     target,
 	})
 	r.current.Store(&target)
-	return id, r.transferBase
+	return id
 }
 
 // popTransfer removes the transfer identified by id and restores current to
@@ -111,23 +111,27 @@ func (r *agentRouter) isActiveTransfer(sessionID string) bool {
 	})
 }
 
-// updateTransferAgent updates the recorded agent for an active transfer session
-// after an in-session handoff so nested transfer returns restore the new agent.
-func (r *agentRouter) updateTransferAgent(sessionID, target string) {
-	if sessionID == "" || target == "" {
-		return
+// handoffSession atomically applies an in-session handoff and updates any
+// matching active transfer entry so both see the same winning agent.
+func (r *agentRouter) handoffSession(sess *session.Session, target string) bool {
+	if sess == nil || target == "" {
+		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !sess.TryAgentHandoff(target) {
+		return false
+	}
 	for i := len(r.transfers) - 1; i >= 0; i-- {
-		if r.transfers[i].sessionID == sessionID {
+		if r.transfers[i].sessionID == sess.ID {
 			r.transfers[i].agent = target
 			if i == len(r.transfers)-1 {
 				r.current.Store(&target)
 			}
-			return
+			return true
 		}
 	}
+	return true
 }
 
 // SetValidated checks that name exists in the team, then sets it as the

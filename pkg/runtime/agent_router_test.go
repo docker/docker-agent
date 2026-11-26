@@ -161,13 +161,11 @@ func TestAgentRouter_TransferStackOutOfOrderPop(t *testing.T) {
 	))
 	r := newAgentRouter(tm, "root")
 
-	tokAlpha, baseA := r.pushTransfer("sess-alpha", "alpha")
-	assert.Equal(t, "root", baseA)
+	tokAlpha := r.pushTransfer("sess-alpha", "alpha")
 	assert.Equal(t, "alpha", r.Name())
 	assert.True(t, r.isActiveTransfer("sess-alpha"))
 
-	tokBeta, baseB := r.pushTransfer("sess-beta", "beta")
-	assert.Equal(t, "root", baseB)
+	tokBeta := r.pushTransfer("sess-beta", "beta")
 	assert.Equal(t, "beta", r.Name())
 	assert.True(t, r.isActiveTransfer("sess-beta"))
 
@@ -196,8 +194,7 @@ func TestAgentRouter_SetDuringActiveTransferUpdatesBase(t *testing.T) {
 	))
 	r := newAgentRouter(tm, "root")
 
-	tok, base := r.pushTransfer("sess-alpha", "alpha")
-	assert.Equal(t, "root", base)
+	tok := r.pushTransfer("sess-alpha", "alpha")
 	assert.Equal(t, "alpha", r.Name())
 
 	r.Set("reviewer")
@@ -219,7 +216,7 @@ func TestAgentRouter_ConcurrentTransfersRestoreBase(t *testing.T) {
 	for range 8 {
 		wg.Go(func() {
 			for range 100 {
-				tok, _ := r.pushTransfer("s", "child")
+				tok := r.pushTransfer("s", "child")
 				_ = r.Name()
 				_ = r.isActiveTransfer("s")
 				r.popTransfer(tok, "root")
@@ -240,8 +237,7 @@ func TestAgentRouter_PopTransferUnknownAndFallback(t *testing.T) {
 
 	assert.False(t, r.isActiveTransfer(""))
 
-	tok, base := r.pushTransfer("sess-a", "alpha")
-	assert.Empty(t, base)
+	tok := r.pushTransfer("sess-a", "alpha")
 	assert.Equal(t, "alpha", r.Name())
 
 	// Unknown token leaves the active transfer untouched.
@@ -262,7 +258,7 @@ func TestAgentRouter_PopTransferUnknownAndFallback(t *testing.T) {
 	assert.Equal(t, "fallback", restored)
 }
 
-func TestAgentRouter_UpdateTransferAgent(t *testing.T) {
+func TestAgentRouter_HandoffSession(t *testing.T) {
 	t.Parallel()
 
 	prov := &mockProvider{id: "test/mock-model"}
@@ -274,20 +270,24 @@ func TestAgentRouter_UpdateTransferAgent(t *testing.T) {
 	))
 	r := newAgentRouter(tm, "root")
 
-	// No-op when session is not an active transfer or arguments are empty.
-	r.updateTransferAgent("", "specialist")
-	r.updateTransferAgent("unknown", "specialist")
+	// Rejects nil, empty target, or sessions that disallow handoffs.
+	disallowed := session.New(session.WithAgentName("triage"))
+	assert.False(t, r.handoffSession(nil, "specialist"))
+	assert.False(t, r.handoffSession(disallowed, ""))
+	assert.False(t, r.handoffSession(disallowed, "specialist"))
 	assert.Equal(t, "root", r.Name())
 
-	tok1, _ := r.pushTransfer("sess-1", "triage")
+	child := session.New(session.WithAgentName("triage"), session.WithAgentHandoffs())
+	tok1 := r.pushTransfer(child.ID, "triage")
 	assert.Equal(t, "triage", r.Name())
 
-	// Top active transfer update also updates current.
-	r.updateTransferAgent("sess-1", "specialist")
+	// Top active transfer handoff updates both session and router atomically.
+	assert.True(t, r.handoffSession(child, "specialist"))
+	assert.Equal(t, "specialist", child.HandoffAgent())
 	assert.Equal(t, "specialist", r.Name())
 
 	// Nested transfer pushes on top; popping it restores the updated handoff agent.
-	tok2, _ := r.pushTransfer("sess-2", "helper")
+	tok2 := r.pushTransfer("sess-2", "helper")
 	assert.Equal(t, "helper", r.Name())
 
 	restored, remaining := r.popTransfer(tok2, "root")
@@ -298,4 +298,32 @@ func TestAgentRouter_UpdateTransferAgent(t *testing.T) {
 	restored, remaining = r.popTransfer(tok1, "root")
 	assert.False(t, remaining)
 	assert.Equal(t, "root", restored)
+}
+
+func TestAgentRouter_ConcurrentHandoffSessionAgreesOnWinner(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/mock-model"}
+	tm := team.New(team.WithAgents(
+		agent.New("root", "", agent.WithModel(prov)),
+		agent.New("triage", "", agent.WithModel(prov)),
+		agent.New("alpha", "", agent.WithModel(prov)),
+		agent.New("beta", "", agent.WithModel(prov)),
+	))
+
+	for range 50 {
+		r := newAgentRouter(tm, "root")
+		child := session.New(session.WithAgentName("triage"), session.WithAgentHandoffs())
+		tok := r.pushTransfer(child.ID, "triage")
+
+		var wg sync.WaitGroup
+		wg.Go(func() { r.handoffSession(child, "alpha") })
+		wg.Go(func() { r.handoffSession(child, "beta") })
+		wg.Wait()
+
+		assert.Equal(t, child.HandoffAgent(), r.Name(), "session and router must agree on the winning handoff")
+		restored, remaining := r.popTransfer(tok, "root")
+		assert.False(t, remaining)
+		assert.Equal(t, "root", restored)
+	}
 }

@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/cache"
@@ -21,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -720,4 +723,51 @@ func TestRouting_UserMessageEventKeepsTheUserPosition(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []int{0}, positions, "routing items appended before the event must not shift the user's position")
+}
+
+func TestRouting_FollowUpStreamStartRecordsEntryAgent(t *testing.T) {
+	t.Parallel()
+
+	f := newEvaluatorRoutingFixture(t,
+		scriptedAnswer{result: choiceResult("complex", defaultProbabilities("complex", 0.9))},
+		scriptedAnswer{result: choiceResult("complex", defaultProbabilities("complex", 0.4))},
+	)
+	rec := &recordingTelemetry{}
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+	f.rt.telemetry = rec
+	f.rt.tracer = tp.Tracer("test")
+
+	sess := session.New(session.WithUserMessage("First complex request"), session.WithNonInteractive(true))
+	runRouted(t, f.rt, sess)
+	require.True(t, sess.Routed())
+	require.Equal(t, "specialist", sess.RouteAgent(), "first request should leave RouteAgent on specialist")
+
+	// Second request restarts at the entry agent (root) and stays there when
+	// the evaluator confidence is below the routing threshold.
+	sess.AddMessage(session.UserMessage("Follow-up on root"))
+	runRouted(t, f.rt, sess)
+
+	starts := rec.snapshot().sessionStarts
+	require.Len(t, starts, 2)
+	assert.Equal(t, "root", starts[0].AgentName)
+	assert.Equal(t, "root", starts[1].AgentName, "follow-up session_start must record entry agent, not previous route")
+
+	var sessionSpanAgents []string
+	for _, sp := range exporter.GetSpans() {
+		if sp.Name != "runtime.session" {
+			continue
+		}
+		for _, attr := range sp.Attributes {
+			if string(attr.Key) == genai.AttrAgentNameRuntime {
+				sessionSpanAgents = append(sessionSpanAgents, attr.Value.AsString())
+			}
+		}
+	}
+	assert.Equal(t, []string{"root", "root"}, sessionSpanAgents, "both runtime.session spans must be attributed to root")
+
+	// Pinned children still keep their own session-local attribution.
+	pinned := session.New(session.WithAgentName("specialist"))
+	assert.Equal(t, "specialist", f.rt.streamStartAgentName(pinned))
 }

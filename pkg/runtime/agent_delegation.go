@@ -335,14 +335,18 @@ func mergeExcludedTools(parent, child []string) []string {
 func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID, childSessionID string, from, to *agent.Agent, evts EventSink) func() {
 	evts.Emit(AgentSwitching(true, from.Name(), to.Name()))
 	r.executeOnAgentSwitchHooks(ctx, from, sessionID, from.Name(), to.Name(), agentSwitchKindTransferTask)
-	token, initialBase := r.agents.pushTransfer(childSessionID, to.Name())
+	r.transferEmitMu.Lock()
+	defer r.transferEmitMu.Unlock()
+	token := r.agents.pushTransfer(childSessionID, to.Name())
 	evts.Emit(AgentInfo(to.Name(), agentModelLabel(ctx, to), to.Description(), to.WelcomeMessage()))
 	return func() {
-		restored, remaining := r.agents.popTransfer(token, from.Name())
-		evts.Emit(AgentSwitching(false, to.Name(), from.Name()))
 		r.executeOnAgentSwitchHooks(ctx, from, sessionID, to.Name(), from.Name(), agentSwitchKindTransferTaskReturn)
+		r.transferEmitMu.Lock()
+		defer r.transferEmitMu.Unlock()
+		restored, _ := r.agents.popTransfer(token, from.Name())
+		evts.Emit(AgentSwitching(false, to.Name(), from.Name()))
 		restoredAgent := from
-		if remaining || (restored != "" && restored != initialBase) {
+		if restored != "" && restored != from.Name() {
 			if active, err := r.team.Agent(restored); err == nil {
 				restoredAgent = active
 			}

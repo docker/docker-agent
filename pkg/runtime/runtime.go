@@ -245,11 +245,14 @@ type LocalRuntime struct {
 	harnessFactory    *harness.Factory
 	commandEvaluator  *CommandEvaluatorFactory
 
-	ctx                       func() context.Context
-	toolMap                   map[string]ToolHandlerFunc
-	toolDeferrals             tools.DeferralTracker
-	team                      *team.Team
-	agents                    *agentRouter
+	ctx           func() context.Context
+	toolMap       map[string]ToolHandlerFunc
+	toolDeferrals tools.DeferralTracker
+	team          *team.Team
+	agents        *agentRouter
+	// transferEmitMu serializes transfer stack transitions with AgentSwitching/AgentInfo
+	// emissions (lock order: transferEmitMu -> agents.mu; never held across hooks).
+	transferEmitMu            sync.Mutex
 	resumeChan                chan ResumeRequest // Queues a decision delivered before the prompt emitter parks.
 	tracer                    trace.Tracer
 	modelsDevFallback         func() *modelsdev.Database

@@ -151,8 +151,17 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 	return r.runStream(ctx, sess, defaultIdleStreamRetryPolicy())
 }
 
+func (r *LocalRuntime) streamStartAgentName(sess *session.Session) string {
+	// Routed root sessions restart at the shared entry agent in beginRouting;
+	// ignore any RouteAgent left over from the previous request.
+	if sess.Routed() && sess.AgentName == "" {
+		return r.currentAgentName()
+	}
+	return r.sessionAgentName(sess)
+}
+
 func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idleRetryPolicy idleStreamRetryPolicy) <-chan Event {
-	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.sessionAgentName(sess), "session_id", sess.ID)
+	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.streamStartAgentName(sess), "session_id", sess.ID)
 	events := make(chan Event, defaultEventChannelCapacity)
 	rootStream := !sess.IsSubSession()
 	if rootStream {
@@ -190,7 +199,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// gateway-bound HTTP call originating from this loop can correlate
 	// back to the originating session. Plumbing happens in
 	// pkg/httpclient/userAgentTransport, gated on `X-Cagent-Forward`.
-	initialAgent := r.sessionAgentName(sess)
+	initialAgent := r.streamStartAgentName(sess)
 	ctx = httpclient.ContextWithSessionID(ctx, sess.ID)
 	r.telemetry.RecordSessionStart(ctx, initialAgent, sess.ID)
 

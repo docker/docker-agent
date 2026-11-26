@@ -2622,6 +2622,254 @@ func TestTransferTask_ParallelWithRunSkillForkStaysIsolated(t *testing.T) {
 	assert.Equal(t, "root-done", sess.GetLastAssistantMessageContent())
 }
 
+func TestTransferTask_ChildParallelHandoffsAgreeOnWinner(t *testing.T) {
+	t.Parallel()
+
+	for range 10 {
+		var winnerMu sync.Mutex
+		var winner string
+
+		helperProv := &queueProvider{
+			id: "test/helper-model",
+			streams: []chat.MessageStream{
+				newStreamBuilder().AddContent("helper-done").AddStopWithUsage(10, 5).Build(),
+			},
+		}
+
+		makeSpecialistProv := func(name string) *delegationFuncProvider {
+			var turns atomic.Int32
+			return &delegationFuncProvider{
+				id: "test/" + name + "-model",
+				fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+					if turns.Add(1) == 1 {
+						winnerMu.Lock()
+						winner = name
+						winnerMu.Unlock()
+						return newStreamBuilder().
+							AddToolCallWithStop("tc_helper", transfertask.ToolNameTransferTask, `{"agent":"helper","task":"assist"}`).
+							Build(), nil
+					}
+					return newStreamBuilder().AddContent(name+"-done").AddStopWithUsage(10, 5).Build(), nil
+				},
+			}
+		}
+
+		triageProv := &queueProvider{
+			id: "test/triage-model",
+			streams: []chat.MessageStream{
+				newStreamBuilder().
+					AddToolCallName("h_a", handoff.ToolNameHandoff).
+					AddToolCallArguments("h_a", `{"agent":"specialistA"}`).
+					AddToolCallName("h_b", handoff.ToolNameHandoff).
+					AddToolCallArguments("h_b", `{"agent":"specialistB"}`).
+					AddToolCallStopWithUsage(10, 5).
+					Build(),
+			},
+		}
+		rootProv := &queueProvider{
+			id: "test/root-model",
+			streams: []chat.MessageStream{
+				newStreamBuilder().AddToolCallWithStop("tc_triage", transfertask.ToolNameTransferTask, `{"agent":"triage","task":"handle"}`).Build(),
+				newStreamBuilder().AddContent("root-done").AddStopWithUsage(10, 5).Build(),
+			},
+		}
+
+		helper := agent.New("helper", "helper agent", agent.WithModel(helperProv))
+		specA := agent.New("specialistA", "specialist A",
+			agent.WithModel(makeSpecialistProv("specialistA")),
+			agent.WithSubAgents(helper),
+			agent.WithToolSets(transfertask.New()),
+		)
+		specB := agent.New("specialistB", "specialist B",
+			agent.WithModel(makeSpecialistProv("specialistB")),
+			agent.WithSubAgents(helper),
+			agent.WithToolSets(transfertask.New()),
+		)
+		triage := agent.New("triage", "triage agent",
+			agent.WithModel(triageProv),
+			agent.WithHandoffs(specA, specB),
+			agent.WithToolSets(handoff.New()),
+		)
+		root := agent.New("root", "root agent",
+			agent.WithModel(rootProv),
+			agent.WithSubAgents(triage),
+			agent.WithToolSets(transfertask.New()),
+		)
+
+		rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, triage, specA, specB, helper)),
+			WithSessionCompaction(false),
+			WithModelStore(mockModelStore{}),
+		)
+		require.NoError(t, err)
+
+		sess := session.New(session.WithUserMessage("Start"), session.WithToolsApproved(true))
+		events := rt.RunStream(t.Context(), sess)
+
+		var awaitingHelperReturnInfo bool
+		var infoAfterHelper string
+		for ev := range events {
+			switch e := ev.(type) {
+			case *AgentSwitchingEvent:
+				if !e.Switching && e.FromAgent == "helper" {
+					awaitingHelperReturnInfo = true
+				}
+			case *AgentInfoEvent:
+				if awaitingHelperReturnInfo {
+					infoAfterHelper = e.AgentName
+					awaitingHelperReturnInfo = false
+				}
+			}
+		}
+
+		require.NoError(t, rt.Close())
+
+		winnerMu.Lock()
+		gotWinner := winner
+		winnerMu.Unlock()
+
+		assert.Contains(t, []string{"specialistA", "specialistB"}, gotWinner)
+		child := firstSubSession(sess)
+		require.NotNil(t, child)
+		assert.Equal(t, gotWinner, child.HandoffAgent(), "session handoff winner must match executing specialist")
+		assert.Equal(t, gotWinner, infoAfterHelper, "nested transfer return must restore the same handoff winner")
+		assert.Equal(t, "root", rt.CurrentAgent().Name())
+		assert.Equal(t, "root-done", sess.GetLastAssistantMessageContent())
+	}
+}
+
+func TestTransferTask_DelayedReturnHookPreservesAgentInfoOrder(t *testing.T) {
+	t.Parallel()
+
+	alphaEntered := make(chan struct{})
+	betaEntered := make(chan struct{})
+	alphaInReturnHook := make(chan struct{})
+	releaseAlphaReturn := make(chan struct{})
+
+	alphaProv := &delegationFuncProvider{
+		id: "test/alpha-model",
+		fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			close(alphaEntered)
+			<-betaEntered
+			return newStreamBuilder().AddContent("alpha-done").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+	betaProv := &delegationFuncProvider{
+		id: "test/beta-model",
+		fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			close(betaEntered)
+			<-alphaEntered
+			<-alphaInReturnHook
+			return newStreamBuilder().AddContent("beta-done").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	var rootTurns atomic.Int32
+	rootProv := &delegationFuncProvider{
+		id: "test/root-model",
+		fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			if rootTurns.Add(1) == 1 {
+				return newStreamBuilder().
+					AddToolCallName("tc_alpha", transfertask.ToolNameTransferTask).
+					AddToolCallArguments("tc_alpha", `{"agent":"alpha","task":"TASK_A"}`).
+					AddToolCallName("tc_beta", transfertask.ToolNameTransferTask).
+					AddToolCallArguments("tc_beta", `{"agent":"beta","task":"TASK_B"}`).
+					AddToolCallStopWithUsage(10, 5).
+					Build(), nil
+			}
+			return newStreamBuilder().AddContent("should-not-run").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	alpha := agent.New("alpha", "alpha agent", agent.WithModel(alphaProv))
+	beta := agent.New("beta", "beta agent", agent.WithModel(betaProv))
+	root := agent.New("root", "root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(alpha, beta),
+		agent.WithToolSets(transfertask.New()),
+		agent.WithHooks(&hooks.Config{
+			OnAgentSwitch: []hooks.Hook{{
+				Type:    hooks.HookTypeBuiltin,
+				Command: "delay_alpha_return",
+			}},
+		}),
+	)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, alpha, beta)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	var alphaHookOnce sync.Once
+	require.NoError(t, rt.hooksRegistry.RegisterBuiltin("delay_alpha_return", func(ctx context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+		if in != nil && in.AgentSwitchKind == agentSwitchKindTransferTaskReturn && in.FromAgent == "alpha" {
+			alphaHookOnce.Do(func() { close(alphaInReturnHook) })
+			select {
+			case <-releaseAlphaReturn:
+			case <-ctx.Done():
+			}
+		}
+		return nil, nil
+	}))
+	rt.buildHooksExecutors()
+
+	// Cap root at 1 iteration in non-interactive mode so Turn 2 stops before
+	// loop.go emits a subsequent parent AgentInfo("root") that would mask
+	// a stale AgentInfo from a delayed return hook.
+	sess := session.New(
+		session.WithUserMessage("Do both"),
+		session.WithToolsApproved(true),
+		session.WithMaxIterations(1),
+		session.WithNonInteractive(true),
+	)
+	events := rt.RunStream(t.Context(), sess)
+
+	var (
+		lastAgentInfo    string
+		sawMaxIterations bool
+		sawBetaReturnSw  bool
+		betaReturnInfo   string
+		sawAlphaReturnSw bool
+		alphaReturnInfo  string
+		releaseAlphaOnce sync.Once
+		returnOrder      []string
+	)
+	for ev := range events {
+		switch e := ev.(type) {
+		case *MaxIterationsReachedEvent:
+			sawMaxIterations = true
+		case *AgentSwitchingEvent:
+			if !e.Switching {
+				returnOrder = append(returnOrder, e.FromAgent)
+				if e.FromAgent == "beta" {
+					sawBetaReturnSw = true
+				}
+				if e.FromAgent == "alpha" {
+					sawAlphaReturnSw = true
+				}
+			}
+		case *AgentInfoEvent:
+			lastAgentInfo = e.AgentName
+			if sawBetaReturnSw && betaReturnInfo == "" {
+				betaReturnInfo = e.AgentName
+				releaseAlphaOnce.Do(func() { close(releaseAlphaReturn) })
+			}
+			if sawAlphaReturnSw && alphaReturnInfo == "" {
+				alphaReturnInfo = e.AgentName
+			}
+		}
+	}
+
+	assert.Equal(t, int32(1), rootTurns.Load(), "root must stop at max_iterations without running Turn 2")
+	assert.True(t, sawMaxIterations, "max iterations event should be emitted")
+	assert.Equal(t, []string{"beta", "alpha"}, returnOrder)
+	assert.Equal(t, "alpha", betaReturnInfo, "beta return while alpha is still active must publish alpha")
+	assert.Equal(t, "root", alphaReturnInfo, "final alpha return must publish root")
+	assert.Equal(t, "root", rt.CurrentAgent().Name())
+	assert.Equal(t, "root", lastAgentInfo, "final AgentInfo must stay root with no subsequent parent AgentInfo")
+}
+
 func TestTransferTask_ParallelChildHandoffStaysLocal(t *testing.T) {
 	t.Parallel()
 
