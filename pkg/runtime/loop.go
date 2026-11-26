@@ -1001,101 +1001,127 @@ func (r *LocalRuntime) runTurn(
 	}
 
 	if res.Stopped {
-		// Tool-mode structured output never accepts a plain-text stop as the
-		// final answer: remind the model (bounded) or fail with a coded error.
-		if structuredOutputEnabled(sess, a) {
-			if !soFinalized {
-				ctrl, reason := r.structuredOutputStop(ctx, sess, a, modelID.Model, ls, events)
-				endReason = reason
-				return ctrl
-			}
-			// Accepted result: give a potential next turn (follow-up,
-			// steered continuation) a fresh reminder budget.
-			ls.structuredOutputReminders = 0
+		answer := stoppedAnswer{
+			content:      res.Content,
+			hasMedia:     len(res.Media) > 0,
+			finishReason: res.FinishReason,
+			validated:    soFinalized,
 		}
-
-		if a.StructuredOutput() == nil && res.Content != "" && len(res.Media) == 0 && hasExplicitImageGenerationIntent(sess.GetLastUserMessageContent()) {
-			events.Emit(Warning(missingGeneratedImageWarning, a.Name()))
-		}
-
-		slog.DebugContext(ctx, "Conversation stopped", "agent", a.Name())
-		r.executeStopHooks(ctx, sess, a, res.Content, events)
-
-		// --- ROUTED COMPLETION: after_agent_complete or forced handoff ---
-		// Routed conversations decide continuation here, for every
-		// successful completion, with session-local agent switching.
-		if ls.route != nil {
-			outcome, stop := r.routeCompletion(ctx, sess, a, res.Content, ls, events)
-			switch outcome {
-			case routeStopped:
-				endReason = r.stopRouting(ctx, sess, a, stop, events)
-				return turnExit
-			case routeContinued:
-				endReason = turnEndReasonContinue
-				return turnContinue
-			case routeFinished:
-			}
-		} else if next := a.ForceHandoff(); next != nil && (sess.AgentName == "" || sess.AllowsAgentHandoffs()) {
-			// --- FORCED HANDOFF: deterministic routing on natural stop ---
-			// When the agent's config names a force_handoff target, the
-			// runtime intercepts the finish state and routes the conversation
-			// to that agent without involving the LLM. Hard-pinned background
-			// tasks stay put; skill forks route handoffs within their own session.
-			r.applyRoute(ctx, sess, a, next, nil, agentSwitchKindForceHandoff, nil, events)
-			endReason = turnEndReasonForceHandoff
-			return turnContinue
-		}
-
-		// Re-check steer queue: closes the race between the mid-loop drain and this stop.
-		// Routed conversations defer it to this boundary and start a new invocation.
-		if sr := r.drainSteeredQueueAtBoundary(ctx, sess, a, ls, events); sr.drained {
-			if r.applySteering(ctx, sess, a, ls, sr, events) {
-				endReason = turnEndReasonHookBlocked
-				return turnExit
-			}
-			r.restartRouting(sess, ls)
-			ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBeforeTools)
-			endReason = turnEndReasonSteered
-			return turnContinue
-		}
-
-		// --- FOLLOW-UP: end-of-turn injection ---
-		// Pop exactly one follow-up message. Unlike steered
-		// messages, follow-ups are plain user messages that start
-		// a new turn — the model sees them as fresh input, not a
-		// mid-stream interruption. Each follow-up gets a full
-		// undivided agent turn.
-		if followUp, ok := r.followUpQueue.Dequeue(ctx); ok {
-			userMsg := session.UserMessage(followUp.Content, followUp.MultiContent...)
-			userMsg.Message.MessageID = uuid.NewV4().String()
-			pos := sess.AddMessage(userMsg)
-			events.Emit(userMessageEvent(userMsg.Message, sess.ID, pos))
-			stop, msg, ctxMsgs := r.executeUserFollowupSubmitHooks(ctx, sess, a, followUp.Content, events)
-			if stop {
-				slog.WarnContext(ctx, "user_followup_submit hook signalled run termination",
-					"agent", a.Name(), "session_id", sess.ID, "reason", msg)
-				r.emitHookDrivenShutdown(ctx, a, sess, msg, events)
-				endReason = turnEndReasonHookBlocked
-				return turnExit
-			}
-			ls.userPromptMsgs = ctxMsgs
-			r.restartRouting(sess, ls)
-			ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBeforeTools)
-			endReason = turnEndReasonContinue
-			return turnContinue // re-enter the loop for a new turn
-		}
-
-		endReason = turnEndReasonNormal
-		ls.finishReason = res.FinishReason
-		if soFinalized {
-			ls.finishReason = chat.FinishReasonStop
-		}
-		return turnExit
+		ctrl, reason := r.afterAnswer(ctx, sess, a, answer, modelID.Model, contextLimit, messageCountBeforeTools, ls, events)
+		endReason = reason
+		return ctrl
 	}
 
 	ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBeforeTools)
 	endReason = turnEndReasonContinue
 	return turnContinue
+}
+
+// stoppedAnswer is an answer the model stopped on, as seen by what follows it.
+type stoppedAnswer struct {
+	content      string
+	hasMedia     bool
+	finishReason chat.FinishReason
+	// validated is set when the answer is a tool-mode structured output
+	// that passed validation.
+	validated bool
+}
+
+// afterAnswer runs what follows an answer the model stopped on: structured
+// output enforcement, stop hooks, a completion route or forced handoff, then
+// input queued meanwhile. It returns whether the loop goes on and the reason
+// the turn ended with.
+func (r *LocalRuntime) afterAnswer(
+	ctx context.Context,
+	sess *session.Session,
+	a *agent.Agent,
+	answer stoppedAnswer,
+	servingModel string,
+	contextLimit int64,
+	messageCountBefore int,
+	ls *loopState,
+	events EventSink,
+) (turnControl, string) {
+	// Tool-mode structured output never accepts a plain-text stop as the
+	// final answer: remind the model (bounded) or fail with a coded error.
+	if structuredOutputEnabled(sess, a) {
+		if !answer.validated {
+			return r.structuredOutputStop(ctx, sess, a, servingModel, ls, events)
+		}
+		// Accepted result: give a potential next turn (follow-up,
+		// steered continuation) a fresh reminder budget.
+		ls.structuredOutputReminders = 0
+	}
+
+	if a.StructuredOutput() == nil && answer.content != "" && !answer.hasMedia && hasExplicitImageGenerationIntent(sess.GetLastUserMessageContent()) {
+		events.Emit(Warning(missingGeneratedImageWarning, a.Name()))
+	}
+
+	slog.DebugContext(ctx, "Conversation stopped", "agent", a.Name())
+	r.executeStopHooks(ctx, sess, a, answer.content, events)
+
+	// --- ROUTED COMPLETION: after_agent_complete or forced handoff ---
+	// Routed conversations decide continuation here, for every
+	// successful completion, with session-local agent switching.
+	if ls.route != nil {
+		outcome, stop := r.routeCompletion(ctx, sess, a, answer.content, ls, events)
+		switch outcome {
+		case routeStopped:
+			return turnExit, r.stopRouting(ctx, sess, a, stop, events)
+		case routeContinued:
+			return turnContinue, turnEndReasonContinue
+		case routeFinished:
+		}
+	} else if next := a.ForceHandoff(); next != nil && (sess.AgentName == "" || sess.AllowsAgentHandoffs()) {
+		// --- FORCED HANDOFF: deterministic routing on natural stop ---
+		// When the agent's config names a force_handoff target, the
+		// runtime intercepts the finish state and routes the conversation
+		// to that agent without involving the LLM. Hard-pinned background
+		// tasks stay put; skill forks route handoffs within their own session.
+		r.applyRoute(ctx, sess, a, next, nil, agentSwitchKindForceHandoff, nil, events)
+		return turnContinue, turnEndReasonForceHandoff
+	}
+
+	// Re-check steer queue: closes the race between the mid-loop drain and this stop.
+	// Routed conversations defer it to this boundary and start a new invocation.
+	if sr := r.drainSteeredQueueAtBoundary(ctx, sess, a, ls, events); sr.drained {
+		if r.applySteering(ctx, sess, a, ls, sr, events) {
+			return turnExit, turnEndReasonHookBlocked
+		}
+		r.restartRouting(sess, ls)
+		ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBefore)
+		return turnContinue, turnEndReasonSteered
+	}
+
+	// --- FOLLOW-UP: end-of-turn injection ---
+	// Pop exactly one follow-up message. Unlike steered
+	// messages, follow-ups are plain user messages that start
+	// a new turn — the model sees them as fresh input, not a
+	// mid-stream interruption. Each follow-up gets a full
+	// undivided agent turn.
+	if followUp, ok := r.followUpQueue.Dequeue(ctx); ok {
+		userMsg := session.UserMessage(followUp.Content, followUp.MultiContent...)
+		userMsg.Message.MessageID = uuid.NewV4().String()
+		pos := sess.AddMessage(userMsg)
+		events.Emit(userMessageEvent(userMsg.Message, sess.ID, pos))
+		stop, msg, ctxMsgs := r.executeUserFollowupSubmitHooks(ctx, sess, a, followUp.Content, events)
+		if stop {
+			slog.WarnContext(ctx, "user_followup_submit hook signalled run termination",
+				"agent", a.Name(), "session_id", sess.ID, "reason", msg)
+			r.emitHookDrivenShutdown(ctx, a, sess, msg, events)
+			return turnExit, turnEndReasonHookBlocked
+		}
+		ls.userPromptMsgs = ctxMsgs
+		r.restartRouting(sess, ls)
+		ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBefore)
+		return turnContinue, turnEndReasonContinue // re-enter the loop for a new turn
+	}
+
+	ls.finishReason = answer.finishReason
+	if answer.validated {
+		ls.finishReason = chat.FinishReasonStop
+	}
+	return turnExit, turnEndReasonNormal
 }
 
 // Run executes the agent loop synchronously and returns the final session
