@@ -240,7 +240,11 @@ func (r *LocalRuntime) applyRoute(ctx context.Context, sess *session.Session, fr
 	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), next.Name(), action)
 	r.switchSessionAgent(sess, next.Name())
 	if phase != string(hooks.EventBeforeAgentRun) {
-		sess.AddMessage(session.ImplicitUserMessage(forcedHandoffNote(from.Name())))
+		note := session.ImplicitUserMessage(forcedHandoffNote(from.Name()))
+		sess.AddMessage(note)
+		// The note is part of what the next agent answers: it is stored
+		// with the conversation, like any other message.
+		events.Emit(MessageAdded(sess.ID, note, from.Name()))
 	}
 
 	decision := r.recordRoutingDecision(sess, from.Name(), next.Name(), route, phase, action, "", result, events)

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -53,7 +55,7 @@ func (p *handoffRecordingProvider) lastMessages() []chat.Message {
 
 // forceHandoffTeam builds a two-agent team where root force-hands off to
 // summarizer, plus a runtime wired with the usual test doubles.
-func forceHandoffTeam(t *testing.T, rootStream, summarizerStream *mockStream) (*LocalRuntime, *handoffRecordingProvider) {
+func forceHandoffTeam(t *testing.T, rootStream, summarizerStream *mockStream, opts ...Opt) (*LocalRuntime, *handoffRecordingProvider) {
 	t.Helper()
 
 	rootProv := &mockProvider{id: "test/mock-model", stream: rootStream}
@@ -63,7 +65,7 @@ func forceHandoffTeam(t *testing.T, rootStream, summarizerStream *mockStream) (*
 	root := agent.New("root", "You extract", agent.WithModel(rootProv), agent.WithForceHandoff(summarizer))
 	tm := team.New(team.WithAgents(root, summarizer))
 
-	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	rt, err := NewLocalRuntime(t.Context(), tm, append([]Opt{WithSessionCompaction(false), WithModelStore(mockModelStore{})}, opts...)...)
 	require.NoError(t, err)
 	return rt, sumProv
 }
@@ -132,6 +134,37 @@ func TestForceHandoff_RoutesToTargetOnNaturalStop(t *testing.T) {
 	}
 	assert.True(t, sawExtracted, "target agent must see the previous agent's final response")
 	assert.True(t, sawNotice, "target agent must see the handoff notice")
+}
+
+// TestForceHandoff_NoteIsStored pins that a reloaded conversation reads as the
+// live one did: the note that hands it over sits between the two agents'
+// answers, so the target's answer never follows another assistant message.
+func TestForceHandoff_NoteIsStored(t *testing.T) {
+	t.Parallel()
+
+	store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "session.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	rt, _ := forceHandoffTeam(t,
+		newStreamBuilder().AddContent("extracted facts").AddStopWithUsage(10, 5).Build(),
+		newStreamBuilder().AddContent("final summary").AddStopWithUsage(10, 5).Build(),
+		WithSessionStore(store),
+	)
+
+	sess := session.New(session.WithUserMessage("Summarize this article"))
+	require.Empty(t, routedErrors(runRouted(t, rt, sess)))
+
+	stored, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	var roles []string
+	for _, m := range stored.GetAllMessages() {
+		role := string(m.Message.Role)
+		if m.Implicit {
+			role = "implicit " + role
+		}
+		roles = append(roles, role)
+	}
+	assert.Equal(t, []string{"user", "assistant", "implicit user", "assistant"}, roles)
 }
 
 // TestForceHandoff_SkippedForPinnedSession documents the guard for pinned
