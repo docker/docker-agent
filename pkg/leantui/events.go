@@ -32,6 +32,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		m.statusSession.Apply(m.contentSession(""), ev)
 	}
 	switch e := ev.(type) {
+	case sideQueryDone:
+		m.handleSideQueryDone(e)
 	case fileCompletionsLoaded:
 		m.screen.Autocomplete.SetFiles(e)
 		m.screen.Autocomplete.Sync(m.screen.Editor.Text())

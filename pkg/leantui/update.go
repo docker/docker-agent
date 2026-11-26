@@ -380,6 +380,9 @@ func (m *model) handleSlash(ctx context.Context, text string, mode busySubmitMod
 	case "effort":
 		m.handleSetThinkingLevel(ctx, rest)
 		return true
+	case "btw":
+		m.handleSideQuestion(ctx, rest)
+		return true
 	}
 
 	if skillName, task, ok := m.app.SkillCommandFork(ctx, text); ok {
@@ -883,6 +886,7 @@ func (m *model) commitHelp() {
 			ui.StMuted().Render("  /compact   summarize and compact the conversation"),
 			ui.StMuted().Render("  /model     change the model for the current agent"),
 			ui.StMuted().Render("  /effort    set the model's reasoning effort (e.g. /effort high)"),
+			ui.StMuted().Render("  /btw       ask a side question without affecting the conversation"),
 			ui.StMuted().Render("  /copy      copy the last assistant response"),
 			ui.StMuted().Render("  /clear     clear the screen"),
 			ui.StMuted().Render("  /settings  change lean TUI settings"),

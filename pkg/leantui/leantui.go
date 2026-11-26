@@ -119,6 +119,12 @@ func Run(ctx context.Context, cfg Config) error {
 		close(done)
 		<-keysDone
 	}()
+	m.post = func(ev any) {
+		select {
+		case events <- ev:
+		case <-done:
+		}
+	}
 	subscriptionReady := make(chan struct{})
 	go func() {
 		m.app.SubscribeReliable(loopCtx, func(msg tea.Msg) {
@@ -337,6 +343,8 @@ type model struct {
 	settings         *leanSettings
 	// hideBanner drops the ASCII-art welcome banner; the zero value keeps it.
 	hideBanner bool
+	// post delivers an event from a background goroutine to the main loop.
+	post func(any)
 }
 
 const defaultAppName = "docker agent"
