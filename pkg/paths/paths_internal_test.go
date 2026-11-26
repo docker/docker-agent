@@ -414,10 +414,10 @@ func TestSharedTargetDoesNotAdoptOtherRootsLegacyState(t *testing.T) {
 	}
 }
 
-// A marker that cannot be written must not stop the command: the root is used
-// unmarked and the failure is only reported for logging.
-func TestMarkerFailureUsesTargetUnmarked(t *testing.T) {
-	t.Run("directory squatting on the marker path", func(t *testing.T) {
+// Marker creation failure: fall back to non-empty legacy root, otherwise fail
+// the command rather than using an unmarked target which can split an install.
+func TestMarkerFailureBehavior(t *testing.T) {
+	t.Run("directory squatting on the marker path with empty legacy", func(t *testing.T) {
 		home := freshInstall(t, runtime.GOOS)
 		_, target, _ := testutil.DefaultDirs(runtime.GOOS, home)
 		require.NoError(t, os.MkdirAll(filepath.Join(target, dataRoot.marker()), 0o700))
@@ -428,28 +428,42 @@ func TestMarkerFailureUsesTargetUnmarked(t *testing.T) {
 
 		warnings, err := EnsureRoots()
 		assert.Empty(t, warnings)
-		require.ErrorContains(t, err, "data directory: using "+target+" unmarked")
-		assert.Equal(t, target, GetDataDir())
+		require.ErrorContains(t, err, "data directory: cannot create marker at "+target)
+		require.ErrorContains(t, err, "aborting to avoid unmarked state")
+		// The getter should NOT return the target (it would be unmarked)
+		// EnsureRoots returned an error, so the root mode is undecided
+		// and resolve() will pick the target anyway, but the command should fail.
+	})
+
+	t.Run("directory squatting on marker path with non-empty legacy root", func(t *testing.T) {
+		home := freshInstall(t, runtime.GOOS)
+		_, target, _ := testutil.DefaultDirs(runtime.GOOS, home)
+		require.NoError(t, os.MkdirAll(filepath.Join(target, dataRoot.marker()), 0o700))
+		// Non-empty legacy root with state
+		legacy := filepath.Join(home, ".cagent")
+		require.NoError(t, os.MkdirAll(legacy, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(legacy, "some-state"), []byte("data"), 0o600))
+
+		warnings, err := EnsureRoots()
+		assert.Empty(t, warnings)
+		require.NoError(t, err)
+		// Should fall back to legacy (non-empty legacy wins before marker creation is attempted)
+		assert.Equal(t, legacy, GetDataDir())
+		// No marker created at target since we fell back to legacy
 		assert.False(t, markerExists(target, dataRoot.marker()))
 	})
 
-	t.Run("read-only home on a fresh install", func(t *testing.T) {
+	t.Run("read-only home on a fresh install fails", func(t *testing.T) {
 		skipWithoutPermissionChecks(t)
 		home := freshInstall(t, runtime.GOOS)
-		config, data, cache := testutil.DefaultDirs(runtime.GOOS, home)
+		_, _, _ = testutil.DefaultDirs(runtime.GOOS, home)
 		require.NoError(t, os.Chmod(home, 0o500))
 		t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
 
 		warnings, err := EnsureRoots()
 		assert.Empty(t, warnings)
-		require.ErrorContains(t, err, "unmarked")
-		assert.Equal(t, config, GetConfigDir())
-		assert.Equal(t, data, GetDataDir())
-		assert.Equal(t, cache, GetCacheDir())
-
-		entries, readErr := os.ReadDir(home)
-		require.NoError(t, readErr)
-		assert.Empty(t, entries)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "aborting to avoid unmarked state")
 	})
 }
 

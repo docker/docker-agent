@@ -186,7 +186,15 @@ func (r *root) decide() (mode rootMode, warning string, err error) {
 	// Without a marker the root still works; it is just not pinned against an
 	// older binary recreating the legacy one.
 	if markErr := createMarker(target, r.marker()); markErr != nil {
-		return modeTarget, warning, fmt.Errorf("using %s unmarked: %w", target, markErr)
+		// Marker creation failed. If a non-empty legacy root exists (distinct
+		// from target), fall back to it. Otherwise fail the command rather than
+		// using an unmarked target which can split an install.
+		if legacy != "" {
+			if state, _ := hasState(legacy); state {
+				return modeLegacy, fmt.Sprintf("cannot create marker at %s (%v); falling back to legacy %s", target, markErr, legacy), nil
+			}
+		}
+		return modeTarget, "", fmt.Errorf("cannot create marker at %s: %w; aborting to avoid unmarked state", target, markErr)
 	}
 	return modeTarget, warning, nil
 }
