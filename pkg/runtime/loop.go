@@ -564,7 +564,10 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// runs AFTER both are set, so callers see the same reason the
 		// runtime took. ctrl drives the outer for-loop's
 		// continue-or-exit decision.
-		ctrl := r.runTurn(ctx, sess, a, m, model, modelID, contextLimit, sessionSpan, agentTools, ls, sink)
+		ctrl := r.runTurn(ctx, &turn{
+			sess: sess, a: a, m: m, model: model, modelID: modelID, contextLimit: contextLimit,
+			sessionSpan: sessionSpan, agentTools: agentTools, ls: ls, events: sink,
+		}, phaseModel, nil)
 		streamReason = ls.exitReason
 		switch ctrl {
 		case turnContinue:
@@ -676,6 +679,48 @@ func emptyTurnWarning(res streamResult, prevTurnMadeToolCalls bool, modelID stri
 	}
 }
 
+// runPhase names the step a turn is entered at. A turn takes three in a row:
+// the model is asked, the tool calls it made are run, and what follows an
+// answer is done. The run loop enters every turn at the first.
+type runPhase string
+
+const (
+	phaseModel    runPhase = "model"
+	phaseTools    runPhase = "tools"
+	phaseAnswered runPhase = "answered"
+)
+
+// turn is what one pass of the loop works with: the agent it runs, what that
+// agent runs with, and where its events go.
+type turn struct {
+	sess         *session.Session
+	a            *agent.Agent
+	m            *modelsdev.Model
+	model        provider.Provider
+	modelID      modelsdev.ID
+	contextLimit int64
+	sessionSpan  trace.Span
+	agentTools   []tools.Tool
+	ls           *loopState
+	events       EventSink
+}
+
+// modelAnswer is what the model step of a turn leaves for the steps after
+// it: the tool calls to run, and the answer the model stopped on, if it did.
+type modelAnswer struct {
+	Calls        []tools.ToolCall  `json:"calls,omitempty"`
+	Content      string            `json:"content,omitempty"`
+	HasMedia     bool              `json:"has_media,omitempty"`
+	FinishReason chat.FinishReason `json:"finish_reason,omitempty"`
+	Stopped      bool              `json:"stopped,omitempty"`
+	// Model is the model that answered, which a fallback or a routing rule
+	// may have chosen over the agent's own.
+	Model modelsdev.ID `json:"model"`
+	// Validated is set when the answer is a tool-mode structured output
+	// that passed validation.
+	Validated bool `json:"validated,omitempty"`
+}
+
 // runTurn performs one iteration of the run-stream loop, from
 // turn_start onwards. Wrapping the body in its own function exists for
 // one reason: a deferred call can fire turn_end on every exit path — a
@@ -686,24 +731,76 @@ func emptyTurnWarning(res streamResult, prevTurnMadeToolCalls bool, modelID stri
 // it before falling out; the deferred call reads it AFTER the body has
 // assigned the final value.
 //
+// A turn is three steps: [LocalRuntime.callModel], [LocalRuntime.runTools] and
+// [LocalRuntime.afterAnswer]. from names the one it is entered at; a turn
+// entered past the first is given the answer the model step had left.
+//
 // The outer loop owns persistent per-stream state via ls ([loopState]);
 // per-turn state that needs to survive into the next iteration
 // (overflowCompactions, toolModelOverride) is mutated through the
 // shared loopState pointer.
-func (r *LocalRuntime) runTurn(
-	ctx context.Context,
-	sess *session.Session,
-	a *agent.Agent,
-	m *modelsdev.Model,
-	model provider.Provider,
-	modelID modelsdev.ID,
-	contextLimit int64,
-	sessionSpan trace.Span,
-	agentTools []tools.Tool,
-	ls *loopState,
-	events EventSink,
-) turnControl {
+func (r *LocalRuntime) runTurn(ctx context.Context, t *turn, from runPhase, answer *modelAnswer) turnControl {
+	sess, a, ls, events := t.sess, t.a, t.ls, t.events
 	ls.finishReason = ""
+
+	// endReason is set by every exit branch below and read by the
+	// deferred turn_end dispatch. Default = normal so a clean fall-
+	// through (model produced output, more tool calls, no hook
+	// blocked) reports "continue" or "normal" depending on which
+	// branch ran last. Branches overwrite this before returning.
+	endReason := turnEndReasonNormal
+	defer func() {
+		if ctxErr := ctx.Err(); ctxErr != nil && endReason == turnEndReasonNormal {
+			// Context cancellation is detected after the fact: a
+			// branch that returned early because of ctx.Err overrides
+			// the default, but a panic-recovered branch may not have
+			// had the chance, so re-check here.
+			endReason = turnEndReasonCanceled
+		}
+		// Use a non-cancellable context so turn_end runs even when
+		// the stream was interrupted (Ctrl+C, parent cancellation),
+		// matching the same guarantee session_end has at the
+		// finalizeEventChannel level.
+		r.executeTurnEndHooks(context.WithoutCancel(ctx), sess, a, endReason, events)
+		ls.exitReason = endReason
+	}()
+
+	if from == phaseModel {
+		var ctrl turnControl
+		if answer, ctrl, endReason = r.callModel(ctx, t); answer == nil {
+			return ctrl
+		}
+	}
+
+	// Record the message count before tool calls so we can
+	// measure how much content was added by tool results.
+	messageCountBeforeTools := sess.OwnMessageCount()
+
+	if from != phaseAnswered {
+		if ctrl, reason, done := r.runTools(ctx, t, answer, messageCountBeforeTools); done {
+			endReason = reason
+			return ctrl
+		}
+	}
+
+	if answer.Stopped {
+		ctrl, reason := r.afterAnswer(ctx, t, answer, messageCountBeforeTools)
+		endReason = reason
+		return ctrl
+	}
+
+	ls.compaction.AfterMessages(ctx, a, t.contextLimit, messageCountBeforeTools)
+	endReason = turnEndReasonContinue
+	return turnContinue
+}
+
+// callModel is the first step of a turn: it asks the model and records its
+// answer. It returns nil when the turn ends there, along with what the loop
+// does next and the reason the turn ended with.
+func (r *LocalRuntime) callModel(ctx context.Context, t *turn) (*modelAnswer, turnControl, string) {
+	sess, a, ls, events := t.sess, t.a, t.ls, t.events
+	m, model, modelID, contextLimit, agentTools := t.m, t.model, t.modelID, t.contextLimit, t.agentTools
+
 	// turnStart bounds this turn's active time, attributed to the agent
 	// below so the run budget can show how long each agent spent working.
 	turnStart := r.now()
@@ -731,28 +828,6 @@ func (r *LocalRuntime) runTurn(
 	}
 	defer endStreamSpan()
 
-	// endReason is set by every exit branch below and read by the
-	// deferred turn_end dispatch. Default = normal so a clean fall-
-	// through (model produced output, more tool calls, no hook
-	// blocked) reports "continue" or "normal" depending on which
-	// branch ran last. Branches overwrite this before returning.
-	endReason := turnEndReasonNormal
-	defer func() {
-		if ctxErr := ctx.Err(); ctxErr != nil && endReason == turnEndReasonNormal {
-			// Context cancellation is detected after the fact: a
-			// branch that returned early because of ctx.Err overrides
-			// the default, but a panic-recovered branch may not have
-			// had the chance, so re-check here.
-			endReason = turnEndReasonCanceled
-		}
-		// Use a non-cancellable context so turn_end runs even when
-		// the stream was interrupted (Ctrl+C, parent cancellation),
-		// matching the same guarantee session_end has at the
-		// finalizeEventChannel level.
-		r.executeTurnEndHooks(context.WithoutCancel(ctx), sess, a, endReason, events)
-		ls.exitReason = endReason
-	}()
-
 	// Run turn_start hooks before assembly so dynamic context can be diffed
 	// against what the model already knows. Changes extend the conversation;
 	// they never rewrite the frozen instruction prefix.
@@ -766,12 +841,10 @@ func (r *LocalRuntime) runTurn(
 	messages, err := r.messagesWithDynamicContext(ctx, sess, a, sources, legacyExtras)
 	if err != nil {
 		if ctx.Err() != nil {
-			endReason = turnEndReasonCanceled
-			return turnExit
+			return nil, turnExit, turnEndReasonCanceled
 		}
 		r.emitHookDrivenShutdown(ctx, a, sess, err.Error(), events)
-		endReason = turnEndReasonHookBlocked
-		return turnExit
+		return nil, turnExit, turnEndReasonHookBlocked
 	}
 	slog.DebugContext(ctx, "Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))
 
@@ -791,8 +864,7 @@ func (r *LocalRuntime) runTurn(
 			"agent", a.Name(), "session_id", sess.ID, "reason", msg)
 		r.emitHookDrivenShutdown(ctx, a, sess, msg, events)
 		endStreamSpan()
-		endReason = turnEndReasonHookBlocked
-		return turnExit
+		return nil, turnExit, turnEndReasonHookBlocked
 	}
 	if rewritten != nil {
 		messages = rewritten
@@ -814,17 +886,15 @@ func (r *LocalRuntime) runTurn(
 	res, usedModel, err := r.fallback.execute(streamCtx, a, model, messages, agentTools, sess, events, ls.idleRetry, admitIdleRetry)
 	if _, ok := errors.AsType[budgetAdmissionError](err); ok {
 		endStreamSpan()
-		endReason = turnEndReasonBudgetExceeded
-		return turnExit
+		return nil, turnExit, turnEndReasonBudgetExceeded
 	}
 	if err != nil {
 		outcome := r.handleStreamError(ctx, sess, a, err, contextLimit, &ls.OverflowCompactions, streamSpan, events)
 		endStreamSpan()
-		endReason = turnEndReasonError
 		if outcome == streamErrorRetry {
-			return turnContinue
+			return nil, turnContinue, turnEndReasonError
 		}
-		return turnExit
+		return nil, turnExit, turnEndReasonError
 	}
 
 	if usedModel != nil {
@@ -935,21 +1005,37 @@ func (r *LocalRuntime) runTurn(
 		events.Emit(Warning("This agent turn did not use the prompt cache.", a.Name()))
 	}
 
-	// Record the message count before tool calls so we can
-	// measure how much content was added by tool results.
-	messageCountBeforeTools := sess.OwnMessageCount()
+	// The steps after this one work with the tools the answering model was
+	// offered.
+	t.agentTools = agentTools
+	return &modelAnswer{
+		Calls:        res.Calls,
+		Content:      res.Content,
+		HasMedia:     len(res.Media) > 0,
+		FinishReason: res.FinishReason,
+		Stopped:      res.Stopped,
+		Model:        modelID,
+	}, turnContinue, turnEndReasonNormal
+}
+
+// runTools is the second step of a turn: it runs the tool calls the model
+// made. done reports that the turn ends there, with what the loop does next
+// and the reason the turn ended with.
+func (r *LocalRuntime) runTools(ctx context.Context, t *turn, answer *modelAnswer, messageCountBeforeTools int) (ctrl turnControl, reason string, done bool) {
+	sess, a, ls, events := t.sess, t.a, t.ls, t.events
+	contextLimit, sessionSpan, agentTools := t.contextLimit, t.sessionSpan, t.agentTools
 
 	// Intercept internal structured-output calls before dispatch: they bypass
 	// approval and the user's tool hooks, and an exclusive valid call
-	// finalizes the turn (res is rewritten so the stop path below runs on
+	// finalizes the turn (the answer is rewritten so the stop path runs on
 	// the validated JSON).
-	dispatchCalls, soFinalized := r.handleStructuredOutputCalls(ctx, sess, a, &res, agentTools, modelID.String(), events)
+	dispatchCalls, finalized := r.handleStructuredOutputCalls(ctx, sess, a, answer, agentTools, answer.Model.String(), events)
+	answer.Validated = finalized
 
 	loopSink := &toolCallLoopSink{EventSink: events}
 	stopRun, stopMsg := r.processToolCalls(ctx, sess, a, dispatchCalls, agentTools, loopSink)
 	if stopRun && r.enforceBudget(ctx, sess, a, events) == iterationStop {
-		endReason = turnEndReasonBudgetExceeded
-		return turnExit
+		return turnExit, turnEndReasonBudgetExceeded, true
 	}
 
 	// Re-probe toolsets after tool calls: an install/setup tool call may
@@ -962,15 +1048,15 @@ func (r *LocalRuntime) runTurn(
 	// response — within the same user turn, without requiring a new user
 	// message. reprobe deliberately returns nothing; the top-of-loop
 	// getTools() is the authoritative source.
-	if len(res.Calls) > 0 {
+	if len(answer.Calls) > 0 {
 		r.reprobe(ctx, sess, a, agentTools, sessionSpan, events)
 	}
 
 	// Check for degenerate tool call loops
-	if ls.recordToolCalls(res.Calls, loopSink.exemptCalls(res.Calls)...) {
+	if ls.recordToolCalls(answer.Calls, loopSink.exemptCalls(answer.Calls)...) {
 		toolName := "unknown"
-		if len(res.Calls) > 0 {
-			toolName = res.Calls[0].Function.Name
+		if len(answer.Calls) > 0 {
+			toolName = answer.Calls[0].Function.Name
 		}
 		consecutive := ls.loopDetector.Consecutive()
 		slog.WarnContext(ctx, "Repetitive tool call loop detected",
@@ -993,8 +1079,7 @@ func (r *LocalRuntime) runTurn(
 		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeLoopDetected, errMsg))
 		r.notifyError(ctx, a, sess.ID, errMsg)
 		ls.resetToolCallCount()
-		endReason = turnEndReasonLoopDetected
-		return turnExit
+		return turnExit, turnEndReasonLoopDetected, true
 	}
 
 	// post_tool_use hook signalled run termination via a deny
@@ -1006,92 +1091,57 @@ func (r *LocalRuntime) runTurn(
 		slog.WarnContext(ctx, "post_tool_use hook signalled run termination",
 			"agent", a.Name(), "session_id", sess.ID, "reason", stopMsg)
 		r.emitHookDrivenShutdown(ctx, a, sess, stopMsg, events)
-		endReason = turnEndReasonHookBlocked
-		return turnExit
+		return turnExit, turnEndReasonHookBlocked, true
 	}
 
 	// Record completed tool work for the next turn's empty-reply warning.
-	ls.PrevTurnMadeToolCalls = len(res.Calls) > 0
+	ls.PrevTurnMadeToolCalls = len(answer.Calls) > 0
 
 	// Record per-toolset model override for the next LLM turn.
-	ls.ToolModelOverride = toolexec.ResolveModelOverride(res.Calls, agentTools)
+	ls.ToolModelOverride = toolexec.ResolveModelOverride(answer.Calls, agentTools)
 
 	// Drain steer messages that arrived during tool calls.
 	if sr := r.drainAndEmitSteered(ctx, sess, a, events); sr.drained {
 		if r.applySteering(ctx, sess, a, ls, sr, events) {
-			endReason = turnEndReasonHookBlocked
-			return turnExit
+			return turnExit, turnEndReasonHookBlocked, true
 		}
 		ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBeforeTools)
-		endReason = turnEndReasonSteered
-		return turnContinue
+		return turnContinue, turnEndReasonSteered, true
 	}
 
-	if res.Stopped {
-		answer := stoppedAnswer{
-			content:      res.Content,
-			hasMedia:     len(res.Media) > 0,
-			finishReason: res.FinishReason,
-			validated:    soFinalized,
-		}
-		ctrl, reason := r.afterAnswer(ctx, sess, a, answer, modelID.Model, contextLimit, messageCountBeforeTools, ls, events)
-		endReason = reason
-		return ctrl
-	}
-
-	ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBeforeTools)
-	endReason = turnEndReasonContinue
-	return turnContinue
-}
-
-// stoppedAnswer is an answer the model stopped on, as seen by what follows it.
-type stoppedAnswer struct {
-	content      string
-	hasMedia     bool
-	finishReason chat.FinishReason
-	// validated is set when the answer is a tool-mode structured output
-	// that passed validation.
-	validated bool
+	return turnContinue, "", false
 }
 
 // afterAnswer runs what follows an answer the model stopped on: structured
 // output enforcement, stop hooks, a completion route or forced handoff, then
 // input queued meanwhile. It returns whether the loop goes on and the reason
 // the turn ended with.
-func (r *LocalRuntime) afterAnswer(
-	ctx context.Context,
-	sess *session.Session,
-	a *agent.Agent,
-	answer stoppedAnswer,
-	servingModel string,
-	contextLimit int64,
-	messageCountBefore int,
-	ls *loopState,
-	events EventSink,
-) (turnControl, string) {
+func (r *LocalRuntime) afterAnswer(ctx context.Context, t *turn, answer *modelAnswer, messageCountBefore int) (turnControl, string) {
+	sess, a, ls, events, contextLimit := t.sess, t.a, t.ls, t.events, t.contextLimit
+
 	// Tool-mode structured output never accepts a plain-text stop as the
 	// final answer: remind the model (bounded) or fail with a coded error.
 	if structuredOutputEnabled(sess, a) {
-		if !answer.validated {
-			return r.structuredOutputStop(ctx, sess, a, servingModel, ls, events)
+		if !answer.Validated {
+			return r.structuredOutputStop(ctx, sess, a, answer.Model.Model, ls, events)
 		}
 		// Accepted result: give a potential next turn (follow-up,
 		// steered continuation) a fresh reminder budget.
 		ls.StructuredOutputReminders = 0
 	}
 
-	if a.StructuredOutput() == nil && answer.content != "" && !answer.hasMedia && hasExplicitImageGenerationIntent(sess.GetLastUserMessageContent()) {
+	if a.StructuredOutput() == nil && answer.Content != "" && !answer.HasMedia && hasExplicitImageGenerationIntent(sess.GetLastUserMessageContent()) {
 		events.Emit(Warning(missingGeneratedImageWarning, a.Name()))
 	}
 
 	slog.DebugContext(ctx, "Conversation stopped", "agent", a.Name())
-	r.executeStopHooks(ctx, sess, a, answer.content, events)
+	r.executeStopHooks(ctx, sess, a, answer.Content, events)
 
 	// --- ROUTED COMPLETION: after_agent_complete or forced handoff ---
 	// Routed conversations decide continuation here, for every
 	// successful completion, with session-local agent switching.
 	if ls.Route != nil {
-		outcome, stop := r.routeCompletion(ctx, sess, a, answer.content, ls, events)
+		outcome, stop := r.routeCompletion(ctx, sess, a, answer.Content, ls, events)
 		switch outcome {
 		case routeStopped:
 			return turnExit, r.stopRouting(ctx, sess, a, stop, events)
@@ -1144,8 +1194,8 @@ func (r *LocalRuntime) afterAnswer(
 		return turnContinue, turnEndReasonContinue // re-enter the loop for a new turn
 	}
 
-	ls.finishReason = answer.finishReason
-	if answer.validated {
+	ls.finishReason = answer.FinishReason
+	if answer.Validated {
 		ls.finishReason = chat.FinishReasonStop
 	}
 	return turnExit, turnEndReasonNormal

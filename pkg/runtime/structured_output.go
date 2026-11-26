@@ -104,17 +104,17 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 	ctx context.Context,
 	sess *session.Session,
 	a *agent.Agent,
-	res *streamResult,
+	answer *modelAnswer,
 	agentTools []tools.Tool,
 	modelID string,
 	events EventSink,
 ) (dispatchCalls []tools.ToolCall, finalized bool) {
 	if !structuredOutputEnabled(sess, a) {
-		return res.Calls, false
+		return answer.Calls, false
 	}
 
 	var outputCalls, otherCalls []tools.ToolCall
-	for _, tc := range res.Calls {
+	for _, tc := range answer.Calls {
 		if tc.Function.Name == structuredoutput.ToolName {
 			outputCalls = append(outputCalls, tc)
 		} else {
@@ -122,7 +122,7 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 		}
 	}
 	if len(outputCalls) == 0 {
-		return res.Calls, false
+		return answer.Calls, false
 	}
 
 	tool, ok := findToolByName(agentTools, structuredoutput.ToolName)
@@ -131,7 +131,7 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 		// after every session filter, so this should not occur when
 		// enforcement is active); let the dispatcher reject the calls as
 		// unavailable rather than inventing a definition here.
-		return res.Calls, false
+		return answer.Calls, false
 	}
 
 	if len(outputCalls) > 1 || len(otherCalls) > 0 {
@@ -168,8 +168,8 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 		CreatedAt: r.now().Format(time.RFC3339),
 		Model:     modelID,
 	}, events)
-	res.Content = result.Output
-	res.Stopped = true
+	answer.Content = result.Output
+	answer.Stopped = true
 	return nil, true
 }
 
