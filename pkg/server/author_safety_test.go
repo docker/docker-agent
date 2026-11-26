@@ -266,8 +266,9 @@ func TestAuthorSafetyDefault_FailedBuildKeepsMarkerForRetry(t *testing.T) {
 	sm.newRuntime = func(context.Context, *team.Team, ...runtime.Opt) (runtime.Runtime, error) {
 		return nil, buildErr
 	}
-	_, _, _, err = sm.runtimeForSession(ctx, sess, "agent.yaml", "root", &config.RuntimeConfig{})
+	run, _, _, err := sm.runtimeForSession(ctx, sess, "agent.yaml", "root", &config.RuntimeConfig{})
 	require.ErrorIs(t, err, buildErr)
+	require.Nil(t, run, "a failed build must not hand back a runtime")
 
 	assert.Equal(t, session.SafetyPolicy(""), sess.GetSafetyPolicy(),
 		"a failed build must not seed the in-memory session")
