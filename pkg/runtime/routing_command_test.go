@@ -43,7 +43,7 @@ func TestRoutingCommandExample(t *testing.T) {
 				return p, nil
 			}
 			tm, err := teamloader.Load(t.Context(), config.NewBytesSource("hook_routing_command.yaml", source),
-				&config.RuntimeConfig{EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "fake"})},
+				withTestCatalog(&config.RuntimeConfig{EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "fake"})}),
 				teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{"openai": factory})))
 			require.NoError(t, err)
 			rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))

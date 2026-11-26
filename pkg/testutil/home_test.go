@@ -29,6 +29,14 @@ func userHomeDir(t *testing.T) string {
 	return home
 }
 
+// requireInsideHome fails unless dir resolves inside home.
+func requireInsideHome(t *testing.T, home, dir string) {
+	t.Helper()
+	rel, err := filepath.Rel(home, dir)
+	require.NoError(t, err)
+	assert.True(t, filepath.IsLocal(rel), "%q must resolve inside the temporary home %q", dir, home)
+}
+
 func TestRunWithTempHome(t *testing.T) {
 	original := useHome(t)
 	config := filepath.Join(original, ".config", "cagent", "config.yaml")
@@ -46,6 +54,7 @@ func TestRunWithTempHome(t *testing.T) {
 
 		assert.Equal(t, filepath.Join(home, ".config", "cagent"), paths.GetConfigDir())
 		assert.Equal(t, filepath.Join(home, ".cagent"), paths.GetDataDir())
+		requireInsideHome(t, home, paths.GetCacheDir())
 
 		// pkg/path prefers HOME over os.UserHomeDir on every platform.
 		expanded, err := pathx.ExpandHomeDir("~")
@@ -115,6 +124,39 @@ func TestHomeVariables(t *testing.T) {
 	// the runner never had.
 	assert.Equal(t, []string{"USERPROFILE"}, homeVariables("windows", ""))
 	assert.Equal(t, []string{"USERPROFILE", "HOME"}, homeVariables("windows", `C:\Users\me`))
+}
+
+// A developer can start a test run with the cache root preset outside the home
+// directory (Windows %LocalAppData%, Linux $XDG_CACHE_HOME). RunWithTempHome
+// must override it, otherwise suites keep writing the developer's cache while
+// only their home directory looks isolated.
+func TestRunWithTempHomeIsolatesPresetCache(t *testing.T) {
+	useHome(t)
+	preset := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", preset)
+	t.Setenv("LocalAppData", preset)
+
+	var home, cache string
+	code := RunWithTempHome(func() int {
+		home = userHomeDir(t)
+		cache = paths.GetCacheDir()
+		require.NoError(t, os.MkdirAll(cache, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(cache, "written-by-suite"), nil, 0o600))
+		return 0
+	})
+
+	assert.Equal(t, 0, code)
+	require.NotEmpty(t, home)
+	requireInsideHome(t, home, cache)
+
+	// The cache root variables are restored, so the next suite starts from
+	// the developer's values again.
+	assert.Equal(t, preset, os.Getenv("XDG_CACHE_HOME"))
+	assert.Equal(t, preset, os.Getenv("LocalAppData"))
+
+	entries, err := os.ReadDir(preset)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "suite wrote into the preset cache root %q", preset)
 }
 
 func TestSetenvRestoresUnsetVariable(t *testing.T) {

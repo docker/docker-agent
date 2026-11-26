@@ -49,10 +49,10 @@ agents:
               command: add_context
               args: [matched]
 `))
-			tm, err := teamloader.Load(t.Context(), source, &config.RuntimeConfig{
+			tm, err := teamloader.Load(t.Context(), source, withTestCatalog(&config.RuntimeConfig{
 				Config:              config.Config{WorkingDir: t.TempDir()},
 				EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test"}),
-			}, teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{
+			}), teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{
 				"openai": func(context.Context, *latest.ModelConfig, environment.Provider, ...options.Opt) (provider.Provider, error) {
 					return &mockProvider{id: "test/mock-model"}, nil
 				},

@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -70,12 +71,16 @@ func TestMain(m *testing.M) {
 	}
 	paths.SetConfigDir(configDir)
 
-	code := m.Run()
+	code := testutil.RunWithTempHome(m.Run)
 
 	paths.SetConfigDir("")
 	_ = os.RemoveAll(configDir)
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+func TestTempHomeIsolation(t *testing.T) {
+	testutil.RequireTempHome(t)
 }
 
 // useHarnessShim points PATH at the shared shim directory and sets the
