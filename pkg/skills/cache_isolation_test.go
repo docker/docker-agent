@@ -3,6 +3,8 @@ package skills
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	stdruntime "runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -45,4 +47,48 @@ func TestSuiteCacheStaysInsideTempHome(t *testing.T) {
 	entries, err := os.ReadDir(preset)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "child suite wrote into the preset cache root %q", preset)
+}
+
+// TestSuiteCacheStaysInsideTempHomeWithRelativeTMPDIR is the regression test
+// for the relative-TMPDIR review on #5018. Running the compiled test binary
+// with TMPDIR=.tmp used to export a relative XDG_CACHE_HOME: os.UserCacheDir
+// rejected it and paths.GetCacheDir fell back to <cwd>/tmp/.cagent-cache,
+// outside the child's temporary home. The child suite then failed
+// TestTempHomeIsolation and could leave cache residue under the relative
+// TMPDIR that its cleanup does not own.
+func TestSuiteCacheStaysInsideTempHomeWithRelativeTMPDIR(t *testing.T) {
+	if testing.Short() {
+		t.Skip("re-runs the test binary")
+	}
+	if stdruntime.GOOS == "windows" {
+		t.Skip("os.TempDir ignores TMPDIR on Windows")
+	}
+
+	self, err := os.Executable()
+	require.NoError(t, err)
+
+	work := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(work, "tmp"), 0o700))
+
+	cmd := exec.CommandContext(t.Context(), self,
+		"-test.run=^(TestTempHomeIsolation|TestLoadWithRemoteSources)$",
+		"-test.count=1",
+		"-test.timeout=2m",
+	)
+	cmd.Dir = work
+	// Clear inherited absolute cache roots so the relative TMPDIR is what
+	// RunWithTempHome has to derive the cache root from.
+	cmd.Env = append(os.Environ(),
+		"TESTUTIL_TEMP_HOME=",
+		"TMPDIR=tmp",
+		"XDG_CACHE_HOME=",
+		"LocalAppData=",
+	)
+
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "child suite failed with a relative TMPDIR:\n%s", output)
+
+	entries, err := os.ReadDir(filepath.Join(work, "tmp"))
+	require.NoError(t, err)
+	assert.Empty(t, entries, "child suite left residue under the relative TMPDIR")
 }

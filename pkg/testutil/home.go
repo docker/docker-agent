@@ -35,6 +35,15 @@ func RunWithTempHome(run func() int) int {
 	if err != nil {
 		panic(err)
 	}
+	// os.MkdirTemp returns TMPDIR as supplied, so a relative TMPDIR yields a
+	// relative home. Make it absolute before exporting the cache variables:
+	// os.UserCacheDir rejects a relative XDG_CACHE_HOME, and paths.GetCacheDir
+	// would then fall back to a relative .cagent-cache directory outside the
+	// temporary home.
+	home, err = filepath.Abs(home)
+	if err != nil {
+		panic(err)
+	}
 	defer os.RemoveAll(home)
 
 	restores := []func(){setenv(tempHomeEnv, home)}
