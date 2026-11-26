@@ -137,7 +137,7 @@ func ResolveAttachSession(ctx context.Context, addr, recorded string, explicit b
 	case 1:
 		return live[0], nil
 	default:
-		return "", fmt.Errorf("the run's initial session %s is no longer attached and the run has several live sessions; select one explicitly with --attach <session-id>: %s", recorded, formatSessionIDs(live))
+		return "", fmt.Errorf("the run's initial session %s is no longer attached and the run has several live sessions; select one explicitly with --attach=<session-id>: %s", recorded, formatSessionIDs(live))
 	}
 }
 

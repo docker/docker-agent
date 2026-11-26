@@ -83,7 +83,7 @@ func TestResolveAttachSession_DiscoveryFailsWhenAmbiguous(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tab-a")
 	assert.Contains(t, err.Error(), "tab-b")
-	assert.Contains(t, err.Error(), "--attach <session-id>")
+	assert.Contains(t, err.Error(), "--attach=<session-id>")
 }
 
 func TestResolveAttachSession_DiscoveryFailsWhenRunHasNoTabs(t *testing.T) {

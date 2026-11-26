@@ -364,7 +364,7 @@ $ docker agent serve mcp <config> [flags]
 | `--insecure-no-auth`   | `false`            | Permit unauthenticated non-loopback HTTP MCP binding.                                              |
 | `-l, --listen <addr>`  | `127.0.0.1:8081`   | Address to listen on (only used with `--http`).                                                   |
 | `--mcp-keepalive <dur>` | `0` (disabled)    | Interval between MCP keep-alive pings (e.g. `30s`). Only when serving an agent over stdio — rejected with `--http` (the stateless HTTP transport, MCP `2026-07-28`, has no server-initiated ping) and with `--attach`. |
-| `--attach [target]`    | (none)             | Attach to a running TUI run by pid, address, or session id; a session id selects that tab, including a tab spawned after the run started. Given without a value, selects the most recent run. |
+| `--attach [target]`    | (none)             | Attach to a running TUI run by pid, address, or session id; name a session id as `--attach=<session-id>` to select that tab, including a tab spawned after the run started (a space-separated `--attach <session-id>` is also accepted). Given without a value, selects the most recent run. |
 
 All [runtime configuration flags](#runtime-configuration-flags) are also accepted.
 
@@ -374,6 +374,8 @@ $ docker agent serve mcp agent.yaml                                # stdio trans
 $ docker agent serve mcp agent.yaml --http --listen 127.0.0.1:9090 # streaming HTTP
 $ docker agent serve mcp agent.yaml --working-dir /path/to/project
 $ docker agent serve mcp myorg/coder
+$ docker agent serve mcp --attach                       # the most recent TUI run
+$ docker agent serve mcp --attach=<session-id>          # one live TUI tab, including a spawned one
 ```
 
 See [MCP Mode](../mcp-mode/index.md) for detailed setup.

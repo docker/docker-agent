@@ -1,6 +1,7 @@
 package root
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -189,10 +191,10 @@ func attachTestRecord(addr, sessionID string) runregistry.Record {
 }
 
 // TestResolveAttachTarget_SelectsSpawnedTabBySessionID is the regression test
-// for selecting a TUI tab spawned after startup through serve mcp --attach:
-// the run's discovery record only knows the initial session, so the CLI lookup
-// must find the spawned tab among the run's live sessions instead of failing in
-// the registry lookup first (#4909 review).
+// for selecting a TUI tab spawned after startup through
+// serve mcp --attach=<session-id>: the run's discovery record only knows the
+// initial session, so the CLI lookup must find the spawned tab among the run's
+// live sessions instead of failing in the registry lookup first (#4909 review).
 func TestResolveAttachTarget_SelectsSpawnedTabBySessionID(t *testing.T) {
 	t.Parallel()
 
@@ -304,5 +306,124 @@ func TestResolveAttachTarget_RunDiscoveryFailsWhenAmbiguous(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tab-a")
 	assert.Contains(t, err.Error(), "tab-b")
-	assert.Contains(t, err.Error(), "--attach <session-id>")
+	assert.Contains(t, err.Error(), "--attach=<session-id>")
+}
+
+// TestResolveAttachTarget_LiveExactMatchWinsOverRecordedInitialTab is the
+// regression test for the second #4931 review: the recorded initial tab is live
+// and its ID contains the spawned tab's full ID, so resolving the recorded run
+// first would silently bind the proxy to the initial tab even though the caller
+// named the spawned tab exactly. A live exact match must win.
+func TestResolveAttachTarget_LiveExactMatchWinsOverRecordedInitialTab(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "initial-tab-spawned-xyz", "spawned-xyz")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-tab-spawned-xyz")}}
+
+	addr, sessionID, err := resolveAttachTarget(t.Context(), runs, "spawned-xyz")
+	require.NoError(t, err)
+	assert.Equal(t, srv.URL, addr)
+	assert.Equal(t, "spawned-xyz", sessionID, "the live exact match must win over the recorded initial tab's ID")
+
+	// Naming the live initial tab exactly still selects it.
+	_, sessionID, err = resolveAttachTarget(t.Context(), runs, "initial-tab-spawned-xyz")
+	require.NoError(t, err)
+	assert.Equal(t, "initial-tab-spawned-xyz", sessionID)
+}
+
+// TestResolveAttachTarget_AmbiguousPartialMatchIsReported pins the other half of
+// the rule: when both the initial and the spawned tab are live and a partial id
+// matches both, the lookup must report the ambiguity instead of silently
+// selecting the recorded initial tab (#4931 review).
+func TestResolveAttachTarget_AmbiguousPartialMatchIsReported(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "initial-a1b2-tab", "a1b2-spawned")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-a1b2-tab")}}
+
+	_, _, err := resolveAttachTarget(t.Context(), runs, "a1b2")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous")
+	assert.Contains(t, err.Error(), "initial-a1b2-tab")
+	assert.Contains(t, err.Error(), "a1b2-spawned")
+}
+
+// attachCommandRecorder records the target the attach command resolves, in
+// place of starting the stdio MCP proxy.
+type attachCommandRecorder struct {
+	calls     int
+	addr      string
+	sessionID string
+}
+
+// newAttachTestCommand builds the real serve mcp command with the CLI lookup
+// seams: an isolated run registry and a recorder instead of the stdio proxy.
+// Tests execute it exactly as a user would (flags and positional arguments), so
+// the advertised command form is covered, not only resolveAttachTarget.
+func newAttachTestCommand(runs *fakeAttachRuns) (*cobra.Command, *attachCommandRecorder) {
+	recorder := &attachCommandRecorder{}
+	cmd := newMCPCmd(func(flags *mcpFlags) {
+		flags.runRegistry = runs
+		flags.startAttach = func(_ context.Context, addr, sessionID string) error {
+			recorder.calls++
+			recorder.addr = addr
+			recorder.sessionID = sessionID
+			return nil
+		}
+	})
+	return cmd, recorder
+}
+
+// TestMCPAttachAdvertisedCommandSelectsNamedTab covers the command the CLI
+// advertises in its errors and docs (--attach=<session-id>): it must parse
+// through the real command and select the named live tab. Earlier coverage
+// called resolveAttachTarget directly, which hid pflag's NoOptDefVal parsing
+// (#4931 review).
+func TestMCPAttachAdvertisedCommandSelectsNamedTab(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "spawned-b")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-closed")}}
+
+	cmd, recorder := newAttachTestCommand(runs)
+	cmd.SetArgs([]string{"--attach=spawned-b"})
+	require.NoError(t, cmd.ExecuteContext(t.Context()))
+	require.Equal(t, 1, recorder.calls)
+	assert.Equal(t, srv.URL, recorder.addr)
+	assert.Equal(t, "spawned-b", recorder.sessionID)
+}
+
+// TestMCPAttachSpaceSeparatedValueSelectsNamedTab keeps the space-separated
+// spelling working: pflag gives --attach its "latest" default and leaves the
+// value as a positional argument, so the command must not drop it and attach to
+// the most recent run instead (#4931 review).
+func TestMCPAttachSpaceSeparatedValueSelectsNamedTab(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "spawned-b")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-closed")}}
+
+	cmd, recorder := newAttachTestCommand(runs)
+	cmd.SetArgs([]string{"--attach", "spawned-b"})
+	require.NoError(t, cmd.ExecuteContext(t.Context()))
+	require.Equal(t, 1, recorder.calls)
+	assert.Equal(t, srv.URL, recorder.addr)
+	assert.Equal(t, "spawned-b", recorder.sessionID)
+}
+
+// TestMCPAttachWithoutValueSelectsMostRecentRun pins the bare --attach meaning
+// (the most recent run), which accepting the space-separated value must not
+// break.
+func TestMCPAttachWithoutValueSelectsMostRecentRun(t *testing.T) {
+	t.Parallel()
+
+	srv := attachSessionsServer(t, "spawned-a")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-closed")}}
+
+	cmd, recorder := newAttachTestCommand(runs)
+	cmd.SetArgs([]string{"--attach"})
+	require.NoError(t, cmd.ExecuteContext(t.Context()))
+	require.Equal(t, 1, recorder.calls)
+	assert.Equal(t, srv.URL, recorder.addr)
+	assert.Equal(t, "spawned-a", recorder.sessionID)
 }
