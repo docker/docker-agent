@@ -39,11 +39,12 @@ type routeState struct {
 // newRouteState starts an invocation for the newest user request, with the
 // visible conversation that request arrived in. Once the request has its
 // reply, a new invocation brings no input and has the whole conversation
-// behind it.
-func newRouteState(sess *session.Session) *routeState {
+// behind it. A continued invocation is still answering the request: it starts
+// where the request did, whatever replies the run had got to.
+func newRouteState(sess *session.Session, continuing bool) *routeState {
 	state := &routeState{invocationID: uuid.NewV4().String()}
 	input, exchanges, answered := sess.NewestRequest()
-	if answered {
+	if answered && !continuing {
 		input, exchanges = "", sess.VisibleExchanges()
 	}
 	state.input = input
@@ -57,6 +58,13 @@ func newRouteState(sess *session.Session) *routeState {
 }
 
 func (s *routeState) stepID() string { return "step-" + strconv.Itoa(s.step) }
+
+// reenter puts the invocation back in the activation of the agent name, whose
+// before_agent_run has fired: the activation is carried on, not decided again.
+func (s *routeState) reenter(name string) {
+	s.step++
+	s.activated = name
+}
 
 func (s *routeState) countTransition() *routeStop {
 	s.transitions++
@@ -92,7 +100,7 @@ func (r *LocalRuntime) hasControlHooks(a *agent.Agent) bool {
 // beginRouting opts a root session into hook routing and restarts it at the
 // shared entry agent. Routing never mutates the shared agent, so the entry the
 // user selected survives every request. It returns nil for non-routed sessions.
-func (r *LocalRuntime) beginRouting(sess *session.Session) *routeState {
+func (r *LocalRuntime) beginRouting(sess *session.Session, continuing bool) *routeState {
 	if sess.AgentName != "" {
 		return nil
 	}
@@ -101,17 +109,18 @@ func (r *LocalRuntime) beginRouting(sess *session.Session) *routeState {
 	}
 	sess.SetRouted()
 	sess.SetRouteAgent("")
-	return newRouteState(sess)
+	return newRouteState(sess, continuing)
 }
 
 // restartRouting starts a new invocation at the entry agent for input that
 // arrived while the previous one was running.
-func (r *LocalRuntime) restartRouting(sess *session.Session, ls *loopState) {
+func (r *LocalRuntime) restartRouting(ctx context.Context, sess *session.Session, ls *loopState) {
 	if ls.route == nil {
 		return
 	}
 	sess.SetRouteAgent("")
-	ls.route = newRouteState(sess)
+	r.moveRun(ctx, sess, r.resolveSessionAgent(sess).Name())
+	ls.route = newRouteState(sess, false)
 }
 
 // routingUnsupported rejects control hooks outside a routed root conversation
@@ -238,7 +247,7 @@ func (r *LocalRuntime) applyRoute(ctx context.Context, sess *session.Session, fr
 		action = agentSwitchKindForceHandoff
 	}
 	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), next.Name(), action)
-	r.switchSessionAgent(sess, next.Name())
+	r.switchSessionAgent(ctx, sess, next.Name())
 	if phase != string(hooks.EventBeforeAgentRun) {
 		sess.AddMessage(session.ImplicitUserMessage(forcedHandoffNote(from.Name())))
 	}
@@ -306,7 +315,8 @@ func (r *LocalRuntime) recordUnroutedDecision(sess *session.Session, a *agent.Ag
 
 // switchSessionAgent makes name the active agent. Routed sessions switch only
 // their own session; others keep the shared-agent behavior handoffs always had.
-func (r *LocalRuntime) switchSessionAgent(sess *session.Session, name string) {
+func (r *LocalRuntime) switchSessionAgent(ctx context.Context, sess *session.Session, name string) {
+	r.moveRun(ctx, sess, name)
 	if sess.Routed() {
 		sess.SetRouteAgent(name)
 		return

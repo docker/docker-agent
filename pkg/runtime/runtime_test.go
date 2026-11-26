@@ -401,6 +401,11 @@ func assertEventsEqual(t *testing.T, expected, actual []Event) {
 			eventCopy := *e
 			eventCopy.MessageID = ""
 			actual[i] = &eventCopy
+		case *UserMessageEvent:
+			// Who stored the prompt is not part of what the event announces.
+			eventCopy := *e
+			eventCopy.persisted = false
+			actual[i] = &eventCopy
 		}
 		assert.Equal(t, expected[i], actual[i], "event content mismatch at index %d", i)
 	}

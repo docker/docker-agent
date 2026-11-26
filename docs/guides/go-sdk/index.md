@@ -1041,6 +1041,91 @@ sess := session.New(
 )
 ```
 
+## Continuing Interrupted Runs
+
+With a persistent session store, the runtime records every run while it is in
+flight, together with its prompt, before it starts any toolset. (A session
+created with `WithSendUserMessage(false)` has its prompt neither announced
+nor stored by the runtime: store it yourself if you mean to continue its
+runs.) A record that
+is still there when your application starts belongs to a run that was cut off.
+Continue it from its transcript, without sending a new message:
+
+```go
+store, _ := sqlitestore.New(ctx, "sessions.db")
+rt, _ := runtime.NewLocalRuntime(ctx, agentTeam, runtime.WithSessionStore(store))
+
+runs, _ := store.(session.RunStore).ListRuns(ctx)
+for _, run := range runs {
+    // Continue with the agent the run started with.
+    if err := rt.SetCurrentAgent(ctx, run.Agent); err != nil {
+        continue
+    }
+    sess, _ := store.GetSession(ctx, run.SessionID)
+    for event := range rt.ContinueStream(ctx, sess) {
+        // Handle events as for RunStream.
+    }
+}
+```
+
+To stop a run without ending it, for example when your application shuts
+down, cancel its context with `runtime.ErrSuspended` as the cause. Any other
+cancellation ends the run and removes its record.
+
+```go
+ctx, stop := context.WithCancelCause(parent)
+events := rt.RunStream(ctx, sess)
+// ...
+stop(runtime.ErrSuspended)
+```
+
+A continued run picks up where the transcript stops:
+
+- An answer the model was still writing stays in the transcript but is not
+  sent back to the model, which answers again.
+- A tool call without a result gets one that says it was interrupted, stored
+  in the transcript like any other. The runtime does not run the tool again:
+  the model decides whether to retry.
+- When the transcript already ends with an answer, the run resumes at what
+  follows an answer, without calling the model again: tool-mode structured
+  output is enforced as for the model that gave the answer, a forced handoff
+  or a completion route is applied. When nothing follows, the stream ends.
+  It also ends, with nothing done, when the last word was the runtime's own:
+  the message that says a limit was reached or that the run failed.
+- `session_start` hooks fire again, and so do `stop` hooks for an answer the
+  run resumes after. `user_prompt_submit` and `before_agent_run` fire again
+  only for a prompt that nothing has answered yet: past that point the run
+  stays with the agent it was cut off in.
+- A continued run is a new stream over the stored transcript. What the loop
+  kept in memory starts afresh: context a hook added to the run, the
+  iteration count, loop detection, and a toolset's `model` for the call that
+  follows its tools. A step that left nothing in the transcript, such as an
+  empty answer the runtime does not record, is done again.
+
+The run continues with the agent the runtime resolves for the session, as
+`RunStream` does, so select the agent the run started with, `run.Agent`,
+before you continue it. The stream reports an error and gives the run up when:
+
+- another agent is selected,
+- the conversation had moved to another agent (`run.Current`), through a
+  handoff, a forced handoff or a routing hook: the record follows the
+  conversation, but the state that put it with that agent is not stored,
+- the conversation had come back to the starting agent and the transcript
+  still ends on another agent's answer,
+- the agent runs in an external harness, whose work is not in the transcript,
+- the run died five times in a row without being suspended.
+
+When the record itself cannot be read, the stream reports an error and leaves
+the record for a later attempt.
+
+> [!NOTE]
+> Only root runs are recorded. A sub-agent that was working when the run was
+> cut off starts over when its parent calls it again. The store cannot tell
+> an interrupted run from one another process is still running, so continue
+> listed runs only when your application is the store's single writer.
+> Budgets are counted per runtime and are not stored: a continued run starts
+> with a fresh allowance, as any run does after a restart.
+
 ## Error Handling
 
 ```go

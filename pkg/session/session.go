@@ -1389,11 +1389,73 @@ func isUsageOnlyMessage(msg *chat.Message) bool {
 		len(msg.ToolCalls) == 0 && msg.FunctionCall == nil
 }
 
+// isCutOffMessage identifies an assistant message whose generation was cut off.
+func isCutOffMessage(msg *chat.Message) bool {
+	return msg.Role == chat.MessageRoleAssistant && msg.FinishReason == chat.FinishReasonIncomplete
+}
+
 // omittedFromContext identifies messages kept in the transcript that the
 // model must not see: usage-only records and messages cut off mid-generation.
 func omittedFromContext(msg *chat.Message) bool {
-	return isUsageOnlyMessage(msg) ||
-		msg.Role == chat.MessageRoleAssistant && msg.FinishReason == chat.FinishReasonIncomplete
+	return isUsageOnlyMessage(msg) || isCutOffMessage(msg)
+}
+
+// tailLocked returns up to n of the last messages the run left in the
+// transcript, oldest first. Output that was cut off mid-generation is not
+// among them, but an empty answer is: the model gave it. The caller holds
+// s.mu.
+func (s *Session) tailLocked(n int) []*Message {
+	tail := make([]*Message, 0, n)
+	for _, item := range slices.Backward(s.Messages) {
+		if len(tail) == n {
+			break
+		}
+		if !item.IsMessage() {
+			continue
+		}
+		if msg := &item.Message.Message; msg.Role == chat.MessageRoleSystem || isCutOffMessage(msg) {
+			continue
+		}
+		tail = append(tail, item.Message)
+	}
+	slices.Reverse(tail)
+	return tail
+}
+
+// Tail returns up to n of the last messages the run left in the transcript,
+// oldest first, each with the agent it came from: everything but output that
+// was cut off mid-generation. Unlike the assembled context, it is not trimmed
+// or summarised.
+func (s *Session) Tail(n int) []Message {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tail := s.tailLocked(n)
+	messages := make([]Message, len(tail))
+	for i, msg := range tail {
+		messages[i] = *cloneMessage(msg)
+	}
+	return messages
+}
+
+// Unanswered reports whether the transcript ends on input the model has yet
+// to answer: a user message, tool results, or tool calls without results.
+func (s *Session) Unanswered() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tail := s.tailLocked(1)
+	return len(tail) == 1 && (tail[0].Message.Role != chat.MessageRoleAssistant || len(tail[0].Message.ToolCalls) > 0)
+}
+
+// UnansweredPrompt returns the user's message the transcript ends on, when
+// nothing has answered it yet.
+func (s *Session) UnansweredPrompt() (chat.Message, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tail := s.tailLocked(1)
+	if len(tail) == 0 || tail[0].Message.Role != chat.MessageRoleUser || tail[0].Implicit {
+		return chat.Message{}, false
+	}
+	return cloneChatMessage(tail[0].Message), true
 }
 
 // AddMessageUsageRecord appends a usage record for remote mode where messages aren't stored locally.
@@ -1714,6 +1776,37 @@ func (s *Session) NewestRequest() (request string, history []chat.Message, answe
 		}
 	}
 	return "", visibleExchanges(s.Messages), false
+}
+
+// InterruptedToolCalls returns the tool calls the transcript ends on that
+// never got a result: those of its last assistant message, when nothing but
+// tool results follows it.
+func (s *Session) InterruptedToolCalls() []tools.ToolCall {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	returned := make(map[string]bool)
+	for _, item := range slices.Backward(s.Messages) {
+		if !item.IsMessage() {
+			continue
+		}
+		msg := &item.Message.Message
+		switch {
+		case msg.Role == chat.MessageRoleSystem || isCutOffMessage(msg):
+		case msg.Role == chat.MessageRoleTool:
+			returned[msg.ToolCallID] = true
+		case msg.Role == chat.MessageRoleAssistant:
+			var interrupted []tools.ToolCall
+			for _, call := range msg.ToolCalls {
+				if !returned[call.ID] {
+					interrupted = append(interrupted, call)
+				}
+			}
+			return interrupted
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 func visibleExchanges(items []Item) []chat.Message {
@@ -2754,8 +2847,9 @@ func normalizeMessageContent(messages []chat.Message) []chat.Message {
 	return out
 }
 
-// missingToolResult stands in for a tool call that has no recorded result.
-const missingToolResult = "The tool call was interrupted before it returned a result; it may or may not have run."
+// InterruptedToolResult is the result of a tool call that was cut off before
+// it returned one.
+const InterruptedToolResult = "The tool call was interrupted before it returned a result; it may or may not have run."
 
 // sanitizeToolCalls ensures the tool_use/tool_result blocks sent to the
 // provider are always balanced, in both directions:
@@ -2789,7 +2883,7 @@ func sanitizeToolCalls(messages []chat.Message) []chat.Message {
 				out = append(out, chat.Message{
 					Role:       chat.MessageRoleTool,
 					ToolCallID: tc.ID,
-					Content:    missingToolResult,
+					Content:    InterruptedToolResult,
 					IsError:    true,
 				})
 			}

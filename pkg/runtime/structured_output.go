@@ -350,6 +350,19 @@ func (r *LocalRuntime) structuredOutputStop(
 	return turnExit, turnEndReasonError
 }
 
+// isStructuredOutput reports whether content is what tool-mode structured
+// output delivers for a: JSON that validates against the agent's schema. An
+// answer is checked against the schema itself rather than traced back to the
+// tool call it was promoted from, so nothing that fails the schema passes.
+func isStructuredOutput(a *agent.Agent, content string) bool {
+	tool, err := a.StructuredOutputTool()
+	if err != nil || tool == nil || strings.TrimSpace(content) == "" {
+		return false
+	}
+	_, err = tool.Validate(content)
+	return err == nil
+}
+
 // findToolByName returns the tool with the given name from agentTools.
 func findToolByName(agentTools []tools.Tool, name string) (tools.Tool, bool) {
 	for _, t := range agentTools {

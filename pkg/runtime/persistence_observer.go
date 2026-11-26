@@ -67,6 +67,10 @@ func (p *PersistenceObserver) OnRunStart(ctx context.Context, sess *session.Sess
 	if sess.IsSubSession() {
 		return
 	}
+	// A run's record hangs off the session row: neither is lost to a run
+	// cancelled as it starts.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	if err := p.store.UpdateSession(ctx, sess); err != nil {
 		slog.WarnContext(ctx, "Failed to persist initial session", "session_id", sess.ID, "error", err)
 	}
@@ -114,9 +118,10 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 
 	case *UserMessageEvent:
 		p.streaming = streamingState{}
-		msg := session.UserMessage(e.Message, e.MultiContent...)
-		msg.Message.MessageID = e.MessageID
-		if _, err := p.store.AddMessage(ctx, e.SessionID, msg); err != nil {
+		if e.persisted {
+			break
+		}
+		if _, err := p.store.AddMessage(ctx, e.SessionID, e.sessionMessage()); err != nil {
 			slog.WarnContext(ctx, "Failed to persist user message", "session_id", e.SessionID, "error", err)
 		}
 

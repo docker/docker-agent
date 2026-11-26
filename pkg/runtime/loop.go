@@ -148,10 +148,12 @@ func (r *LocalRuntime) streamStoppedTimeout() time.Duration {
 // the response, executes any tool calls, and loops until the model signals stop
 // or the iteration limit is reached.
 func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan Event {
-	return r.runStream(ctx, sess, defaultIdleStreamRetryPolicy())
+	return r.runStream(ctx, sess, defaultIdleStreamRetryPolicy(), false)
 }
 
-func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idleRetryPolicy idleStreamRetryPolicy) <-chan Event {
+// runStream starts a run. A continuing run answers the transcript as it was
+// left instead of a new prompt.
+func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idleRetryPolicy idleStreamRetryPolicy, continuing bool) <-chan Event {
 	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.currentAgentName(), "session_id", sess.ID)
 	events := make(chan Event, defaultEventChannelCapacity)
 	rootStream := !sess.IsSubSession()
@@ -174,7 +176,7 @@ func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idl
 		if rootStream {
 			defer r.activeRootStreams.Add(-1)
 		}
-		r.runStreamLoop(withObserverFlush(ctx, events), sess, entry, events)
+		r.runStreamLoop(withObserverFlush(ctx, events), sess, entry, continuing, events)
 	}()
 	return out
 }
@@ -182,7 +184,7 @@ func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idl
 // runStreamLoop is the body of RunStream. Pulled out of the anonymous
 // goroutine so it has a real name in stack traces and is easier to navigate
 // in editors.
-func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session, liveEntry *liveSessionEntry, events chan Event) {
+func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session, liveEntry *liveSessionEntry, continuing bool, events chan Event) {
 	sink := &channelSink{ch: events}
 	ctx = context.WithValue(ctx, scratchpadRootKey{}, liveEntry.treeRootID)
 
@@ -255,8 +257,20 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// at this dead stream's channel.
 	var streamReason string
 	var streamFinishReason chat.FinishReason
+	// recorded is set once this stream answers for the run's record.
+	var recorded bool
 	defer func() {
+		// A panic is a crash: the record stays, so the run is found again
+		// and the crash counted. The stream is still closed before the panic
+		// goes on.
+		crash := recover()
+		if recorded && crash == nil {
+			r.settleRun(ctx, sess)
+		}
 		r.finalizeEventChannel(ctx, sess, streamReason, streamFinishReason, prevElicitationCh, events)
+		if crash != nil {
+			panic(crash)
+		}
 	}()
 
 	// Unregister from the live-session registry and execute any accepted
@@ -276,23 +290,52 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	// Routed conversations restart at the entry agent and let before_agent_run
 	// pick the agent that actually runs, before anything is prepared for it.
-	route := r.beginRouting(sess)
+	route := r.beginRouting(sess, continuing)
 	a := r.resolveSessionAgent(sess)
-	emitPrompt := func() chat.Message {
-		if sess.SendUserMessage {
-			if msgs, count := sess.GetMessagesWithInstructionContext(a, nil); len(msgs) > 0 {
-				last := msgs[len(msgs)-1]
-				sink.Emit(userMessageEvent(last, sess.ID, count-1))
-				return last
-			}
-		}
-		return chat.Message{}
-	}
+	// A continued run announces no prompt: it is in the transcript already.
+	// One that nothing has answered yet still goes through user_prompt_submit
+	// below, which may not have seen it before the run was cut off.
 	var prompt chat.Message
+	var promptEvent *UserMessageEvent
+	switch {
+	case !sess.SendUserMessage:
+	case continuing:
+		prompt, _ = sess.UnansweredPrompt()
+	default:
+		if msgs, count := sess.GetMessagesWithInstructionContext(a, nil); len(msgs) > 0 {
+			prompt = msgs[len(msgs)-1]
+			promptEvent = userMessageEvent(prompt, sess.ID, count-1).(*UserMessageEvent)
+		}
+	}
+	if continuing {
+		var refusal string
+		if recorded, refusal = r.continueRun(ctx, sess, a); refusal != "" {
+			sink.Emit(ErrorForSession(sess.ID, refusal))
+			streamReason = turnEndReasonError
+			return
+		}
+		if endedByRuntime(sess) {
+			streamReason = turnEndReasonNormal
+			return
+		}
+		r.settleInterruptedCalls(sess, a, sink)
+	} else {
+		recorded = r.beginRun(ctx, sess, a, promptEvent)
+	}
+	emitPrompt := func() {
+		if promptEvent != nil {
+			sink.Emit(promptEvent)
+		}
+	}
 	var stop *routeStop
 	if route != nil {
 		// The prompt precedes any route taken by a before_agent_run hook.
-		prompt = emitPrompt()
+		emitPrompt()
+		// A continued run is past that hook once anything has answered its
+		// prompt: it was cut off inside the activation the hook decided on.
+		if _, unanswered := sess.UnansweredPrompt(); continuing && !unanswered {
+			route.reenter(a.Name())
+		}
 		a, stop = r.activateAgent(ctx, sess, a, route, sink)
 	} else {
 		stop = r.routingUnsupported(route, a)
@@ -360,7 +403,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	sink.Emit(ToolsetInfo(len(agentTools), false, a.Name()))
 
 	if route == nil {
-		prompt = emitPrompt()
+		emitPrompt()
 	}
 	if prompt.Role == chat.MessageRoleUser {
 		stop, msg, ctxMsgs := r.executeUserPromptSubmitHooks(ctx, sess, a, prompt.Content, sink)
@@ -383,8 +426,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// Response cache lookup. On a hit, replay the stored answer and
 	// skip the model entirely. The matching storage half is
 	// implemented as the cache_response stop-hook builtin (see
-	// runtime/cache.go and getHooksExecutor).
-	if r.tryReplayCachedResponse(ctx, sess, a, sink) {
+	// runtime/cache.go and getHooksExecutor). A continued run brings no
+	// new prompt for the cache to answer.
+	if !continuing && r.tryReplayCachedResponse(ctx, sess, a, sink) {
 		if ls.route == nil {
 			return
 		}
@@ -536,6 +580,22 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// trigger and the UI context gauge (issue #3241); it equals the primary
 		// window unless a smaller compaction model is configured.
 		contextLimit := r.effectiveContextLimit(ctx, a, r.resolveContextLimit(ctx, model, modelID))
+
+		// A continued run whose transcript ends on an answer was cut off
+		// after the model stopped. It resumes at what follows an answer
+		// instead of asking the model again, so nothing is done first to
+		// prepare a model call.
+		if continuing && ls.iteration == 1 {
+			if ctrl, resumed := r.resumeAfterAnswer(ctx, sess, a, modelID, contextLimit, ls, sink); resumed {
+				streamReason = ls.exitReason
+				if ctrl == turnExit {
+					streamFinishReason = ls.finishReason
+					return
+				}
+				continue
+			}
+		}
+
 		ls.compaction.BeforeTurn(ctx, a, contextLimit)
 
 		// Drain steer messages queued while idle or before the first model call
@@ -1088,7 +1148,7 @@ func (r *LocalRuntime) afterAnswer(
 		if r.applySteering(ctx, sess, a, ls, sr, events) {
 			return turnExit, turnEndReasonHookBlocked
 		}
-		r.restartRouting(sess, ls)
+		r.restartRouting(ctx, sess, ls)
 		ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBefore)
 		return turnContinue, turnEndReasonSteered
 	}
@@ -1112,7 +1172,7 @@ func (r *LocalRuntime) afterAnswer(
 			return turnExit, turnEndReasonHookBlocked
 		}
 		ls.userPromptMsgs = ctxMsgs
-		r.restartRouting(sess, ls)
+		r.restartRouting(ctx, sess, ls)
 		ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBefore)
 		return turnContinue, turnEndReasonContinue // re-enter the loop for a new turn
 	}
