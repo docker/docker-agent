@@ -3,6 +3,56 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.166.0] - 2026-11-26
+
+This release adds A2A push notification support, experimental MCP Skills and Tasks extensions, a new Straitly provider, and several TUI and bug fixes.
+
+## What's New
+
+- Adds A2A push notification support to `docker agent serve a2a`, including webhook registration, SQLite-backed persistent task state, and hardened push-notification delivery
+- Adds experimental MCP Skills extension support (`io.modelcontextprotocol/skills`) behind a global user setting (`settings.experimental.mcp_skills`)
+- Adds experimental MCP Tasks extension support (`io.modelcontextprotocol/tasks`) behind a global user setting (`settings.experimental.mcp_tasks`)
+- Adds Straitly to the built-in provider catalog
+- Adds a subtle sidebar separator to the TUI
+- Adds a Rapid-MLX provider guide to the documentation
+
+## Bug Fixes
+
+- Fixes A2A push notifications being dropped under backpressure (final notifications are now always delivered)
+- Fixes A2A tasks not being marked as failed when interrupted by a server restart
+- Fixes A2A push redirects that would drop the POST body
+- Fixes A2A push deliveries not being scoped to the registered webhook origin
+- Fixes A2A store not holding an exclusive lock, and scopes it to a private session directory
+- Fixes `run_skill` missing a `ReadOnlyHint`, causing unnecessary confirmation prompts for read-only fork skills
+- Fixes the file picker incorrectly truncating multi-byte (e.g. Unicode) directory paths by byte length instead of display width
+- Fixes text cursor blinking in the TUI
+- Fixes the experimental `mcp_events` setting location, moving it from agent toolset YAML config to global user settings (`~/.config/cagent/config.yaml`)
+- Fixes `mcp_events_subscribe` schema to allow arbitrary argument types instead of rejecting non-string properties
+
+## Technical Changes
+
+- Adds `api_flavor` classification (`openai`, `openai-compatible`, `gateway`) to the provider catalog
+- Adds `linux/riscv64` to the cross-compilation build target
+- Moves A2A push-notification logging to emit only an error category and status code for failed deliveries
+### Pull Requests
+
+- [#4660](https://github.com/docker/docker-agent/pull/4660) - docs: add Rapid-MLX provider guide
+- [#4818](https://github.com/docker/docker-agent/pull/4818) - refactor(catalog): add api_flavor classification
+- [#4915](https://github.com/docker/docker-agent/pull/4915) - fix(skills): treat run_skill as a delegation wrapper
+- [#4965](https://github.com/docker/docker-agent/pull/4965) - feat(a2a): support push notifications with persistent config store
+- [#5001](https://github.com/docker/docker-agent/pull/5001) - TUI - make cursors blink again
+- [#5008](https://github.com/docker/docker-agent/pull/5008) - feat: add Straitly to the built-in provider catalog
+- [#5026](https://github.com/docker/docker-agent/pull/5026) - fix(tui): truncate the file picker's directory by display width
+- [#5029](https://github.com/docker/docker-agent/pull/5029) - docs: update CHANGELOG.md for v1.165.0
+- [#5033](https://github.com/docker/docker-agent/pull/5033) - TUI - subtle sidebar separator
+- [#5034](https://github.com/docker/docker-agent/pull/5034) - fix(mcp): move experimental mcp_events setting to global user settings
+- [#5035](https://github.com/docker/docker-agent/pull/5035) - feat(mcp): add experimental MCP Skills extension support
+- [#5037](https://github.com/docker/docker-agent/pull/5037) - feat(mcp): add experimental MCP Tasks extension support
+- [#5039](https://github.com/docker/docker-agent/pull/5039) - fix(mcp): allow arbitrary arguments in mcp_events_subscribe schema
+- [#5040](https://github.com/docker/docker-agent/pull/5040) - test(dmr): stop reusing a closed httptest server port in TestCheckModelAvailable
+- [#5042](https://github.com/docker/docker-agent/pull/5042) - build(cross): add linux/riscv64 to the cross target
+
+
 ## [v1.165.0] - 2026-11-24
 
 This release adds experimental MCP Events push subscriptions, improves Gemini 4 model support, expands the browser WASM profile, and includes several TUI enhancements and bug fixes.
@@ -7738,3 +7788,5 @@ This release improves the terminal user interface with better error handling and
 [v1.164.0]: https://github.com/docker/docker-agent/releases/tag/v1.164.0
 
 [v1.165.0]: https://github.com/docker/docker-agent/releases/tag/v1.165.0
+
+[v1.166.0]: https://github.com/docker/docker-agent/releases/tag/v1.166.0
