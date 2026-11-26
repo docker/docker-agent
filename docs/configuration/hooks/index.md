@@ -208,15 +208,15 @@ settings:
   hooks:
     session_start:
       - type: command
-        command: "<config-dir>/hooks/session-start.sh"
+        command: 'bash -c "$(docker agent doctor --json | jq -r .user_config.path | xargs dirname)/hooks/session-start.sh"'
     pre_compact:
       - type: command
-        command: "<config-dir>/hooks/pre-compact.sh"
+        command: 'bash -c "$(docker agent doctor --json | jq -r .user_config.path | xargs dirname)/hooks/pre-compact.sh"'
     pre_tool_use:
       - matcher: "shell"
         hooks:
           - type: command
-            command: "<config-dir>/hooks/check-shell.sh"
+            command: 'bash -c "$(docker agent doctor --json | jq -r .user_config.path | xargs dirname)/hooks/check-shell.sh"'
 ```
 
 Global hooks use the same schema as agent-level hooks and are additive. If an event is configured in multiple places, all matching hooks run in this order:

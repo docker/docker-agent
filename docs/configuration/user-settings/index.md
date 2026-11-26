@@ -134,7 +134,7 @@ settings:
   hooks:
     session_start:
       - type: command
-        command: "<config-dir>/hooks/session-start.sh"
+        command: 'bash -c "$(docker agent doctor --json | jq -r .user_config.path | xargs dirname)/hooks/session-start.sh"'
   keybindings:
     - action: "commands"
       keys: ["f2", "ctrl+k"]

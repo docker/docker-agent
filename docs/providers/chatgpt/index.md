@@ -41,8 +41,10 @@ Related commands:
 
 ```bash
 docker agent doctor                        # the chatgpt row shows the credential state
-rm <config-dir>/chatgpt-auth.json      # sign out (remove the stored sign-in)
-                                           # `docker agent doctor` prints your config directory
+
+# sign out (remove the stored sign-in); use the config directory from `docker agent doctor`
+CONFIG_DIR=$(docker agent doctor --json | jq -r .user_config.path | xargs dirname)
+rm "$CONFIG_DIR/chatgpt-auth.json"
 ```
 
 ## Configuration
