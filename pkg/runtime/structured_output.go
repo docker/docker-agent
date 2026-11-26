@@ -38,7 +38,7 @@ const structuredOutputReminderText = "Reminder: this conversation requires struc
 // a one-element system-message slice, or nil when no reminder is due. The
 // counter is reset on agent switch by the run loop.
 func (ls *loopState) structuredOutputReminderMessages() []chat.Message {
-	if ls.structuredOutputReminders == 0 {
+	if ls.StructuredOutputReminders == 0 {
 		return nil
 	}
 	return []chat.Message{{Role: chat.MessageRoleSystem, Content: structuredOutputReminderText}}
@@ -317,11 +317,11 @@ func (r *LocalRuntime) structuredOutputStop(
 	events EventSink,
 ) (turnControl, string) {
 	_, rejectsPrefill := modelinfo.LookupClaude5(servingModel)
-	if !rejectsPrefill && ls.structuredOutputReminders < maxStructuredOutputReminders {
-		ls.structuredOutputReminders++
+	if !rejectsPrefill && ls.StructuredOutputReminders < maxStructuredOutputReminders {
+		ls.StructuredOutputReminders++
 		slog.InfoContext(ctx, "Model stopped without structured output; injecting transient reminder",
 			"agent", a.Name(), "session_id", sess.ID,
-			"reminder", ls.structuredOutputReminders, "max", maxStructuredOutputReminders)
+			"reminder", ls.StructuredOutputReminders, "max", maxStructuredOutputReminders)
 		return turnContinue, turnEndReasonContinue
 	}
 	errMsg := fmt.Sprintf(

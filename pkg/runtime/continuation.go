@@ -85,7 +85,7 @@ func (r *LocalRuntime) drainSteeredQueue(ctx context.Context, sess *session.Sess
 // drainSteeredQueueAtBoundary drains the steering queue where an invocation
 // ends; routed conversations only ever drain here.
 func (r *LocalRuntime) drainSteeredQueueAtBoundary(ctx context.Context, sess *session.Session, a *agent.Agent, ls *loopState, events EventSink) steerResult {
-	if ls.route != nil {
+	if ls.Route != nil {
 		return r.drainSteeredQueue(ctx, sess, a, events)
 	}
 	return r.drainAndEmitSteered(ctx, sess, a, events)
@@ -137,6 +137,6 @@ func (r *LocalRuntime) applySteering(ctx context.Context, sess *session.Session,
 		r.emitHookDrivenShutdown(ctx, a, sess, sr.stopMsg, events)
 		return true
 	}
-	ls.userPromptMsgs = sr.contextMsgs
+	ls.UserPromptMsgs = sr.contextMsgs
 	return false
 }

@@ -24,16 +24,16 @@ const (
 // routeState is the per-invocation state of a hook-routed conversation. It
 // lives on the run loop, never on shared agent definitions or evaluator clients.
 type routeState struct {
-	invocationID string
-	input        string
-	conversation []hooks.ConversationMessage
-	// previousOutput is the last successfully completed step's answer.
-	previousOutput string
-	step           int
-	transitions    int
-	// activated names the agent whose before_agent_run has already fired for
+	InvocationID string                      `json:"invocation_id"`
+	Input        string                      `json:"input,omitempty"`
+	Conversation []hooks.ConversationMessage `json:"conversation,omitempty"`
+	// PreviousOutput is the last successfully completed step's answer.
+	PreviousOutput string `json:"previous_output,omitempty"`
+	Step           int    `json:"step,omitempty"`
+	Transitions    int    `json:"transitions,omitempty"`
+	// Activated names the agent whose before_agent_run has already fired for
 	// the current activation.
-	activated string
+	Activated string `json:"activated,omitempty"`
 }
 
 // newRouteState starts an invocation for the newest user request, with the
@@ -41,26 +41,26 @@ type routeState struct {
 // reply, a new invocation brings no input and has the whole conversation
 // behind it.
 func newRouteState(sess *session.Session) *routeState {
-	state := &routeState{invocationID: uuid.NewV4().String()}
+	state := &routeState{InvocationID: uuid.NewV4().String()}
 	input, exchanges, answered := sess.NewestRequest()
 	if answered {
 		input, exchanges = "", sess.VisibleExchanges()
 	}
-	state.input = input
+	state.Input = input
 	if len(exchanges) > maxRoutingConversation {
 		exchanges = exchanges[len(exchanges)-maxRoutingConversation:]
 	}
 	for _, m := range exchanges {
-		state.conversation = append(state.conversation, hooks.ConversationMessage{Role: string(m.Role), Content: m.Content})
+		state.Conversation = append(state.Conversation, hooks.ConversationMessage{Role: string(m.Role), Content: m.Content})
 	}
 	return state
 }
 
-func (s *routeState) stepID() string { return "step-" + strconv.Itoa(s.step) }
+func (s *routeState) stepID() string { return "step-" + strconv.Itoa(s.Step) }
 
 func (s *routeState) countTransition() *routeStop {
-	s.transitions++
-	if s.transitions > maxRouteTransitions {
+	s.Transitions++
+	if s.Transitions > maxRouteTransitions {
 		return &routeStop{message: fmt.Sprintf("routing exceeded the limit of %d transitions in one invocation", maxRouteTransitions)}
 	}
 	return nil
@@ -107,11 +107,11 @@ func (r *LocalRuntime) beginRouting(sess *session.Session) *routeState {
 // restartRouting starts a new invocation at the entry agent for input that
 // arrived while the previous one was running.
 func (r *LocalRuntime) restartRouting(sess *session.Session, ls *loopState) {
-	if ls.route == nil {
+	if ls.Route == nil {
 		return
 	}
 	sess.SetRouteAgent("")
-	ls.route = newRouteState(sess)
+	ls.Route = newRouteState(sess)
 }
 
 // routingUnsupported rejects control hooks outside a routed root conversation
@@ -128,9 +128,9 @@ func (r *LocalRuntime) routingUnsupported(route *routeState, a *agent.Agent) *ro
 // activateAgent fires before_agent_run once for a new activation and follows
 // route transitions, returning the agent that should actually run.
 func (r *LocalRuntime) activateAgent(ctx context.Context, sess *session.Session, a *agent.Agent, route *routeState, events EventSink) (*agent.Agent, *routeStop) {
-	for route.activated != a.Name() {
-		route.step++
-		route.activated = a.Name()
+	for route.Activated != a.Name() {
+		route.Step++
+		route.Activated = a.Name()
 
 		result := r.dispatchControlHook(ctx, sess, a, hooks.EventBeforeAgentRun, route, "", events)
 		next, stop := r.resolveTransition(a, result, route)
@@ -152,7 +152,7 @@ func (r *LocalRuntime) activateAgent(ctx context.Context, sess *session.Session,
 // routeCompletion fires after_agent_complete, or applies the agent's forced
 // handoff, for an agent that completed successfully with content.
 func (r *LocalRuntime) routeCompletion(ctx context.Context, sess *session.Session, a *agent.Agent, content string, ls *loopState, events EventSink) (routeOutcome, *routeStop) {
-	route := ls.route
+	route := ls.Route
 	if strings.TrimSpace(content) == "" {
 		return routeFinished, nil
 	}
@@ -180,7 +180,7 @@ func (r *LocalRuntime) routeCompletion(ctx context.Context, sess *session.Sessio
 	if next == nil {
 		return routeFinished, nil
 	}
-	route.previousOutput = content
+	route.PreviousOutput = content
 	r.applyRoute(ctx, sess, a, next, route, phase, result, events)
 	return routeContinued, nil
 }
@@ -193,12 +193,12 @@ func (r *LocalRuntime) dispatchControlHook(ctx context.Context, sess *session.Se
 	return r.dispatchHook(ctx, a, event, &hooks.Input{
 		SessionID:      sess.ID,
 		AgentName:      a.Name(),
-		InvocationID:   route.invocationID,
+		InvocationID:   route.InvocationID,
 		StepID:         route.stepID(),
-		TaskInput:      route.input,
-		PreviousOutput: route.previousOutput,
+		TaskInput:      route.Input,
+		PreviousOutput: route.PreviousOutput,
 		Output:         output,
-		Conversation:   route.conversation,
+		Conversation:   route.Conversation,
 	}, events)
 }
 
@@ -277,7 +277,7 @@ func (r *LocalRuntime) recordRoutingDecision(sess *session.Session, fromAgent, t
 		Phase: phase, FromAgent: fromAgent, ToAgent: toAgent, Action: action, Reason: reason,
 	}
 	if route != nil {
-		decision.InvocationID, decision.StepID = route.invocationID, route.stepID()
+		decision.InvocationID, decision.StepID = route.InvocationID, route.stepID()
 	}
 	if result != nil {
 		decision.Evaluator = result.Metadata["evaluator"]

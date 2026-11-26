@@ -310,13 +310,15 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// clean and the user message tail stable.
 	sessionStart := r.executeSessionStartHooks(ctx, sess, a, sink)
 	ls := &loopState{
-		maxIterations:          sess.MaxIterations,
-		idleRetry:              liveEntry.idleRetry,
-		sessionStartMsgs:       sessionStart.messages,
-		sessionStartLegacyMsgs: sessionStart.legacyMessages(),
-		sessionStartSources:    sessionStart.sources,
-		route:                  route,
-		compaction:             newCompactionController(r, sess, sink, userconfig.Get()),
+		runState: runState{
+			MaxIterations:          sess.MaxIterations,
+			SessionStartMsgs:       sessionStart.messages,
+			SessionStartLegacyMsgs: sessionStart.legacyMessages(),
+			SessionStartSources:    sessionStart.sources,
+			Route:                  route,
+		},
+		idleRetry:  liveEntry.idleRetry,
+		compaction: newCompactionController(r, sess, sink, userconfig.Get()),
 	}
 	defer ls.compaction.Close(ctx)
 
@@ -370,7 +372,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			r.emitHookDrivenShutdown(ctx, a, sess, msg, sink)
 			return
 		}
-		ls.userPromptMsgs = ctxMsgs
+		ls.UserPromptMsgs = ctxMsgs
 	}
 
 	sink.Emit(StreamStarted(sess.ID, a.Name()))
@@ -385,7 +387,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// implemented as the cache_response stop-hook builtin (see
 	// runtime/cache.go and getHooksExecutor).
 	if r.tryReplayCachedResponse(ctx, sess, a, sink) {
-		if ls.route == nil {
+		if ls.Route == nil {
 			return
 		}
 		// A replayed answer is a completion like any other: it may still route onward.
@@ -431,10 +433,10 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		r.runQueuedCompaction(ctx, liveEntry)
 
 		a = r.resolveSessionAgent(sess)
-		if ls.route != nil {
-			a, stop = r.activateAgent(ctx, sess, a, ls.route, sink)
+		if ls.Route != nil {
+			a, stop = r.activateAgent(ctx, sess, a, ls.Route, sink)
 		} else {
-			stop = r.routingUnsupported(ls.route, a)
+			stop = r.routingUnsupported(ls.Route, a)
 		}
 		if stop != nil {
 			streamReason = r.stopRouting(ctx, sess, a, stop, sink)
@@ -443,11 +445,11 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 		// Reset tool-derived state on agent switch so warnings and model
 		// overrides do not inherit the previous agent's tool activity.
-		if a.Name() != ls.prevAgentName {
-			ls.toolModelOverride = ""
-			ls.prevTurnMadeToolCalls = false
-			ls.structuredOutputReminders = 0
-			ls.prevAgentName = a.Name()
+		if a.Name() != ls.PrevAgentName {
+			ls.ToolModelOverride = ""
+			ls.PrevTurnMadeToolCalls = false
+			ls.StructuredOutputReminders = 0
+			ls.PrevAgentName = a.Name()
 		}
 
 		r.emitAgentWarnings(a, sink)
@@ -464,7 +466,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		sink.Emit(ToolsetInfo(len(agentTools), false, a.Name()))
 
 		// Check iteration limit
-		newMax, decision := r.enforceMaxIterations(ctx, sess, a, ls.iteration, ls.maxIterations, sink)
+		newMax, decision := r.enforceMaxIterations(ctx, sess, a, ls.Iteration, ls.MaxIterations, sink)
 		if decision == iterationStop {
 			streamReason = StreamStopReasonMaxIterations
 			if ctx.Err() != nil {
@@ -472,7 +474,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			}
 			return
 		}
-		ls.maxIterations = newMax
+		ls.MaxIterations = newMax
 
 		// Check the run budget. Placed next to the iteration cap because
 		// both are "should this run keep going" questions answered at the
@@ -482,7 +484,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			return
 		}
 
-		ls.iteration++
+		ls.Iteration++
 
 		// Exit immediately if the stream context has been cancelled (e.g., Ctrl+C)
 		if err := ctx.Err(); err != nil {
@@ -495,16 +497,16 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 		// Per-tool model routing: use a cheaper model for this turn
 		// if the previous tool calls specified one, then reset.
-		if ls.toolModelOverride != "" {
-			if overrideModel, err := r.resolveModelRef(ctx, ls.toolModelOverride); err != nil {
+		if ls.ToolModelOverride != "" {
+			if overrideModel, err := r.resolveModelRef(ctx, ls.ToolModelOverride); err != nil {
 				slog.WarnContext(ctx, "Failed to resolve per-tool model override; using agent default",
-					"model_override", ls.toolModelOverride, "error", err)
+					"model_override", ls.ToolModelOverride, "error", err)
 			} else {
 				slog.InfoContext(ctx, "Using per-tool model override for this turn",
 					"agent", a.Name(), "override", overrideModel.ID().String(), "primary", model.ID().String())
 				model = overrideModel
 			}
-			ls.toolModelOverride = ""
+			ls.ToolModelOverride = ""
 		}
 
 		modelID := model.ID()
@@ -590,37 +592,62 @@ const (
 	turnExit
 )
 
-// loopState bundles the mutable per-RunStream state that persists across
-// iterations. Previously these were individual local variables in
-// runStreamLoop and pointer parameters of runTurn; grouping them in a
-// struct keeps the function signatures small and makes it trivial to add
-// new per-stream tracking (cost ceiling, token budget, turn timing)
-// without touching any signature.
-type loopState struct {
-	compaction             *compactionController
-	iteration              int
-	maxIterations          int
-	overflowCompactions    int
-	toolModelOverride      string
-	prevAgentName          string
-	loopDetector           *toolexec.LoopDetector
-	sessionStartMsgs       []chat.Message
-	sessionStartLegacyMsgs []chat.Message
-	sessionStartSources    []session.InstructionSource
-	userPromptMsgs         []chat.Message
-	exitReason             string
-	finishReason           chat.FinishReason
-	// structuredOutputReminders counts the transient reminders injected
+// runState is what a run carries from one step to the next: everything the
+// loop needs to pick the run up where a step left it. It holds data only, so
+// it can be kept as it is. What the loop works with but cannot keep, such as
+// the compaction controller, lives on [loopState].
+type runState struct {
+	Iteration           int    `json:"iteration,omitempty"`
+	MaxIterations       int    `json:"max_iterations,omitempty"`
+	OverflowCompactions int    `json:"overflow_compactions,omitempty"`
+	ToolModelOverride   string `json:"tool_model_override,omitempty"`
+	PrevAgentName       string `json:"prev_agent_name,omitempty"`
+	// Context that session_start and user_prompt_submit hooks added to the
+	// run. It rides with every model call and never enters the transcript.
+	SessionStartMsgs       []chat.Message              `json:"session_start_msgs,omitempty"`
+	SessionStartLegacyMsgs []chat.Message              `json:"session_start_legacy_msgs,omitempty"`
+	SessionStartSources    []session.InstructionSource `json:"session_start_sources,omitempty"`
+	UserPromptMsgs         []chat.Message              `json:"user_prompt_msgs,omitempty"`
+	// StructuredOutputReminders counts the transient reminders injected
 	// after a tool-mode turn stopped without calling the internal output
 	// tool. Bounded by maxStructuredOutputReminders; reset on agent switch
 	// so it never carries across agents.
-	structuredOutputReminders int
-	// prevTurnMadeToolCalls gives empty-reply warnings context from this agent's previous turn.
-	prevTurnMadeToolCalls bool
+	StructuredOutputReminders int `json:"structured_output_reminders,omitempty"`
+	// PrevTurnMadeToolCalls gives empty-reply warnings context from this agent's previous turn.
+	PrevTurnMadeToolCalls bool `json:"prev_turn_made_tool_calls,omitempty"`
+	// Route is non-nil only for hook-routed conversations.
+	Route *routeState `json:"route,omitempty"`
+	// Loop is what the loop detector has counted.
+	Loop toolexec.LoopState `json:"loop"`
+}
+
+// loopState is the per-RunStream state that persists across iterations: the
+// run's state, and the working parts of this stream that serve it. Grouping
+// them keeps the function signatures small and makes it trivial to add new
+// per-stream tracking without touching any signature.
+type loopState struct {
+	runState
+
+	compaction   *compactionController
+	loopDetector *toolexec.LoopDetector
+	exitReason   string
+	finishReason chat.FinishReason
 	// idleRetry is shared by every turn and fallback attempt in this child run.
 	idleRetry *idleStreamRetryAllowance
-	// route is non-nil only for hook-routed conversations.
-	route *routeState
+}
+
+// recordToolCalls counts a batch of tool calls and reports whether the model
+// is repeating itself without making progress.
+func (ls *loopState) recordToolCalls(calls []tools.ToolCall, exemptCallIDs ...string) bool {
+	looping := ls.loopDetector.Record(calls, exemptCallIDs...)
+	ls.Loop = ls.loopDetector.State()
+	return looping
+}
+
+// resetToolCallCount starts counting repeated tool calls afresh.
+func (ls *loopState) resetToolCallCount() {
+	ls.loopDetector.Reset()
+	ls.Loop = ls.loopDetector.State()
 }
 
 // emptyTurnWarning explains a terminal turn without a user-facing reply.
@@ -733,8 +760,8 @@ func (r *LocalRuntime) runTurn(
 	// Pending tool-mode structured-output reminder rides with the transient
 	// system extras: threaded per call, never persisted as a user message.
 	reminderMsgs := ls.structuredOutputReminderMessages()
-	legacyExtras := slices.Concat(ls.sessionStartLegacyMsgs, ls.userPromptMsgs, turnStartMsgs.legacyMessages(), reminderMsgs)
-	sources := instructionSources(ls.sessionStartMsgs, ls.userPromptMsgs, turnStartMsgs, ls.sessionStartSources...)
+	legacyExtras := slices.Concat(ls.SessionStartLegacyMsgs, ls.UserPromptMsgs, turnStartMsgs.legacyMessages(), reminderMsgs)
+	sources := instructionSources(ls.SessionStartMsgs, ls.UserPromptMsgs, turnStartMsgs, ls.SessionStartSources...)
 	sources = append(sources, instructionSource("runtime/structured-output", "structured-output reminder", reminderMsgs))
 	messages, err := r.messagesWithDynamicContext(ctx, sess, a, sources, legacyExtras)
 	if err != nil {
@@ -758,7 +785,7 @@ func (r *LocalRuntime) runTurn(
 	// runtime's Go-only message transforms so a hook that drops a
 	// message (e.g. a custom "strip system reminders") doesn't get
 	// silently overridden by a transform later in the chain.
-	stop, msg, rewritten := r.executeBeforeLLMCallHooks(ctx, sess, a, modelID.String(), ls.iteration, messages)
+	stop, msg, rewritten := r.executeBeforeLLMCallHooks(ctx, sess, a, modelID.String(), ls.Iteration, messages)
 	if stop {
 		slog.WarnContext(ctx, "before_llm_call hook signalled run termination",
 			"agent", a.Name(), "session_id", sess.ID, "reason", msg)
@@ -791,7 +818,7 @@ func (r *LocalRuntime) runTurn(
 		return turnExit
 	}
 	if err != nil {
-		outcome := r.handleStreamError(ctx, sess, a, err, contextLimit, &ls.overflowCompactions, streamSpan, events)
+		outcome := r.handleStreamError(ctx, sess, a, err, contextLimit, &ls.OverflowCompactions, streamSpan, events)
 		endStreamSpan()
 		endReason = turnEndReasonError
 		if outcome == streamErrorRetry {
@@ -822,7 +849,7 @@ func (r *LocalRuntime) runTurn(
 	}
 
 	// A successful model call resets the overflow compaction counter.
-	ls.overflowCompactions = 0
+	ls.OverflowCompactions = 0
 
 	// Compute the per-turn cost once, here, so the exact same value
 	// reaches telemetry, the after_llm_call hook payload and the recorded
@@ -884,7 +911,7 @@ func (r *LocalRuntime) runTurn(
 		if reason == "" {
 			reason = chat.FinishReasonNull
 		}
-		warning := emptyTurnWarning(res, ls.prevTurnMadeToolCalls, modelID.String(), reason)
+		warning := emptyTurnWarning(res, ls.PrevTurnMadeToolCalls, modelID.String(), reason)
 		slog.WarnContext(ctx, "Empty assistant turn",
 			"agent", a.Name(), "model", modelID.String(),
 			"finish_reason", string(reason), "reasoning_length", len(res.ReasoningContent), "session_id", sess.ID)
@@ -940,7 +967,7 @@ func (r *LocalRuntime) runTurn(
 	}
 
 	// Check for degenerate tool call loops
-	if ls.loopDetector.Record(res.Calls, loopSink.exemptCalls(res.Calls)...) {
+	if ls.recordToolCalls(res.Calls, loopSink.exemptCalls(res.Calls)...) {
 		toolName := "unknown"
 		if len(res.Calls) > 0 {
 			toolName = res.Calls[0].Function.Name
@@ -965,7 +992,7 @@ func (r *LocalRuntime) runTurn(
 		sessionSpan.SetStatus(codes.Error, errMsg)
 		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeLoopDetected, errMsg))
 		r.notifyError(ctx, a, sess.ID, errMsg)
-		ls.loopDetector.Reset()
+		ls.resetToolCallCount()
 		endReason = turnEndReasonLoopDetected
 		return turnExit
 	}
@@ -984,10 +1011,10 @@ func (r *LocalRuntime) runTurn(
 	}
 
 	// Record completed tool work for the next turn's empty-reply warning.
-	ls.prevTurnMadeToolCalls = len(res.Calls) > 0
+	ls.PrevTurnMadeToolCalls = len(res.Calls) > 0
 
 	// Record per-toolset model override for the next LLM turn.
-	ls.toolModelOverride = toolexec.ResolveModelOverride(res.Calls, agentTools)
+	ls.ToolModelOverride = toolexec.ResolveModelOverride(res.Calls, agentTools)
 
 	// Drain steer messages that arrived during tool calls.
 	if sr := r.drainAndEmitSteered(ctx, sess, a, events); sr.drained {
@@ -1050,7 +1077,7 @@ func (r *LocalRuntime) afterAnswer(
 		}
 		// Accepted result: give a potential next turn (follow-up,
 		// steered continuation) a fresh reminder budget.
-		ls.structuredOutputReminders = 0
+		ls.StructuredOutputReminders = 0
 	}
 
 	if a.StructuredOutput() == nil && answer.content != "" && !answer.hasMedia && hasExplicitImageGenerationIntent(sess.GetLastUserMessageContent()) {
@@ -1063,7 +1090,7 @@ func (r *LocalRuntime) afterAnswer(
 	// --- ROUTED COMPLETION: after_agent_complete or forced handoff ---
 	// Routed conversations decide continuation here, for every
 	// successful completion, with session-local agent switching.
-	if ls.route != nil {
+	if ls.Route != nil {
 		outcome, stop := r.routeCompletion(ctx, sess, a, answer.content, ls, events)
 		switch outcome {
 		case routeStopped:
@@ -1111,7 +1138,7 @@ func (r *LocalRuntime) afterAnswer(
 			r.emitHookDrivenShutdown(ctx, a, sess, msg, events)
 			return turnExit, turnEndReasonHookBlocked
 		}
-		ls.userPromptMsgs = ctxMsgs
+		ls.UserPromptMsgs = ctxMsgs
 		r.restartRouting(sess, ls)
 		ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBefore)
 		return turnContinue, turnEndReasonContinue // re-enter the loop for a new turn
