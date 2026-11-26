@@ -1688,8 +1688,30 @@ func (s *Session) TryAgentHandoff(name string) bool {
 func (s *Session) VisibleExchanges() []chat.Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return visibleExchanges(s.Messages)
+}
+
+// NewestRequest splits the visible conversation at the newest user request.
+// It returns the request's text, the exchanges before it, and whether a
+// visible reply has followed it. The request is looked up in the transcript
+// itself: one with nothing visible to it, as when it is made of attachments
+// only, has no text and is not mistaken for the request before it. Without
+// any request, history is the whole visible conversation.
+func (s *Session) NewestRequest() (request string, history []chat.Message, answered bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i, item := range slices.Backward(s.Messages) {
+		if item.IsMessage() && !item.Message.Implicit && item.Message.Message.Role == chat.MessageRoleUser {
+			replies := visibleExchanges(s.Messages[i+1:])
+			return item.Message.Message.Content, visibleExchanges(s.Messages[:i]), len(replies) > 0
+		}
+	}
+	return "", visibleExchanges(s.Messages), false
+}
+
+func visibleExchanges(items []Item) []chat.Message {
 	var out []chat.Message
-	for _, item := range s.Messages {
+	for _, item := range items {
 		if !item.IsMessage() || item.Message.Implicit {
 			continue
 		}
