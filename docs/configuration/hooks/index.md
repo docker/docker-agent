@@ -196,7 +196,11 @@ and `on_error: warn` remain distinct from omitted options.
 This also applies to automatic built-ins: an identical explicit entry runs only
 once, but adding a name or changing an option makes it a separate invocation.
 Disable the corresponding agent flag when you want a custom entry *instead of*
-the automatic default.
+the automatic default. The `tool_response_transform` redaction pair is the
+deliberate exception: when it brackets configured transforms, both
+auto-injected passes are named so the final scrub always survives
+deduplication, which means an explicitly wired redactor runs as an additional
+invocation at its configured position.
 
 ## Global (user-level) hooks
 
@@ -665,7 +669,7 @@ This is the symmetric counterpart of `tool_input_transform`'s `updated_input`, a
 
 Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_documents`, the inline document attachments the tool returned. MCP servers return text resources this way (the payload is in `text`), and those documents are emitted to event subscribers and persisted in the session next to the textual output. Only `tool_response_transform` hooks can rewrite the list, with `updated_tool_documents`; the rewritten attachments are what gets emitted and persisted, and `post_tool_use` hooks receive the already-transformed list. `redact_secrets` scrubs each attachment's name, URI, MIME type, and text, so a secret carried in an MCP inline-text resource never reaches the session file or the event stream.
 
-When the agent-level `redact_secrets` flag is on (the default) and other `tool_response_transform` hooks are configured, the auto-injected redactor runs both **before** and **after** them. The leading pass matters because command hooks receive the whole hook input as JSON on stdin: without it, a hook that archives its input would record the raw tool output, display metadata, and inline document attachments. The trailing pass is the final scrub, so a later rewrite that reintroduces a secret is still caught. Configured hooks therefore observe the already-redacted values, with detected secrets replaced by markers.
+When the agent-level `redact_secrets` flag is on (the default) and other `tool_response_transform` hooks are configured, the auto-injected redactor runs both **before** and **after** them. The leading pass matters because command hooks receive the whole hook input as JSON on stdin: without it, a hook that archives its input would record the raw tool output, display metadata, and inline document attachments. The trailing pass is the final scrub, so a later rewrite that reintroduces a secret is still caught — for example, a transform placed after an explicitly wired `redact_secrets` entry that rewrites a secret back into the output or the attachments. Both auto-injected passes carry distinct names so deduplication cannot drop the final scrub; an explicit redactor entry stays a separate invocation at its configured position. Configured hooks therefore observe the already-redacted values, with detected secrets replaced by markers.
 
 Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_result_meta`, the structured display metadata a tool recorded alongside its text output (the TUI renders completed `edit_file` diffs from it). Only `tool_response_transform` hooks can rewrite it, with `updated_tool_result_meta` (independently of `updated_tool_response`); the rewritten metadata is what gets emitted and persisted. `post_tool_use` hooks receive the already-transformed metadata and cannot change it. `redact_secrets` also scrubs this metadata, and clears it when it cannot be serialized safely.
 

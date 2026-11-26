@@ -1,6 +1,7 @@
 package builtins
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -75,4 +76,65 @@ func TestConfiguredCommandHookReceivesRedactedToolDocuments(t *testing.T) {
 	require.Len(t, result.UpdatedToolDocuments, 2)
 	assert.NotContains(t, result.UpdatedToolDocuments[0].Text, secret)
 	assert.Equal(t, "nothing to see", result.UpdatedToolDocuments[1].Text)
+}
+
+// TestFinalRedactionPassSurvivesExplicitRedactorEntry pins the final-pass
+// requirement: an agent that also wires the builtin by hand — as
+// examples/redact_secrets_hooks.yaml does — must not lose the auto-injected
+// final scrub to the executor's hook deduplication. The explicit unnamed
+// entry is identical to the auto-injected trailing pass, so hooksFor would
+// drop the trailing one (keeping the explicit entry at its configured
+// position); a transform after it could then rewrite a secret back into the
+// attachments and the runtime would emit and record it unsanitized. The
+// final pass therefore carries its own Name, which keeps it alive.
+func TestFinalRedactionPassSurvivesExplicitRedactorEntry(t *testing.T) {
+	t.Parallel()
+
+	secret := fakeGitHubPAT()
+	registry := hooks.NewRegistry()
+	require.NoError(t, Register(registry))
+	require.NoError(t, registry.RegisterBuiltin("reintroduce_secret", func(context.Context, *hooks.Input, []string) (*hooks.Output, error) {
+		return &hooks.Output{HookSpecificOutput: &hooks.HookSpecificOutput{
+			UpdatedToolDocuments: []tools.DocumentContent{
+				{Name: "leaked.md", MimeType: "text/markdown", Text: "token=" + secret},
+			},
+		}}, nil
+	}))
+
+	cfg := ApplyAgentDefaults(&hooks.Config{
+		ToolResponseTransform: []hooks.MatcherConfig{
+			{
+				Matcher: "*",
+				// Explicit, unnamed redactor: the same builtin the runtime
+				// auto-injects, which makes it a dedup candidate.
+				Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: RedactSecrets}},
+			},
+			{
+				Matcher: "*",
+				// Runs after the explicit redactor and rewrites the secret
+				// back in: only a surviving final pass can scrub this.
+				Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "reintroduce_secret"}},
+			},
+		},
+	}, AgentDefaults{RedactSecrets: true})
+
+	exec := hooks.NewExecutorWithRegistry(cfg, t.TempDir(), nil, registry)
+	result, err := exec.Dispatch(t.Context(), hooks.EventToolResponseTransform, &hooks.Input{
+		ToolName:     "mcp_fetch",
+		ToolCategory: "mcp",
+		ToolResponse: "fetched resource",
+		ToolDocuments: []tools.DocumentContent{
+			{Name: "clean.md", MimeType: "text/markdown", Text: "nothing to see"},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// The reintroduced list is the runtime's rewrite: it must already be
+	// scrubbed by the final auto-injected pass.
+	require.NotNil(t, result.UpdatedToolDocuments, "the rewrite from the configured hook must reach the runtime")
+	require.Len(t, result.UpdatedToolDocuments, 1)
+	assert.NotContains(t, result.UpdatedToolDocuments[0].Text, secret,
+		"the final redaction pass must survive hook dedup when the agent wires the builtin explicitly")
+	assert.Contains(t, result.UpdatedToolDocuments[0].Text, portcullis.Marker)
 }

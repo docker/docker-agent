@@ -897,11 +897,21 @@ func TestApplyAgentDefaultsOrdersTransformsAroundRedaction(t *testing.T) {
 			}
 			assert.Equal(t, tc.want, names)
 
+			last := cfg.ToolResponseTransform[len(cfg.ToolResponseTransform)-1]
+			require.Len(t, last.Hooks, 1, "the large-result limiter always runs last")
+
 			if tc.redact && tc.configured {
-				assert.NotEmpty(t, cfg.ToolResponseTransform[0].Hooks[0].Name,
+				leading := cfg.ToolResponseTransform[0].Hooks[0].Name
+				trailing := cfg.ToolResponseTransform[len(cfg.ToolResponseTransform)-2].Hooks[0].Name
+				assert.NotEmpty(t, leading,
 					"the pre-hook redaction pass needs a distinct identity to survive hook dedup")
-				assert.Empty(t, cfg.ToolResponseTransform[2].Hooks[0].Name,
-					"the trailing redaction pass must stay identical to the historical auto-injection")
+				assert.NotEmpty(t, trailing,
+					"the final redaction pass needs a distinct identity to survive hook dedup")
+				assert.NotEqual(t, leading, trailing,
+					"the two auto-injected passes must not deduplicate each other")
+			} else if tc.redact {
+				assert.Empty(t, cfg.ToolResponseTransform[0].Hooks[0].Name,
+					"the lone redaction pass keeps its historical identity when nothing is bracketed")
 			}
 		})
 	}
