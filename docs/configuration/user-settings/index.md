@@ -1,6 +1,6 @@
 ---
 title: "User Settings"
-description: "Full reference for the global settings block in ~/.config/cagent/config.yaml: theme, layout, YOLO, sound, snapshots, permissions, hooks, keybindings, and how they interact with agent config and CLI flags."
+description: "Full reference for the global settings block in <config-dir>/config.yaml: theme, layout, YOLO, sound, snapshots, permissions, hooks, keybindings, and how they interact with agent config and CLI flags."
 keywords: docker agent, ai agents, configuration, yaml, user settings, user config
 linkTitle: "User Settings"
 weight: 110
@@ -12,13 +12,15 @@ canonical: https://docs.docker.com/ai/docker-agent/configuration/user-settings/
 Docker Agent reads a single user-level config file, independent of any agent YAML:
 
 ```text
-~/.config/cagent/config.yaml
+<config-dir>/config.yaml
 ```
+
+On a new macOS or Windows installation the file lives in the OS-native config directory instead. See [State Directories](../directories/index.md).
 
 The `settings:` block inside it holds preferences that apply to every agent you run — appearance, behavior, notifications, and a few global safety defaults. Everything under `settings:` is optional; an unset field falls back to the documented default.
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   theme: dracula
   lean: false
@@ -41,7 +43,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `show_banner` | boolean | `true` | Show the braille wordmark startup banner. In the full TUI it appears on an empty conversation; in the [lean TUI](../../features/tui/index.md#lean-tui) it is printed at the start of the transcript, before any resumed session. Managed from the **Appearance** tab of `/settings` in the full TUI; the lean TUI's `/settings` panel has a *Show startup banner* toggle (labeled "next launch") that is saved for future launches. Unlike other settings marked **next launch**, saving it also adds or removes the banner in the current session, but only while the session's welcome block is still in the transcript: it cannot erase a banner already printed to your terminal scrollback, and after resuming another session with `/sessions` there is no welcome block to update. |
 | `fade_scroll_edges` | boolean | `true` | Fade the top and bottom edges of scrollable areas in the full TUI when more content lies beyond them. Managed from the **Fade scroll edges** toggle on the **Appearance** tab of `/settings`. |
 | `top_margin` | boolean | `false` | Add a one-row top margin above the full TUI when the terminal is taller than 24 rows. Managed from the **Show top margin** toggle on the **Appearance** tab of `/settings`. |
-| `theme` | string | `default` | Theme name, loaded from a built-in theme or `~/.cagent/themes/<name>.yaml`. The special value `auto` follows the terminal's light/dark background. See [Theming](../../features/tui/index.md#theming). |
+| `theme` | string | `default` | Theme name, loaded from a built-in theme or `<data-dir>/themes/<name>.yaml`. The special value `auto` follows the terminal's light/dark background. See [Theming](../../features/tui/index.md#theming). |
 | `theme_dark` | string | `default` | Theme applied when `theme: auto` and the terminal background is dark. |
 | `theme_light` | string | `default-light` | Theme applied when `theme: auto` and the terminal background is light. |
 | `YOLO` | boolean | `false` | Select the `autonomous` safety fallback globally. Unmatched calls are auto-approved, but deny rules, session-scoped ask rules, `tool_guard`, and `preempt_yolo` hooks can still block or prompt. Mirrors the `--yolo` flag and the `/yolo` command. Legacy alias for `safety: autonomous`; when both are set, `safety` wins. |
@@ -97,7 +99,7 @@ Enable **Plans** under `/settings` → **Appearance** → **Sidebar sections**, 
 ## Complete Example
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   theme: auto
   theme_dark: dracula
@@ -132,7 +134,7 @@ settings:
   hooks:
     session_start:
       - type: command
-        command: "~/.config/cagent/hooks/session-start.sh"
+        command: 'bash -c "$(docker agent doctor --json | jq -r .user_config.path | xargs dirname)/hooks/session-start.sh"'
   keybindings:
     - action: "commands"
       keys: ["f2", "ctrl+k"]

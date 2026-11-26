@@ -279,11 +279,11 @@ agents:
 
 Providers defined in an agent file only apply to that file. To make a custom
 provider available to every command (`docker agent run`, `new`, `models`, ...),
-define it once in your user configuration (`~/.config/cagent/config.yaml`)
+define it once in your user configuration ([`<config-dir>`](../../configuration/directories/index.md)`/config.yaml`)
 under the same `providers` key:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 providers:
   myprovider:
     base_url: https://llm.corp.example.com/v1

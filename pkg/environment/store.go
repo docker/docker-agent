@@ -104,7 +104,7 @@ func upsertEnvLine(content, name, value string) string {
 }
 
 // ConfigEnvFilePath returns the path of the env file that the default secret
-// sources read: <config dir>/.env (e.g. ~/.config/cagent/.env).
+// sources read: <config dir>/.env.
 func ConfigEnvFilePath() string {
 	return filepath.Join(paths.GetConfigDir(), ".env")
 }

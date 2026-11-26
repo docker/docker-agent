@@ -52,7 +52,7 @@ func addRuntimeConfigFlags(cmd *cobra.Command, runConfig *config.RuntimeConfig) 
 // flag. The default is resolved lazily, at command run time, because the
 // data dir must reflect a --data-dir override applied by the root
 // PersistentPreRunE; a default baked in at flag registration would always
-// point at ~/.cagent regardless of --data-dir.
+// point at the default data directory regardless of --data-dir.
 func sessionDBPath(flagValue string) string {
 	if flagValue != "" {
 		return flagValue

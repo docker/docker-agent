@@ -16,6 +16,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 func TestConfig_Empty(t *testing.T) {
@@ -1023,8 +1024,7 @@ func TestConfig_DefaultModel_SaveAndLoad(t *testing.T) {
 
 func TestGet_Empty(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// No config file exists
 	settings := Get()
@@ -1035,8 +1035,7 @@ func TestGet_Empty(t *testing.T) {
 
 func TestGet_WithHideToolResults(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	// Set up config with settings
 	cfg, err := Load()

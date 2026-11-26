@@ -62,7 +62,7 @@ The following environment variables must be set:
 Provide them using any of these sources:
  - Shell environment:      export ANTHROPIC_API_KEY=<value>
  - Env file:               docker agent run --env-from-file <file> ...
- - Docker Agent env file:  docker agent setup (stores the key in ~/.config/cagent/.env)
+ - Docker Agent env file:  docker agent setup (stores the key in <config-dir>/.env)
 
 See https://docs.docker.com/ai/docker-agent/guides/secrets/ for details.
 ```
@@ -111,7 +111,7 @@ If instead you see `cannot query Docker Model Runner at <url>`, Docker Model Run
 The first step for any issue is enabling debug logging. This provides detailed information about what Docker Agent is doing internally.
 
 ```bash
-# Enable debug logging (writes to ~/.cagent/cagent.debug.log)
+# Enable debug logging (writes to <data-dir>/cagent.debug.log)
 $ docker agent run config.yaml --debug
 
 # Write debug logs to a custom file

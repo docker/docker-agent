@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	chatmsg "github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
@@ -92,8 +93,7 @@ func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appM
 	tb.Helper()
 	if setter, ok := tb.(interface{ Setenv(key, value string) }); ok {
 		home := tb.TempDir()
-		setter.Setenv("HOME", home)
-		setter.Setenv("USERPROFILE", home)
+		testutil.SetHome(setter, home)
 	}
 	started := time.Now()
 	sess := &session.Session{ID: "profile", Title: "profile"}

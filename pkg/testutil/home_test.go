@@ -3,6 +3,7 @@ package testutil
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,8 +45,10 @@ func TestRunWithTempHome(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, entries)
 
-		assert.Equal(t, filepath.Join(home, ".config", "cagent"), paths.GetConfigDir())
-		assert.Equal(t, filepath.Join(home, ".cagent"), paths.GetDataDir())
+		config, data, cache := DefaultDirs(runtime.GOOS, home)
+		assert.Equal(t, config, paths.GetConfigDir())
+		assert.Equal(t, data, paths.GetDataDir())
+		assert.Equal(t, cache, paths.GetCacheDir())
 
 		// pkg/path prefers HOME over os.UserHomeDir on every platform.
 		expanded, err := pathx.ExpandHomeDir("~")
@@ -128,4 +131,44 @@ func TestSetenvRestoresUnsetVariable(t *testing.T) {
 	restore()
 	_, set := os.LookupEnv(name)
 	assert.False(t, set)
+}
+
+func TestUnsetenvRestoresPreviousState(t *testing.T) {
+	const name = "TESTUTIL_UNSETENV_VARIABLE"
+	t.Setenv(name, "") // Restores the variable after the test.
+
+	require.NoError(t, os.Unsetenv(name))
+	restore := unsetenv(name)
+	setenv(name, "set-during-run")
+	restore()
+	_, set := os.LookupEnv(name)
+	assert.False(t, set, "a variable that was unset must be unset again")
+
+	setenv(name, "original")
+	restore = unsetenv(name)
+	_, set = os.LookupEnv(name)
+	assert.False(t, set)
+	restore()
+	assert.Equal(t, "original", os.Getenv(name))
+}
+
+func TestSetHomeIsolatesState(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	paths.SetRoot("")
+
+	home := t.TempDir()
+	SetHome(t, home)
+
+	assert.Equal(t, home, os.Getenv("HOME"))
+	assert.Equal(t, home, os.Getenv("USERPROFILE"))
+	for _, name := range xdgVariables {
+		assert.Empty(t, os.Getenv(name), name)
+	}
+
+	config, data, cache := DefaultDirs(runtime.GOOS, home)
+	assert.Equal(t, config, paths.GetConfigDir())
+	assert.Equal(t, data, paths.GetDataDir())
+	assert.Equal(t, cache, paths.GetCacheDir())
 }

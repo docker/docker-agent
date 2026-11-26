@@ -111,7 +111,7 @@ For most consumers this is pass-through metadata: collectors and backends that i
 
 ## Inspecting traces locally
 
-Use `--debug` to print telemetry activity to the debug log (`~/.cagent/cagent.debug.log` by default) without standing up a backend:
+Use `--debug` to print telemetry activity to the debug log (`cagent.debug.log` in the [data directory](../directories/index.md) by default) without standing up a backend:
 
 ```bash
 docker agent run agent.yaml --otel --debug

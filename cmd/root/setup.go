@@ -105,8 +105,9 @@ Four paths:
   - Built-in cloud provider: pick a provider docker agent already knows
     (Anthropic, OpenAI, Google, Groq, Hugging Face, ...) and connect it.
     Credentials vary by provider: most paste an API key or token, stored in
-    the docker agent env file (~/.config/cagent/.env), while chatgpt signs
-    in with your ChatGPT account in the browser instead.
+    the docker agent env file (.env in the config directory; see
+    --config-dir), while chatgpt signs in with your ChatGPT account in the
+    browser instead.
   - Local model: check Docker Model Runner and pull a model. No API key needed.
   - Custom OpenAI-compatible endpoint: for endpoints that are not built in
     (vLLM, LiteLLM, a corporate gateway, ...). Register the endpoint with

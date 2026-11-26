@@ -56,6 +56,8 @@
       url: /configuration/routing/
     - title: User Settings
       url: /configuration/user-settings/
+    - title: State Directories
+      url: /configuration/directories/
     - title: Telemetry
       url: /configuration/telemetry/
     - title: OpenTelemetry Tracing

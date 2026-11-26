@@ -101,7 +101,7 @@ is a quick reference.
 
 ## Debug and Development Flags
 
-- `--debug` or `-d` — Enable debug logging (logs to `~/.cagent/cagent.debug.log`)
+- `--debug` or `-d` — Enable debug logging (logs to `cagent.debug.log` in the data directory)
 - `--log-file <path>` — Specify custom debug log location
 - `--otel` or `-o` — Enable OpenTelemetry tracing
 - Example: `./bin/docker-agent run config.yaml --debug --log-file ./debug.log`

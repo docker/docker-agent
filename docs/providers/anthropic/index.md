@@ -378,10 +378,10 @@ Cost estimates use the **actual response speed** (`usage.speed`), not the reques
 
 ### Global default
 
-To enable fast mode without editing each agent file, set it in your user configuration (`~/.config/cagent/config.yaml`). A `providers` entry with `provider: anthropic` is a native Anthropic provider, so it needs no `base_url`. Select it with its name:
+To enable fast mode without editing each agent file, set it in your user configuration ([`<config-dir>`](../../configuration/directories/index.md)`/config.yaml`). A `providers` entry with `provider: anthropic` is a native Anthropic provider, so it needs no `base_url`. Select it with its name:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 providers:
   fast-claude:
     provider: anthropic

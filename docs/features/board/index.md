@@ -68,7 +68,7 @@ Requirements: `tmux` and `git` must be installed.
 ## Configuration
 
 Everything is configured in the global config file
-(`~/.config/cagent/config.yaml`) or through the TUI itself (`p` for projects,
+([`<config-dir>`](../../configuration/directories/index.md)`/config.yaml`) or through the TUI itself (`p` for projects,
 `c` for columns, `e` for column prompts):
 
 ```yaml

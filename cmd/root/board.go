@@ -21,7 +21,8 @@ through the pipeline (Dev → Review → Push → Done) sends the
 destination column's prompt to its agent.
 
 Projects and column prompts are stored in the global config file
-(~/.config/cagent/config.yaml) and can be managed from the TUI.`,
+(config.yaml in the config directory; see --config-dir) and can be managed
+from the TUI.`,
 		Example:      `  docker-agent board`,
 		Args:         cobra.NoArgs,
 		GroupID:      "advanced",

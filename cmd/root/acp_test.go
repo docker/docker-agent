@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 func TestACPArgs(t *testing.T) {
@@ -39,8 +41,7 @@ func TestACPArgs(t *testing.T) {
 
 func TestACPWithoutAgent(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	sessionDB := filepath.Join(t.TempDir(), "session.db")
 
 	cmd := newACPCmd()

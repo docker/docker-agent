@@ -16,10 +16,10 @@ A session is only persisted to disk once it has content (the first message added
 
 ## Where Sessions Are Stored
 
-Sessions live in a SQLite database, `session.db`, under the [data directory](../cli/index.md#global-flags) (`~/.cagent` by default):
+Sessions live in a SQLite database, `session.db`, under the [data directory](../../configuration/directories/index.md). On Linux that is `~/.local/share/cagent` for a new installation, or `~/.cagent` if you already had one:
 
 ```bash
-$ ls ~/.cagent/session.db
+$ ls ~/.local/share/cagent/session.db
 ```
 
 Override the location with `-s`/`--session-db`, or by overriding the data directory itself with `--data-dir` or `DOCKER_AGENT_DATA_DIR` (`--data-dir` takes precedence):
@@ -103,7 +103,7 @@ Press `/sessions` to open the session browser: search and filter past conversati
 <kbd>Ctrl</kbd>+<kbd>T</kbd> opens a new tab running an additional agent session alongside the current one; <kbd>Ctrl</kbd>+<kbd>N</kbd>/<kbd>Ctrl</kbd>+<kbd>P</kbd> cycle between tabs and <kbd>Ctrl</kbd>+<kbd>W</kbd> closes the current one. By default, tabs are not restored the next time you launch the TUI. Set `restore_tabs: true` in your user config to reopen the same tabs (and their sessions) on the next launch:
 
 ```yaml
-# ~/.config/cagent/config.yaml
+# <config-dir>/config.yaml
 settings:
   restore_tabs: true
 ```

@@ -88,7 +88,7 @@ When configuring MCP or LSP tools that require a binary command, Docker Agent ca
 ### How It Works
 
 1. When a toolset with a `command` is loaded, Docker Agent checks if the command is available in your `PATH`
-2. If not found, it checks the Docker Agent tools directory (`~/.cagent/tools/bin/`)
+2. If not found, it checks the Docker Agent tools directory (`<data-dir>/tools/bin/`)
 3. If still not found, it looks up the command in the aqua registry and installs it automatically
 
 ### Explicit Package Reference
@@ -154,10 +154,10 @@ export DOCKER_AGENT_AUTO_INSTALL=false
 | Variable                     | Default            | Description                                      |
 | ---------------------------- | ------------------ | ------------------------------------------------ |
 | `DOCKER_AGENT_AUTO_INSTALL`  | (enabled)          | Set to `false` to disable all auto-installation  |
-| `DOCKER_AGENT_TOOLS_DIR`     | `~/.cagent/tools/` | Base directory for installed tools               |
+| `DOCKER_AGENT_TOOLS_DIR`     | `<data-dir>/tools/` | Base directory for installed tools               |
 | `GITHUB_TOKEN`               | —                  | GitHub token to raise API rate limits (optional) |
 
-Installed binaries are placed in `~/.cagent/tools/bin/` and cached so they are only downloaded once.
+Installed binaries are placed in `<data-dir>/tools/bin/` and cached so they are only downloaded once. See [State Directories](../directories/index.md) for where `<data-dir>` is.
 
 > [!TIP]
 > Auto-install supports both Go packages (via `go install`) and GitHub release binaries (via archive download). The aqua registry metadata determines which method is used.

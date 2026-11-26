@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
@@ -431,8 +432,7 @@ func TestSpeech_LeavingAndReturningRevokesSend(t *testing.T) {
 
 func TestNew_KeepsInjectedTranscriber(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 	ft := &fakeTranscriber{supported: true}
 
 	a := app.New(t.Context(), stubRuntime{}, &session.Session{ID: "speak", Title: "speak"})

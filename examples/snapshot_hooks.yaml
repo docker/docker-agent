@@ -1,15 +1,15 @@
 #
 # Shadow-git snapshot hook
 # ------------------------
-# Records filesystem snapshots under the docker-agent data
-# directory (`~/.cagent/snapshot/...` by default) without touching the
-# source repository's `.git` directory.
+# Records filesystem snapshots under `snapshot/` in the docker-agent
+# data directory, without touching the source repository's `.git`
+# directory.
 #
 # The builtin is a no-op outside git repositories. It mirrors the source
 # repo's ignore rules and skips newly-added files larger than 2 MiB.
 #
 # To enable the same turn-level snapshots for every agent, set this in
-# ~/.config/cagent/config.yaml instead of wiring hooks manually:
+# config.yaml in your config directory instead of wiring hooks manually:
 #
 # settings:
 #   snapshot: true

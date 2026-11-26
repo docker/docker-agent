@@ -435,7 +435,7 @@ func (t *Toolset) validate() error {
 	case "background_jobs":
 		// no additional validation needed
 	case "memory":
-		// path is optional; defaults to ~/.cagent/memory/<agent-name>/memory.db
+		// path is optional; defaults to <data-dir>/memory/<agent-name>/memory.db
 	case "tasks":
 		// path defaults to ./tasks.json if not set
 	case "mcp":

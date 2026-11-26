@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -37,6 +38,9 @@ import (
 var harnessBinDir string
 
 func TestMain(m *testing.M) {
+	// Tests that isolate HOME must not pick up the host's XDG directories.
+	testutil.ClearXDG()
+
 	// The production JS-command wiring lives in pkg/runtime/jscommands,
 	// which in-package tests cannot import (cycle); register the same
 	// evaluator directly for the command-resolution tests.

@@ -1,5 +1,5 @@
 // Package userconfig provides user-level configuration for docker agent.
-// This configuration is stored in ~/.config/cagent/config.yaml and contains
+// This configuration is stored in config.yaml in the config directory and contains
 // user preferences like aliases.
 package userconfig
 
@@ -83,7 +83,7 @@ type Settings struct {
 	// Defaults to true when not set.
 	FadeScrollEdges *bool `yaml:"fade_scroll_edges,omitempty"`
 	// Theme is the default theme reference (e.g., "dark", "light")
-	// Theme files are loaded from ~/.cagent/themes/<theme>.yaml
+	// Theme files are loaded from <data-dir>/themes/<theme>.yaml
 	// The special value "auto" follows the terminal's light/dark background,
 	// resolving to ThemeDark or ThemeLight.
 	Theme string `yaml:"theme,omitempty"`

@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/tui"
 	"github.com/docker/docker-agent/pkg/tui/tuitest"
 )
@@ -104,8 +105,7 @@ func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, p
 func isolateState(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	t.Setenv("USERPROFILE", dir)
+	testutil.SetHome(t, dir)
 	paths.SetDataDir(filepath.Join(dir, "data"))
 	paths.SetConfigDir(filepath.Join(dir, "config"))
 	t.Cleanup(func() {
@@ -116,8 +116,7 @@ func isolateState(t *testing.T) {
 
 func TestIsolateState_PromptHistory(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	hostHistory, err := history.New("")
 	require.NoError(t, err)

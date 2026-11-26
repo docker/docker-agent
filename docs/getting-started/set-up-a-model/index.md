@@ -57,10 +57,10 @@ That lasts for the current shell session. To set a key up once, use any other bu
 $ echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 $ docker agent run --env-from-file .env
 
-# Docker Agent env file, read automatically on every run
-# (`docker agent setup` writes it for you with owner-only permissions)
-$ echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.config/cagent/.env
-$ chmod 600 ~/.config/cagent/.env
+# Docker Agent env file, read automatically on every run.
+# `docker agent setup` writes it with owner-only permissions, and
+# `docker agent doctor` prints where it lives.
+$ docker agent setup
 ```
 
 The entry name must match the environment variable the provider expects. [Managing Secrets](../../guides/secrets/index.md) covers every source (Docker Compose secrets, credential helpers, 1Password references) and the order they are checked in.
@@ -78,7 +78,7 @@ $ docker agent doctor
 
 ```text
 User configuration
-  ~/.config/cagent/config.yaml: ok
+  <config-dir>/config.yaml: ok
 
 Model provider credentials
   PROVIDER    STATUS    CREDENTIAL          SOURCE
@@ -149,7 +149,7 @@ $ docker agent doctor
 
 ```text
 User configuration
-  ~/.config/cagent/config.yaml: ok
+  <config-dir>/config.yaml: ok
 
 Model provider credentials
   PROVIDER    STATUS    CREDENTIAL          SOURCE
@@ -194,7 +194,7 @@ The interactive wizard is the quickest way:
 $ docker agent setup   # pick "Custom OpenAI-compatible endpoint"
 ```
 
-Or define the provider once in your user configuration (`~/.config/cagent/config.yaml`):
+Or define the provider once in your user configuration ([`<config-dir>`](../../configuration/directories/index.md)`/config.yaml`):
 
 ```yaml
 providers:

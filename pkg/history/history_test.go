@@ -21,25 +21,24 @@ import (
 
 	"github.com/docker/docker-agent/pkg/internal/portcullistest"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
 
 func TestNew(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	h, err := New("")
 	require.NoError(t, err)
 
-	assert.Equal(t, filepath.Join(home, ".cagent", "history"), h.path)
+	assert.Equal(t, filepath.Join(paths.GetDataDir(), "history"), h.path)
 	assert.Equal(t, 0, h.current)
 	assert.Empty(t, h.Messages)
 }
 
 func TestNew_FollowsDataDir(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	homeDataDir := filepath.Join(home, ".cagent")
 	require.NoError(t, os.MkdirAll(homeDataDir, 0o700))
@@ -125,8 +124,7 @@ func TestNew_ExplicitDirectoryWins(t *testing.T) {
 
 func TestHistory_AddAndSave(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	h, err := New("")
 	require.NoError(t, err)
@@ -148,8 +146,7 @@ func TestHistory_AddAndSave(t *testing.T) {
 
 func TestHistory_Navigation(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	h, err := New("")
 	require.NoError(t, err)
@@ -174,8 +171,7 @@ func TestHistory_Navigation(t *testing.T) {
 
 func TestHistory_EdgeCases(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	h, err := New("")
 	require.NoError(t, err)
@@ -192,8 +188,7 @@ func TestHistory_EdgeCases(t *testing.T) {
 
 func TestHistory_NoDuplicateMessages(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	h, err := New("")
 	require.NoError(t, err)
@@ -209,8 +204,7 @@ func TestHistory_NoDuplicateMessages(t *testing.T) {
 
 func TestHistory_MoveDuplicateLast(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testutil.SetHome(t, home)
 
 	h, err := New("")
 	require.NoError(t, err)
