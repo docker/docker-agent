@@ -51,6 +51,9 @@ type fakeRuntime struct {
 	release chan struct{}
 }
 
+// Close is a no-op: server-owned runtimes are closed when their session is deleted.
+func (f *fakeRuntime) Close() error { return nil }
+
 func (f *fakeRuntime) RunStream(ctx context.Context, _ *session.Session) <-chan runtime.Event {
 	cur := f.concurrentStreams.Add(1)
 	for {
@@ -1487,7 +1490,7 @@ func TestRuntimeForSession_RegistersSessionScopedElicitationSink(t *testing.T) {
 
 	require.False(t, sm.HasEventSource(sess.ID))
 
-	run, _, err := sm.runtimeForSession(ctx, sess, "agent.yaml", "", &config.RuntimeConfig{})
+	run, _, _, err := sm.runtimeForSession(ctx, sess, "agent.yaml", "", &config.RuntimeConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = run.Close() })
 
@@ -2017,7 +2020,7 @@ func TestDeleteSession_SilencesLiveRuntimeElicitationDelivery(t *testing.T) {
 	sources := config.Sources{"agent.yaml": config.NewBytesSource("agent.yaml", cfg)}
 	sm := NewSessionManager(ctx, sources, store, 0, &config.RuntimeConfig{})
 
-	run, _, err := sm.runtimeForSession(ctx, sess, "agent.yaml", "", &config.RuntimeConfig{})
+	run, _, _, err := sm.runtimeForSession(ctx, sess, "agent.yaml", "", &config.RuntimeConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = run.Close() })
 	lr, ok := run.(*runtime.LocalRuntime)

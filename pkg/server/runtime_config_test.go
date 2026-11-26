@@ -165,7 +165,7 @@ func newAPIRuntimeForSession(t *testing.T, sm *SessionManager, sess *session.Ses
 		t.Cleanup(func() { require.NoError(t, tm.StopToolSets(context.WithoutCancel(t.Context()))) })
 		return runtime.New(ctx, tm, opts...)
 	}
-	run, _, err := sm.runtimeForSession(t.Context(), sess, "agent.yaml", selected, sm.runConfig)
+	run, _, _, err := sm.runtimeForSession(t.Context(), sess, "agent.yaml", selected, sm.runConfig)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, run.Close()) })
 	require.NotNil(t, loadedTeam)

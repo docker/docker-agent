@@ -37,7 +37,10 @@ import (
 )
 
 type activeRuntimes struct {
-	runtime  runtime.Runtime
+	runtime runtime.Runtime
+	// team is the team the server built for this runtime (RunSession), stopped on deletion.
+	// Nil for attached runtimes: their embedder owns the team.
+	team     *team.Team
 	done     <-chan struct{} // Closed when the session is deleted/detached. Nil for sessions without lifetime tracking.
 	cancel   context.CancelFunc
 	session  *session.Session        // The actual session object used by the runtime
@@ -893,7 +896,9 @@ func (sm *SessionManager) GetSessions(ctx context.Context) ([]*session.Session, 
 
 // DeleteSession deletes a session by ID. It cancels the runtime context and
 // removes the session from all registries. Callers that need to wait for
-// the stream to fully stop should call WaitStopped afterwards.
+// the stream to fully stop should call WaitStopped afterwards. The runtime and
+// toolsets the server built for the session are released in the background once
+// the stream has ended; WaitStopped does not wait for that.
 func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) error {
 	return sm.deleteSession(ctx, sessionID, true)
 }
@@ -926,7 +931,7 @@ func (sm *SessionManager) deleteSession(ctx context.Context, sessionID string, t
 			sm.mux.Unlock()
 			return err
 		}
-		sm.finishSessionDeletion(sess.ID, nil, trackStopped)
+		sm.finishSessionDeletion(ctx, sess.ID, nil, trackStopped)
 		sm.mux.Unlock()
 		return nil
 	}
@@ -943,13 +948,13 @@ func (sm *SessionManager) deleteSession(ctx context.Context, sessionID string, t
 
 	sm.mux.Lock()
 	defer sm.mux.Unlock()
-	sm.finishSessionDeletion(sess.ID, sessionRuntime, trackStopped)
+	sm.finishSessionDeletion(ctx, sess.ID, sessionRuntime, trackStopped)
 	return nil
 }
 
 // finishSessionDeletion removes manager state after the store row is gone.
 // The caller holds sm.mux.
-func (sm *SessionManager) finishSessionDeletion(sessionID string, sessionRuntime *activeRuntimes, trackStopped bool) {
+func (sm *SessionManager) finishSessionDeletion(ctx context.Context, sessionID string, sessionRuntime *activeRuntimes, trackStopped bool) {
 	if sessionRuntime != nil {
 		// Server-owned runtimes (done == nil) carry the manager's own
 		// elicitation sink (see runtimeForSession); clear it so a detached
@@ -971,25 +976,22 @@ func (sm *SessionManager) finishSessionDeletion(sessionID string, sessionRuntime
 		if trackStopped {
 			sm.deletedSessions.Store(sessionID, sessionRuntime)
 		}
-
-		if trackStopped {
-			// Background cleanup prevents leaks when the caller omits ?wait=true.
+		// Attached runtimes (done != nil) are stopped by their embedder.
+		serverOwned := sessionRuntime.done == nil
+		if trackStopped || serverOwned {
+			// Detached from the request: teardown must outlive it.
+			ctx = context.WithoutCancel(ctx)
 			go func() {
-				ticker := time.NewTicker(100 * time.Millisecond)
-				defer ticker.Stop()
-				deadline := time.After(5 * time.Minute)
-				for {
-					if sessionRuntime.streaming.TryLock() {
-						sessionRuntime.streaming.Unlock()
-						sm.deletedSessions.Delete(sessionID)
-						return
+				// Background cleanup prevents leaks when the caller omits ?wait=true.
+				ended := awaitStreamIdle(sessionRuntime, releaseStreamWait)
+				if trackStopped {
+					sm.deletedSessions.Delete(sessionID)
+				}
+				if serverOwned {
+					if !ended {
+						slog.WarnContext(ctx, "Releasing runtime of deleted session while its stream is still running", "session_id", sessionID)
 					}
-					select {
-					case <-deadline:
-						sm.deletedSessions.Delete(sessionID)
-						return
-					case <-ticker.C:
-					}
+					releaseRuntime(ctx, sessionID, sessionRuntime)
 				}
 			}()
 		}
@@ -1065,7 +1067,8 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		}
 
 		var rt runtime.Runtime
-		rt, titleGen, err = sm.runtimeForSession(ctx, sess, agentFilename, currentAgent, sm.runConfig)
+		var sessionTeam *team.Team
+		rt, titleGen, sessionTeam, err = sm.runtimeForSession(ctx, sess, agentFilename, currentAgent, sm.runConfig)
 		if err != nil {
 			sm.mux.Unlock()
 			cancel()
@@ -1073,6 +1076,7 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		}
 		runtimeSession = &activeRuntimes{
 			runtime:  rt,
+			team:     sessionTeam,
 			cancel:   cancel,
 			session:  sess,
 			titleGen: titleGen,
@@ -1650,7 +1654,7 @@ func (sm *SessionManager) generateTitle(ctx context.Context, sess *session.Sessi
 	}
 }
 
-func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.Session, agentFilename, currentAgent string, rc *config.RuntimeConfig) (_ runtime.Runtime, _ *sessiontitle.Generator, err error) {
+func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.Session, agentFilename, currentAgent string, rc *config.RuntimeConfig) (_ runtime.Runtime, _ *sessiontitle.Generator, _ *team.Team, err error) {
 	// Caller (RunSession) holds sm.mux and has already verified that no
 	// active runtime exists for this session. This function is purely a
 	// constructor: it must not touch sm.runtimeSessions, otherwise it would
@@ -1676,14 +1680,14 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 
 	loadResult, err := sm.loadTeamWithConfig(ctx, agentFilename, rc, teamloader.WithWorkingDir(sess.WorkingDir))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	t := loadResult.Team
 
 	// Resolve the team's default agent when no specific agent was requested.
 	agt, err := t.AgentOrDefault(currentAgent)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	currentAgent = agt.Name()
 	sess.MaxIterations = agt.MaxIterations()
@@ -1740,7 +1744,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 	}
 	run, err := newRuntime(ctx, t, opts...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// If any later construction step fails, close the runtime before
 	// returning: the caller only ever sees the error, so an unclosed
@@ -1784,7 +1788,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 
 	slog.DebugContext(ctx, "Runtime created for session", "session_id", sess.ID)
 
-	return run, titleGen, nil
+	return run, titleGen, t, nil
 }
 
 // applyAuthorSafetyDefault seeds an API-created session that carries no
