@@ -52,11 +52,17 @@ func TestSourceCopyHidesAmbiguousBlocks(t *testing.T) {
 		"```\na\n```\n\n```\nb\x1b[0m\n```",
 		"\x1b[31mprose\x1b[0m\n\n```\nsafe\n```",
 	} {
-		view, blocks, err := NewFastRenderer(60).RenderWithSourceCodeBlocks(input)
-		require.NoError(t, err)
-		assert.Empty(t, blocks)
-		assert.NotContains(t, view, CodeBlockCopyIcon)
-		assert.NotContains(t, ansi.Strip(view), "hidden")
+		for _, trusted := range []bool{false, true} {
+			r := NewFastRenderer(60)
+			if trusted {
+				r.AllowSGR()
+			}
+			view, blocks, err := r.RenderWithSourceCodeBlocks(input)
+			require.NoError(t, err)
+			assert.Empty(t, blocks, "trusted=%v input=%q", trusted, input)
+			assert.NotContains(t, view, CodeBlockCopyIcon)
+			assert.NotContains(t, ansi.Strip(view), "hidden")
+		}
 	}
 }
 
@@ -92,4 +98,35 @@ func TestLongFenceIncrementalMatchesFullRender(t *testing.T) {
 		assert.Equal(t, want, got, "at %d", end)
 		assert.Equal(t, wantBlocks, blocks, "at %d", end)
 	}
+}
+
+func TestSourceCopyTrustedSGRDisplaySafety(t *testing.T) {
+	t.Parallel()
+	for _, control := range []string{"\x1b[32m", "\x9b32m", "\u009b32m", "\x1b]52;c;cHduZWQ=\x07", "\x1b[2J"} {
+		for _, input := range []string{
+			control + "prose\n\n```\nsafe\n```",
+			"```\n" + control + "safe\n```",
+			"```\nsafe\n```\n\n" + control + "prose",
+		} {
+			r := NewFastRenderer(60).AllowSGR()
+			want, err := NewFastRenderer(60).AllowSGR().HideCopyIcon().Render(input)
+			require.NoError(t, err)
+			view, blocks, err := r.RenderWithSourceCodeBlocks(input)
+			require.NoError(t, err)
+			assert.Equal(t, want, view, "trusted styling remains visible without copy labels")
+			assert.Empty(t, blocks)
+			assert.NotContains(t, view, CodeBlockCopyIcon)
+			assert.NotContains(t, view, "\x1b]52;")
+			assert.NotContains(t, view, "\x1b[2J")
+
+			view, blocks, err = r.RenderWithSourceCodeBlocks("```\r\none\r\ntwo\r\n```")
+			require.NoError(t, err)
+			require.Len(t, blocks, 1, "the renderer still permits copying control-free source")
+			assert.Equal(t, "one\r\ntwo", blocks[0].Content)
+			assert.Contains(t, view, CodeBlockCopyIcon)
+		}
+	}
+	view, _, err := NewFastRenderer(60).AllowSGR().RenderWithSourceCodeBlocks("\x1b[32mprose\x1b[0m\n\n```\nsafe\n```")
+	require.NoError(t, err)
+	assert.Contains(t, view, "\x1b[32mprose\x1b[0m")
 }
