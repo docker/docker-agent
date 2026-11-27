@@ -569,6 +569,118 @@ func TestEscapeWhileIdleDismissesAutocomplete(t *testing.T) {
 	assert.False(t, m.quitting)
 }
 
+func TestEscapeInterruptsToolsAfterMidStreamCompaction(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	m := bareModel(80)
+	m.app = app.New(t.Context(), &cycleThinkingRuntime{}, sess)
+	m.sessionState = service.NewSessionState(sess)
+
+	runCtx, cancel := context.WithCancel(t.Context())
+	m.busy = true
+	m.runCancel = cancel
+	m.queue = []ui.PendingUserMessage{{Content: "queued follow-up"}}
+
+	m.handleEvent(t.Context(), runtime.StreamStarted(sess.ID, "coder"))
+	m.handleEvent(t.Context(), runtime.SessionCompaction(sess.ID, "started", "coder"))
+	assert.True(t, m.status.Compacting)
+
+	m.handleEvent(t.Context(), runtime.SessionCompactionCompleted(sess.ID, runtime.CompactionOutcomeApplied, "coder"))
+	assert.False(t, m.status.Compacting)
+	assert.True(t, m.busy)
+	assert.NotNil(t, m.runCancel)
+	assert.Len(t, m.queue, 1)
+
+	toolCall := tools.ToolCall{
+		ID:       "call-1",
+		Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"sleep 60"}`},
+	}
+	m.handleEvent(t.Context(), runtime.ToolCall(toolCall, tools.Tool{Name: "shell"}, "coder"))
+	require.Equal(t, 1, m.screen.Transcript.ToolCount())
+
+	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
+	require.ErrorIs(t, runCtx.Err(), context.Canceled)
+	assert.Empty(t, m.queue)
+
+	m.handleEvent(t.Context(), runtime.StreamStopped(sess.ID, "coder", "canceled"))
+	assert.False(t, m.busy)
+	assert.Nil(t, m.runCancel)
+	assert.Zero(t, m.screen.Transcript.ToolCount())
+	transcript := strings.Join(m.screen.Transcript.Lines(80, 0, false, m.sessionState, nil), "\n")
+	assert.Contains(t, transcript, "Cancelled")
+}
+
+func TestSubSessionCompactionKeepsRootRunCancel(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	m := bareModel(80)
+	m.app = app.New(t.Context(), &cycleThinkingRuntime{}, sess)
+	m.sessionState = service.NewSessionState(sess)
+
+	runCtx, cancel := context.WithCancel(t.Context())
+	m.busy = true
+	m.runCancel = cancel
+	m.queue = []ui.PendingUserMessage{{Content: "queued follow-up"}}
+
+	m.handleEvent(t.Context(), runtime.SessionCompaction("sub-session-1", "started", "worker"))
+	assert.False(t, m.status.Compacting)
+
+	m.handleEvent(t.Context(), runtime.SessionCompactionCompleted("sub-session-1", runtime.CompactionOutcomeApplied, "worker"))
+	assert.False(t, m.status.Compacting)
+	assert.True(t, m.busy)
+	assert.NotNil(t, m.runCancel)
+	assert.Len(t, m.queue, 1)
+
+	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
+	require.ErrorIs(t, runCtx.Err(), context.Canceled)
+}
+
+func TestStandaloneCompactionCompletesRun(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	m := bareModel(80)
+	m.app = app.New(t.Context(), &cycleThinkingRuntime{}, sess)
+	m.sessionState = service.NewSessionState(sess)
+
+	_, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	m.busy = true
+	m.runCancel = cancel
+
+	m.handleEvent(t.Context(), runtime.SessionCompaction(sess.ID, "started", "coder"))
+	assert.True(t, m.status.Compacting)
+
+	m.handleEvent(t.Context(), runtime.SessionCompactionCompleted(sess.ID, runtime.CompactionOutcomeApplied, "coder"))
+	assert.False(t, m.status.Compacting)
+	assert.False(t, m.busy)
+	assert.Nil(t, m.runCancel)
+}
+
+func TestCompactRejectedWhileRunActive(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	m := bareModel(80)
+	m.app = app.New(t.Context(), &cycleThinkingRuntime{}, sess)
+	m.sessionState = service.NewSessionState(sess)
+
+	runCtx, cancel := m.beginRun(t.Context())
+	defer cancel()
+	m.handleEvent(t.Context(), runtime.StreamStarted(sess.ID, "coder"))
+
+	assert.True(t, m.handleSlash(t.Context(), "/compact", busySubmitSteer))
+	require.NoError(t, runCtx.Err())
+	assert.True(t, m.busy)
+	assert.Equal(t, 1, m.streamDepth)
+
+	transcript := strings.Join(m.screen.Transcript.Lines(80, 0, true, m.sessionState, nil), "\n")
+	assert.Contains(t, transcript, "Wait for the current response to finish before compacting")
+
+	m.handleEvent(t.Context(), runtime.StreamStopped(sess.ID, "coder", "normal"))
+	assert.False(t, m.busy)
+	assert.Nil(t, m.runCancel)
+	assert.Zero(t, m.streamDepth)
+}
+
 func TestShiftEnterInsertsNewline(t *testing.T) {
 	t.Parallel()
 	m := bareModel(24)

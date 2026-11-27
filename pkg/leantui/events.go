@@ -151,7 +151,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.ToolsetInfoEvent:
 		m.refreshCommands(ctx)
 	case *runtime.SessionTitleEvent:
-		if e.SessionID != "" && m.contentSession("") != "" && e.SessionID != m.contentSession("") {
+		if m.isSubSessionEvent(e.SessionID) {
 			return
 		}
 		m.applySessionTitle(e.Title)
@@ -234,12 +234,19 @@ func (m *model) handleStreamStopped(ctx context.Context) {
 }
 
 func (m *model) handleSessionCompaction(ctx context.Context, e *runtime.SessionCompactionEvent) {
+	if m.isSubSessionEvent(e.SessionID) {
+		return
+	}
 	switch e.Status {
 	case "started":
 		m.busy = true
 		m.status.Compacting = true
 	case "completed":
 		m.status.Compacting = false
+		if m.streamDepth > 0 {
+			// Mid-stream compaction is not a turn boundary; StreamStopped owns cleanup.
+			return
+		}
 		m.finishBusy(ctx)
 	}
 }
@@ -311,4 +318,9 @@ func (m *model) contentSession(sessionID string) string {
 		return m.app.Session().ID
 	}
 	return sessionID
+}
+
+func (m *model) isSubSessionEvent(sessionID string) bool {
+	rootID := m.contentSession("")
+	return sessionID != "" && rootID != "" && sessionID != rootID
 }
