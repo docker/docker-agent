@@ -45,6 +45,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 	case *runtime.StreamStartedEvent:
 		m.contentIdentity.Finish(m.contentSession(e.SessionID))
+		m.sessionStreams.Start(m.contentSession(e.SessionID))
 		if m.streamDepth == 0 {
 			m.streamStartTime = time.Now()
 		}
@@ -57,9 +58,10 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		if e.SessionID != "" && e.SessionID != m.contentSession("") {
 			return
 		}
-		m.screen.Transcript.FlushPending()
+		m.screen.Transcript.CompleteStream()
 		m.screen.Transcript.FinalizeTools(tuitypes.ToolStatusError, m.sessionState)
 		m.streamDepth = 0
+		m.sessionStreams.Reset()
 		m.usage.RecoverIdle(m.contentSession(e.SessionID))
 		m.applyUsageSnapshot()
 		m.busy = false
@@ -70,6 +72,12 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		m.contentIdentity.Finish(m.contentSession(e.SessionID))
 	case *runtime.StreamStoppedEvent:
 		m.contentIdentity.Finish(m.contentSession(e.SessionID))
+		// A session's replies complete when its last stream stops, so a nested
+		// stream completes its own replies while the parent's stay live. This
+		// also covers remote sessions, whose saved messages are not sent.
+		if m.sessionStreams.Stop(m.contentSession(e.SessionID)) {
+			m.screen.Transcript.CompleteSession(m.contentSession(e.SessionID))
+		}
 		m.trackStreamStopped()
 		m.streamDepth = max(0, m.streamDepth-1)
 		if m.streamDepth > 0 {
@@ -91,6 +99,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		sessionID := m.contentSession(e.SessionID)
 		identity := m.contentIdentity.Resolve(sessionID, e.Message.Message.MessageID)
 		m.screen.Transcript.ReconcileAssistantContent(identity, chat.VisibleAssistantContent(e.Message.Message.Content))
+		m.screen.Transcript.CompleteMessage(identity)
 		m.contentIdentity.Finish(sessionID)
 	case *runtime.ToolCallsRetractedEvent:
 		for _, id := range e.ToolCallIDs {
@@ -247,7 +256,12 @@ func (m *model) handleSessionCompaction(ctx context.Context, e *runtime.SessionC
 // finishBusy clears the busy state at the end of a run and starts the next
 // queued message, if any. It reports whether a queued run was started.
 func (m *model) finishBusy(ctx context.Context) bool {
-	m.screen.Transcript.FlushPending()
+	// Compaction can finish inside a live stream, whose replies stay live.
+	if m.streamDepth == 0 {
+		m.screen.Transcript.CompleteStream()
+	} else {
+		m.screen.Transcript.FlushPending()
+	}
 	m.screen.Transcript.FinalizeTools(tuitypes.ToolStatusError, m.sessionState)
 	if m.cancelMarkerPending {
 		m.screen.Transcript.AddBlock(func(int) []string { return []string{ui.StWarning().Render("⏹ Cancelled")} })

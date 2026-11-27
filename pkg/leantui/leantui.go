@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/gitbranch"
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
+	"github.com/docker/docker-agent/pkg/markdowntransform"
 	"github.com/docker/docker-agent/pkg/programstatus"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/sound"
@@ -76,6 +77,8 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	m := newModel(term, cfg)
+	m.markdown = markdowntransform.Start(loopCtx, userconfig.Get().MarkdownTransformers)
+	m.screen.Transcript.SetMarkdownDisplay(m.markdown)
 	if isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
 		m.programStatus = &programstatus.Reporter{}
 		defer m.programStatus.Finish(os.Stdout)
@@ -159,6 +162,8 @@ func Run(ctx context.Context, cfg Config) error {
 	resizeTicker := time.NewTicker(250 * time.Millisecond)
 	defer resizeTicker.Stop()
 	branchChanges := branchWatcher.Changes()
+	transformed := m.markdown.Changed()
+	var refreshMarkdown <-chan time.Time
 
 	probeTimer := time.NewTimer(200 * time.Millisecond)
 	defer probeTimer.Stop()
@@ -188,6 +193,16 @@ func Run(ctx context.Context, cfg Config) error {
 			m.handleEvent(loopCtx, ev)
 			m.publishProgramStatus()
 			m.render()
+		case <-transformed:
+			transformed = m.markdown.Changed()
+			if refreshMarkdown == nil {
+				refreshMarkdown = time.After(markdowntransform.RefreshInterval)
+			}
+		case <-refreshMarkdown:
+			refreshMarkdown = nil
+			if m.screen.Transcript.RefreshMarkdown() {
+				m.render()
+			}
 		case <-resizeTicker.C:
 			m.resize(term.Size())
 		case <-animationTicker.C:
@@ -313,12 +328,15 @@ type model struct {
 	height int
 
 	screen *ui.Screen
+	// markdown outlives transcripts replaced on /sessions resume.
+	markdown *markdowntransform.Display
 
 	status       ui.StatusModel
 	sessionState *service.SessionState
 	usage        *ui.UsageTracker
 
 	contentIdentity     streamcontent.Tracker
+	sessionStreams      streamcontent.Streams
 	streamDepth         int
 	streamStartTime     time.Time
 	playSound           func(context.Context, sound.Event)
@@ -444,7 +462,8 @@ func (m *model) render() {
 // renderFinal repaints the current state, then erases the input box and footer
 // so only the conversation remains once the program exits.
 func (m *model) renderFinal() {
-	m.screen.Transcript.FlushPending()
+	m.screen.Transcript.CompleteStream()
+	m.screen.Transcript.SettleMarkdown()
 	m.render()
 	m.r.EraseBelow(len(m.screen.Transcript.Lines(m.width, m.spinnerFrame, m.busy, m.sessionState, m.pendingUsers)))
 }
