@@ -183,6 +183,9 @@ For each event dispatch, identical matching hook definitions run once, at the
 position of the first match. Identity includes every hook field: `name`, `type`,
 `command`, `args`, `timeout`, `env`, `working_dir`, `on_error`, `strict_output`, `model`, `prompt`,
 `system_prompt`, and `schema`. Sharing a name or command alone does not make two hooks duplicates.
+Hooks synthesized by the runtime additionally carry an internal marker that
+cannot be written in configuration, so they are never treated as duplicates of
+a user-authored entry.
 
 Hooks with different model prompts, environments, working directories, or other
 options all run. To deliberately run otherwise identical hooks twice, give them
@@ -196,7 +199,13 @@ and `on_error: warn` remain distinct from omitted options.
 This also applies to automatic built-ins: an identical explicit entry runs only
 once, but adding a name or changing an option makes it a separate invocation.
 Disable the corresponding agent flag when you want a custom entry *instead of*
-the automatic default.
+the automatic default. The `tool_response_transform` redaction pair is the
+deliberate exception: when it brackets configured transforms, both
+auto-injected passes carry an internal marker with no YAML or JSON
+representation, so no user-authored entry can reproduce their identity — not
+even by copying the pass's `name` and every other option. The final scrub
+therefore always survives deduplication, and an explicitly wired redactor runs
+as an additional invocation at its configured position.
 
 ## Global (user-level) hooks
 
@@ -288,7 +297,7 @@ Built-ins are typically zero-config and faster than equivalent shell hooks becau
 | `add_recent_commits`    | `session_start`                                                                           | _none_, or `["<N>"]`  | Adds `git log --oneline -n N`. `N` defaults to 10; pass a positive integer to override.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `max_iterations`        | `before_llm_call`                                                                         | `["<N>"]` (required)  | Hard-stops the agent after `N` model calls. Stateless: the runtime supplies the iteration counter on every dispatch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `snapshot`              | `session_start`, `turn_start`, `turn_end`, `pre_tool_use`, `post_tool_use`, `session_end` | _none_                | Records filesystem snapshots in a shadow git repo under the Docker Agent data directory. No-op outside git repos; respects the source repo's ignore rules and skips newly-added files larger than 2 MiB.                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `redact_secrets`        | `tool_input_transform`, `before_llm_call`, `tool_response_transform`                              | _none_                | Scrubs detected secrets (API keys, tokens, private keys, …) out of tool call arguments, outgoing chat content, and tool output. The same builtin handles all three events and dispatches on the event name. Auto-registered on all three events by `redact_secrets: true` on the agent — see [`examples/redact_secrets_hooks.yaml`](https://github.com/docker/docker-agent/blob/main/examples/redact_secrets_hooks.yaml) for the manual wiring.                                                                                                                                                                                     |
+| `redact_secrets`        | `tool_input_transform`, `before_llm_call`, `tool_response_transform`                              | _none_                | Scrubs detected secrets (API keys, tokens, private keys, …) out of tool call arguments, outgoing chat content, and tool output, including the text of inline document attachments and the result metadata. The same builtin handles all three events and dispatches on the event name. Auto-registered on all three events by `redact_secrets: true` on the agent — see [`examples/redact_secrets_hooks.yaml`](https://github.com/docker/docker-agent/blob/main/examples/redact_secrets_hooks.yaml) for the manual wiring.                                                                                                                                                                                     |
 | `transform_json` | `tool_response_transform` | JSON field names | Keeps only the named top-level fields of a JSON object. Nested values are preserved; missing fields are omitted. No expression language or domain validation. |
 | `limit_large_tool_results` | `tool_response_transform`, `session_end`                                               | _none_                | **Always-on safety hook** — automatically injected by the runtime, no configuration required. When a tool result from the `filesystem`, `shell`, `background_jobs`, `mcp`, or `a2a` categories exceeds 2,000 lines or 50 KiB, the full payload is written to a per-session temp file and replaced in the conversation with a notice plus a bounded excerpt (up to 2,000 excerpt lines; 50 KiB including the notice): the tail for most tools, but the head for the built-in filesystem `read_file`, whose notice suggests a follow-up call with `line`/`limit` to continue reading. If saving the payload fails, a bounded inline excerpt is returned without a file reference. Background-job excerpts retain status metadata before the log tail. The `session_end` leg deletes the temp directory. Internal toolsets (`memory`, `plan`, `tasks`, `think`, …) are not affected. |
 | `keep_awake`            | `session_start`, `session_end` | _none_ | CLI-owned sleep inhibitor, controlled by the disabled-by-default `settings.keep_awake` preference. |
@@ -427,8 +436,8 @@ In addition to the common fields, each event ships its own payload:
 | `tool_input_transform`     | `agent_name`, `tool_name`, `tool_use_id`, `tool_category`, `tool_input`, `safety_policy` |
 | `tool_guard`               | `agent_name`, `tool_name`, `tool_use_id`, `tool_category`, `tool_input`, `safety_policy` |
 | `pre_tool_use`              | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`                                                                |
-| `tool_response_transform`   | `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `tool_result_meta`                                         |
-| `post_tool_use`             | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `tool_error`, `tool_result_meta`             |
+| `tool_response_transform`   | `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `tool_result_meta`, `tool_documents`                       |
+| `post_tool_use`             | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `tool_error`, `tool_result_meta`, `tool_documents` |
 | `permission_request`        | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`                                                                |
 | `session_start`             | `source` — `startup` for each run stream                                                             |
 | `user_prompt_submit`        | `prompt` — the text the user just submitted                                                                           |
@@ -661,8 +670,15 @@ The `hook_specific_output` for `tool_response_transform` supports:
 | ----------------------- | ------ | --------------------------------------------- |
 | `updated_tool_response` | string | Rewritten tool output (replaces the original) |
 | `updated_tool_result_meta` | JSON | Replacement for the tool result's display metadata (for example, the recorded diff of an `edit_file` call). A JSON value replaces the metadata, `null` clears it, and omitting the field leaves it unchanged |
+| `updated_tool_documents` | array | Replacement for the tool result's inline document attachments, in the `tools.DocumentContent` shape (`name`, `uri`, `mimeType`, `data`, `text`). MCP servers return text resources as documents with `text` set; they are emitted and persisted with the response, so scrub them here too. A present list replaces the attachments (an empty list drops them); omitting the field leaves them unchanged |
 
 This is the symmetric counterpart of `tool_input_transform`'s `updated_input`, applied to tool **results** instead of tool **arguments**. The rewrite reaches every downstream consumer — event subscribers, the persisted session file, the `post_tool_use` hook input, and the next LLM call. Use it to truncate excessive output, scrub PII, or normalise tool dialects. The built-in `redact_secrets` registers itself on this event as the third leg of the redact_secrets feature.
+
+Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_documents`, the inline document attachments the tool returned. MCP servers return text resources this way (the payload is in `text`), and those documents are emitted to event subscribers and persisted in the session next to the textual output. Only `tool_response_transform` hooks can rewrite the list, with `updated_tool_documents`; the rewritten attachments are what gets emitted and persisted, and `post_tool_use` hooks receive the already-transformed list. `redact_secrets` scrubs each attachment's name, URI, MIME type, and text, so a secret carried in an MCP inline-text resource never reaches the session file or the event stream.
+
+When the agent-level `redact_secrets` flag is on (the default) and other `tool_response_transform` hooks are configured, the auto-injected redactor runs both **before** and **after** them. The leading pass matters because command hooks receive the whole hook input as JSON on stdin: without it, a hook that archives its input would record the original raw tool output, display metadata, and inline document attachments. The trailing pass is the final scrub, so a later rewrite that reintroduces a secret is still caught before the result is emitted, persisted, or handed to `post_tool_use` — for example, a transform placed after an explicitly wired `redact_secrets` entry that rewrites a secret back into the output or the attachments.
+
+This is not one pass over one value: the first configured transform sees the scrubbed original tool result, but every later transform sees the preceding hook's rewrite, before the final scrub runs (`pkg/hooks/pipeline.go`). A transform can therefore introduce a secret that a following hook observes — including a command hook that records its stdin — and only the final scrub runs after the last configured transform. Both auto-injected passes carry an internal identity that no YAML entry can reproduce, so deduplication cannot drop the final scrub even when an explicit redactor copies the automatic pass's label; an explicit redactor entry stays a separate invocation at its configured position.
 
 Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_result_meta`, the structured display metadata a tool recorded alongside its text output (the TUI renders completed `edit_file` diffs from it). Only `tool_response_transform` hooks can rewrite it, with `updated_tool_result_meta` (independently of `updated_tool_response`); the rewritten metadata is what gets emitted and persisted. `post_tool_use` hooks receive the already-transformed metadata and cannot change it. `redact_secrets` also scrubs this metadata, and clears it when it cannot be serialized safely.
 
@@ -675,19 +691,30 @@ Hooks for the following events run **sequentially in configuration order**:
 | `tool_input_transform` | `updated_input` | `tool_input` with the patch applied |
 | `pre_tool_use` (default lane) | `updated_input` | `tool_input` with the patch applied |
 | `before_llm_call` | `updated_messages` | The rewritten `messages` array |
-| `tool_response_transform` | `updated_tool_response`, `updated_tool_result_meta` | The rewritten `tool_response` string and `tool_result_meta` |
+| `tool_response_transform` | `updated_tool_response`, `updated_tool_result_meta`, `updated_tool_documents` | The rewritten `tool_response` string, `tool_result_meta`, and `tool_documents` list |
 
 Every matching hook on these events participates in the sequence, whether it
 rewrites, observes, or returns a verdict. Each hook sees the most recent
 successful rewrite. Hooks that return no rewrite leave the current value
-unchanged; the runtime receives the final result of the sequence.
+unchanged; the runtime receives the final result of the sequence. The
+runtime's auto-injected defaults respect that order: the always-on
+`limit_large_tool_results` runs last, and when `redact_secrets` is enabled it
+runs both ahead of the configured transforms (so the first of them receives a
+scrubbed tool result rather than the raw one) and after them (so whatever the
+last rewrite left behind is scrubbed before emission and persistence). The
+leading pass only sanitizes the original values: a later transform's rewrite
+is visible to the hooks that follow it until the final scrub replaces the
+secret with a marker, so a command hook placed there can still record a secret
+that a previous transform introduced.
 
 `updated_input` patches replace only the top-level keys they supply. Other
 arguments are preserved; nested objects are replaced, not deep-merged. An empty
 patch does not clear the arguments. Omitting a key no longer removes it; this
 patch protocol does not support key deletion. `updated_messages` replaces the entire
 message array, with an empty array treated as no rewrite. An explicit empty
-`updated_tool_response` **does** clear the response.
+`updated_tool_response` **does** clear the response. A present
+`updated_tool_documents` list, including an empty one, replaces the
+attachments; omitting the field keeps the current list.
 
 Verdicts still aggregate across all matching hooks: a later allow cannot undo
 a denial, and `pre_tool_use` keeps `deny > ask > allow` precedence. Blocking

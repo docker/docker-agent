@@ -25,13 +25,15 @@ func NewHooksInput(sess *session.Session, toolCall tools.ToolCall) *hooks.Input 
 
 // NewPostToolHooksInput builds a [hooks.Input] for the post-tool-use event.
 // It enriches the common fields built by [NewHooksInput] with the tool
-// result so post-tool-use hooks can inspect the response and error flag.
+// result so post-tool-use hooks can inspect the response, the error flag,
+// the display metadata, and the inline document attachments.
 func NewPostToolHooksInput(sess *session.Session, toolCall tools.ToolCall, res *tools.ToolCallResult) *hooks.Input {
 	input := NewHooksInput(sess, toolCall)
 	if res != nil {
 		input.ToolResponse = res.Output
 		input.ToolError = res.IsError
 		input.ToolResultMeta = res.Meta
+		input.ToolDocuments = res.Documents
 	}
 	return input
 }

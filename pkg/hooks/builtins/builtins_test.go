@@ -845,25 +845,81 @@ func TestApplyAgentDefaultsAppendsToUserHooks(t *testing.T) {
 	assert.Equal(t, builtins.AddDate, got.TurnStart[1].Command)
 }
 
-func TestApplyAgentDefaultsOrdersTransformsBeforeLimiter(t *testing.T) {
+// TestApplyAgentDefaultsOrdersTransformsAroundRedaction pins the
+// tool_response_transform ordering: the always-on large-result limiter runs
+// last, and when redaction is enabled the auto-injected redaction pass
+// brackets the configured transforms — a preamble so command hooks cannot
+// observe raw tool results (the hook input is piped to their stdin as JSON)
+// and a trailing pass so a rewrite that reintroduces a secret is still
+// scrubbed. The two redaction entries are the same builtin, so both must be
+// distinguishable from user-authored hooks and from each other: the executor
+// deduplicates identical hooks, and `name` is a user-configurable label that
+// an explicit entry could copy. The internal AutoInjected marker that no YAML
+// entry can reproduce is what keeps the passes alive; the names are labels.
+func TestApplyAgentDefaultsOrdersTransformsAroundRedaction(t *testing.T) {
 	t.Parallel()
 
-	for _, redact := range []bool{false, true} {
-		cfg := builtins.ApplyAgentDefaults(&hooks.Config{
-			ToolResponseTransform: []hooks.MatcherConfig{{Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "custom"}}}},
-		}, builtins.AgentDefaults{RedactSecrets: redact})
-		var names []string
-		for _, matcher := range cfg.ToolResponseTransform {
-			for _, hook := range matcher.Hooks {
-				names = append(names, hook.Command)
+	for _, tc := range []struct {
+		name       string
+		redact     bool
+		configured bool
+		want       []string
+	}{
+		{
+			name:       "no redaction",
+			configured: true,
+			want:       []string{"custom", builtins.LimitLargeToolResults},
+		},
+		{
+			name:       "redaction brackets configured transforms",
+			redact:     true,
+			configured: true,
+			want:       []string{builtins.RedactSecrets, "custom", builtins.RedactSecrets, builtins.LimitLargeToolResults},
+		},
+		{
+			name:   "redaction without configured transforms needs one pass",
+			redact: true,
+			want:   []string{builtins.RedactSecrets, builtins.LimitLargeToolResults},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := &hooks.Config{}
+			if tc.configured {
+				cfg.ToolResponseTransform = []hooks.MatcherConfig{{Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "custom"}}}}
 			}
-		}
-		want := []string{"custom"}
-		if redact {
-			want = append(want, builtins.RedactSecrets)
-		}
-		want = append(want, builtins.LimitLargeToolResults)
-		assert.Equal(t, want, names)
+			cfg = builtins.ApplyAgentDefaults(cfg, builtins.AgentDefaults{RedactSecrets: tc.redact})
+
+			var names []string
+			for _, matcher := range cfg.ToolResponseTransform {
+				for _, hook := range matcher.Hooks {
+					names = append(names, hook.Command)
+				}
+			}
+			assert.Equal(t, tc.want, names)
+
+			last := cfg.ToolResponseTransform[len(cfg.ToolResponseTransform)-1]
+			require.Len(t, last.Hooks, 1, "the large-result limiter always runs last")
+
+			if tc.redact && tc.configured {
+				leadingHook := cfg.ToolResponseTransform[0].Hooks[0]
+				trailingHook := cfg.ToolResponseTransform[len(cfg.ToolResponseTransform)-2].Hooks[0]
+				assert.True(t, leadingHook.AutoInjected,
+					"the pre-hook redaction pass needs the internal identity to survive hook dedup")
+				assert.True(t, trailingHook.AutoInjected,
+					"the final redaction pass needs the internal identity to survive hook dedup")
+				assert.NotEmpty(t, leadingHook.Name, "the pre-hook pass keeps a readable label")
+				assert.NotEmpty(t, trailingHook.Name, "the final pass keeps a readable label")
+				assert.NotEqual(t, leadingHook.Name, trailingHook.Name,
+					"the two auto-injected passes keep distinct labels")
+			} else if tc.redact {
+				assert.False(t, cfg.ToolResponseTransform[0].Hooks[0].AutoInjected,
+					"the lone redaction pass keeps its historical identity when nothing is bracketed")
+				assert.Empty(t, cfg.ToolResponseTransform[0].Hooks[0].Name,
+					"the lone redaction pass keeps its historical identity when nothing is bracketed")
+			}
+		})
 	}
 }
 

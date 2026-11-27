@@ -262,7 +262,7 @@ Secret redaction is enabled by default as a defense in depth. Set `redact_secret
 
 - the arguments of every outgoing tool call (before the tool sees them),
 - every outgoing chat message (before the model provider sees them), and
-- every tool's output (before it reaches event consumers, the persisted session file, the `post_tool_use` hook input, or the next LLM call).
+- every tool's output, including the text of the inline document attachments it returns (before they reach event consumers, the persisted session file, the `post_tool_use` hook input, or the next LLM call).
 
 ```yaml
 agents:

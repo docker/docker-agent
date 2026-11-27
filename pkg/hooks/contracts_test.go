@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/hooks/events"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestEventContractsMatchConfigurationAndSchema(t *testing.T) {
@@ -70,6 +71,7 @@ func TestStrictOutputContractCapabilities(t *testing.T) {
 				{"input", &Output{HookSpecificOutput: &HookSpecificOutput{UpdatedInput: map[string]any{}}}, c.Rewrite == events.RewriteToolInput},
 				{"response", &Output{HookSpecificOutput: &HookSpecificOutput{UpdatedToolResponse: new("")}}, c.Rewrite == events.RewriteToolResponse},
 				{"result meta", &Output{HookSpecificOutput: &HookSpecificOutput{UpdatedToolResultMeta: json.RawMessage(`null`)}}, c.Rewrite == events.RewriteToolResponse},
+				{"documents", &Output{HookSpecificOutput: &HookSpecificOutput{UpdatedToolDocuments: []tools.DocumentContent{{Name: "notes.md"}}}}, c.Rewrite == events.RewriteToolResponse},
 				{"context", NewAdditionalContextOutput(EventType(c.Name), "context"), c.Context},
 				{"metadata", &Output{HookSpecificOutput: &HookSpecificOutput{Metadata: map[string]string{}}}, c.Metadata},
 				{"summary", &Output{HookSpecificOutput: &HookSpecificOutput{Summary: "summary"}}, c.Summary},

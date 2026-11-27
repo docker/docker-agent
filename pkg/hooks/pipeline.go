@@ -59,7 +59,7 @@ func rewrittenInput(input Input, event EventType, out *HookSpecificOutput) (Inpu
 		}
 		input.Messages = out.UpdatedMessages
 	case events.RewriteToolResponse:
-		if out.UpdatedToolResponse == nil && out.UpdatedToolResultMeta == nil {
+		if out.UpdatedToolResponse == nil && out.UpdatedToolResultMeta == nil && out.UpdatedToolDocuments == nil {
 			return input, false
 		}
 		if out.UpdatedToolResponse != nil {
@@ -67,6 +67,9 @@ func rewrittenInput(input Input, event EventType, out *HookSpecificOutput) (Inpu
 		}
 		if out.UpdatedToolResultMeta != nil {
 			input.ToolResultMeta = out.UpdatedToolResultMeta
+		}
+		if out.UpdatedToolDocuments != nil {
+			input.ToolDocuments = out.UpdatedToolDocuments
 		}
 	default:
 		return input, false
