@@ -1691,6 +1691,27 @@ func (s *Session) VisibleExchanges() []chat.Message {
 	return visibleExchanges(s.Messages)
 }
 
+// Prompt returns the message a run of the session starts from, and its
+// position in the transcript: the conversation's last item, when it is a
+// message the user wrote. A session that ends on anything else (an answer, a
+// tool result, a summary, a note the runtime left) has no prompt: it is run
+// again without new input. The usage of a side request is no part of the
+// conversation, and can land behind a prompt before its run starts.
+func (s *Session) Prompt() (prompt chat.Message, position int, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for position, item := range slices.Backward(s.Messages) {
+		if item.AuxiliaryUsage != nil {
+			continue
+		}
+		if !item.IsMessage() || item.Message.Implicit || item.Message.Message.Role != chat.MessageRoleUser {
+			break
+		}
+		return item.Message.Message, position, true
+	}
+	return chat.Message{}, -1, false
+}
+
 // NewestRequest splits the visible conversation at the newest user request.
 // It returns the request's text, the exchanges before it, and whether a
 // visible reply has followed it. The request is looked up in the transcript

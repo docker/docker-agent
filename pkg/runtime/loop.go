@@ -278,12 +278,14 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// pick the agent that actually runs, before anything is prepared for it.
 	route := r.beginRouting(sess)
 	a := r.resolveSessionAgent(sess)
+	// The prompt is what the user last wrote, when the run has that to
+	// answer. A session run again without new input ends on something else,
+	// which is not announced as the user's, or stored as such.
 	emitPrompt := func() chat.Message {
 		if sess.SendUserMessage {
-			if msgs, count := sess.GetMessagesWithInstructionContext(a, nil); len(msgs) > 0 {
-				last := msgs[len(msgs)-1]
-				sink.Emit(userMessageEvent(last, sess.ID, count-1))
-				return last
+			if prompt, position, ok := sess.Prompt(); ok {
+				sink.Emit(userMessageEvent(prompt, sess.ID, position))
+				return prompt
 			}
 		}
 		return chat.Message{}
