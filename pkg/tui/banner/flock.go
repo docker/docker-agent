@@ -52,7 +52,11 @@ func (f *Flock) Point(x, y float64, click bool, progress float64, width int) {
 	}
 }
 
-func (f *Flock) Leave() { f.hovering = false }
+// Leave reports whether displaced particles need to return home.
+func (f *Flock) Leave() bool {
+	f.hovering = false
+	return len(f.dots) != 0
+}
 
 func (f *Flock) force(p particle, progress float64, width int) (float64, float64) {
 	if !f.hovering {
@@ -78,9 +82,9 @@ func (f *Flock) force(p particle, progress float64, width int) (float64, float64
 	return dx * strength, dy * strength
 }
 
-// Step returns whether motion still needs frames. Small substeps keep the
-// spring stable even when terminal rendering delays the shared animation tick.
-func (f *Flock) Step(elapsed time.Duration, progress float64, width int) bool {
+// Step reports whether motion needs frames and whether any dot changed cells.
+// Small substeps keep the spring stable when terminal rendering delays ticks.
+func (f *Flock) Step(elapsed time.Duration, progress float64, width int) (active, changed bool) {
 	remaining := min(elapsed.Seconds(), 0.15)
 	for remaining > 0 {
 		dt := min(remaining, 1.0/60)
@@ -102,23 +106,33 @@ func (f *Flock) Step(elapsed time.Duration, progress float64, width int) bool {
 			fx, fy := f.force(*p, progress, width)
 			// Local alignment keeps neighboring dots flowing together without an
 			// all-pairs boid simulation; the spring preserves the wordmark identity.
-			p.vx += (fx - 9*p.x - 3.8*p.vx + 3*(g.x/float64(g.count)-p.vx)) * dt
-			p.vy += (fy - 9*p.y - 3.8*p.vy + 3*(g.y/float64(g.count)-p.vy)) * dt
+			ax := fx - 9*p.x - 3.8*p.vx + 3*(g.x/float64(g.count)-p.vx)
+			ay := fy - 9*p.y - 3.8*p.vy + 3*(g.y/float64(g.count)-p.vy)
+			p.vx += ax * dt
+			p.vy += ay * dt
+			if remaining == 0 && (math.Hypot(p.vx, p.vy) > 0.1 || math.Hypot(ax, ay) > 0.3) {
+				active = true
+			}
+			oldX, oldY := math.Round(p.x), math.Round(p.y)
 			p.x += p.vx * dt
 			p.y += p.vy * dt
+			changed = changed || math.Round(p.x) != oldX || math.Round(p.y) != oldY
 		}
 	}
 	if f.hovering {
-		return true
+		return active, changed
 	}
 	for _, p := range f.dots {
 		if math.Hypot(p.x, p.y) > 0.03 || math.Hypot(p.vx, p.vy) > 0.1 {
-			return true
+			return true, changed
 		}
 	}
 	*f = Flock{}
-	return false
+	return false, true
 }
+
+// Displaced reports whether the flock owns a frame, including a resting hover.
+func (f *Flock) Displaced() bool { return len(f.dots) != 0 }
 
 // Render draws the displaced dust using the banner's existing colors and bounds.
 func (f *Flock) Render(progress float64, width int) []string {

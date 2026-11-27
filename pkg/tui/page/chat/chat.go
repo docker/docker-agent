@@ -607,7 +607,7 @@ func (p *chatPage) UpdateEffects(msg tea.Msg) (Page, Effects) {
 	p.effects = &effects
 	defer func() { p.effects = nil }()
 	model, cmd := p.update(msg)
-	if (p.bannerTransition.Running() || p.bannerMotion.IsActive()) && !p.bannerVisible(p.computeSidebarLayout()) {
+	if (p.bannerTransition.Running() || p.bannerFlock.Displaced()) && !p.bannerVisible(p.computeSidebarLayout()) {
 		p.cancelBanner()
 	}
 	// State changes (async sidebar updates, streaming indicators) can move
@@ -645,10 +645,13 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case animation.TickMsg:
 		if p.bannerMotion.IsActive() {
 			before, after := msg.ElapsedBounds()
-			if !p.bannerFlock.Step(after-before, p.bannerProgress(), p.computeSidebarLayout().chatWidth) {
+			active, changed := p.bannerFlock.Step(after-before, p.bannerProgress(), p.computeSidebarLayout().chatWidth)
+			if !active && !p.bannerTransition.Running() {
 				p.bannerMotion.Stop()
 			}
-			msg.MarkDirty()
+			if changed {
+				msg.MarkDirty()
+			}
 		}
 		p.sidebarGrip.Tick(msg)
 		if p.bannerTransition.Running() {
@@ -664,9 +667,9 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return p, cmd
 
 	case tea.BlurMsg:
-		p.bannerFlock.Leave()
+		cmd := p.leaveBanner()
 		ResetSidebarGrip(p)
-		return p, nil
+		return p, cmd
 
 	case tea.KeyPressMsg:
 		return p.handleKeyPress(msg)
@@ -900,7 +903,7 @@ func (p *chatPage) messagesView(sl sidebarLayout) string {
 	}
 
 	lines := tuibanner.Render()
-	if p.bannerMotion.IsActive() {
+	if p.bannerFlock.Displaced() {
 		lines = p.bannerFlock.Render(p.bannerProgress(), sl.chatWidth)
 	} else if p.bannerTransition.Running() {
 		lines = tuibanner.RenderFrame(p.bannerTransition.Progress(), sl.chatWidth)
@@ -1021,7 +1024,7 @@ func (p *chatPage) setSize(width, height int, fromSidebarDrag bool) tea.Cmd {
 	sl := p.computeSidebarLayout()
 	old := p.appliedLayout
 	if sl != old {
-		p.bannerFlock.Leave()
+		ResetBanner(p)
 	}
 	if !fromSidebarDrag && sl != old && (sl.mode != sidebarVertical || sl.chatHeight != old.chatHeight ||
 		p.isDraggingSidebar || (sl.sidebarOnLeft == old.sidebarOnLeft && sl.handleX != old.handleX)) {
@@ -1057,7 +1060,7 @@ func (p *chatPage) setSize(width, height int, fromSidebarDrag bool) tea.Cmd {
 	if !p.isDraggingSidebar {
 		cmds = append(cmds, p.messages.SetSize(sl.chatWidth, sl.chatHeight))
 	}
-	if (p.bannerTransition.Running() || p.bannerMotion.IsActive()) && !p.bannerVisible(sl) {
+	if (p.bannerTransition.Running() || p.bannerFlock.Displaced()) && !p.bannerVisible(sl) {
 		p.cancelBanner()
 	}
 

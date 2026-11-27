@@ -34,7 +34,7 @@ func TestFlockRepelsAndReturns(t *testing.T) {
 	hover.Leave()
 	active := true
 	for range 100 {
-		active = hover.Step(70*time.Millisecond, 1, width)
+		active, _ = hover.Step(70*time.Millisecond, 1, width)
 	}
 	assert.False(t, active)
 	assert.Empty(t, hover.dots)

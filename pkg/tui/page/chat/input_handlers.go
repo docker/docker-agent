@@ -110,11 +110,19 @@ func copyWorkingDirToClipboard(wd string) tea.Cmd {
 
 // handleMouseClick handles mouse click events.
 func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
+	var bannerCmd tea.Cmd
 	if msg.Button == tea.MouseLeft && msg.Mod == 0 {
-		if hit, cmd := p.pointBanner(msg.X, msg.Y, true); hit {
-			return p, cmd
+		var hit bool
+		hit, bannerCmd = p.pointBanner(msg.X, msg.Y, true)
+		if hit {
+			return p, bannerCmd
 		}
 	}
+	model, cmd := p.routeMouseClick(msg)
+	return model, tea.Batch(bannerCmd, cmd)
+}
+
+func (p *chatPage) routeMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
 	hit := NewHitTest(p)
 	target := hit.At(msg.X, msg.Y)
 

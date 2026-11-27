@@ -21,9 +21,25 @@ func (p *chatPage) cancelBanner() {
 }
 
 // LeaveBanner releases hover when a dialog or another app region owns the pointer.
-func LeaveBanner(page Page) {
+func LeaveBanner(page Page) tea.Cmd {
 	if p, ok := page.(*chatPage); ok {
-		p.bannerFlock.Leave()
+		return p.leaveBanner()
+	}
+	return nil
+}
+
+func (p *chatPage) leaveBanner() tea.Cmd {
+	if p.bannerFlock.Leave() {
+		return p.bannerMotion.Start()
+	}
+	return nil
+}
+
+// ResetBanner clears motion when the page loses pointer access.
+func ResetBanner(page Page) {
+	if p, ok := page.(*chatPage); ok {
+		p.bannerMotion.Stop()
+		p.bannerFlock = banner.Flock{}
 	}
 }
 
@@ -41,8 +57,7 @@ func (p *chatPage) pointBanner(x, y int, click bool) (bool, tea.Cmd) {
 		left, right = 0, sl.chatWidth
 	}
 	if !p.bannerInteractive || !p.bannerVisible(sl) || x < left || x >= right || y < 0 || y >= banner.Height {
-		p.bannerFlock.Leave()
-		return false, nil
+		return false, p.leaveBanner()
 	}
 	p.bannerFlock.Point(float64(x), float64(y), click, p.bannerProgress(), sl.chatWidth)
 	return true, p.bannerMotion.Start()
