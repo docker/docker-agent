@@ -1,6 +1,7 @@
 package banner
 
 import (
+	"image"
 	"math"
 	"testing"
 	"time"
@@ -20,11 +21,12 @@ func TestFlockRepelsAndReturns(t *testing.T) {
 		}
 		return total
 	}
+	before := hover.Composite("", 1, width, image.Point{}, image.Rect(0, 0, width, Height), nil)
 	hover.Step(70*time.Millisecond, 1, width)
 	click.Step(70*time.Millisecond, 1, width)
 	assert.Positive(t, displacement(&hover))
 	assert.Greater(t, displacement(&click), displacement(&hover))
-	assert.NotEqual(t, RenderFrame(1, width), hover.Render(1, width))
+	assert.NotEqual(t, before, hover.Composite("", 1, width, image.Point{}, image.Rect(0, 0, width, Height), nil))
 	for _, p := range hover.dots {
 		x, y, _ := dustPosition(p.homeX, p.homeY, width, 1)
 		if p.x != 0 || p.y != 0 {

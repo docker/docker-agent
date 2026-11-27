@@ -172,13 +172,14 @@ func TestBannerPointerInteraction(t *testing.T) {
 			}
 			x := styles.AppPadding + sl.chatStartX + sl.chatWidth/2
 			y := chatY + (sl.chatHeight-banner.Height)/2 + 2
-			static := p.View()
-			_, cmd := p.Update(tea.MouseMotionMsg{X: x, Y: y})
+			render := func() string { return CompositeBanner(p, p.View(), 160, 35, 0, nil) }
+			static := render()
+			cmd := PointBanner(p, x, y, false)
 			require.NotNil(t, cmd)
 			tick, ok := ar.Accept(cmd().(animation.TickMsg))
 			require.True(t, ok)
 			_, _ = p.Update(tick)
-			assert.NotEqual(t, static, p.View())
+			assert.NotEqual(t, static, render())
 			require.True(t, p.bannerMotion.IsActive())
 			LeaveBanner(p)
 			for range 100 {
@@ -191,7 +192,7 @@ func TestBannerPointerInteraction(t *testing.T) {
 				_, _ = p.Update(tick)
 			}
 			assert.False(t, p.bannerMotion.IsActive())
-			assert.Equal(t, static, p.View())
+			assert.Equal(t, static, render())
 		})
 	}
 }

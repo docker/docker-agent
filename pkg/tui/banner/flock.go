@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const influenceRadius = 24.0
+
 type particle struct {
 	homeX, homeY int
 	x, y, vx, vy float64
@@ -68,8 +70,7 @@ func (f *Flock) force(p particle, progress float64, width int) (float64, float64
 	}
 	dx, dy := float64(x)+p.x-f.pointerX, float64(y)+p.y-f.pointerY
 	distance := math.Hypot(dx, dy)
-	const radius = 24.0
-	if distance >= radius {
+	if distance >= influenceRadius {
 		return 0, 0
 	}
 	// A tiny deterministic bias avoids trapping dots exactly under the pointer.
@@ -77,7 +78,7 @@ func (f *Flock) force(p particle, progress float64, width int) (float64, float64
 		angle := float64(dustHash(p.homeX, p.homeY)%628) * 0.01
 		dx, dy, distance = math.Cos(angle), math.Sin(angle), 1
 	}
-	falloff := 1 - distance/radius
+	falloff := 1 - distance/influenceRadius
 	strength := 900 * falloff * falloff / distance
 	return dx * strength, dy * strength
 }
@@ -133,9 +134,3 @@ func (f *Flock) Step(elapsed time.Duration, progress float64, width int) (active
 
 // Displaced reports whether the flock owns a frame, including a resting hover.
 func (f *Flock) Displaced() bool { return len(f.dots) != 0 }
-
-// Render draws the displaced dust using the banner's existing colors and bounds.
-func (f *Flock) Render(progress float64, width int) []string {
-	f.init()
-	return renderParticles(progress, width, f)
-}

@@ -45,16 +45,15 @@ func RenderFrame(progress float64, paneWidth int) []string {
 	if progress >= settledAt {
 		return Render()
 	}
-	return renderParticles(progress, paneWidth, nil)
+	return renderParticles(progress, paneWidth)
 }
 
-func renderParticles(progress float64, paneWidth int, flock *Flock) []string {
+func renderParticles(progress float64, paneWidth int) []string {
 	colors := rowColors(styles.Background)
 	cells := make([][]byte, Height)
 	for y := range cells {
 		cells[y] = make([]byte, paneWidth)
 	}
-	index := 0
 	for y, line := range Lines {
 		for x, r := range []rune(line) {
 			if r < '⠀' || r > '⣿' {
@@ -67,11 +66,6 @@ func renderParticles(progress float64, paneWidth int, flock *Flock) []string {
 						continue
 					}
 					px, py, _ := dustPosition(x*2+dx, y*4+dy, paneWidth, progress)
-					if flock != nil {
-						px += int(math.Round(flock.dots[index].x))
-						py += int(math.Round(flock.dots[index].y))
-					}
-					index++
 					if px < 0 || px >= paneWidth*2 || py < 0 || py >= Height*4 {
 						continue
 					}

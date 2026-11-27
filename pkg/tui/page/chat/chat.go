@@ -904,7 +904,7 @@ func (p *chatPage) messagesView(sl sidebarLayout) string {
 
 	lines := tuibanner.Render()
 	if p.bannerFlock.Displaced() {
-		lines = p.bannerFlock.Render(p.bannerProgress(), sl.chatWidth)
+		return ""
 	} else if p.bannerTransition.Running() {
 		lines = tuibanner.RenderFrame(p.bannerTransition.Progress(), sl.chatWidth)
 	}
