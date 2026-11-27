@@ -86,6 +86,11 @@ type SessionManager struct {
 
 	mux sync.Mutex
 
+	// attachMu serialises AttachRuntime with DetachRuntime, so a reattach
+	// cannot interleave with the teardown of the previous registration. It is
+	// acquired before mux and never while holding it.
+	attachMu sync.Mutex
+
 	// eventLogsMu serialises event-log lifecycle transitions: on-demand
 	// creation (ensureEventLog), source attachment (RegisterEventSource) and
 	// teardown (dropEventLog), together with deletedEventLogs. Reads of
@@ -103,6 +108,11 @@ type SessionManager struct {
 	// session is far cheaper than the leaked event log it prevents. Guarded
 	// by eventLogsMu.
 	deletedEventLogs map[string]struct{}
+
+	// releasedEventSeqs keeps the last sequence number of logs torn down by
+	// releaseEventLog, so a reattached session keeps numbering its events
+	// where it left off. Guarded by eventLogsMu.
+	releasedEventSeqs map[string]uint64
 
 	// sessionReady is closed once the first session is attached or created,
 	// signalling that the server is ready to accept session-scoped requests.
@@ -180,6 +190,7 @@ func NewSessionManager(ctx context.Context, sources config.Sources, sessionStore
 		deletedSessions:       concurrent.NewMap[string, *activeRuntimes](),
 		eventLogs:             concurrent.NewMap[string, *pumpedEventLog](),
 		deletedEventLogs:      make(map[string]struct{}),
+		releasedEventSeqs:     make(map[string]uint64),
 		followUpInjectors:     concurrent.NewMap[string, FollowUpInjector](),
 		followUpKeys:          concurrent.NewMap[string, *idempotencyCache](),
 		pendingSafetyDefaults: concurrent.NewMap[string, struct{}](),
@@ -263,7 +274,7 @@ func (sm *SessionManager) RegisterEventSource(sessionID string, src EventSource)
 	if pe, ok := sm.eventLogs.Load(sessionID); ok && pe.lazy {
 		log = pe.log
 	} else {
-		log = newEventLog(defaultEventLogCapacity)
+		log = sm.newSessionEventLogLocked(sessionID)
 	}
 	pumpCtx, cancel := context.WithCancel(context.Background())
 	sm.eventLogs.Store(sessionID, &pumpedEventLog{log: log, cancel: cancel})
@@ -320,7 +331,7 @@ func (sm *SessionManager) ensureEventLog(sessionID string) *pumpedEventLog {
 	if pe, ok := sm.eventLogs.Load(sessionID); ok {
 		return pe
 	}
-	log := newEventLog(defaultEventLogCapacity)
+	log := sm.newSessionEventLogLocked(sessionID)
 	pe := &pumpedEventLog{log: log, cancel: func() { log.close("session ended") }, lazy: true}
 	sm.eventLogs.Store(sessionID, pe)
 	return pe
@@ -335,6 +346,7 @@ func (sm *SessionManager) dropEventLog(sessionID string) {
 	sm.eventLogsMu.Lock()
 	defer sm.eventLogsMu.Unlock()
 	sm.deletedEventLogs[sessionID] = struct{}{}
+	delete(sm.releasedEventSeqs, sessionID)
 	if pe, ok := sm.eventLogs.Load(sessionID); ok {
 		pe.cancel()
 		sm.eventLogs.Delete(sessionID)
@@ -344,14 +356,28 @@ func (sm *SessionManager) dropEventLog(sessionID string) {
 // releaseEventLog tears down sessionID's event log, if any, without
 // tombstoning the ID: unlike dropEventLog it is for a session that merely
 // stops being attached (see DetachRuntime), so the same ID can be attached
-// again and register a fresh event source.
+// again and register a fresh event source. The last sequence number is kept
+// so that source's events continue after it.
 func (sm *SessionManager) releaseEventLog(sessionID string) {
 	sm.eventLogsMu.Lock()
 	defer sm.eventLogsMu.Unlock()
 	if pe, ok := sm.eventLogs.Load(sessionID); ok {
 		pe.cancel()
+		// A source pump closes its log asynchronously; close it now so the
+		// saved sequence number includes session_exited.
+		pe.log.close("session ended")
+		sm.releasedEventSeqs[sessionID] = pe.log.lastSeq()
 		sm.eventLogs.Delete(sessionID)
 	}
+}
+
+// newSessionEventLogLocked returns an empty log for sessionID, resuming the
+// numbering of a released one. The caller holds eventLogsMu.
+func (sm *SessionManager) newSessionEventLogLocked(sessionID string) *eventLog {
+	log := newEventLog(defaultEventLogCapacity)
+	log.base = sm.releasedEventSeqs[sessionID]
+	log.seq = log.base
+	return log
 }
 
 // appendSessionEvent appends event to sessionID's event log, creating the
@@ -469,6 +495,8 @@ func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, r
 		cancel:  cancel,
 		session: sess,
 	}
+	sm.attachMu.Lock()
+	defer sm.attachMu.Unlock()
 	sm.runtimeSessions.Store(sessionID, rs)
 	sm.registerRecallHandler(sessionID, rt)
 	sm.markReady()
@@ -484,11 +512,28 @@ func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, r
 // Unlike [SessionManager.DeleteSession], the stored session is kept and the
 // session ID is not tombstoned, so it can be attached again (e.g. a reopened tab). It is a no-op for unknown sessions.
 func (sm *SessionManager) DetachRuntime(sessionID string) {
+	sm.attachMu.Lock()
+	defer sm.attachMu.Unlock()
+
 	sm.mux.Lock()
-	defer sm.mux.Unlock()
 	rs, ok := sm.runtimeSessions.Load(sessionID)
 	if !ok {
+		sm.mux.Unlock()
 		return
+	}
+	rs.deleting.Store(true)
+	sm.mux.Unlock()
+
+	// Wait for an in-flight metadata write before the session looks inactive,
+	// otherwise a later update to the stored session could be overwritten by
+	// it. As in deleteSession, this happens outside sm.mux.
+	rs.modelSwitch.Lock()
+	rs.modelSwitch.Unlock() //nolint:gocritic,staticcheck // empty critical section: drain only
+
+	sm.mux.Lock()
+	defer sm.mux.Unlock()
+	if current, ok := sm.runtimeSessions.Load(sessionID); !ok || current != rs {
+		return // deleted meanwhile; that path released everything
 	}
 	if rs.cancel != nil {
 		rs.cancel()

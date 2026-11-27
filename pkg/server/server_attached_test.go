@@ -838,3 +838,112 @@ func TestSessionManager_DetachRuntimeAllowsReattach(t *testing.T) {
 	sm.RegisterEventSource(sess.ID, src)
 	assert.True(t, sm.HasEventSource(sess.ID), "same ID must be able to register a new event source after reattach")
 }
+
+func TestSessionManager_DetachRuntimeKeepsEventSequence(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	sm.appendSessionEvent(sess.ID, "one")
+	sm.appendSessionEvent(sess.ID, "two")
+	seen, ok := sm.LastEventSeq(sess.ID)
+	require.True(t, ok)
+
+	sm.DetachRuntime(sess.ID)
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	sm.appendSessionEvent(sess.ID, "three")
+
+	next, ok := sm.LastEventSeq(sess.ID)
+	require.True(t, ok)
+	assert.Greater(t, next, seen, "event IDs must not restart after a reattach")
+
+	// A client resuming from before the detach missed session_exited, so it
+	// must be told to resync.
+	streamCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	var got []any
+	sm.StreamEvents(streamCtx, sess.ID, &seen, func(_ uint64, ev any) { got = append(got, ev) })
+	require.NotEmpty(t, got)
+	assert.Equal(t, gapEvent{Type: "gap"}, got[0])
+	assert.Equal(t, "three", got[len(got)-1])
+}
+
+// gatedUpdateStore holds UpdateSession open until release is closed.
+type gatedUpdateStore struct {
+	session.Store
+
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *gatedUpdateStore) UpdateSession(ctx context.Context, sess *session.Session) error {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.Store.UpdateSession(ctx, sess)
+}
+
+func TestSessionManager_DetachRuntimeDrainsMetadataUpdate(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := &gatedUpdateStore{
+		Store:   session.NewInMemorySessionStore(),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+
+	updated := make(chan error, 1)
+	go func() { updated <- sm.UpdateSessionTitle(ctx, sess.ID, "old") }()
+	<-store.entered
+
+	detached := make(chan struct{})
+	go func() {
+		sm.DetachRuntime(sess.ID)
+		close(detached)
+	}()
+
+	// While the write is in flight the session must not look inactive, or a
+	// later update would take the stored-session path and be overwritten.
+	assert.Never(t, func() bool {
+		_, ok := sm.runtimeSessions.Load(sess.ID)
+		return !ok
+	}, 100*time.Millisecond, 10*time.Millisecond)
+
+	// A reattach waits for the detach to finish, so it is never torn down by it.
+	reattached := make(chan struct{})
+	replacement := &fakeRuntime{}
+	go func() {
+		sm.AttachRuntime(ctx, sess.ID, replacement, sess)
+		close(reattached)
+	}()
+	assert.Never(t, func() bool {
+		select {
+		case <-reattached:
+			return true
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, 10*time.Millisecond)
+
+	close(store.release)
+	require.NoError(t, <-updated)
+	<-detached
+	<-reattached
+
+	rs, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok, "replacement registration must survive the detach")
+	assert.Same(t, replacement, rs.runtime)
+}
