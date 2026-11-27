@@ -851,9 +851,11 @@ func TestApplyAgentDefaultsAppendsToUserHooks(t *testing.T) {
 // brackets the configured transforms — a preamble so command hooks cannot
 // observe raw tool results (the hook input is piped to their stdin as JSON)
 // and a trailing pass so a rewrite that reintroduces a secret is still
-// scrubbed. The two redaction entries are the same builtin, so the preamble
-// must stay distinguishable (by Name) from the trailing pass: the executor
-// deduplicates identical hooks and would otherwise drop the final pass.
+// scrubbed. The two redaction entries are the same builtin, so both must be
+// distinguishable from user-authored hooks and from each other: the executor
+// deduplicates identical hooks, and `name` is a user-configurable label that
+// an explicit entry could copy. The internal AutoInjected marker that no YAML
+// entry can reproduce is what keeps the passes alive; the names are labels.
 func TestApplyAgentDefaultsOrdersTransformsAroundRedaction(t *testing.T) {
 	t.Parallel()
 
@@ -901,15 +903,19 @@ func TestApplyAgentDefaultsOrdersTransformsAroundRedaction(t *testing.T) {
 			require.Len(t, last.Hooks, 1, "the large-result limiter always runs last")
 
 			if tc.redact && tc.configured {
-				leading := cfg.ToolResponseTransform[0].Hooks[0].Name
-				trailing := cfg.ToolResponseTransform[len(cfg.ToolResponseTransform)-2].Hooks[0].Name
-				assert.NotEmpty(t, leading,
-					"the pre-hook redaction pass needs a distinct identity to survive hook dedup")
-				assert.NotEmpty(t, trailing,
-					"the final redaction pass needs a distinct identity to survive hook dedup")
-				assert.NotEqual(t, leading, trailing,
-					"the two auto-injected passes must not deduplicate each other")
+				leadingHook := cfg.ToolResponseTransform[0].Hooks[0]
+				trailingHook := cfg.ToolResponseTransform[len(cfg.ToolResponseTransform)-2].Hooks[0]
+				assert.True(t, leadingHook.AutoInjected,
+					"the pre-hook redaction pass needs the internal identity to survive hook dedup")
+				assert.True(t, trailingHook.AutoInjected,
+					"the final redaction pass needs the internal identity to survive hook dedup")
+				assert.NotEmpty(t, leadingHook.Name, "the pre-hook pass keeps a readable label")
+				assert.NotEmpty(t, trailingHook.Name, "the final pass keeps a readable label")
+				assert.NotEqual(t, leadingHook.Name, trailingHook.Name,
+					"the two auto-injected passes keep distinct labels")
 			} else if tc.redact {
+				assert.False(t, cfg.ToolResponseTransform[0].Hooks[0].AutoInjected,
+					"the lone redaction pass keeps its historical identity when nothing is bracketed")
 				assert.Empty(t, cfg.ToolResponseTransform[0].Hooks[0].Name,
 					"the lone redaction pass keeps its historical identity when nothing is bracketed")
 			}

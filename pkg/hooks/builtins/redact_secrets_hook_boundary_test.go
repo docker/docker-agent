@@ -81,16 +81,103 @@ func TestConfiguredCommandHookReceivesRedactedToolDocuments(t *testing.T) {
 // TestFinalRedactionPassSurvivesExplicitRedactorEntry pins the final-pass
 // requirement: an agent that also wires the builtin by hand — as
 // examples/redact_secrets_hooks.yaml does — must not lose the auto-injected
-// final scrub to the executor's hook deduplication. The explicit unnamed
-// entry is identical to the auto-injected trailing pass, so hooksFor would
-// drop the trailing one (keeping the explicit entry at its configured
-// position); a transform after it could then rewrite a secret back into the
-// attachments and the runtime would emit and record it unsanitized. The
-// final pass therefore carries its own Name, which keeps it alive.
+// final scrub to the executor's hook deduplication. `hooksFor` compares
+// configured values, so an explicit entry that copies the automatic pass's
+// label and options used to collapse the final pass into itself, leaving the
+// explicit entry at its configured position. A transform after it could then
+// rewrite a secret back into the attachments and the runtime would emit and
+// record it unsanitized. The automatic passes therefore carry an internal
+// identity that YAML cannot reproduce, which keeps them alive whatever the
+// explicit entry's `name` is.
 func TestFinalRedactionPassSurvivesExplicitRedactorEntry(t *testing.T) {
 	t.Parallel()
 
+	for _, tc := range []struct {
+		name         string
+		explicitName string
+	}{
+		{name: "unnamed explicit redactor"},
+		{
+			name:         "explicit redactor copies the final pass name",
+			explicitName: "redact_secrets (final pass)",
+		},
+		{
+			name:         "explicit redactor copies the leading pass name",
+			explicitName: "redact_secrets (before configured hooks)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			secret := fakeGitHubPAT()
+			registry := hooks.NewRegistry()
+			require.NoError(t, Register(registry))
+			require.NoError(t, registry.RegisterBuiltin("reintroduce_secret", func(context.Context, *hooks.Input, []string) (*hooks.Output, error) {
+				return &hooks.Output{HookSpecificOutput: &hooks.HookSpecificOutput{
+					UpdatedToolDocuments: []tools.DocumentContent{
+						{Name: "leaked.md", MimeType: "text/markdown", Text: "token=" + secret},
+					},
+				}}, nil
+			}))
+
+			cfg := ApplyAgentDefaults(&hooks.Config{
+				ToolResponseTransform: []hooks.MatcherConfig{
+					{
+						Matcher: "*",
+						// Explicit redactor: the same builtin the runtime
+						// auto-injects. Its label is user-configurable, so a
+						// matching name must not be able to replace an
+						// automatic pass.
+						Hooks: []hooks.Hook{{
+							Name:    tc.explicitName,
+							Type:    hooks.HookTypeBuiltin,
+							Command: RedactSecrets,
+						}},
+					},
+					{
+						Matcher: "*",
+						// Runs after the explicit redactor and rewrites the
+						// secret back in: only a surviving final pass can
+						// scrub this.
+						Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "reintroduce_secret"}},
+					},
+				},
+			}, AgentDefaults{RedactSecrets: true})
+
+			exec := hooks.NewExecutorWithRegistry(cfg, t.TempDir(), nil, registry)
+			result, err := exec.Dispatch(t.Context(), hooks.EventToolResponseTransform, &hooks.Input{
+				ToolName:     "mcp_fetch",
+				ToolCategory: "mcp",
+				ToolResponse: "fetched resource",
+				ToolDocuments: []tools.DocumentContent{
+					{Name: "clean.md", MimeType: "text/markdown", Text: "nothing to see"},
+				},
+			})
+			require.NoError(t, err)
+			require.NotNil(t, result)
+
+			// The reintroduced list is the runtime's rewrite: it must
+			// already be scrubbed by the final auto-injected pass.
+			require.NotNil(t, result.UpdatedToolDocuments, "the rewrite from the configured hook must reach the runtime")
+			require.Len(t, result.UpdatedToolDocuments, 1)
+			assert.NotContains(t, result.UpdatedToolDocuments[0].Text, secret,
+				"the final redaction pass must survive hook dedup when the agent wires the builtin explicitly")
+			assert.Contains(t, result.UpdatedToolDocuments[0].Text, portcullis.Marker)
+		})
+	}
+}
+
+// TestExplicitRedactorCopyingLeadingPassNameRunsInPlace pins the other half
+// of the dedup contract: an explicit redactor whose label copies the
+// auto-injected leading pass must still run at its configured position. A
+// command hook placed after it records the hook input on stdin; without the
+// explicit redactor, a secret reintroduced by the preceding transform would
+// reach that hook even though the automatic passes bracket the sequence.
+func TestExplicitRedactorCopyingLeadingPassNameRunsInPlace(t *testing.T) {
+	t.Parallel()
+
 	secret := fakeGitHubPAT()
+	capture := filepath.Join(t.TempDir(), "hook-stdin.json")
 	registry := hooks.NewRegistry()
 	require.NoError(t, Register(registry))
 	require.NoError(t, registry.RegisterBuiltin("reintroduce_secret", func(context.Context, *hooks.Input, []string) (*hooks.Output, error) {
@@ -104,16 +191,23 @@ func TestFinalRedactionPassSurvivesExplicitRedactorEntry(t *testing.T) {
 	cfg := ApplyAgentDefaults(&hooks.Config{
 		ToolResponseTransform: []hooks.MatcherConfig{
 			{
+				// Reintroduces a secret after the automatic leading pass.
 				Matcher: "*",
-				// Explicit, unnamed redactor: the same builtin the runtime
-				// auto-injects, which makes it a dedup candidate.
-				Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: RedactSecrets}},
+				Hooks:   []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "reintroduce_secret"}},
+			},
+			{
+				// Copies the automatic leading pass's label. This entry must
+				// still run here, between the two transforms.
+				Matcher: "*",
+				Hooks: []hooks.Hook{{
+					Name:    "redact_secrets (before configured hooks)",
+					Type:    hooks.HookTypeBuiltin,
+					Command: RedactSecrets,
+				}},
 			},
 			{
 				Matcher: "*",
-				// Runs after the explicit redactor and rewrites the secret
-				// back in: only a surviving final pass can scrub this.
-				Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "reintroduce_secret"}},
+				Hooks:   []hooks.Hook{{Type: hooks.HookTypeCommand, Command: captureStdinCommand(t, capture)}},
 			},
 		},
 	}, AgentDefaults{RedactSecrets: true})
@@ -130,11 +224,15 @@ func TestFinalRedactionPassSurvivesExplicitRedactorEntry(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// The reintroduced list is the runtime's rewrite: it must already be
-	// scrubbed by the final auto-injected pass.
-	require.NotNil(t, result.UpdatedToolDocuments, "the rewrite from the configured hook must reach the runtime")
+	raw, err := os.ReadFile(capture)
+	require.NoError(t, err, "the configured command hook must have run and captured its stdin")
+	stdin := string(raw)
+	assert.NotContains(t, stdin, secret,
+		"the explicit redactor copying the leading pass name must still run at its configured position")
+	assert.Contains(t, stdin, portcullis.Marker)
+
+	// The automatic final pass keeps the guarantee for emitted results.
+	require.NotNil(t, result.UpdatedToolDocuments)
 	require.Len(t, result.UpdatedToolDocuments, 1)
-	assert.NotContains(t, result.UpdatedToolDocuments[0].Text, secret,
-		"the final redaction pass must survive hook dedup when the agent wires the builtin explicitly")
-	assert.Contains(t, result.UpdatedToolDocuments[0].Text, portcullis.Marker)
+	assert.NotContains(t, result.UpdatedToolDocuments[0].Text, secret)
 }

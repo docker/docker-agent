@@ -183,6 +183,9 @@ For each event dispatch, identical matching hook definitions run once, at the
 position of the first match. Identity includes every hook field: `name`, `type`,
 `command`, `args`, `timeout`, `env`, `working_dir`, `on_error`, `strict_output`, `model`, `prompt`,
 `system_prompt`, and `schema`. Sharing a name or command alone does not make two hooks duplicates.
+Hooks synthesized by the runtime additionally carry an internal marker that
+cannot be written in configuration, so they are never treated as duplicates of
+a user-authored entry.
 
 Hooks with different model prompts, environments, working directories, or other
 options all run. To deliberately run otherwise identical hooks twice, give them
@@ -198,9 +201,11 @@ once, but adding a name or changing an option makes it a separate invocation.
 Disable the corresponding agent flag when you want a custom entry *instead of*
 the automatic default. The `tool_response_transform` redaction pair is the
 deliberate exception: when it brackets configured transforms, both
-auto-injected passes are named so the final scrub always survives
-deduplication, which means an explicitly wired redactor runs as an additional
-invocation at its configured position.
+auto-injected passes carry an internal marker with no YAML or JSON
+representation, so no user-authored entry can reproduce their identity — not
+even by copying the pass's `name` and every other option. The final scrub
+therefore always survives deduplication, and an explicitly wired redactor runs
+as an additional invocation at its configured position.
 
 ## Global (user-level) hooks
 
@@ -669,7 +674,9 @@ This is the symmetric counterpart of `tool_input_transform`'s `updated_input`, a
 
 Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_documents`, the inline document attachments the tool returned. MCP servers return text resources this way (the payload is in `text`), and those documents are emitted to event subscribers and persisted in the session next to the textual output. Only `tool_response_transform` hooks can rewrite the list, with `updated_tool_documents`; the rewritten attachments are what gets emitted and persisted, and `post_tool_use` hooks receive the already-transformed list. `redact_secrets` scrubs each attachment's name, URI, MIME type, and text, so a secret carried in an MCP inline-text resource never reaches the session file or the event stream.
 
-When the agent-level `redact_secrets` flag is on (the default) and other `tool_response_transform` hooks are configured, the auto-injected redactor runs both **before** and **after** them. The leading pass matters because command hooks receive the whole hook input as JSON on stdin: without it, a hook that archives its input would record the raw tool output, display metadata, and inline document attachments. The trailing pass is the final scrub, so a later rewrite that reintroduces a secret is still caught — for example, a transform placed after an explicitly wired `redact_secrets` entry that rewrites a secret back into the output or the attachments. Both auto-injected passes carry distinct names so deduplication cannot drop the final scrub; an explicit redactor entry stays a separate invocation at its configured position. Configured hooks therefore observe the already-redacted values, with detected secrets replaced by markers.
+When the agent-level `redact_secrets` flag is on (the default) and other `tool_response_transform` hooks are configured, the auto-injected redactor runs both **before** and **after** them. The leading pass matters because command hooks receive the whole hook input as JSON on stdin: without it, a hook that archives its input would record the original raw tool output, display metadata, and inline document attachments. The trailing pass is the final scrub, so a later rewrite that reintroduces a secret is still caught before the result is emitted, persisted, or handed to `post_tool_use` — for example, a transform placed after an explicitly wired `redact_secrets` entry that rewrites a secret back into the output or the attachments.
+
+This is not one pass over one value: the first configured transform sees the scrubbed original tool result, but every later transform sees the preceding hook's rewrite, before the final scrub runs (`pkg/hooks/pipeline.go`). A transform can therefore introduce a secret that a following hook observes — including a command hook that records its stdin — and only the final scrub runs after the last configured transform. Both auto-injected passes carry an internal identity that no YAML entry can reproduce, so deduplication cannot drop the final scrub even when an explicit redactor copies the automatic pass's label; an explicit redactor entry stays a separate invocation at its configured position.
 
 Hooks on `tool_response_transform` and `post_tool_use` also receive `tool_result_meta`, the structured display metadata a tool recorded alongside its text output (the TUI renders completed `edit_file` diffs from it). Only `tool_response_transform` hooks can rewrite it, with `updated_tool_result_meta` (independently of `updated_tool_response`); the rewritten metadata is what gets emitted and persisted. `post_tool_use` hooks receive the already-transformed metadata and cannot change it. `redact_secrets` also scrubs this metadata, and clears it when it cannot be serialized safely.
 
@@ -690,9 +697,13 @@ successful rewrite. Hooks that return no rewrite leave the current value
 unchanged; the runtime receives the final result of the sequence. The
 runtime's auto-injected defaults respect that order: the always-on
 `limit_large_tool_results` runs last, and when `redact_secrets` is enabled it
-runs both ahead of the configured transforms (so command hooks never receive
-raw tool results on stdin) and after them (so a later rewrite is still
-scrubbed).
+runs both ahead of the configured transforms (so the first of them receives a
+scrubbed tool result rather than the raw one) and after them (so whatever the
+last rewrite left behind is scrubbed before emission and persistence). The
+leading pass only sanitizes the original values: a later transform's rewrite
+is visible to the hooks that follow it until the final scrub replaces the
+secret with a marker, so a command hook placed there can still record a secret
+that a previous transform introduced.
 
 `updated_input` patches replace only the top-level keys they supply. Other
 arguments are preserved; nested objects are replaced, not deep-merged. An empty

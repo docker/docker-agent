@@ -118,67 +118,87 @@ func lastToolMessage(t *testing.T, sess *session.Session) chat.Message {
 
 // TestDispatcherFinalRedactionSurvivesExplicitRedactorEntry pins the
 // end-to-end final-pass requirement. The agent also wires the builtin by
-// hand (examples/redact_secrets_hooks.yaml does), so the explicit unnamed
-// entry is identical to the auto-injected trailing pass and hook
-// deduplication used to drop the trailing one. A transform placed after the
-// explicit entry then rewrites a secret back into the attachments: without
-// the final pass surviving dedup, the dispatcher emits and records that
-// unsanitized list.
+// hand (examples/redact_secrets_hooks.yaml does), so the explicit entry is
+// the same builtin as the auto-injected trailing pass. `hooksFor` compares
+// configured values (including the user-configurable `name`), so the trailing
+// pass used to be dropped when the explicit entry matched it; a transform
+// placed after the explicit entry then rewrote a secret back into the
+// attachments and the dispatcher emitted and recorded that unsanitized list.
+// The automatic passes now carry an internal identity that YAML cannot
+// reproduce, so no explicit label can displace them.
 func TestDispatcherFinalRedactionSurvivesExplicitRedactorEntry(t *testing.T) {
 	t.Parallel()
 
-	secret := portcullistest.FakeGitHubPAT("cxLeRrvbJfmYdUtr70xnNE3Q7Gvli4")
-	reg := hooks.NewRegistry()
-	require.NoError(t, builtins.Register(reg))
-	require.NoError(t, reg.RegisterBuiltin("reintroduce_secret", func(context.Context, *hooks.Input, []string) (*hooks.Output, error) {
-		return &hooks.Output{HookSpecificOutput: &hooks.HookSpecificOutput{
-			UpdatedToolDocuments: []tools.DocumentContent{
-				{Name: "leaked.md", MimeType: "text/markdown", Text: "token=" + secret},
-			},
-		}}, nil
-	}))
-	cfg := builtins.ApplyAgentDefaults(&hooks.Config{
-		ToolResponseTransform: []hooks.MatcherConfig{
-			{
-				Matcher: "*",
-				// Explicit, unnamed redactor: the same builtin the runtime
-				// auto-injects, which makes it a dedup candidate.
-				Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: builtins.RedactSecrets}},
-			},
-			{
-				Matcher: "*",
-				// Runs after the explicit redactor and rewrites the secret
-				// back in: only a surviving final pass can scrub this.
-				Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "reintroduce_secret"}},
-			},
-		},
-	}, builtins.AgentDefaults{RedactSecrets: true})
-	hd := &execHookDispatcher{exec: hooks.NewExecutorWithRegistry(cfg, t.TempDir(), nil, reg)}
-	sess := session.New()
-	sess.ToolsApproved = true
-	a := newAgent()
-	tool := tools.Tool{Name: "fetch", Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
-		return &tools.ToolCallResult{
-			Output:    "fetched resource",
-			Documents: []tools.DocumentContent{{Name: "clean.md", MimeType: "text/markdown", Text: "nothing to see"}},
-		}, nil
-	}}
-	emitter := &metaEmitter{}
-	dispatcher := &toolexec.Dispatcher{AgentFor: func(*session.Session) *agent.Agent { return a }, Hooks: hd}
-	dispatcher.Process(t.Context(), sess, []tools.ToolCall{{ID: "fetch", Function: tools.FunctionCall{Name: "fetch", Arguments: `{}`}}}, []tools.Tool{tool}, emitter)
+	for _, tc := range []struct {
+		name         string
+		explicitName string
+	}{
+		{name: "unnamed explicit redactor"},
+		{name: "explicit redactor copies the final pass name", explicitName: "redact_secrets (final pass)"},
+		{name: "explicit redactor copies the leading pass name", explicitName: "redact_secrets (before configured hooks)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.NotNil(t, emitter.result)
-	require.Len(t, emitter.result.Documents, 1)
+			secret := portcullistest.FakeGitHubPAT("cxLeRrvbJfmYdUtr70xnNE3Q7Gvli4")
+			reg := hooks.NewRegistry()
+			require.NoError(t, builtins.Register(reg))
+			require.NoError(t, reg.RegisterBuiltin("reintroduce_secret", func(context.Context, *hooks.Input, []string) (*hooks.Output, error) {
+				return &hooks.Output{HookSpecificOutput: &hooks.HookSpecificOutput{
+					UpdatedToolDocuments: []tools.DocumentContent{
+						{Name: "leaked.md", MimeType: "text/markdown", Text: "token=" + secret},
+					},
+				}}, nil
+			}))
+			cfg := builtins.ApplyAgentDefaults(&hooks.Config{
+				ToolResponseTransform: []hooks.MatcherConfig{
+					{
+						Matcher: "*",
+						// Explicit redactor: the same builtin the runtime
+						// auto-injects. Its label is user-configurable.
+						Hooks: []hooks.Hook{{
+							Name:    tc.explicitName,
+							Type:    hooks.HookTypeBuiltin,
+							Command: builtins.RedactSecrets,
+						}},
+					},
+					{
+						Matcher: "*",
+						// Runs after the explicit redactor and rewrites the
+						// secret back in: only a surviving final pass can
+						// scrub this.
+						Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "reintroduce_secret"}},
+					},
+				},
+			}, builtins.AgentDefaults{RedactSecrets: true})
+			hd := &execHookDispatcher{exec: hooks.NewExecutorWithRegistry(cfg, t.TempDir(), nil, reg)}
+			sess := session.New()
+			sess.ToolsApproved = true
+			a := newAgent()
+			tool := tools.Tool{Name: "fetch", Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+				return &tools.ToolCallResult{
+					Output:    "fetched resource",
+					Documents: []tools.DocumentContent{{Name: "clean.md", MimeType: "text/markdown", Text: "nothing to see"}},
+				}, nil
+			}}
+			emitter := &metaEmitter{}
+			dispatcher := &toolexec.Dispatcher{AgentFor: func(*session.Session) *agent.Agent { return a }, Hooks: hd}
+			dispatcher.Process(t.Context(), sess, []tools.ToolCall{{ID: "fetch", Function: tools.FunctionCall{Name: "fetch", Arguments: `{}`}}}, []tools.Tool{tool}, emitter)
 
-	// The emitted result feeds SSE / ACP / TUI consumers.
-	event, err := json.Marshal(emitter.result)
-	require.NoError(t, err)
-	assert.NotContains(t, string(event), secret, "emitted attachment text must be scrubbed by the final pass")
-	assert.Contains(t, string(event), portcullis.Marker)
+			require.NotNil(t, emitter.result)
+			require.Len(t, emitter.result.Documents, 1)
 
-	// The persisted session message feeds every later turn and export.
-	stored, err := json.Marshal(sess)
-	require.NoError(t, err)
-	assert.NotContains(t, string(stored), secret, "persisted attachment text must be scrubbed by the final pass")
-	assert.Contains(t, string(stored), portcullis.Marker)
+			// The emitted result feeds SSE / ACP / TUI consumers.
+			event, err := json.Marshal(emitter.result)
+			require.NoError(t, err)
+			assert.NotContains(t, string(event), secret, "emitted attachment text must be scrubbed by the final pass")
+			assert.Contains(t, string(event), portcullis.Marker)
+
+			// The persisted session message feeds every later turn and export.
+			stored, err := json.Marshal(sess)
+			require.NoError(t, err)
+			assert.NotContains(t, string(stored), secret, "persisted attachment text must be scrubbed by the final pass")
+			assert.Contains(t, string(stored), portcullis.Marker)
+		})
+	}
 }

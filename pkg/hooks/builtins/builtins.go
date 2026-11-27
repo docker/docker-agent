@@ -145,9 +145,11 @@ type AgentDefaults struct {
 	// [hooks.Executor.hooksFor] collapses an identical explicit entry
 	// (including its name and per-hook options). The
 	// tool_response_transform leg differs: when configured transforms are
-	// present its auto-injected passes are named so the final scrub
-	// survives that dedup, which means an explicitly wired redactor runs
-	// as an additional invocation instead of replacing the automatic one.
+	// present its auto-injected passes are marked internal
+	// (`AutoInjected`), an identity no YAML entry can reproduce, so the
+	// final scrub survives that dedup and an
+	// explicitly wired redactor runs as an additional invocation at its
+	// configured position instead of replacing the automatic one.
 	RedactSecrets bool
 }
 
@@ -165,15 +167,27 @@ type AutoInjector interface {
 	AutoInject(cfg *hooks.Config)
 }
 
+// Labels for the redaction passes that bracket configured
+// tool_response_transform hooks. They are for logs and runtime events only:
+// what keeps the passes out of the executor's deduplication is the internal
+// `AutoInjected` marker, which no YAML entry can set.
+const (
+	redactSecretsLeadingPassName = "redact_secrets (before configured hooks)"
+	redactSecretsFinalPassName   = "redact_secrets (final pass)"
+)
+
 // ApplyAgentDefaults adds the stock builtin hook entries implied by d to
 // cfg, appending them after any user-configured hooks. There is one
 // deliberate exception: when d.RedactSecrets is set and cfg already
-// carries configured tool_response_transform hooks, two named redaction
-// passes bracket them — one ahead so command hooks cannot observe raw
-// tool output, display metadata, or inline document attachments on
-// stdin, and one after as the final scrub so a later rewrite cannot
-// reintroduce a secret. A nil cfg is treated as empty. Returns nil iff
-// no hook (user-configured or auto-injected) is present.
+// carries configured tool_response_transform hooks, two auto-injected
+// redaction passes bracket them — one ahead so command hooks cannot
+// observe the original raw tool output, display metadata, or inline
+// document attachments on stdin, and one after as the final scrub so a
+// later rewrite cannot reintroduce a secret before emission or
+// persistence. Both carry an internal identity that no YAML entry can
+// reproduce, so hook deduplication cannot drop either pass. A nil cfg is
+// treated as empty. Returns nil iff no hook (user-configured or
+// auto-injected) is present.
 //
 // Snapshot auto-injection is handled separately via [SnapshotController]
 // (an [AutoInjector]) so it can be configured by the embedder rather
@@ -228,28 +242,33 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 		// transforms to protect; with none there is no hook to leak to and a
 		// single pass keeps the per-tool-result cost unchanged.
 		//
-		// When they are injected, both carry their own Name: the executor
+		// When they are injected, both are marked AutoInjected: the executor
 		// deduplicates identical hooks keeping the first occurrence
-		// ([hooks.Executor.hooksFor]). Without a distinct name the trailing
-		// entry would collapse into an explicit "command: redact_secrets"
-		// entry the agent wires by hand (examples/redact_secrets_hooks.yaml
-		// does exactly that), and the final scrub would silently disappear:
-		// a transform after that explicit entry could then rewrite a secret
-		// back into the tool output or attachments and the dispatcher would
-		// emit and record it. Naming both also keeps the two auto-injected
-		// passes distinct from each other. An explicit entry stays a
+		// ([hooks.Executor.hooksFor]), and matching on a plain struct field
+		// would let an explicit "command: redact_secrets" entry that copies
+		// the pass's label and options (the label is a user-configurable
+		// name) collapse the pass into itself. A transform after that
+		// explicit entry could then rewrite a secret back into the tool
+		// output or attachments and the dispatcher would emit and record it.
+		// AutoInjected has no YAML or JSON representation, so no
+		// user-authored entry can reproduce the identity and both passes
+		// always survive deduplication, while an explicit entry stays a
 		// separate, additional invocation at the position the user chose.
+		// The names are labels for logs and runtime events only; keeping
+		// them distinct makes the two passes readable.
 		responseRedactor := hooks.Hook{Type: hooks.HookTypeBuiltin, Command: RedactSecrets}
 		if len(cfg.ToolResponseTransform) > 0 {
 			preamble := hooks.MatcherConfig{
 				Matcher: "*",
 				Hooks: []hooks.Hook{{
-					Name:    "redact_secrets (before configured hooks)",
-					Type:    hooks.HookTypeBuiltin,
-					Command: RedactSecrets,
+					Name:         redactSecretsLeadingPassName,
+					Type:         hooks.HookTypeBuiltin,
+					Command:      RedactSecrets,
+					AutoInjected: true,
 				}},
 			}
-			responseRedactor.Name = "redact_secrets (final pass)"
+			responseRedactor.Name = redactSecretsFinalPassName
+			responseRedactor.AutoInjected = true
 			cfg.ToolResponseTransform = append([]hooks.MatcherConfig{preamble}, cfg.ToolResponseTransform...)
 		}
 		cfg.ToolResponseTransform = append(cfg.ToolResponseTransform, hooks.MatcherConfig{
