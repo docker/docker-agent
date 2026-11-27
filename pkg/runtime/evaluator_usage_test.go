@@ -165,11 +165,11 @@ func TestEvaluatorBudgetAdmissionAndBlocking(t *testing.T) {
 			tool := recordingTool("the_tool", &executed)
 			calls := []tools.ToolCall{{ID: "call", Function: tools.FunctionCall{Name: "the_tool", Arguments: `{}`}}}
 			sink := &collectSink{}
-			stopped, _ := rt.processToolCalls(t.Context(), sess, root, calls, tool, sink)
+			stopped, _ := rt.processToolCalls(t.Context(), sess, root, calls, tool, sink, nil)
 			assert.True(t, stopped)
 			assert.False(t, executed, "exhausting the budget must not bypass the guard")
 			assert.EqualValues(t, 1, requests.Load())
-			stopped, _ = rt.processToolCalls(t.Context(), sess, root, calls, tool, sink)
+			stopped, _ = rt.processToolCalls(t.Context(), sess, root, calls, tool, sink, nil)
 			assert.True(t, stopped)
 			assert.EqualValues(t, 1, requests.Load(), "no further paid evaluation after exhaustion")
 			require.Len(t, evaluationItems(sess), 1)
@@ -344,7 +344,7 @@ func TestEvaluatorInvalidAccountingFailsClosed(t *testing.T) {
 				tool := recordingTool("the_tool", &executed)
 				calls := []tools.ToolCall{{ID: "call", Function: tools.FunctionCall{Name: "the_tool", Arguments: `{}`}}}
 				sink := &collectSink{}
-				rt.processToolCalls(t.Context(), sess, root, calls, tool, sink)
+				rt.processToolCalls(t.Context(), sess, root, calls, tool, sink, nil)
 				assert.False(t, executed)
 				records := evaluationItems(sess)
 				require.Len(t, records, 1)
@@ -412,7 +412,7 @@ func TestEvaluatorAccountsEveryRequest(t *testing.T) {
 			tool := recordingTool("the_tool", &executed)
 			calls := []tools.ToolCall{{ID: "call", Function: tools.FunctionCall{Name: "the_tool", Arguments: `{}`}}}
 			sink := &collectSink{}
-			stopped, _ := rt.processToolCalls(t.Context(), sess, root, calls, tool, sink)
+			stopped, _ := rt.processToolCalls(t.Context(), sess, root, calls, tool, sink, nil)
 			assert.Equal(t, limit < 0.12, stopped)
 			assert.Equal(t, limit > 0.12, executed)
 			records := evaluationItems(sess)
@@ -483,7 +483,7 @@ func TestEvaluatorHTTPUsageOverflowBlocksTool(t *testing.T) {
 	var executed bool
 	tool := recordingTool("the_tool", &executed)
 	sink := &collectSink{}
-	rt.processToolCalls(t.Context(), sess, root, []tools.ToolCall{{ID: "call", Function: tools.FunctionCall{Name: "the_tool", Arguments: `{}`}}}, tool, sink)
+	rt.processToolCalls(t.Context(), sess, root, []tools.ToolCall{{ID: "call", Function: tools.FunctionCall{Name: "the_tool", Arguments: `{}`}}}, tool, sink, nil)
 	assert.False(t, executed)
 	require.Len(t, evaluationItems(sess), 1)
 	assert.Nil(t, evaluationItems(sess)[0].Usage)

@@ -271,6 +271,9 @@ type LocalRuntime struct {
 	onElicitationRequest func(Event)
 	onElicitationContext func(context.Context, Event)
 	sessionStore         session.Store
+	// runs is where a durable runtime records its runs. It is nil on a
+	// runtime that keeps no record of them. See [DurableRuntime].
+	runs session.RunStore
 	// generatedFiles caches per-owner-session workspace roots and manifest
 	// records for [LocalRuntime.ResolveGeneratedFile]. Seeded by
 	// materialization, filled lazily for restored sessions.

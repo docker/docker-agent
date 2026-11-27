@@ -38,7 +38,7 @@ import (
 // (false, "") in every other path — including user cancellation, which
 // halts the *batch* but keeps the loop alive so the synthesised tool
 // error responses can be sent back to the model on the next turn.
-func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Session, caller *agent.Agent, calls []tools.ToolCall, agentTools []tools.Tool, events EventSink) (stopRun bool, stopMessage string) {
+func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Session, caller *agent.Agent, calls []tools.ToolCall, agentTools []tools.Tool, events EventSink, journal toolexec.Journal) (stopRun bool, stopMessage string) {
 	r.ensureBudget()
 	accounting := &evaluatorAccounting{r: r, sess: sess, a: caller, events: events}
 	ctx = context.WithValue(ctx, evaluatorAccountingKey{}, accounting)
@@ -79,6 +79,7 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 		AgentFor:            func(*session.Session) *agent.Agent { return caller },
 		Permissions:         r.permissionCheckers,
 		Handlers:            handlers,
+		Journal:             journal,
 		Recall: func(ctx context.Context, _ *session.Session, _ *agent.Agent, message string) error {
 			return r.recall(ctx, QueuedMessage{Content: message})
 		},

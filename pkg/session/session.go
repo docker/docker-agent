@@ -1688,8 +1688,51 @@ func (s *Session) TryAgentHandoff(name string) bool {
 func (s *Session) VisibleExchanges() []chat.Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return visibleExchanges(s.Messages)
+}
+
+// Prompt returns the message a run of the session starts from, and its
+// position in the transcript: the conversation's last item, when it is a
+// message the user wrote. A session that ends on anything else (an answer, a
+// tool result, a summary, a note the runtime left) has no prompt: it is run
+// again without new input. The usage of a side request is no part of the
+// conversation, and can land behind a prompt before its run starts.
+func (s *Session) Prompt() (prompt chat.Message, position int, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for position, item := range slices.Backward(s.Messages) {
+		if item.AuxiliaryUsage != nil {
+			continue
+		}
+		if !item.IsMessage() || item.Message.Implicit || item.Message.Message.Role != chat.MessageRoleUser {
+			break
+		}
+		return item.Message.Message, position, true
+	}
+	return chat.Message{}, -1, false
+}
+
+// NewestRequest splits the visible conversation at the newest user request.
+// It returns the request's text, the exchanges before it, and whether a
+// visible reply has followed it. The request is looked up in the transcript
+// itself: one with nothing visible to it, as when it is made of attachments
+// only, has no text and is not mistaken for the request before it. Without
+// any request, history is the whole visible conversation.
+func (s *Session) NewestRequest() (request string, history []chat.Message, answered bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i, item := range slices.Backward(s.Messages) {
+		if item.IsMessage() && !item.Message.Implicit && item.Message.Message.Role == chat.MessageRoleUser {
+			replies := visibleExchanges(s.Messages[i+1:])
+			return item.Message.Message.Content, visibleExchanges(s.Messages[:i]), len(replies) > 0
+		}
+	}
+	return "", visibleExchanges(s.Messages), false
+}
+
+func visibleExchanges(items []Item) []chat.Message {
 	var out []chat.Message
-	for _, item := range s.Messages {
+	for _, item := range items {
 		if !item.IsMessage() || item.Message.Implicit {
 			continue
 		}

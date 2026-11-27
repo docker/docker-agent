@@ -30,6 +30,23 @@ import (
 type PersistenceObserver struct {
 	store     session.Store
 	streaming streamingState
+	// lost is the first error that kept part of the transcript out of the
+	// store.
+	lost error
+}
+
+// Err returns the first error that kept part of the transcript out of the
+// store, if any did: from then on the store no longer holds the conversation
+// the run had.
+func (p *PersistenceObserver) Err() error { return p.lost }
+
+// missed logs that part of the transcript did not reach the store, and
+// remembers the first time it happens.
+func (p *PersistenceObserver) missed(ctx context.Context, what string, err error, attrs ...any) {
+	slog.WarnContext(ctx, what, append(attrs, "error", err)...)
+	if p.lost == nil {
+		p.lost = err
+	}
 }
 
 // streamingState holds the in-flight streaming assistant message
@@ -114,10 +131,11 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 
 	case *UserMessageEvent:
 		p.streaming = streamingState{}
-		msg := session.UserMessage(e.Message, e.MultiContent...)
-		msg.Message.MessageID = e.MessageID
-		if _, err := p.store.AddMessage(ctx, e.SessionID, msg); err != nil {
-			slog.WarnContext(ctx, "Failed to persist user message", "session_id", e.SessionID, "error", err)
+		if e.stored {
+			break
+		}
+		if _, err := p.store.AddMessage(ctx, e.SessionID, e.sessionMessage()); err != nil {
+			p.missed(ctx, "Failed to persist user message", err, "session_id", e.SessionID)
 		}
 
 	case *MessageAddedEvent:
@@ -130,15 +148,15 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			_, err = p.store.AddMessage(ctx, e.SessionID, e.Message)
 		}
 		if err != nil {
-			slog.WarnContext(ctx, "Failed to persist message",
-				"session_id", e.SessionID, "message_id", p.streaming.messageID, "error", err)
+			p.missed(ctx, "Failed to persist message", err,
+				"session_id", e.SessionID, "message_id", p.streaming.messageID)
 		}
 		p.streaming = streamingState{}
 
 	case *SubSessionCompletedEvent:
 		if subSess, ok := e.SubSession.(*session.Session); ok {
 			if err := p.store.AddSubSession(ctx, e.ParentSessionID, subSess); err != nil {
-				slog.WarnContext(ctx, "Failed to persist sub-session", "parent_id", e.ParentSessionID, "error", err)
+				p.missed(ctx, "Failed to persist sub-session", err, "parent_id", e.ParentSessionID)
 			}
 		}
 
@@ -153,17 +171,17 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			item.Usage = &usage
 		}
 		if err := p.store.AddSummary(ctx, e.SessionID, item); err != nil {
-			slog.WarnContext(ctx, "Failed to persist summary", "session_id", e.SessionID, "error", err)
+			p.missed(ctx, "Failed to persist summary", err, "session_id", e.SessionID)
 		}
 
 	case *EvaluationUsageEvent:
 		if err := p.store.AddEvaluation(ctx, e.SessionID, e.Evaluation); err != nil {
-			slog.WarnContext(ctx, "Failed to persist evaluator usage", "session_id", e.SessionID, "error", err)
+			p.missed(ctx, "Failed to persist evaluator usage", err, "session_id", e.SessionID)
 		}
 
 	case *RoutingDecisionEvent:
 		if err := p.store.AddRoutingDecision(ctx, e.SessionID, e.Decision); err != nil {
-			slog.WarnContext(ctx, "Failed to persist routing decision", "session_id", e.SessionID, "error", err)
+			p.missed(ctx, "Failed to persist routing decision", err, "session_id", e.SessionID)
 		}
 
 	case *TokenUsageEvent:
@@ -195,7 +213,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			CreatedAt: ts.Format(time.RFC3339),
 		}
 		if err := p.store.AddError(ctx, sess.ID, errItem); err != nil {
-			slog.WarnContext(ctx, "Failed to persist error", "session_id", sess.ID, "error", err)
+			p.missed(ctx, "Failed to persist error", err, "session_id", sess.ID)
 		}
 	}
 }

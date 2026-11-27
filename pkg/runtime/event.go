@@ -53,6 +53,10 @@ type UserMessageEvent struct {
 	MultiContent    []chat.MessagePart `json:"multi_content,omitempty"`
 	SessionID       string             `json:"session_id"`
 	SessionPosition int                `json:"session_position"` // Index in session.Messages, -1 if unknown
+
+	// stored is set when the message reached the session store before the
+	// event was emitted, so observers must not store it again.
+	stored bool
 }
 
 func UserMessage(message, sessionID string, multiContent []chat.MessagePart, sessionPos ...int) Event {
@@ -77,6 +81,14 @@ func userMessageEvent(msg chat.Message, sessionID string, position int) Event {
 }
 
 func (e *UserMessageEvent) GetSessionID() string { return e.SessionID }
+
+// sessionMessage returns the message the event announces, as the session
+// store keeps it.
+func (e *UserMessageEvent) sessionMessage() *session.Message {
+	msg := session.UserMessage(e.Message, e.MultiContent...)
+	msg.Message.MessageID = e.MessageID
+	return msg
+}
 
 // PartialToolCallEvent is sent when a tool call is first received (partial/complete)
 type PartialToolCallEvent struct {

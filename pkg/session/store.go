@@ -1117,14 +1117,23 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 		return ErrEmptyID
 	}
 
-	// These tables carry no foreign keys because media may be recorded before
-	// the lazily persisted session row exists, so prune them explicitly.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := deleteSessionTreeTx(ctx, tx, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// deleteSessionTreeTx deletes a session and its descendants. It reports
+// ErrNotFound when there is no such session.
+func deleteSessionTreeTx(ctx context.Context, tx *sql.Tx, id string) error {
+	// These tables carry no foreign keys because media may be recorded before
+	// the lazily persisted session row exists, so prune them explicitly.
 	// Prune descendants' non-FK media before cascading away their ancestry.
 	const subtree = `WITH RECURSIVE subtree(id) AS (
 		SELECT id FROM sessions WHERE id = ?
@@ -1153,8 +1162,7 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 	if rowsAffected == 0 {
 		return ErrNotFound
 	}
-
-	return tx.Commit()
+	return nil
 }
 
 // UpdateSession updates an existing session's metadata, or creates it if it doesn't exist (upsert).
