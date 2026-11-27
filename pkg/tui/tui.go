@@ -759,6 +759,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithSendMode(m.sendMode),
 		chat.WithInterruptMode(m.interruptMode),
 		chat.WithShowBanner(m.showBanner),
+		chat.WithBannerInteraction(m.startupBannerAnimation),
 	}
 
 	if m.leanMode {
@@ -2746,7 +2747,12 @@ func (m *appModel) helpCovers(x, y int) bool {
 }
 
 // handleMouseClick routes mouse clicks to the appropriate component based on Y coordinate.
-func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (model tea.Model, cmd tea.Cmd) {
+	var bannerCmd tea.Cmd
+	if msg.Button == tea.MouseLeft && msg.Mod == 0 {
+		bannerCmd = m.pointBanner(msg.X, msg.Y, true)
+	}
+	defer func() { cmd = tea.Batch(bannerCmd, cmd) }()
 	if m.helpCovers(msg.X, msg.Y) {
 		return m.forwardDialog(msg)
 	}
@@ -2827,7 +2833,14 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 }
 
 // handleMouseMotion routes mouse motion events with adjusted coordinates.
-func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (model tea.Model, cmd tea.Cmd) {
+	var bannerCmd tea.Cmd
+	if msg.Button == tea.MouseNone {
+		bannerCmd = m.pointBanner(msg.X, msg.Y, false)
+	} else {
+		bannerCmd = chat.LeaveBanner(m.activeTab.chatPage)
+	}
+	defer func() { cmd = tea.Batch(bannerCmd, cmd) }()
 	if m.isDragging {
 		switch msg.Button {
 		case tea.MouseLeft:
@@ -3140,6 +3153,7 @@ func (m *appModel) resetResizeGrips() {
 	m.viewCacheValid = false
 	if m.activeTab != nil {
 		chat.ResetSidebarGrip(m.activeTab.chatPage)
+		chat.ResetBanner(m.activeTab.chatPage)
 	}
 }
 
@@ -3169,6 +3183,13 @@ func (m *appModel) View() tea.View {
 	}
 	view := m.composeView()
 	view.Content = m.topRow + view.Content
+	if m.ready && m.err == nil && !m.leanMode && !m.paneHidden {
+		masks := foregroundBounds(m.foreground.layers)
+		for i := range masks {
+			masks[i] = masks[i].Add(image.Pt(0, m.topMargin()))
+		}
+		view.Content = chat.CompositeBanner(m.activeTab.chatPage, view.Content, m.width, m.height+m.topMargin(), m.topMargin(), masks)
+	}
 	m.viewCache = view
 	m.viewCacheValid = true
 	m.viewCacheInitialized = true
@@ -3529,4 +3550,11 @@ func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.V
 		view.ProgressBar = tea.NewProgressBar(tea.ProgressBarIndeterminate, 0)
 	}
 	return view
+}
+
+func (m *appModel) pointBanner(x, y int, click bool) tea.Cmd {
+	if m.leanMode || m.paneHidden || !m.ready || m.err != nil || m.dialogMgr.Open() || m.completions.Open() || m.notification.Open() || m.tour.Active() || m.isDragging || chat.IsResizingSidebar(m.activeTab.chatPage) || m.activeTab.chatPage.IsSelecting() {
+		return chat.LeaveBanner(m.activeTab.chatPage)
+	}
+	return chat.PointBanner(m.activeTab.chatPage, x, y, click)
 }

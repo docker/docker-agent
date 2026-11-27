@@ -45,6 +45,10 @@ func RenderFrame(progress float64, paneWidth int) []string {
 	if progress >= settledAt {
 		return Render()
 	}
+	return renderParticles(progress, paneWidth)
+}
+
+func renderParticles(progress float64, paneWidth int) []string {
 	colors := rowColors(styles.Background)
 	cells := make([][]byte, Height)
 	for y := range cells {
