@@ -2,7 +2,6 @@ package a2a
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -42,6 +41,7 @@ type cancelTaskIDKey struct{}
 
 func (i *approvalInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	if cancelReq, ok := req.Payload.(*a2a.CancelTaskRequest); ok && cancelReq != nil && i.approvals.toolApproval() {
+		i.approvals.beginCancelCall(cancelReq.ID)
 		return context.WithValue(ctx, cancelTaskIDKey{}, cancelReq.ID), nil, nil
 	}
 	sendReq, ok := req.Payload.(*a2a.SendMessageRequest)
@@ -57,14 +57,15 @@ func (i *approvalInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallCo
 
 // After reports a CancelTask that lost the race to INPUT_REQUIRED, but whose
 // cleanup canceled the task, as the success it is: a2a-go only sees the
-// INPUT_REQUIRED result and returns ErrTaskNotCancelable.
+// INPUT_REQUIRED result (ErrTaskNotCancelable) or the closed event pipe of the
+// ended execution (ErrQueueClosed).
 func (i *approvalInterceptor) After(ctx context.Context, _ *a2asrv.CallContext, resp *a2asrv.Response) error {
 	taskID, ok := ctx.Value(cancelTaskIDKey{}).(a2a.TaskID)
 	if !ok {
 		return nil
 	}
-	task, ok := i.approvals.takeCanceled(taskID)
-	if ok && errors.Is(resp.Err, a2a.ErrTaskNotCancelable) {
+	task, ok := i.approvals.endCancelCall(taskID)
+	if ok && resp.Err != nil {
 		resp.Payload, resp.Err = task, nil
 	}
 	return nil

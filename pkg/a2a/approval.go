@@ -53,6 +53,7 @@ const (
 	hookBeforePark approvalHookPoint = iota
 	hookAfterPark
 	hookBeforeCancelEvent
+	hookAfterCancelEvent
 	hookAfterFinalEvent
 )
 
@@ -93,14 +94,15 @@ type approvalRegistry struct {
 	done    chan struct{} // closed once the janitor has released every parked run
 	ttl     time.Duration
 
-	mu        sync.Mutex
-	runs      map[a2a.TaskID]*pausedRun
-	canceling map[a2a.TaskID]bool      // CancelTask in progress: the execution must not pause
-	canceled  map[a2a.TaskID]*a2a.Task // canceled by resolveCancel; CancelTask reports it (see approvalInterceptor)
-	closed    bool                     // shutdown released the parked runs; later parks are abandoned
-	onAbandon abandonFunc
-	live      int           // runtimes whose event stream is still open
-	idle      chan struct{} // closed while live is zero
+	mu          sync.Mutex
+	runs        map[a2a.TaskID]*pausedRun
+	canceling   map[a2a.TaskID]bool      // CancelTask in progress: the execution must not pause
+	cancelCalls map[a2a.TaskID]int       // CancelTask requests in flight; they may share one SDK cancellation
+	canceled    map[a2a.TaskID]*a2a.Task // canceled by resolveCancel; reported to every in-flight CancelTask
+	closed      bool                     // shutdown released the parked runs; later parks are abandoned
+	onAbandon   abandonFunc
+	live        int           // runtimes whose event stream is still open
+	idle        chan struct{} // closed while live is zero
 
 	hook func(approvalHookPoint, a2a.TaskID) // tests only
 }
@@ -113,15 +115,16 @@ func newApprovalRegistry(baseCtx context.Context, enabled bool) *approvalRegistr
 	idle := make(chan struct{})
 	close(idle)
 	r := &approvalRegistry{
-		enabled:   enabled,
-		baseCtx:   ctx,
-		stop:      stop,
-		done:      make(chan struct{}),
-		ttl:       defaultApprovalTTL,
-		runs:      make(map[a2a.TaskID]*pausedRun),
-		canceling: make(map[a2a.TaskID]bool),
-		canceled:  make(map[a2a.TaskID]*a2a.Task),
-		idle:      idle,
+		enabled:     enabled,
+		baseCtx:     ctx,
+		stop:        stop,
+		done:        make(chan struct{}),
+		ttl:         defaultApprovalTTL,
+		runs:        make(map[a2a.TaskID]*pausedRun),
+		canceling:   make(map[a2a.TaskID]bool),
+		cancelCalls: make(map[a2a.TaskID]int),
+		canceled:    make(map[a2a.TaskID]*a2a.Task),
+		idle:        idle,
 	}
 	if enabled {
 		go r.janitor()
@@ -318,9 +321,10 @@ func (r *approvalRegistry) isCanceling(taskID a2a.TaskID) bool {
 
 // resolveCancel releases the run parked for taskID once a CancelTask is over.
 // If the task did not end canceled, the execution published INPUT_REQUIRED
-// before the cancel event (a2a-go then reports ErrTaskNotCancelable): the task
+// before the cancel event (a2a-go then reports ErrTaskNotCancelable, or
+// ErrQueueClosed once that execution closed its pipe): the task
 // is canceled here instead, so it never advertises a dropped approval, and
-// takeCanceled hands it to the CancelTask response.
+// endCancelCall reports it to the CancelTask requests waiting on the outcome.
 func (r *approvalRegistry) resolveCancel(taskID a2a.TaskID, canceled bool) {
 	if r == nil {
 		return
@@ -337,21 +341,39 @@ func (r *approvalRegistry) resolveCancel(taskID a2a.TaskID, canceled bool) {
 	default:
 		if task := r.abandon(run, a2a.TaskStateCanceled, ""); task != nil {
 			r.mu.Lock()
-			r.canceled[taskID] = task
+			if r.cancelCalls[taskID] > 0 {
+				r.canceled[taskID] = task
+			}
 			r.mu.Unlock()
 		}
 	}
 }
 
-// takeCanceled returns, once, the task resolveCancel canceled for taskID.
-func (r *approvalRegistry) takeCanceled(taskID a2a.TaskID) (*a2a.Task, bool) {
+// beginCancelCall records a CancelTask request for taskID until endCancelCall.
+func (r *approvalRegistry) beginCancelCall(taskID a2a.TaskID) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cancelCalls[taskID]++
+}
+
+// endCancelCall returns the task resolveCancel canceled for taskID, if any.
+// a2a-go hands one cancellation result to every overlapping CancelTask, so the
+// task is kept until the last of them ends.
+func (r *approvalRegistry) endCancelCall(taskID a2a.TaskID) (*a2a.Task, bool) {
 	if r == nil {
 		return nil, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	task, ok := r.canceled[taskID]
-	delete(r.canceled, taskID)
+	r.cancelCalls[taskID]--
+	if r.cancelCalls[taskID] <= 0 {
+		delete(r.cancelCalls, taskID)
+		delete(r.canceled, taskID)
+	}
 	return task, ok
 }
 

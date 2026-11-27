@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -589,6 +590,123 @@ func TestServer_ToolApproval_CancelDuringPauseHandoff(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("the runtime of the canceled task is still running")
 			}
+			assert.Zero(t, executions.Load())
+		})
+	}
+}
+
+// Every CancelTask request that loses the race to INPUT_REQUIRED reports the
+// CANCELED task its cleanup persisted, whether a2a-go failed the cancel with
+// ErrTaskNotCancelable or on the ended execution's closed event pipe, and
+// however many requests share the cancellation.
+func TestServer_ToolApproval_CancelAfterPublishReportsCanceled(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		pipeClosed bool
+		callers    int
+	}{
+		{"pipe closed before the cancel write", true, 1},
+		{"callers share the cancellation", false, 2},
+		{"callers share a cancellation on a closed pipe", true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+
+			var executions atomic.Int32
+			reg := newApprovalRegistry(t.Context(), true)
+			paused := make(chan a2a.TaskID, 1)
+			release := make(chan struct{})
+			releaseOnce := sync.OnceFunc(func() { close(release) })
+			var client *a2aclient.Client
+			var pending atomic.Pointer[pausedRun]
+			reg.hook = func(point approvalHookPoint, id a2a.TaskID) {
+				switch point {
+				case hookAfterFinalEvent:
+					paused <- id
+					<-release
+				case hookBeforeCancelEvent:
+					if tc.callers > 1 {
+						assert.Eventually(t, func() bool {
+							reg.mu.Lock()
+							defer reg.mu.Unlock()
+							return reg.cancelCalls[id] == tc.callers
+						}, 10*time.Second, time.Millisecond)
+						// a2a-go joins them to this cancellation without a signal.
+						time.Sleep(50 * time.Millisecond) //nolint:forbidigo // no observable join point
+					}
+					if !tc.pipeClosed {
+						// The execution keeps its pipe until the cancel event is written
+						// (hookAfterCancelEvent): a2a-go reports INPUT_REQUIRED.
+						return
+					}
+					releaseOnce()
+					// a2a-go answers a follow-up with "cancelation is in progress"
+					// only once the execution is gone and its pipe closed.
+					run := pending.Load()
+					reply := answerToolCall(&a2a.Task{ID: id, ContextID: run.contextID}, run.callID, map[string]any{"decision": "approve"})
+					assert.Eventually(t, func() bool {
+						_, err := client.SendMessage(ctx, &a2a.SendMessageRequest{Message: reply})
+						return err != nil && strings.Contains(err.Error(), "cancelation is in progress")
+					}, 10*time.Second, 5*time.Millisecond)
+				case hookAfterCancelEvent:
+					if !tc.pipeClosed {
+						releaseOnce()
+					}
+				}
+			}
+			client, _ = startApprovalServer(t, approvalTeam(&executions), session.NewInMemorySessionStore(), RunOptions{ToolApproval: true, approvals: reg})
+
+			go func() {
+				_, _ = client.SendMessage(context.WithoutCancel(t.Context()), &a2a.SendMessageRequest{
+					Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("run the tool")),
+				})
+			}()
+			var taskID a2a.TaskID
+			select {
+			case taskID = <-paused:
+			case <-ctx.Done():
+				t.Fatal("the run did not publish INPUT_REQUIRED")
+			}
+			run, ok := reg.pending(taskID)
+			require.True(t, ok)
+			pending.Store(run)
+			require.Eventually(t, func() bool {
+				_, err := client.GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+				return err == nil
+			}, 10*time.Second, 5*time.Millisecond)
+
+			type result struct {
+				task *a2a.Task
+				err  error
+			}
+			results := make(chan result, tc.callers)
+			for range tc.callers {
+				go func() {
+					task, err := client.CancelTask(ctx, &a2a.CancelTaskRequest{ID: taskID})
+					results <- result{task, err}
+				}()
+			}
+			for range tc.callers {
+				res := <-results
+				require.NoError(t, res.err, "every cancel request canceled the task")
+				assert.Equal(t, a2a.TaskStateCanceled, res.task.Status.State)
+				assert.Equal(t, taskID, res.task.ID)
+			}
+
+			got, err := client.GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+			require.NoError(t, err)
+			assert.Equal(t, a2a.TaskStateCanceled, got.Status.State)
+			_, parked := reg.pending(taskID)
+			assert.False(t, parked)
+			reg.mu.Lock()
+			assert.Empty(t, reg.canceled, "the fallback is dropped once its requests end")
+			assert.Empty(t, reg.cancelCalls)
+			reg.mu.Unlock()
 			assert.Zero(t, executions.Load())
 		})
 	}

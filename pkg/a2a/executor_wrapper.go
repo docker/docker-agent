@@ -107,11 +107,21 @@ func (w *executorWrapper) takeResume(execCtx *a2asrv.ExecutorContext) (*resumeTi
 // in Cleanup once the outcome is known; an active run is cancelled with the
 // execution context the SDK cancels.
 func (w *executorWrapper) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
-	if w.approvals.toolApproval() {
-		w.approvals.markCanceling(execCtx.TaskID)
-		w.approvals.runHook(hookBeforeCancelEvent, execCtx.TaskID)
+	if !w.approvals.toolApproval() {
+		return w.executor.Cancel(ctx, execCtx)
 	}
-	return w.executor.Cancel(ctx, execCtx)
+	w.approvals.markCanceling(execCtx.TaskID)
+	w.approvals.runHook(hookBeforeCancelEvent, execCtx.TaskID)
+	events := w.executor.Cancel(ctx, execCtx)
+	return func(yield func(a2a.Event, error) bool) {
+		for event, err := range events {
+			ok := yield(event, err)
+			w.approvals.runHook(hookAfterCancelEvent, execCtx.TaskID)
+			if !ok {
+				return
+			}
+		}
+	}
 }
 
 // Cleanup releases the run parked for the task unless the task is still
