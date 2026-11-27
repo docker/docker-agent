@@ -148,10 +148,12 @@ func (r *LocalRuntime) streamStoppedTimeout() time.Duration {
 // the response, executes any tool calls, and loops until the model signals stop
 // or the iteration limit is reached.
 func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan Event {
-	return r.runStream(ctx, sess, defaultIdleStreamRetryPolicy())
+	return r.runStream(ctx, sess, defaultIdleStreamRetryPolicy(), nil)
 }
 
-func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idleRetryPolicy idleStreamRetryPolicy) <-chan Event {
+// runStream starts the run loop for sess. resume is the checkpoint the run is
+// taken up from; it is nil for a new run.
+func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idleRetryPolicy idleStreamRetryPolicy, resume *checkpoint) <-chan Event {
 	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.currentAgentName(), "session_id", sess.ID)
 	events := make(chan Event, defaultEventChannelCapacity)
 	rootStream := !sess.IsSubSession()
@@ -174,7 +176,7 @@ func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idl
 		if rootStream {
 			defer r.activeRootStreams.Add(-1)
 		}
-		r.runStreamLoop(withObserverFlush(ctx, events), sess, entry, events)
+		r.runStreamLoop(withObserverFlush(ctx, events), sess, entry, resume, events)
 	}()
 	return out
 }
@@ -182,7 +184,7 @@ func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idl
 // runStreamLoop is the body of RunStream. Pulled out of the anonymous
 // goroutine so it has a real name in stack traces and is easier to navigate
 // in editors.
-func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session, liveEntry *liveSessionEntry, events chan Event) {
+func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session, liveEntry *liveSessionEntry, resume *checkpoint, events chan Event) {
 	sink := &channelSink{ch: events}
 	ctx = context.WithValue(ctx, scratchpadRootKey{}, liveEntry.treeRootID)
 
@@ -255,8 +257,26 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// at this dead stream's channel.
 	var streamReason string
 	var streamFinishReason chat.FinishReason
+	// rec is the record a durable runtime keeps of the run; it is nil, and
+	// does nothing, on any other.
+	rec := r.newRunRecord(sess, events, resume)
+	ctx = withRunRecord(ctx, rec)
 	defer func() {
+		// A panic is a crash: the record stays, so the run is found again
+		// and the crash counted. The stream is still closed before the
+		// panic goes on.
+		crash := recover()
+		if crash == nil {
+			if err := rec.settle(ctx); err != nil {
+				// The run got to its end and its record is still there: it
+				// did not end as far as the store knows.
+				streamReason = r.stopUnrecorded(ctx, sess, r.resolveSessionAgent(sess), err, sink)
+			}
+		}
 		r.finalizeEventChannel(ctx, sess, streamReason, streamFinishReason, prevElicitationCh, events)
+		if crash != nil {
+			panic(crash)
+		}
 	}()
 
 	// Unregister from the live-session registry and execute any accepted
@@ -274,55 +294,81 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	defer r.subscribePlanChanges(sess, sink)()
 	defer r.subscribeToolsetEvents(sess, sink)()
 
+	// A run does some things once, when it starts: it announces its prompt,
+	// fires the hooks of a new run and looks for a cached answer. A run taken
+	// up past that point has its state back instead.
+	starting := resume == nil || resume.Phase == phaseStarting
+
 	// Routed conversations restart at the entry agent and let before_agent_run
 	// pick the agent that actually runs, before anything is prepared for it.
-	route := r.beginRouting(sess)
-	a := r.resolveSessionAgent(sess)
-	// The prompt is what the user last wrote, when the run has that to
-	// answer. A session run again without new input ends on something else,
-	// which is not announced as the user's, or stored as such.
-	emitPrompt := func() chat.Message {
-		if sess.SendUserMessage {
-			if prompt, position, ok := sess.Prompt(); ok {
-				sink.Emit(userMessageEvent(prompt, sess.ID, position))
-				return prompt
+	var route *routeState
+	if starting {
+		route = r.beginRouting(sess)
+	} else {
+		route = resume.State.Route
+	}
+	a := r.turnAgent(sess, resume)
+	// The prompt is what the user last wrote, when a run that is starting
+	// has that to answer. A new run announces it; one taken up again has
+	// announced it already.
+	var prompt chat.Message
+	var promptEvent *UserMessageEvent
+	if starting && sess.SendUserMessage {
+		if msg, position, ok := sess.Prompt(); ok {
+			prompt = msg
+			if resume == nil {
+				promptEvent = userMessageEvent(prompt, sess.ID, position).(*UserMessageEvent)
 			}
 		}
-		return chat.Message{}
 	}
-	var prompt chat.Message
+	if resume == nil {
+		if err := rec.begin(ctx, promptEvent); err != nil {
+			streamReason = r.stopUnrecorded(ctx, sess, a, err, sink)
+			return
+		}
+	}
+	emitPrompt := func() {
+		if promptEvent != nil {
+			sink.Emit(promptEvent)
+		}
+	}
 	var stop *routeStop
-	if route != nil {
-		// The prompt precedes any route taken by a before_agent_run hook.
-		prompt = emitPrompt()
-		a, stop = r.activateAgent(ctx, sess, a, route, sink)
-	} else {
+	switch {
+	case route == nil:
 		stop = r.routingUnsupported(route, a)
+	case starting:
+		// The prompt precedes any route taken by a before_agent_run hook.
+		emitPrompt()
+		a, stop = r.activateAgent(ctx, sess, a, route, sink)
 	}
 	if stop != nil {
 		streamReason = r.stopRouting(ctx, sess, a, stop, sink)
 		return
 	}
 
-	// session_start fires once per RunStream. Its AdditionalContext
-	// (typically the AddEnvironmentInfo env block) is held as transient
-	// extras and threaded into every model call below — never added to
-	// the visible transcript (with cache_stable_prompts it is persisted
-	// only in the instruction-context snapshot), to keep the transcript
-	// clean and the user message tail stable.
-	sessionStart := r.executeSessionStartHooks(ctx, sess, a, sink)
 	ls := &loopState{
-		runState: runState{
+		idleRetry:  liveEntry.idleRetry,
+		compaction: newCompactionController(r, sess, sink, userconfig.Get()),
+	}
+	defer ls.compaction.Close(ctx)
+	if starting {
+		// session_start fires once per run. Its AdditionalContext
+		// (typically the AddEnvironmentInfo env block) is held as transient
+		// extras and threaded into every model call below — never added to
+		// the visible transcript (with cache_stable_prompts it is persisted
+		// only in the instruction-context snapshot), to keep the transcript
+		// clean and the user message tail stable.
+		sessionStart := r.executeSessionStartHooks(ctx, sess, a, sink)
+		ls.runState = runState{
 			MaxIterations:          sess.MaxIterations,
 			SessionStartMsgs:       sessionStart.messages,
 			SessionStartLegacyMsgs: sessionStart.legacyMessages(),
 			SessionStartSources:    sessionStart.sources,
 			Route:                  route,
-		},
-		idleRetry:  liveEntry.idleRetry,
-		compaction: newCompactionController(r, sess, sink, userconfig.Get()),
+		}
+	} else {
+		ls.runState = resume.State
 	}
-	defer ls.compaction.Close(ctx)
 
 	// Emit team information
 	sink.Emit(TeamInfo(r.agentDetailsFromTeam(ctx), a.Name()))
@@ -364,7 +410,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	sink.Emit(ToolsetInfo(len(agentTools), false, a.Name()))
 
 	if route == nil {
-		prompt = emitPrompt()
+		emitPrompt()
 	}
 	if prompt.Role == chat.MessageRoleUser {
 		stop, msg, ctxMsgs := r.executeUserPromptSubmitHooks(ctx, sess, a, prompt.Content, sink)
@@ -379,7 +425,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	sink.Emit(StreamStarted(sess.ID, a.Name()))
 
-	if a.HasHarness() {
+	if starting && a.HasHarness() && rec == nil {
 		streamReason = r.runHarnessAgent(ctx, sess, a, sink)
 		return
 	}
@@ -388,7 +434,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// skip the model entirely. The matching storage half is
 	// implemented as the cache_response stop-hook builtin (see
 	// runtime/cache.go and getHooksExecutor).
-	if r.tryReplayCachedResponse(ctx, sess, a, sink) {
+	if starting && r.tryReplayCachedResponse(ctx, sess, a, sink) {
 		if ls.Route == nil {
 			return
 		}
@@ -415,8 +461,24 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		bgagent.ToolNameWaitBackgroundAgents,
 		backgroundjobs.ToolNameViewBackgroundJob,
 	)
+	ls.loopDetector.Restore(ls.Loop)
+
+	// A run taken up again enters its first turn at the step it was cut off
+	// in, with the answer that turn's model step had left.
+	from, answer := phaseModel, (*modelAnswer)(nil)
+	if !starting {
+		from, answer = resume.Phase, resume.Answer
+	}
+	// recorded says the record already stands where the run is: at the step
+	// it is taken up at. Saving it again would pass for progress.
+	recorded := !starting
 
 	for {
+		// A turn is prepared for its model step unless the run is taken up
+		// past it: what comes before the model is asked has no place between
+		// a model's tool calls and their results.
+		entering := from == phaseModel
+
 		// Pause the loop here if /pause has been toggled on. Any in-flight
 		// LLM request and its tool calls have already completed. Emit a
 		// RuntimePaused event right before blocking so the TUI can flip its
@@ -432,16 +494,29 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// session now, at the iteration boundary: no model turn is in flight,
 		// so the compaction snapshot cannot race with messages being appended
 		// between the snapshot and ApplyCompaction.
-		r.runQueuedCompaction(ctx, liveEntry)
+		if entering {
+			r.runQueuedCompaction(ctx, liveEntry)
+		}
 
 		a = r.resolveSessionAgent(sess)
-		if ls.Route != nil {
+		switch {
+		case !entering:
+			a = r.turnAgent(sess, resume)
+		case ls.Route != nil:
 			a, stop = r.activateAgent(ctx, sess, a, ls.Route, sink)
-		} else {
+		default:
 			stop = r.routingUnsupported(ls.Route, a)
 		}
 		if stop != nil {
 			streamReason = r.stopRouting(ctx, sess, a, stop, sink)
+			return
+		}
+		if rec != nil && a.HasHarness() {
+			// A harness does its work outside the conversation: there
+			// would be no step to take the run up at. This holds for the
+			// agent a run starts with and for any it is handed to.
+			sink.Emit(ErrorForSession(sess.ID, fmt.Sprintf("Agent %q runs in an external harness, which a durable runtime cannot run.", a.Name())))
+			streamReason = turnEndReasonError
 			return
 		}
 
@@ -467,26 +542,28 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// server and may return a different count.
 		sink.Emit(ToolsetInfo(len(agentTools), false, a.Name()))
 
-		// Check iteration limit
-		newMax, decision := r.enforceMaxIterations(ctx, sess, a, ls.Iteration, ls.MaxIterations, sink)
-		if decision == iterationStop {
-			streamReason = StreamStopReasonMaxIterations
-			if ctx.Err() != nil {
-				streamReason = turnEndReasonCanceled
+		// A turn entered past its model step was let through before the run
+		// was cut off.
+		if entering {
+			// Check iteration limit
+			newMax, decision := r.enforceMaxIterations(ctx, sess, a, ls.Iteration, ls.MaxIterations, sink)
+			if decision == iterationStop {
+				streamReason = StreamStopReasonMaxIterations
+				if ctx.Err() != nil {
+					streamReason = turnEndReasonCanceled
+				}
+				return
 			}
-			return
-		}
-		ls.MaxIterations = newMax
+			ls.MaxIterations = newMax
 
-		// Check the run budget. Placed next to the iteration cap because
-		// both are "should this run keep going" questions answered at the
-		// turn boundary, before a model call is paid for.
-		if r.enforceBudget(ctx, sess, a, sink) == iterationStop {
-			streamReason = turnEndReasonBudgetExceeded
-			return
+			// Check the run budget. Placed next to the iteration cap because
+			// both are "should this run keep going" questions answered at the
+			// turn boundary, before a model call is paid for.
+			if r.enforceBudget(ctx, sess, a, sink) == iterationStop {
+				streamReason = turnEndReasonBudgetExceeded
+				return
+			}
 		}
-
-		ls.Iteration++
 
 		// Exit immediately if the stream context has been cancelled (e.g., Ctrl+C)
 		if err := ctx.Err(); err != nil {
@@ -508,7 +585,6 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 					"agent", a.Name(), "override", overrideModel.ID().String(), "primary", model.ID().String())
 				model = overrideModel
 			}
-			ls.ToolModelOverride = ""
 		}
 
 		modelID := model.ID()
@@ -540,22 +616,43 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// trigger and the UI context gauge (issue #3241); it equals the primary
 		// window unless a smaller compaction model is configured.
 		contextLimit := r.effectiveContextLimit(ctx, a, r.resolveContextLimit(ctx, model, modelID))
-		ls.compaction.BeforeTurn(ctx, a, contextLimit)
 
-		// Drain steer messages queued while idle or before the first model call
-		// (covers idle-window and first-turn-miss races).
-		if sr := r.drainAndEmitSteered(ctx, sess, a, sink); sr.drained {
-			if r.applySteering(ctx, sess, a, ls, sr, sink) {
+		if entering {
+			ls.compaction.BeforeTurn(ctx, a, contextLimit)
+
+			// Drain steer messages queued while idle or before the first model call
+			// (covers idle-window and first-turn-miss races).
+			if sr := r.drainAndEmitSteered(ctx, sess, a, sink); sr.drained {
+				if r.applySteering(ctx, sess, a, ls, sr, sink) {
+					return
+				}
+				ls.compaction.AfterMessages(ctx, a, contextLimit, sr.messageCountBefore)
+				// The run has new input: where it stands is no longer what
+				// is on record.
+				recorded = false
+			}
+
+			// Proactive compaction may have exhausted the budget since the first check.
+			if r.enforceBudget(ctx, sess, a, sink) == iterationStop {
+				streamReason = turnEndReasonBudgetExceeded
 				return
 			}
-			ls.compaction.AfterMessages(ctx, a, contextLimit, sr.messageCountBefore)
-		}
 
-		// Proactive compaction may have exhausted the budget since the first check.
-		if r.enforceBudget(ctx, sess, a, sink) == iterationStop {
-			streamReason = turnEndReasonBudgetExceeded
-			return
+			// All that comes before the model is asked is done, and is in
+			// the record with the run's state as the turn found it: taken up
+			// from here, the turn is prepared again and comes out the same.
+			if !recorded {
+				if err := rec.commit(ctx, phaseModel, ls, nil); err != nil {
+					streamReason = r.stopUnrecorded(ctx, sess, a, err, sink)
+					return
+				}
+			}
+			// The turn is counted, and the model its tools asked for is
+			// used up, once it is on record.
+			ls.Iteration++
+			ls.ToolModelOverride = ""
 		}
+		recorded = false
 
 		// Everything from turn_start onwards is extracted into runTurn so a
 		// single deferred turn_end hook fires on every exit path: a normal
@@ -568,8 +665,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// continue-or-exit decision.
 		ctrl := r.runTurn(ctx, &turn{
 			sess: sess, a: a, m: m, model: model, modelID: modelID, contextLimit: contextLimit,
-			sessionSpan: sessionSpan, agentTools: agentTools, ls: ls, events: sink,
-		}, phaseModel, nil)
+			sessionSpan: sessionSpan, agentTools: agentTools, ls: ls, events: sink, rec: rec,
+		}, from, answer)
+		from, answer = phaseModel, nil
 		streamReason = ls.exitReason
 		switch ctrl {
 		case turnContinue:
@@ -681,12 +779,14 @@ func emptyTurnWarning(res streamResult, prevTurnMadeToolCalls bool, modelID stri
 	}
 }
 
-// runPhase names the step a turn is entered at. A turn takes three in a row:
-// the model is asked, the tool calls it made are run, and what follows an
-// answer is done. The run loop enters every turn at the first.
+// runPhase names the step a run takes next. A run starts once, then takes
+// turns of three steps each: the model is asked, the tool calls it made are
+// run, and what follows an answer is done. The run loop enters every turn at
+// the first of them, except the turn a run is taken up again in.
 type runPhase string
 
 const (
+	phaseStarting runPhase = "starting"
 	phaseModel    runPhase = "model"
 	phaseTools    runPhase = "tools"
 	phaseAnswered runPhase = "answered"
@@ -705,11 +805,18 @@ type turn struct {
 	agentTools   []tools.Tool
 	ls           *loopState
 	events       EventSink
+	// rec is the record kept of the run, if one is.
+	rec *runRecord
+	// takenUp says the turn is entered past its model step, by a run that
+	// was cut off in it.
+	takenUp bool
 }
 
 // modelAnswer is what the model step of a turn leaves for the steps after
 // it: the tool calls to run, and the answer the model stopped on, if it did.
 type modelAnswer struct {
+	// Agent is the agent whose turn it is.
+	Agent        string            `json:"agent,omitempty"`
 	Calls        []tools.ToolCall  `json:"calls,omitempty"`
 	Content      string            `json:"content,omitempty"`
 	HasMedia     bool              `json:"has_media,omitempty"`
@@ -721,6 +828,10 @@ type modelAnswer struct {
 	// Validated is set when the answer is a tool-mode structured output
 	// that passed validation.
 	Validated bool `json:"validated,omitempty"`
+	// Messages is how many messages the session held once the answer was
+	// in it. What the turn adds to them are its tool results, whose size
+	// decides whether the context is compacted before the next model call.
+	Messages int `json:"messages,omitempty"`
 }
 
 // runTurn performs one iteration of the run-stream loop, from
@@ -744,6 +855,7 @@ type modelAnswer struct {
 func (r *LocalRuntime) runTurn(ctx context.Context, t *turn, from runPhase, answer *modelAnswer) turnControl {
 	sess, a, ls, events := t.sess, t.a, t.ls, t.events
 	ls.finishReason = ""
+	t.takenUp = from != phaseModel
 
 	// endReason is set by every exit branch below and read by the
 	// deferred turn_end dispatch. Default = normal so a clean fall-
@@ -772,11 +884,22 @@ func (r *LocalRuntime) runTurn(ctx context.Context, t *turn, from runPhase, answ
 		if answer, ctrl, endReason = r.callModel(ctx, t); answer == nil {
 			return ctrl
 		}
+		answer.Messages = sess.OwnMessageCount()
+		if err := t.rec.commit(ctx, phaseTools, ls, answer); err != nil {
+			endReason = r.stopUnrecorded(ctx, sess, a, err, events)
+			return turnExit
+		}
+	} else {
+		// A turn taken up past its model step starts again as far as its
+		// hooks can tell: the turn_end that fires however it ends has a
+		// turn_start of this stream's before it. What turn_start has to
+		// say is for a model call, and this turn makes none.
+		r.executeTurnStartHooks(ctx, sess, a, events)
 	}
 
-	// Record the message count before tool calls so we can
-	// measure how much content was added by tool results.
-	messageCountBeforeTools := sess.OwnMessageCount()
+	// The message count before tool calls measures how much content was
+	// added by tool results.
+	messageCountBeforeTools := answer.Messages
 
 	if from != phaseAnswered {
 		if ctrl, reason, done := r.runTools(ctx, t, answer, messageCountBeforeTools); done {
@@ -786,6 +909,12 @@ func (r *LocalRuntime) runTurn(ctx context.Context, t *turn, from runPhase, answ
 	}
 
 	if answer.Stopped {
+		if from != phaseAnswered {
+			if err := t.rec.commit(ctx, phaseAnswered, ls, answer); err != nil {
+				endReason = r.stopUnrecorded(ctx, sess, a, err, events)
+				return turnExit
+			}
+		}
 		ctrl, reason := r.afterAnswer(ctx, t, answer, messageCountBeforeTools)
 		endReason = reason
 		return ctrl
@@ -1011,6 +1140,7 @@ func (r *LocalRuntime) callModel(ctx context.Context, t *turn) (*modelAnswer, tu
 	// offered.
 	t.agentTools = agentTools
 	return &modelAnswer{
+		Agent:        a.Name(),
 		Calls:        res.Calls,
 		Content:      res.Content,
 		HasMedia:     len(res.Media) > 0,
@@ -1031,11 +1161,18 @@ func (r *LocalRuntime) runTools(ctx context.Context, t *turn, answer *modelAnswe
 	// approval and the user's tool hooks, and an exclusive valid call
 	// finalizes the turn (the answer is rewritten so the stop path runs on
 	// the validated JSON).
-	dispatchCalls, finalized := r.handleStructuredOutputCalls(ctx, sess, a, answer, agentTools, answer.Model.String(), events)
+	dispatchCalls, finalized := r.handleStructuredOutputCalls(ctx, sess, a, answer, agentTools, answer.Model.String(), t.rec, events)
 	answer.Validated = finalized
 
 	loopSink := &toolCallLoopSink{EventSink: events}
-	stopRun, stopMsg := r.processToolCalls(ctx, sess, a, dispatchCalls, agentTools, loopSink)
+	if t.takenUp {
+		own := sess.OwnMessages()
+		loopSink.recall(own[min(messageCountBeforeTools, len(own)):], answer.Calls, agentTools)
+	}
+	stopRun, stopMsg := r.processToolCalls(ctx, sess, a, dispatchCalls, agentTools, loopSink, t.rec.journal())
+	if err := t.rec.failure(); err != nil {
+		return turnExit, r.stopUnrecorded(ctx, sess, a, err, events), true
+	}
 	if stopRun && r.enforceBudget(ctx, sess, a, events) == iterationStop {
 		return turnExit, turnEndReasonBudgetExceeded, true
 	}

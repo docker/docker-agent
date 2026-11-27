@@ -125,7 +125,7 @@ func runResumeTestCall(t *testing.T, rt *LocalRuntime, root *agent.Agent, availa
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		rt.processToolCalls(ctx, session.New(), root, []tools.ToolCall{{ID: "outer", Function: tools.FunctionCall{Name: "the_tool", Arguments: "{}"}}}, available, sink)
+		rt.processToolCalls(ctx, session.New(), root, []tools.ToolCall{{ID: "outer", Function: tools.FunctionCall{Name: "the_tool", Arguments: "{}"}}}, available, sink, nil)
 		close(done)
 	}()
 	select {

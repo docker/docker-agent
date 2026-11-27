@@ -107,6 +107,7 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 	answer *modelAnswer,
 	agentTools []tools.Tool,
 	modelID string,
+	rec *runRecord,
 	events EventSink,
 ) (dispatchCalls []tools.ToolCall, finalized bool) {
 	if !structuredOutputEnabled(sess, a) {
@@ -145,8 +146,12 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 				"Finish any other tool use first, then call %s alone with the final answer.",
 			structuredoutput.ToolName, structuredoutput.ToolName,
 		)
+		// The other calls of the batch are recorded as they go. So are these:
+		// a batch that is cut off must not find them rejected twice.
 		for _, tc := range outputCalls {
-			r.rejectStructuredOutputCall(ctx, sess, a, tc, tool, rejectMsg, events)
+			rec.finishCall(ctx, tc.ID, func() {
+				r.rejectStructuredOutputCall(ctx, sess, a, tc, tool, rejectMsg, events)
+			})
 		}
 		return otherCalls, false
 	}

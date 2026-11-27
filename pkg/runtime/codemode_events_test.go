@@ -56,7 +56,7 @@ func TestCodeModeToolCallEvents(t *testing.T) {
 			rt.processToolCalls(t.Context(), sess, root, []tools.ToolCall{{
 				ID: "outer", Type: "function",
 				Function: tools.FunctionCall{Name: "run_tools_with_javascript", Arguments: string(args)},
-			}}, available, NewChannelSink(events))
+			}}, available, NewChannelSink(events), nil)
 			close(events)
 
 			calls := make(map[string]*ToolCallEvent)

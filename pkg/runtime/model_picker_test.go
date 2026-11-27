@@ -32,7 +32,7 @@ func TestModelPickerUsesSessionHandoffCaller(t *testing.T) {
 	ts, err := picker.Tools(t.Context())
 	require.NoError(t, err)
 	invoke := func(name, args string) {
-		rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), []tools.ToolCall{{ID: name, Type: "function", Function: tools.FunctionCall{Name: name, Arguments: args}}}, ts, NewChannelSink(make(chan Event, 128)))
+		rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), []tools.ToolCall{{ID: name, Type: "function", Function: tools.FunctionCall{Name: name, Arguments: args}}}, ts, NewChannelSink(make(chan Event, 128)), nil)
 	}
 	invoke("change_model", `{"model":"chosen"}`)
 	assert.Equal(t, "openai/gpt-4o-mini", target.Model(t.Context()).ID().String())

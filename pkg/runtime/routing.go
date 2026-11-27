@@ -238,7 +238,7 @@ func (r *LocalRuntime) applyRoute(ctx context.Context, sess *session.Session, fr
 		action = agentSwitchKindForceHandoff
 	}
 	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), next.Name(), action)
-	r.switchSessionAgent(sess, next.Name())
+	r.switchSessionAgent(ctx, sess, next.Name())
 	if phase != string(hooks.EventBeforeAgentRun) {
 		note := session.ImplicitUserMessage(forcedHandoffNote(from.Name()))
 		sess.AddMessage(note)
@@ -310,13 +310,14 @@ func (r *LocalRuntime) recordUnroutedDecision(sess *session.Session, a *agent.Ag
 
 // switchSessionAgent makes name the active agent. Routed sessions switch only
 // their own session; others keep the shared-agent behavior handoffs always had.
-func (r *LocalRuntime) switchSessionAgent(sess *session.Session, name string) {
+func (r *LocalRuntime) switchSessionAgent(ctx context.Context, sess *session.Session, name string) {
 	if sess.Routed() {
 		sess.SetRouteAgent(name)
 		return
 	}
 	if !sess.TryAgentHandoff(name) && sess.AgentName == "" {
 		r.setCurrentAgent(name)
+		runRecordFrom(ctx).currentAgentIs(sess, name)
 	}
 }
 

@@ -79,7 +79,7 @@ func TestSkillGuardEntryPoints(t *testing.T) {
 				if entry == "read_skill_file" {
 					args = `{"skill_name":"test","path":"SKILL.md"}`
 				}
-				stopped, _ := rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), []tools.ToolCall{{ID: "skill-call", Type: "function", Function: tools.FunctionCall{Name: entry, Arguments: args}}}, ts, sink)
+				stopped, _ := rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), []tools.ToolCall{{ID: "skill-call", Type: "function", Function: tools.FunctionCall{Name: entry, Arguments: args}}}, ts, sink, nil)
 				assert.False(t, stopped)
 				assert.Nil(t, firstSubSession(sess))
 				assert.Equal(t, 1, sess.MessageCount())
@@ -213,7 +213,7 @@ func TestRunSkillPolicyPinnedBeforeHandler(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), []tools.ToolCall{{ID: "fork", Type: "function", Function: tools.FunctionCall{Name: "run_skill", Arguments: `{"name":"test"}`}}}, ts, NewChannelSink(make(chan Event, 128)))
+		rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), []tools.ToolCall{{ID: "fork", Type: "function", Function: tools.FunctionCall{Name: "run_skill", Arguments: `{"name":"test"}`}}}, ts, NewChannelSink(make(chan Event, 128)), nil)
 	}()
 	<-entered
 	require.NoError(t, rt.SetCurrentAgent(t.Context(), "other"))
