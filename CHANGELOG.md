@@ -3,6 +3,35 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.167.0] - 2026-11-27
+
+This release adds `/btw` side question support to the lean TUI and fixes several issues including session cleanup on deletion, git worktree race conditions, and a scrollbar rendering bug.
+
+## What's New
+- Adds `/btw <question>` support to the lean TUI, running an isolated, tool-free side query and printing the answer into the transcript under a muted `btw` header without saving it to the conversation
+
+## Bug Fixes
+- Fixes session runtime and toolsets not being released/stopped when a session is deleted in `serve api` mode
+- Fixes a race condition where concurrent `git worktree add` calls in the same repository could fail due to half-written admin entries; worktree creation is now serialized per repository
+- Fixes the scrollbar hover band extending outside its pane in the TUI
+- Adds a warning when a `permissions.allow` rule shadows a `permissions.ask` rule, since the ask confirmation would never be reached
+
+## Technical Changes
+- Isolates test suites from the developer's home directory to prevent test runs from writing state into the real home directory
+### Pull Requests
+
+- [#4922](https://github.com/docker/docker-agent/pull/4922) - fix(worktree): serialize git worktree add per repository
+- [#4923](https://github.com/docker/docker-agent/pull/4923) - fix(worktree): serialize git worktree add per repository
+- [#4985](https://github.com/docker/docker-agent/pull/4985) - fix(config): warn when an allow rule shadows an ask rule
+- [#5010](https://github.com/docker/docker-agent/pull/5010) - fix(config): warn when an allow rule shadows an ask rule
+- [#5018](https://github.com/docker/docker-agent/pull/5018) - test: isolate test suites from the developer's home directory
+- [#5024](https://github.com/docker/docker-agent/pull/5024) - fix(tui): keep the scrollbar hover band inside its pane
+- [#5044](https://github.com/docker/docker-agent/pull/5044) - docs: update CHANGELOG.md for v1.166.0
+- [#5045](https://github.com/docker/docker-agent/pull/5045) - feat(leantui): support /btw side questions in the lean TUI
+- [#5046](https://github.com/docker/docker-agent/pull/5046) - fix(server): release a deleted session's runtime and stop its toolsets
+- [#5049](https://github.com/docker/docker-agent/pull/5049) - docs: auto-update for merged PRs (2026-11-27)
+
+
 ## [v1.166.0] - 2026-11-26
 
 This release adds A2A push notification support, experimental MCP Skills and Tasks extensions, a new Straitly provider, and several TUI and bug fixes.
@@ -7790,3 +7819,5 @@ This release improves the terminal user interface with better error handling and
 [v1.165.0]: https://github.com/docker/docker-agent/releases/tag/v1.165.0
 
 [v1.166.0]: https://github.com/docker/docker-agent/releases/tag/v1.166.0
+
+[v1.167.0]: https://github.com/docker/docker-agent/releases/tag/v1.167.0
