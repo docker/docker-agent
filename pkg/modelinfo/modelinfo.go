@@ -336,29 +336,77 @@ func atLeastGPT(modelID string, major, minor int) bool {
 	return maj > major || (maj == major && mn >= minor)
 }
 
-// UsesThinkingLevel reports whether a Google Gemini model uses level-based
-// thinking configuration (`thinkingLevel`) rather than token-based budgets.
-//
-// Gemini 3+ models always reason and only accept ThinkingLevel; older
-// Gemini 2.5 models accept the legacy ThinkingBudget tokens.
-//
-// Matches both "gemini-3-<family>" and "gemini-3.X-<family>" patterns.
-func UsesThinkingLevel(modelID string) bool {
+// geminiGeneration extracts the major version and variant suffix of a
+// normalized Google Gemini 3+ model id of the form
+// "gemini-<major>[.<minor>|-<minor>]-<variant>" (e.g. "gemini-3.1-pro-preview",
+// "gemini-4-hydrogen").
+func geminiGeneration(modelID string) (major int, variant string, ok bool) {
 	m := normalize(modelID)
-	rest, found := strings.CutPrefix(m, "gemini-3")
+	rest, found := strings.CutPrefix(m, "gemini-")
 	if !found {
-		return false
+		return 0, "", false
 	}
-	if rest == "" {
-		return false
+	maj, w := leadingInt(rest)
+	if w != 1 || maj < 3 {
+		return 0, "", false
+	}
+	rest = rest[w:]
+	if len(rest) < 2 {
+		return 0, "", false
 	}
 	switch rest[0] {
 	case '-':
-		return true
+		after := rest[1:]
+		_, mw := leadingInt(after)
+		if mw == 0 {
+			return maj, after, true
+		}
+		if mw <= 2 && len(after) > mw+1 && after[mw] == '-' {
+			return maj, after[mw+1:], true
+		}
+		return 0, "", false
 	case '.':
-		return strings.Contains(rest, "-")
+		_, mw := leadingInt(rest[1:])
+		if mw == 0 || mw > 2 {
+			return 0, "", false
+		}
+		tail := rest[1+mw:]
+		if len(tail) < 2 || tail[0] != '-' {
+			return 0, "", false
+		}
+		return maj, tail[1:], true
+	default:
+		return 0, "", false
 	}
-	return false
+}
+
+// UsesThinkingLevel reports whether a Google Gemini model uses level-based
+// thinking configuration (`thinkingLevel`) rather than token-based budgets.
+//
+// Gemini 3+ models (including Gemini 4 Hydrogen, Neon, Carbon, Argon) always
+// reason and only accept ThinkingLevel; older Gemini 2.5 models accept the
+// legacy ThinkingBudget tokens.
+func UsesThinkingLevel(modelID string) bool {
+	_, _, ok := geminiGeneration(modelID)
+	return ok
+}
+
+// GeminiRejectsThinkingBudget reports whether a Google Gemini model rejects
+// the legacy token-based `thinkingBudget` parameter with HTTP 400.
+// Gemini 4+ models only accept `thinkingLevel`; Gemini 3 still accepted
+// `thinkingBudget` for backward compatibility.
+func GeminiRejectsThinkingBudget(modelID string) bool {
+	maj, _, ok := geminiGeneration(modelID)
+	return ok && maj >= 4
+}
+
+// HasGoogleQualifier reports whether modelID is explicitly vendor-qualified
+// with a "google/" or "gemini/" prefix, the convention gateways (Vercel AI
+// Gateway, OpenRouter, Cloudflare AI Gateway) use to route Google's Gemini
+// models through a shared endpoint.
+func HasGoogleQualifier(modelID string) bool {
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	return strings.HasPrefix(m, "google/") || strings.HasPrefix(m, "gemini/")
 }
 
 // IsBedrockClaudeID reports whether a model identifier looks like an Anthropic
@@ -807,6 +855,21 @@ func ResolveReasoningSupport(ctx context.Context, store *modelsdev.Store, id mod
 		return ReasoningSupported
 	}
 	return ReasoningUnsupported
+}
+
+// ResolveGeminiThinkingSupport reports whether a Gemini model supports
+// thinking configuration, consulting store first and falling back to suffix
+// exclusions (-image, -tts, -live) only when catalogue support is unknown.
+func ResolveGeminiThinkingSupport(ctx context.Context, store *modelsdev.Store, id modelsdev.ID, modelID string) bool {
+	switch ResolveReasoningSupport(ctx, store, id) {
+	case ReasoningUnsupported:
+		return false
+	case ReasoningSupported:
+		return true
+	default:
+		m := strings.ToLower(modelID)
+		return !strings.Contains(m, "-image") && !strings.Contains(m, "-tts") && !strings.Contains(m, "-live")
+	}
 }
 
 // ResolveOutputImage applies an explicit image-output override when present;

@@ -959,6 +959,13 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 			}
 			items = append(items, item)
 
+		case "auxiliary_usage":
+			var record AuxiliaryUsage
+			if err := json.Unmarshal([]byte(row.messageJSON.String), &record); err != nil {
+				return nil, fmt.Errorf("unmarshaling auxiliary usage at position %d: %w", row.position, err)
+			}
+			items = append(items, Item{AuxiliaryUsage: &record})
+
 		case "evaluation":
 			var evaluation Evaluation
 			if err := json.Unmarshal([]byte(row.messageJSON.String), &evaluation); err != nil {
@@ -1000,34 +1007,19 @@ func (s *SQLiteSessionStore) GetSessionByOrigin(ctx context.Context, id, origin 
 	if id == "" {
 		return nil, ErrEmptyID
 	}
-	return s.loadSessionByOrigin(ctx, s.db, id, origin)
+	row := s.db.QueryRowContext(ctx,
+		"SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ? AND origin = ?", id, origin)
+	return s.loadSessionRow(ctx, s.db, id, row)
 }
 
 // loadSession retrieves a session by ID using the supplied querier.
 func (s *SQLiteSessionStore) loadSession(ctx context.Context, q querier, id string) (*Session, error) {
 	row := q.QueryRowContext(ctx,
 		"SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ?", id)
-
-	sess, err := scanSession(row)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-
-	sess.Messages, err = s.loadSessionItems(ctx, q, id)
-	if err != nil {
-		return nil, fmt.Errorf("loading session items: %w", err)
-	}
-
-	return sess, nil
+	return s.loadSessionRow(ctx, q, id, row)
 }
 
-func (s *SQLiteSessionStore) loadSessionByOrigin(ctx context.Context, q querier, id, origin string) (*Session, error) {
-	row := q.QueryRowContext(ctx,
-		"SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ? AND origin = ?", id, origin)
-
+func (s *SQLiteSessionStore) loadSessionRow(ctx context.Context, q querier, id string, row *sql.Row) (*Session, error) {
 	sess, err := scanSession(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1557,6 +1549,16 @@ func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionI
 			`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json, message_json)
 			 VALUES (?, ?, 'summary', ?, ?, ?, ?, ?, ?)`,
 			sessionID, position, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON, compactionJSON)
+		return err
+
+	case item.AuxiliaryUsage != nil:
+		data, err := json.Marshal(item.AuxiliaryUsage)
+		if err != nil {
+			return fmt.Errorf("marshaling auxiliary usage: %w", err)
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO session_items (session_id, position, item_type, message_json) VALUES (?, ?, 'auxiliary_usage', ?)`,
+			sessionID, position, string(data))
 		return err
 
 	case item.Evaluation != nil:

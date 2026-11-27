@@ -1,6 +1,7 @@
 package latest
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ func TestValidateCompactionThreshold(t *testing.T) {
 		{name: "negative", value: new(-0.5), wantErr: "compaction_threshold must be greater than 0 and at most 1, got -0.5"},
 		{name: "just above one", value: new(1.000001), wantErr: "compaction_threshold must be greater than 0 and at most 1"},
 		{name: "well above one", value: new(1.5), wantErr: "compaction_threshold must be greater than 0 and at most 1, got 1.5"},
+		{name: "NaN", value: new(math.NaN()), wantErr: "compaction_threshold must be greater than 0 and at most 1"},
 	}
 
 	for _, tt := range tests {

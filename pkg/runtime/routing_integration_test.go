@@ -58,9 +58,9 @@ func routedExample(t *testing.T, srv *httptest.Server) (*LocalRuntime, map[strin
 	}
 	registry := provider.NewRegistry(map[string]provider.Factory{"openai": factory})
 
-	tm, err := teamloader.Load(t.Context(), config.NewBytesSource("hook_routing.yaml", []byte(yamlSource)), &config.RuntimeConfig{
+	tm, err := teamloader.Load(t.Context(), config.NewBytesSource("hook_routing.yaml", []byte(yamlSource)), withTestCatalog(&config.RuntimeConfig{
 		EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "fake", "TYPESAFE_API_KEY": "judge-secret"}),
-	}, teamloader.WithProviderRegistry(registry))
+	}), teamloader.WithProviderRegistry(registry))
 	require.NoError(t, err)
 	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
@@ -214,9 +214,9 @@ func TestRoutingExample_StrictLoadRequiresRoutingFeature(t *testing.T) {
 		calls.Add(1)
 		return &scriptedProvider{}, nil
 	}
-	_, err = teamloader.Load(t.Context(), config.NewBytesSource("hook_routing.yaml", source), &config.RuntimeConfig{
+	_, err = teamloader.Load(t.Context(), config.NewBytesSource("hook_routing.yaml", source), withTestCatalog(&config.RuntimeConfig{
 		EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "fake", "TYPESAFE_API_KEY": "x"}),
-	}, teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{"openai": factory})),
+	}), teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{"openai": factory})),
 		teamloader.WithStrict(config.FeatureHooks, config.FeatureEvaluators))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), string(config.FeatureAgentRouting))

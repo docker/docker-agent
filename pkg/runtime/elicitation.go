@@ -69,7 +69,7 @@ var errNoSuchElicitation = errors.New("no elicitation request in progress")
 // under each other; see elicitationWaiters and OnElicitationRequest for
 // the routing/delivery fix (#3584). The bridge itself is kept only as a
 // best-effort secondary delivery path for remote/SSE consumers that read
-// events directly off a RunStream channel (see remote_runtime.go). It is
+// events directly off a RunStream channel (see remote/remote_runtime.go). It is
 // never allowed to hold up the reliable sink or response processing: send
 // is bounded by the caller's ctx (see requestElicitation), and callers
 // invoke it from a detached goroutine so a wedged or abandoned channel
@@ -395,7 +395,7 @@ func (r *LocalRuntime) OnElicitationRequestWithContext(handler func(context.Cont
 // they must skip *ElicitationRequestEvent to avoid delivering the same
 // request twice.
 //
-// RemoteRuntime deliberately does NOT implement this: its
+// remote.Runtime deliberately does NOT implement this: its
 // OnElicitationRequest is a no-op, so the copy on its RunStream is the ONLY
 // delivery and callers must not skip it (#3584 review — an earlier fix
 // skipped unconditionally and silently dropped every remote elicitation).
@@ -638,7 +638,7 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 
 	// Best-effort secondary delivery on the owning stream's events channel,
 	// kept for remote/SSE consumers that read directly off RunStream
-	// (remote_runtime.go depends on it). Dispatched on a detached goroutine,
+	// (remote/remote_runtime.go depends on it). Dispatched on a detached goroutine,
 	// bounded by ctx, so a wedged or abandoned bridge channel (concurrent
 	// RunStreams racing the swap-based single slot, or a dead consumer) can
 	// never delay — let alone block — sink delivery or the response wait

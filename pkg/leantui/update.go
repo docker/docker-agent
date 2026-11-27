@@ -351,6 +351,7 @@ func (m *model) handleSlash(ctx context.Context, text string, mode busySubmitMod
 		m.eventGeneration.Add(1)
 		m.app.NewSession()
 		m.resetConversation()
+		m.applySessionTitle("")
 		m.addNotice("", "Started a new session.", ui.StMuted())
 		m.refreshCommands(ctx)
 		return true
@@ -378,6 +379,9 @@ func (m *model) handleSlash(ctx context.Context, text string, mode busySubmitMod
 		return true
 	case "effort":
 		m.handleSetThinkingLevel(ctx, rest)
+		return true
+	case "btw":
+		m.handleSideQuestion(ctx, rest)
 		return true
 	}
 
@@ -512,6 +516,7 @@ func (m *model) resumeSession(ctx context.Context, sessionID string) {
 	m.resetConversation()
 	m.screen.Transcript = ui.NewTranscript()
 	m.sessionState = service.NewSessionState(sess)
+	m.applySessionTitle(sess.Title)
 	m.loadSessionTranscript(sess)
 	m.refreshCommands(ctx)
 	title := strings.TrimSpace(sess.Title)
@@ -751,7 +756,7 @@ func (m *model) refreshCommands(ctx context.Context) {
 		}
 		cmds = append(cmds, ui.Command{Name: name, Desc: c.DisplayText(), Kind: ui.CmdAgent})
 	}
-	for _, sk := range m.app.CurrentAgentSkills() {
+	for _, sk := range m.app.CurrentAgentSkills(ctx) {
 		cmds = append(cmds, ui.Command{Name: sk.Name, Desc: sk.Description, Kind: ui.CmdAgent})
 	}
 	m.screen.Autocomplete.SetCommands(cmds)
@@ -881,6 +886,7 @@ func (m *model) commitHelp() {
 			ui.StMuted().Render("  /compact   summarize and compact the conversation"),
 			ui.StMuted().Render("  /model     change the model for the current agent"),
 			ui.StMuted().Render("  /effort    set the model's reasoning effort (e.g. /effort high)"),
+			ui.StMuted().Render("  /btw       ask a side question without affecting the conversation"),
 			ui.StMuted().Render("  /copy      copy the last assistant response"),
 			ui.StMuted().Render("  /clear     clear the screen"),
 			ui.StMuted().Render("  /settings  change lean TUI settings"),

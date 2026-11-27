@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -155,85 +155,13 @@ func TestSessionTracking(t *testing.T) {
 	}
 }
 
-func TestCommandTracking(t *testing.T) {
+func TestClientContext(t *testing.T) {
 	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	mockHTTP := NewMockHTTPClient()
-	client := newClient(t.Context(), logger, true, true, "test-version", mockHTTP.Client)
 
-	client.endpoint = "https://test-command-tracking.com/api"
-	client.apiKey = "test-command-key"
-	client.header = "test-header"
-
-	executed := false
-	cmdInfo := CommandInfo{
-		Action: "test-command",
-		Args:   []string{},
-		Flags:  []string{},
-	}
-	err := client.TrackCommand(t.Context(), cmdInfo, func(ctx context.Context) error {
-		executed = true
-		return nil
-	})
-	require.NoError(t, err)
-	assert.True(t, executed)
-
-	require.Eventually(t, func() bool {
-		return mockHTTP.GetRequestCount() > 0
-	}, time.Second, 5*time.Millisecond, "Expected HTTP requests to be made for command tracking")
-
-	requestCount := mockHTTP.GetRequestCount()
-	t.Logf("Command tracking HTTP requests captured: %d", requestCount)
-
-	requests := mockHTTP.GetRequests()
-	for i, req := range requests {
-		assert.Equal(t, "test-command-key", req.Header.Get("test-header"), "Request %d: Expected test-header test-command-key", i)
-	}
-}
-
-func TestCommandTrackingWithError(t *testing.T) {
-	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	mockHTTP := NewMockHTTPClient()
-	client := newClient(t.Context(), logger, true, true, "test-version", mockHTTP.Client)
-
-	client.endpoint = "https://test-command-error.com/api"
-	client.apiKey = "test-command-error-key"
-	client.header = "test-header"
-
-	testErr := &testError{}
-	cmdInfo := CommandInfo{
-		Action: "failing-command",
-		Args:   []string{},
-		Flags:  []string{},
-	}
-	err := client.TrackCommand(t.Context(), cmdInfo, func(ctx context.Context) error {
-		return testErr
-	})
-
-	assert.Equal(t, testErr, err)
-
-	require.Eventually(t, func() bool {
-		return mockHTTP.GetRequestCount() > 0
-	}, time.Second, 5*time.Millisecond, "Expected HTTP requests to be made for command error tracking")
-
-	requestCount := mockHTTP.GetRequestCount()
-	t.Logf("Command error tracking HTTP requests captured: %d", requestCount)
-}
-
-func TestStructuredEvent(t *testing.T) {
-	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	// Use debug mode to avoid HTTP calls in tests
-	client := newClient(t.Context(), logger, true, true, "test-version")
-
-	event := CommandEvent{
-		Action:  "test-command",
-		Success: true,
-	}
-
-	// Should not panic
-	client.Track(t.Context(), &event)
+	ctx := t.Context()
+	client := new(Client)
+	assert.Nil(t, FromContext(ctx))
+	assert.Same(t, client, FromContext(WithClient(ctx, client)))
 }
 
 func TestGetTelemetryEnabled(t *testing.T) {
@@ -274,53 +202,6 @@ type testError struct{}
 
 func (e *testError) Error() string {
 	return "test error"
-}
-
-// Test-only methods - these wrap command execution with telemetry for testing purposes
-
-// TrackCommand wraps command execution with telemetry (test-only method)
-func (tc *Client) TrackCommand(ctx context.Context, commandInfo CommandInfo, fn func(context.Context) error) error {
-	if !tc.enabled {
-		return fn(ctx)
-	}
-
-	ctx = WithClient(ctx, tc)
-
-	// Send telemetry event immediately (optimistic approach)
-	commandEvent := CommandEvent{
-		Action:  commandInfo.Action,
-		Args:    commandInfo.Args,
-		Success: true, // Assume success - we're tracking user intent, not outcome
-	}
-
-	// Send the telemetry event immediately
-	tc.Track(ctx, &commandEvent)
-
-	// Now run the command function
-	return fn(ctx)
-}
-
-// TrackServerStart immediately sends telemetry for server startup, then runs the server function (test-only method)
-// This is for long-running commands that may never exit (api, mcp, etc.)
-func (tc *Client) TrackServerStart(ctx context.Context, commandInfo CommandInfo, fn func(context.Context) error) error {
-	if !tc.enabled {
-		return fn(ctx)
-	}
-
-	ctx = WithClient(ctx, tc)
-
-	// Send startup event immediately
-	startupEvent := CommandEvent{
-		Action:  commandInfo.Action,
-		Args:    commandInfo.Args,
-		Success: true, // We assume startup succeeds if we reach this point
-	}
-
-	// Send the startup telemetry event immediately
-	tc.Track(ctx, &startupEvent)
-
-	// Now run the server function (which may run indefinitely)
-	return fn(ctx)
 }
 
 // TestAllEventTypes tests all possible telemetry events with mock HTTP client
@@ -544,26 +425,6 @@ func TestAllEventTypes(t *testing.T) {
 	}
 }
 
-// TestTrackServerStart tests long-running server command tracking
-func TestTrackServerStart(t *testing.T) {
-	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	client := newClient(t.Context(), logger, true, true, "test-version")
-
-	executed := false
-	cmdInfo := CommandInfo{
-		Action: "mcp",
-		Args:   []string{},
-		Flags:  []string{},
-	}
-	err := client.TrackServerStart(t.Context(), cmdInfo, func(ctx context.Context) error {
-		executed = true
-		return nil
-	})
-	require.NoError(t, err)
-	assert.True(t, executed)
-}
-
 // TestGlobalTelemetryFunctions tests the global telemetry convenience functions
 func TestGlobalTelemetryFunctions(t *testing.T) {
 	t.Parallel()
@@ -660,38 +521,40 @@ func TestHTTPRequestVerification(t *testing.T) {
 		assert.Equal(t, "run", properties["action"], "Expected action 'run'")
 		assert.True(t, properties["is_success"].(bool), "Expected is_success true")
 	})
+}
 
-	t.Run("NoHTTPWhenMissingCredentials", func(t *testing.T) {
-		mockHTTP2 := NewMockHTTPClient()
-		client2 := newClient(t.Context(), logger, true, true, "test-version", mockHTTP2.Client)
+func TestTrackSkipsHTTP(t *testing.T) {
+	t.Parallel()
 
-		// Leave endpoint and API key empty
-		client2.endpoint = ""
-		client2.apiKey = ""
+	const endpoint = "https://telemetry.example.com/events"
+	const apiKey = "test-key"
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		apiKey   string
+		enabled  bool
+	}{
+		{name: "no endpoint", apiKey: apiKey, enabled: true},
+		{name: "no API key", endpoint: endpoint, enabled: true},
+		{name: "disabled", endpoint: endpoint, apiKey: apiKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				mockHTTP := NewMockHTTPClient()
+				client := &Client{
+					logger:     NewTelemetryLogger(slog.New(slog.DiscardHandler)),
+					httpClient: mockHTTP.Client,
+					endpoint:   tc.endpoint,
+					apiKey:     tc.apiKey,
+					enabled:    tc.enabled,
+				}
 
-		event := &CommandEvent{
-			Action:  "version",
-			Success: true,
-		}
-
-		client2.Track(ctx, event)
-
-		assert.Zero(t, mockHTTP2.GetRequestCount(), "Expected no HTTP requests when endpoint/apiKey are missing")
-	})
-
-	t.Run("NoHTTPWhenDisabled", func(t *testing.T) {
-		mockHTTP3 := NewMockHTTPClient()
-		client3 := newClient(t.Context(), logger, false, true, "test-version", mockHTTP3.Client)
-
-		event := &CommandEvent{
-			Action:  "version",
-			Success: true,
-		}
-
-		client3.Track(ctx, event)
-
-		assert.Zero(t, mockHTTP3.GetRequestCount(), "Expected no HTTP requests when client is disabled")
-	})
+				client.Track(t.Context(), &CommandEvent{Action: "version", Success: true})
+				synctest.Wait()
+				assert.Zero(t, mockHTTP.GetRequestCount())
+			})
+		})
+	}
 }
 
 // TestCreateEventTelemetryTags tests the TELEMETRY_TAGS environment variable support in createEvent
@@ -744,14 +607,14 @@ func TestCreateEventTelemetryTags(t *testing.T) {
 
 	t.Run("MalformedTagsIgnored", func(t *testing.T) {
 		// Tags without "=" should be silently ignored
-		t.Setenv("TELEMETRY_TAGS", "valid_key=valid_value,malformed_no_equals,another=good")
+		t.Setenv("TELEMETRY_TAGS", "valid_key=valid_value,malformed_no_equals,=empty_key,another=good")
 
 		event := client.createEvent("test_event", map[string]any{"action": "run"})
 
 		assert.Equal(t, "valid_value", event.Properties["valid_key"])
 		assert.Equal(t, "good", event.Properties["another"])
-		_, hasMalformed := event.Properties["malformed_no_equals"]
-		assert.False(t, hasMalformed, "Malformed tag without = should be ignored")
+		assert.NotContains(t, event.Properties, "malformed_no_equals")
+		assert.NotContains(t, event.Properties, "")
 	})
 
 	t.Run("SystemMetadataCannotBeOverwritten", func(t *testing.T) {
@@ -785,7 +648,7 @@ func TestCreateEventTelemetryTags(t *testing.T) {
 
 		event := client.createEvent("test_event", map[string]any{})
 
-		assert.Empty(t, event.Properties["empty_val"], "Empty value tags should be preserved")
+		assert.Subset(t, event.Properties, map[string]any{"empty_val": ""})
 	})
 
 	t.Run("TagWithEqualsInValue", func(t *testing.T) {
@@ -798,124 +661,27 @@ func TestCreateEventTelemetryTags(t *testing.T) {
 	})
 }
 
-// awaitBodies waits for the async Track dispatch to reach the mock HTTP
-// client and returns the captured request bodies.
-func awaitBodies(t *testing.T, mockHTTP *MockHTTPClient) [][]byte {
-	t.Helper()
-	var bodies [][]byte
-	require.Eventually(t, func() bool {
-		bodies = mockHTTP.GetBodies()
-		return len(bodies) > 0
-	}, time.Second, time.Millisecond, "expected the tracked event to be posted")
-	return bodies
-}
+func TestTelemetryTagsIncludedInRequest(t *testing.T) {
+	t.Setenv("TELEMETRY_TAGS", "ci=github-actions,workflow=PR Review")
 
-func TestTelemetryTags(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	mockHTTP := NewMockHTTPClient()
-	client := newClient(t.Context(), logger, true, true, "test-version", mockHTTP.Client)
+	client := newClient(t.Context(), slog.New(slog.DiscardHandler), true, true, "test-version", mockHTTP.Client)
+	client.endpoint = "https://telemetry.example.com/events"
 
-	client.endpoint = "https://test-tags.com/api"
-	client.apiKey = "test-tags-key"
-	client.header = "test-header"
-
-	t.Run("TagsIncludedInEvent", func(t *testing.T) {
-		t.Setenv("TELEMETRY_TAGS", "ci=github-actions,repository=docker/cagent,workflow=PR Review")
-
-		mockHTTP = NewMockHTTPClient()
-		client.httpClient = mockHTTP
-
+	synctest.Test(t, func(t *testing.T) {
 		client.Track(t.Context(), &CommandEvent{Action: "test", Success: true})
-		bodies := awaitBodies(t, mockHTTP)
-
-		var requestBody map[string]any
-		require.NoError(t, json.Unmarshal(bodies[0], &requestBody))
-
-		records := requestBody["records"].([]any)
-		properties := records[0].(map[string]any)["properties"].(map[string]any)
-
-		assert.Equal(t, "github-actions", properties["ci"])
-		assert.Equal(t, "docker/cagent", properties["repository"])
-		assert.Equal(t, "PR Review", properties["workflow"])
+		synctest.Wait()
 	})
 
-	t.Run("NoTagsWhenUnset", func(t *testing.T) {
-		t.Setenv("TELEMETRY_TAGS", "")
-
-		mockHTTP = NewMockHTTPClient()
-		client.httpClient = mockHTTP
-
-		client.Track(t.Context(), &CommandEvent{Action: "test", Success: true})
-		bodies := awaitBodies(t, mockHTTP)
-
-		var requestBody map[string]any
-		require.NoError(t, json.Unmarshal(bodies[0], &requestBody))
-
-		records := requestBody["records"].([]any)
-		properties := records[0].(map[string]any)["properties"].(map[string]any)
-
-		_, hasCi := properties["ci"]
-		assert.False(t, hasCi, "Expected no 'ci' property when TELEMETRY_TAGS is empty")
-	})
-
-	t.Run("SystemMetadataCannotBeOverwritten", func(t *testing.T) {
-		t.Setenv("TELEMETRY_TAGS", "user_uuid=fake,version=0.0.0,os=spoofed")
-
-		mockHTTP = NewMockHTTPClient()
-		client.httpClient = mockHTTP
-
-		client.Track(t.Context(), &CommandEvent{Action: "test", Success: true})
-		bodies := awaitBodies(t, mockHTTP)
-
-		var requestBody map[string]any
-		require.NoError(t, json.Unmarshal(bodies[0], &requestBody))
-
-		records := requestBody["records"].([]any)
-		properties := records[0].(map[string]any)["properties"].(map[string]any)
-
-		assert.NotEqual(t, "fake", properties["user_uuid"], "user_uuid should not be overwritable via tags")
-		assert.Equal(t, "test-version", properties["version"], "version should not be overwritable via tags")
-		assert.NotEqual(t, "spoofed", properties["os"], "os should not be overwritable via tags")
-	})
-
-	t.Run("MalformedTagsIgnored", func(t *testing.T) {
-		t.Setenv("TELEMETRY_TAGS", "valid=yes,no_equals_sign,=empty_key,also_valid=true")
-
-		mockHTTP = NewMockHTTPClient()
-		client.httpClient = mockHTTP
-
-		client.Track(t.Context(), &CommandEvent{Action: "test", Success: true})
-		bodies := awaitBodies(t, mockHTTP)
-
-		var requestBody map[string]any
-		require.NoError(t, json.Unmarshal(bodies[0], &requestBody))
-
-		records := requestBody["records"].([]any)
-		properties := records[0].(map[string]any)["properties"].(map[string]any)
-
-		assert.Equal(t, "yes", properties["valid"])
-		assert.Equal(t, "true", properties["also_valid"])
-		_, hasEmptyKey := properties[""]
-		assert.False(t, hasEmptyKey, "Empty keys should be ignored")
-	})
-
-	t.Run("WhitespaceIsTrimmed", func(t *testing.T) {
-		t.Setenv("TELEMETRY_TAGS", " key1 = value1 , key2 = value2 ")
-
-		mockHTTP = NewMockHTTPClient()
-		client.httpClient = mockHTTP
-
-		client.Track(t.Context(), &CommandEvent{Action: "test", Success: true})
-		bodies := awaitBodies(t, mockHTTP)
-
-		var requestBody map[string]any
-		require.NoError(t, json.Unmarshal(bodies[0], &requestBody))
-
-		records := requestBody["records"].([]any)
-		properties := records[0].(map[string]any)["properties"].(map[string]any)
-
-		assert.Equal(t, "value1", properties["key1"])
-		assert.Equal(t, "value2", properties["key2"])
+	bodies := mockHTTP.GetBodies()
+	require.Len(t, bodies, 1)
+	var request struct {
+		Records []EventPayload `json:"records"`
+	}
+	require.NoError(t, json.Unmarshal(bodies[0], &request))
+	require.Len(t, request.Records, 1)
+	assert.Subset(t, request.Records[0].Properties, map[string]any{
+		"ci": "github-actions", "workflow": "PR Review",
 	})
 }
 

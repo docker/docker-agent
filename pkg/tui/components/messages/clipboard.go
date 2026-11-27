@@ -211,7 +211,7 @@ func (m *model) copySelectionToClipboard() tea.Cmd {
 		return nil
 	}
 
-	return copyTextToClipboard(selectedText)
+	return CopyTextToClipboard(selectedText)
 }
 
 // copySelectedMessageToClipboard copies the content of the selected message to clipboard
@@ -227,13 +227,13 @@ func (m *model) copySelectedMessageToClipboard() tea.Cmd {
 		return nil
 	}
 
-	return copyTextToClipboard(content)
+	return CopyTextToClipboard(content)
 }
 
-// copyTextToClipboard copies text to the system clipboard and confirms with
+// CopyTextToClipboard copies text to the system clipboard and confirms with
 // a toast. Copy buttons that flash an inline "copied" label must use
 // copyTextToClipboardSilent instead to avoid double feedback.
-func copyTextToClipboard(text string) tea.Cmd {
+func CopyTextToClipboard(text string) tea.Cmd {
 	return tea.Sequence(
 		copyTextToClipboardSilent(text),
 		notification.SuccessCmd("Text copied to clipboard."),

@@ -4,6 +4,7 @@
 │                        Appearance   ·   Behavior   ·   Notifications                        │
 │                                                                                             │
 │          › Theme                                                    ‹ default ›             │
+│            [x] Fade scroll edges                                                            │
 │                                                                                             │
 │          ── Sidebar layout ──────────────────────────────────────────────────               │
 │            Sidebar position                                           ‹ Right ›             │
@@ -25,7 +26,7 @@
 │            [ ] Hide tool results by default                                                 │
 │            [x] Render images                                                                │
 │            [x] Show startup banner                                                          │
-│                                                                                             │
+│            [ ] Show top margin                                                              │
 │                                                                                             │
 │                                                                                             │
 │               ↑↓ move  ←→/space change  tab category  enter open  esc cancel                │

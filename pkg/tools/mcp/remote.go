@@ -171,7 +171,31 @@ func (c *remoteMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeReq
 		PromptListChangedHandler: promptChanged,
 	}
 
+	isStreamable := c.transportType == "streamable" || c.transportType == "streamable-http"
+	if c.eventsEnabled() && isStreamable {
+		opts.Capabilities.AddExtension(eventsExtension, nil)
+	}
+	if c.tasksEnabled() && isStreamable {
+		opts.Capabilities.AddExtension(tasksExtension, nil)
+	}
 	client := gomcp.NewClient(impl, opts)
+	if c.skillsEnabled() {
+		if err := c.enableSkills(client); err != nil {
+			return nil, err
+		}
+	}
+	if c.eventsEnabled() && isStreamable {
+		if err := c.enableHTTPEvents(client, httpClient); err != nil {
+			return nil, err
+		}
+	}
+	var tasks *taskClient
+	if c.tasksEnabled() && isStreamable {
+		tasks, err = c.enableHTTPTasks(client, httpClient)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Connect to the MCP server
 	session, err := client.Connect(ctx, transport, nil)
@@ -179,7 +203,13 @@ func (c *remoteMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeReq
 		return nil, enrichConnectError(err, oauthT)
 	}
 
-	c.setSession(session)
+	c.setSessionWithTasks(session, tasks)
+	c.mu.RLock()
+	hasEvents := c.events != nil
+	c.mu.RUnlock()
+	if hasEvents {
+		c.watchEventConnection()
+	}
 
 	slog.DebugContext(ctx, "Remote MCP client connected successfully")
 	return session.InitializeResult(), nil

@@ -53,7 +53,7 @@ func TestRuntimeForSession_TitleGeneratorKeepsImageOutputModels(t *testing.T) {
 		sess := session.New()
 		require.NoError(t, store.AddSession(ctx, sess))
 
-		run, titleGen, err := sm.runtimeForSession(ctx, sess, "image-only.yaml", "", &config.RuntimeConfig{})
+		run, titleGen, _, err := sm.runtimeForSession(ctx, sess, "image-only.yaml", "", &config.RuntimeConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = run.Close() })
 
@@ -64,7 +64,7 @@ func TestRuntimeForSession_TitleGeneratorKeepsImageOutputModels(t *testing.T) {
 		sess := session.New()
 		require.NoError(t, store.AddSession(ctx, sess))
 
-		run, titleGen, err := sm.runtimeForSession(ctx, sess, "mixed.yaml", "", &config.RuntimeConfig{})
+		run, titleGen, _, err := sm.runtimeForSession(ctx, sess, "mixed.yaml", "", &config.RuntimeConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = run.Close() })
 

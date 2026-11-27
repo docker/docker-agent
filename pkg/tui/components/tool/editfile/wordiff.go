@@ -3,6 +3,7 @@ package editfile
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/aymanbagabas/go-udiff/lcs"
 )
@@ -22,34 +23,38 @@ type wordSegment struct {
 // punctuation/symbol runes. This granularity matches what users intuitively
 // recognize as a "word change" in a code diff (`foo` -> `bar`, `42` -> `43`),
 // while still picking up small edits like added punctuation.
+//
+// Tokens are sliced from the source instead of being re-encoded, so an invalid
+// byte (decoded as a one-byte U+FFFD) keeps its true size and the token stream
+// stays byte-identical to the line — segment offsets must line up with the
+// text applyWordEmphasis slices.
 func tokenizeForWordDiff(line string) []string {
 	if line == "" {
 		return nil
 	}
 
 	var tokens []string
-	var current strings.Builder
+	start := 0
 	currentKind := -1
 
-	flush := func() {
-		if current.Len() > 0 {
-			tokens = append(tokens, current.String())
-			current.Reset()
-		}
-	}
-
-	for _, r := range line {
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
 		k := runeKind(r)
 		// Identifier and whitespace runs are coalesced; everything else is
 		// emitted as a single-rune token so a lone added bracket or comma
 		// shows up as a precise highlight.
 		if k != currentKind || (k != kindIdent && k != kindSpace) {
-			flush()
+			if i > start {
+				tokens = append(tokens, line[start:i])
+			}
+			start = i
 			currentKind = k
 		}
-		current.WriteRune(r)
+		i += size
 	}
-	flush()
+	if start < len(line) {
+		tokens = append(tokens, line[start:])
+	}
 
 	return tokens
 }
@@ -151,6 +156,139 @@ func diffWords(oldLine, newLine string) (oldSegs, newSegs []wordSegment) {
 	}
 
 	return oldSegs, newSegs
+}
+
+const (
+	// minWordDiffSimilarity is the minimum Dice coefficient over non-whitespace
+	// runes required before word-level emphasis is shown on a delete/insert
+	// pair. Below this threshold the lines are treated as unrelated rewrites
+	// and rendered with uniform line-level diff backgrounds.
+	minWordDiffSimilarity = 0.40
+
+	// maxWordDiffIslands caps the number of disjoint emphasized runs on a
+	// single line to avoid noisy "Swiss cheese" highlighting on heavily
+	// rewritten lines.
+	maxWordDiffIslands = 5
+)
+
+// diffWordsForDisplay computes word-level diff segments suitable for visual
+// emphasis, returning nil for both sides when the lines are too dissimilar or
+// the resulting highlight would be excessively fragmented.
+func diffWordsForDisplay(oldLine, newLine string) (oldSegs, newSegs []wordSegment) {
+	oldNonWS := countNonSpaceRunes(oldLine)
+	newNonWS := countNonSpaceRunes(newLine)
+	if oldNonWS == 0 || newNonWS == 0 {
+		return nil, nil
+	}
+
+	oldSegs, newSegs = diffWords(oldLine, newLine)
+	if !anyChanged(oldSegs) && !anyChanged(newSegs) {
+		return nil, nil
+	}
+
+	unchangedNonWS := min(
+		countUnchangedNonSpaceRunes(oldSegs),
+		countUnchangedNonSpaceRunes(newSegs),
+	)
+	if unchangedNonWS == 0 {
+		return nil, nil
+	}
+	similarity := float64(2*unchangedNonWS) / float64(oldNonWS+newNonWS)
+	if similarity < minWordDiffSimilarity {
+		return nil, nil
+	}
+
+	oldSegs = tidyWordSegments(oldSegs)
+	newSegs = tidyWordSegments(newSegs)
+
+	if countChangedRuns(oldSegs) > maxWordDiffIslands || countChangedRuns(newSegs) > maxWordDiffIslands {
+		return nil, nil
+	}
+
+	return oldSegs, newSegs
+}
+
+// tidyWordSegments smooths raw word-diff segments for display:
+//   - leading indentation is never emphasized as a changed block,
+//   - whitespace-only unchanged gaps between two changed segments are absorbed
+//     so multi-word edits read as a single contiguous highlight.
+func tidyWordSegments(segs []wordSegment) []wordSegment {
+	if len(segs) == 0 {
+		return nil
+	}
+
+	out := make([]wordSegment, 0, len(segs))
+	for i, s := range segs {
+		if i == 0 && s.Changed {
+			trimmed := strings.TrimLeftFunc(s.Text, unicode.IsSpace)
+			leadLen := len(s.Text) - len(trimmed)
+			if leadLen > 0 {
+				out = append(out, wordSegment{Text: s.Text[:leadLen], Changed: false})
+				if trimmed != "" {
+					out = append(out, wordSegment{Text: trimmed, Changed: true})
+				}
+				continue
+			}
+		}
+		out = append(out, s)
+	}
+
+	// Absorb whitespace-only unchanged gaps sandwiched between two changed runs.
+	for i := 1; i+1 < len(out); i++ {
+		if !out[i].Changed && out[i-1].Changed && out[i+1].Changed && isWhitespaceOnly(out[i].Text) {
+			out[i].Changed = true
+		}
+	}
+
+	// Coalesce adjacent segments with the same Changed state.
+	merged := make([]wordSegment, 0, len(out))
+	for _, s := range out {
+		if len(merged) > 0 && merged[len(merged)-1].Changed == s.Changed {
+			merged[len(merged)-1].Text += s.Text
+			continue
+		}
+		merged = append(merged, s)
+	}
+	return merged
+}
+
+func countNonSpaceRunes(s string) int {
+	n := 0
+	for _, r := range s {
+		if !unicode.IsSpace(r) {
+			n++
+		}
+	}
+	return n
+}
+
+func countUnchangedNonSpaceRunes(segs []wordSegment) int {
+	n := 0
+	for _, s := range segs {
+		if !s.Changed {
+			n += countNonSpaceRunes(s.Text)
+		}
+	}
+	return n
+}
+
+func countChangedRuns(segs []wordSegment) int {
+	n := 0
+	for _, s := range segs {
+		if s.Changed {
+			n++
+		}
+	}
+	return n
+}
+
+func isWhitespaceOnly(s string) bool {
+	for _, r := range s {
+		if !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func anyChanged(segs []wordSegment) bool {

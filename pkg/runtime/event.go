@@ -1069,6 +1069,9 @@ func MCPInitFinished(agentName string) Event {
 type AgentInfoEvent struct {
 	AgentContext
 
+	// Set for the agent running a model turn, not for roster or model refreshes.
+	SessionID string `json:"session_id,omitempty"`
+
 	Type           string `json:"type"`
 	AgentName      string `json:"agent_name"`
 	Model          string `json:"model"` // this is in provider/model format (e.g., "openai/gpt-4o")
@@ -1085,6 +1088,8 @@ type AgentInfoEvent struct {
 	// Nil means unknown; model-only update events may omit this field.
 	ExecutionCapabilities *inspection.ExecutionCapabilities `json:"execution_capabilities,omitempty"`
 }
+
+func (e *AgentInfoEvent) GetSessionID() string { return e.SessionID }
 
 func AgentInfo(agentName, model, description, welcomeMessage string, contextLimit ...int64) Event {
 	var limit int64

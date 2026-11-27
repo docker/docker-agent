@@ -1,12 +1,12 @@
 ---
 title: "Google Gemini"
-description: "Use Gemini 2.5 Flash, Gemini 3.1 Pro, and other Google models with Docker Agent."
+description: "Use Gemini 4 (Carbon, Neon, Hydrogen, Argon), Gemini 3, and Gemini 2.5 models with Docker Agent."
 keywords: docker agent, ai agents, model providers, llm, google gemini
 weight: 120
 canonical: https://docs.docker.com/ai/docker-agent/providers/google/
 ---
 
-_Use Gemini 2.5 Flash, Gemini 3.1 Pro, and other Google models with Docker Agent._
+_Use Gemini 4 (Carbon, Neon, Hydrogen, Argon), Gemini 3, and Gemini 2.5 models with Docker Agent._
 
 ## Setup
 
@@ -44,7 +44,7 @@ export GOOGLE_CLOUD_LOCATION="us-central1"
 ```yaml
 agents:
   root:
-    model: google/gemini-3.8-flash
+    model: google/gemini-4-hydrogen
 ```
 
 ### Named Model
@@ -53,18 +53,22 @@ agents:
 models:
   gemini:
     provider: google
-    model: gemini-3.8-flash
+    model: gemini-4-neon
     temperature: 0.5
 ```
 
 ## Available Models
 
-| Model                     | Best For                        |
-| -------------------------- | ------------------------------- |
-| `gemini-3.1-pro-preview`  | Most capable Gemini model       |
-| `gemini-3.8-flash`        | Fast, efficient, good balance   |
-| `gemini-2.5-flash`        | Fast inference, cost-effective  |
-| `gemini-2.5-pro`          | Strong reasoning, large context |
+| Model                     | Best For                                       |
+| ------------------------- | ---------------------------------------------- |
+| `gemini-4-carbon`         | Deep-thinking flagship (`low`–`high`)          |
+| `gemini-4-neon`           | Balanced high-speed workhorse (`low`–`xhigh`)  |
+| `gemini-4-hydrogen`       | Fast, cost-effective everyday (`low`–`xhigh`)  |
+| `gemini-4-argon`          | Legacy Gemini 4 frontier (`low`–`high`)        |
+| `gemini-3.8-flash`        | Gemini 3 fast, efficient balance               |
+| `gemini-3.1-pro-preview`  | Gemini 3 Pro preview                           |
+| `gemini-2.5-flash`        | Fast inference, cost-effective                 |
+| `gemini-2.5-pro`          | Strong reasoning, large context                |
 
 ## Generated Images
 
@@ -125,7 +129,7 @@ Gemini supports two approaches depending on the model version:
 > [!WARNING]
 > **Different thinking formats**
 >
-> Gemini 2.5 uses **token-based** budgets (integers). Gemini 3 uses **level-based** budgets (strings like `low`, `high`). Make sure you use the right format for your model version.
+> Gemini 2.5 uses **token-based** budgets (integers). Gemini 3+ uses **level-based** budgets (strings like `low`, `high`, `xhigh`). Make sure you use the right format for your model version.
 
 ### Gemini 2.5 (Token-based)
 
@@ -147,20 +151,34 @@ models:
     thinking_budget: 8192 # fixed token budget
 ```
 
-### Gemini 3 (Level-based)
+### Gemini 3+ (Level-based)
 
 ```yaml
 models:
-  gemini-pro:
+  gemini-neon:
     provider: google
-    model: gemini-3.1-pro-preview
-    thinking_budget: high # default for Pro: low | high
+    model: gemini-4-neon
+    thinking_budget: xhigh    # Hydrogen / Neon: low | medium | high | xhigh
+
+  gemini-carbon:
+    provider: google
+    model: gemini-4-carbon
+    thinking_budget: high     # Carbon / Argon: low | medium | high
+
+  gemini-adaptive:
+    provider: google
+    model: gemini-4-carbon
+    thinking_budget: adaptive # omits thinkingLevel (uses model default); adaptive/<effort> pins a tier
 
   gemini-flash:
     provider: google
     model: gemini-3.8-flash
-    thinking_budget: medium # default for Flash: minimal | low | medium | high
+    thinking_budget: medium   # Gemini 3: minimal | low | medium | high
 ```
+
+- **Disabling thinking (`none` / `0`):** Gemini 3+ models always think and cannot disable reasoning. Setting `thinking_budget: none` or `0` logs a warning and lowers effort to `low` with thoughts hidden.
+- **Token budgets on Gemini 4+:** Gemini 4 models reject integer `thinkingBudget` values; configured integer budgets log a warning and are omitted so the model uses its default `thinkingLevel`.
+- **Gemini 2.5 with effort strings / `adaptive`:** String effort levels and `adaptive` / `adaptive/<effort>` are mapped to Gemini 2.5 token budgets (`-1` for plain `adaptive`).
 
 ## Built-in Tools (Grounding)
 

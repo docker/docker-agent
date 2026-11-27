@@ -257,9 +257,8 @@ func (a urlSource) captureEncryptedConfigFromBody(ctx context.Context, body, enc
 
 // sendEncryptedQueryParam is the query parameter docker-agent adds to a trusted
 // Docker config-fetch URL to opt in to receiving the encrypted agent config
-// embedded in the response body. It must stay in sync with the Docker gateway
-// (gordon proxy pkg/agents/handler.go), which only injects the config when it
-// is set to "true".
+// embedded in the response body. It must stay in sync with the Docker gateway,
+// which only injects the config when it is set to "true".
 const sendEncryptedQueryParam = "sendEncrypted"
 
 // urlWithSendEncrypted returns rawURL with sendEncrypted=true added to its

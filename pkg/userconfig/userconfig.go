@@ -77,6 +77,11 @@ type Settings struct {
 	// ShowBanner displays the ASCII-art startup banner in the TUI.
 	// Defaults to true when not set.
 	ShowBanner *bool `yaml:"show_banner,omitempty"`
+	// TopMargin adds a blank row above the TUI in terminals taller than 24 rows.
+	TopMargin bool `yaml:"top_margin,omitempty"`
+	// FadeScrollEdges dims viewport edges when content is hidden.
+	// Defaults to true when not set.
+	FadeScrollEdges *bool `yaml:"fade_scroll_edges,omitempty"`
 	// Theme is the default theme reference (e.g., "dark", "light")
 	// Theme files are loaded from ~/.cagent/themes/<theme>.yaml
 	// The special value "auto" follows the terminal's light/dark background,
@@ -148,9 +153,39 @@ type Settings struct {
 	// "always" (default) shows a confirmation dialog, "double-tap" requires
 	// pressing Esc twice within 1 second, "none" interrupts immediately.
 	InterruptConfirmation string `yaml:"interrupt_confirmation,omitempty"`
+	// Experimental enables opt-in experimental features. All fields default to false.
+	Experimental *ExperimentalSettings `yaml:"experimental,omitempty"`
 	// Extra preserves settings keys this version does not know about (e.g.
 	// written by a newer docker-agent) across a load/save round trip.
 	Extra map[string]any `yaml:",inline"`
+}
+
+// ExperimentalSettings enables opt-in experimental features.
+type ExperimentalSettings struct {
+	// MCPEvents enables experimental SEP-3415 event discovery and push
+	// subscriptions over stdio and Streamable HTTP.
+	MCPEvents bool `yaml:"mcp_events,omitempty"`
+	// MCPSkills enables experimental SEP-2640 MCP Skills discovery and
+	// verified loading over MCP.
+	MCPSkills bool `yaml:"mcp_skills,omitempty"`
+	// MCPTasks enables experimental SEP-2663 MCP Tasks asynchronous tool
+	// execution over stdio and Streamable HTTP.
+	MCPTasks bool `yaml:"mcp_tasks,omitempty"`
+}
+
+// MCPEventsEnabled reports whether experimental MCP Events push subscriptions are enabled.
+func (s *Settings) MCPEventsEnabled() bool {
+	return s != nil && s.Experimental != nil && s.Experimental.MCPEvents
+}
+
+// MCPSkillsEnabled reports whether experimental MCP Skills support is enabled.
+func (s *Settings) MCPSkillsEnabled() bool {
+	return s != nil && s.Experimental != nil && s.Experimental.MCPSkills
+}
+
+// MCPTasksEnabled reports whether experimental MCP Tasks support is enabled.
+func (s *Settings) MCPTasksEnabled() bool {
+	return s != nil && s.Experimental != nil && s.Experimental.MCPTasks
 }
 
 // LayoutSettings customizes the TUI chat layout. The zero value is the
@@ -270,12 +305,22 @@ func (s *Settings) GetRenderImages() bool {
 	return *s.RenderImages
 }
 
+// GetTopMargin returns whether the optional top margin is enabled.
+func (s *Settings) GetTopMargin() bool {
+	return s != nil && s.TopMargin
+}
+
 // GetShowBanner returns whether the startup banner is displayed, defaulting to true.
 func (s *Settings) GetShowBanner() bool {
 	if s == nil || s.ShowBanner == nil {
 		return true
 	}
 	return *s.ShowBanner
+}
+
+// GetFadeScrollEdges reports whether to fade scroll edges, defaulting to true.
+func (s *Settings) GetFadeScrollEdges() bool {
+	return s == nil || s.FadeScrollEdges == nil || *s.FadeScrollEdges
 }
 
 // GetRestoreTabs returns whether previously open tabs are restored on

@@ -1,4 +1,4 @@
-package editor
+package ansiline
 
 import (
 	"testing"
@@ -10,28 +10,28 @@ import (
 func TestSpliceLine(t *testing.T) {
 	t.Parallel()
 	t.Run("middle of plain line", func(t *testing.T) {
-		got := spliceLine("hello world", "XY", 6)
+		got := Splice("hello world", "XY", 6)
 		require.Equal(t, "hello XYrld", got)
 	})
 
 	t.Run("beyond end pads", func(t *testing.T) {
-		got := spliceLine("hi", "XY", 5)
+		got := Splice("hi", "XY", 5)
 		require.Equal(t, "hi   XY", got)
 	})
 
 	t.Run("empty line", func(t *testing.T) {
-		got := spliceLine("", "XY", 3)
+		got := Splice("", "XY", 3)
 		require.Equal(t, "   XY", got)
 	})
 
 	t.Run("at column zero", func(t *testing.T) {
-		got := spliceLine("hello", "XY", 0)
+		got := Splice("hello", "XY", 0)
 		require.Equal(t, "XYllo", got)
 	})
 
 	t.Run("styled base keeps left styling and width", func(t *testing.T) {
 		styled := "\x1b[31mhello world\x1b[0m"
-		got := spliceLine(styled, "XY", 6)
+		got := Splice(styled, "XY", 6)
 		require.Equal(t, "hello XYrld", ansi.Strip(got))
 		require.Equal(t, 11, ansi.StringWidth(got))
 		require.Contains(t, got, "\x1b[31m", "left side keeps its color")
@@ -39,14 +39,14 @@ func TestSpliceLine(t *testing.T) {
 
 	t.Run("styled overlay stays intact", func(t *testing.T) {
 		overlay := "\x1b[7mX\x1b[0m"
-		got := spliceLine("hello world", overlay, 6)
+		got := Splice("hello world", overlay, 6)
 		require.Equal(t, "hello Xorld", ansi.Strip(got))
 		require.Equal(t, 11, ansi.StringWidth(got))
 		require.Contains(t, got, overlay)
 	})
 
 	t.Run("wide runes on the right boundary", func(t *testing.T) {
-		got := spliceLine("ab界cd", "X", 1) // replaces b; 界 stays at cols 2-3
+		got := Splice("ab界cd", "X", 1) // replaces b; 界 stays at cols 2-3
 		require.Equal(t, "aX界cd", ansi.Strip(got))
 		require.Equal(t, 6, ansi.StringWidth(got))
 	})
@@ -55,7 +55,7 @@ func TestSpliceLine(t *testing.T) {
 		// X lands on the first cell of 界 (cols 2-3); the half-covered wide
 		// rune cannot be drawn, so its remaining cell becomes padding — the
 		// same thing a terminal compositor does.
-		got := spliceLine("ab界cd", "X", 2)
+		got := Splice("ab界cd", "X", 2)
 		require.Equal(t, 6, ansi.StringWidth(got))
 		require.Equal(t, "abX cd", ansi.Strip(got))
 	})

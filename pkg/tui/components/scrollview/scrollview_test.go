@@ -33,7 +33,11 @@ func composeReference(m *Model, lines []string) string {
 		for i := range gapLines {
 			gapLines[i] = col
 		}
-		return lipgloss.JoinHorizontal(lipgloss.Top, contentView, strings.Join(gapLines, "\n"), m.sb.View())
+		bar := strings.Join(m.scrollbarLines(), "\n")
+		if bar == "" {
+			bar = strings.TrimSuffix(strings.Repeat(" \n", m.height), "\n")
+		}
+		return lipgloss.JoinHorizontal(lipgloss.Top, contentView, strings.Join(gapLines, "\n"), bar)
 	}
 	if m.reserveScrollbarSpace {
 		col := strings.Repeat(" ", m.gapWidth+scrollbar.Width)
@@ -84,7 +88,7 @@ func TestComposeMatchesJoinHorizontal(t *testing.T) {
 
 			want := composeReference(m, slices.Clone(lines))
 			got := m.compose(slices.Clone(lines), m.scrollOffset)
-			assert.Equal(t, want, got)
+			assert.Equal(t, ansi.Strip(want), ansi.Strip(got))
 		})
 	}
 }

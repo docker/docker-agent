@@ -553,12 +553,12 @@ func TestSSEStream_SendError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s := newSSEStream(rec, "chatcmpl-x", "root")
 	s.sendError(errors.New("model exploded"))
+	assert.True(t, rec.Flushed)
+	assert.Equal(t, `data: {"error":{"message":"model exploded","type":"internal_error"}}`+"\n\n", rec.Body.String())
 	s.send(ChatCompletionStreamDelta{}, "error")
 	s.done()
 
 	body := rec.Body.String()
-	// One error envelope.
-	assert.Contains(t, body, `"error":{"message":"model exploded"`)
 	// One terminating chunk with finish_reason=error (instead of stop).
 	assert.Contains(t, body, `"finish_reason":"error"`)
 	// And the OpenAI sentinel.

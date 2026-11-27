@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"encoding/json"
 	"slices"
 	"sort"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
+	handoff "github.com/docker/docker-agent/pkg/tools/builtin/handoff/types"
 	transfertask "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
@@ -26,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -112,6 +115,7 @@ type Model interface {
 	// delegation transition. It is never persisted, so it does not reappear
 	// when the session is reloaded.
 	AddAgentReturn(fromAgent, toAgent string) tea.Cmd
+	AddRoutingDecision(decision *session.RoutingDecision) tea.Cmd
 	// LoadFromSession rebuilds the list from a persisted session.
 	// generatedMedia carries the restored generated-media items to attach,
 	// keyed by the owning message's index in sess.Messages; nil when the
@@ -137,6 +141,8 @@ type Model interface {
 	// need to observe real list state rather than trust a call was made.
 	MessageTypeCount(t types.MessageType) int
 
+	FadeOutScrollbar() tea.Cmd
+	ScrollbarOpacity() float64
 	// IsScrollbarDragging returns true when the scrollbar thumb is being dragged.
 	IsScrollbarDragging() bool
 
@@ -247,10 +253,12 @@ type model struct {
 	focused              bool // Whether the messages component is focused
 
 	// Inline editing state
-	inlineEditMsgIndex      int            // Index of message being edited (-1 = not editing)
-	inlineEditSessionPos    int            // Session position for branching
-	inlineEditTextarea      textarea.Model // Textarea for inline editing
-	inlineEditPrevSelection int            // Previous selection index before entering inline edit (-1 = was not in selection mode)
+	inlineEditMsgIndex      int         // Index of message being edited (-1 = not editing)
+	inlineEditSessionPos    int         // Session position for branching
+	inlineEditTextarea      *input.Area // Textarea for inline editing
+	inlineEditPrevSelection int         // Previous selection index before entering inline edit (-1 = was not in selection mode)
+	inlineEditBlinkDirty    bool
+	inlineEditBlinkLines    []string // Caret-only overlay, sharing the cached edit's geometry.
 
 	// Hover state for showing action labels (copy, edit) on messages
 	hoveredMessageIndex int // Index of message under mouse (-1 = none)
@@ -296,6 +304,7 @@ func newModel(ar *animation.Runtime, width, height int, sessionState SessionStat
 	if ar == nil {
 		panic("messages: nil animation runtime")
 	}
+	sv.SetAnimationRuntime(ar)
 	m := &model{
 		toolRenderers:        tool.NewRegistry(),
 		ar:                   ar,
@@ -363,7 +372,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m.handleMouseRelease(msg)
 
 	case messages.WheelCoalescedMsg:
+		before := m.scrollOffset
 		cmd := m.scrollByWheel(msg.Delta)
+		cmd = m.revealAfterScroll(before, cmd)
 		return m, cmd
 
 	case AutoScrollTickMsg:
@@ -404,6 +415,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// Theme changed - invalidate all render caches
 		m.invalidateAllItems()
 		m.toolRenderers.InvalidateCaches()
+		if m.inlineEditMsgIndex >= 0 {
+			m.inlineEditTextarea.SetStyles(inlineEditTextareaStyles())
+		}
 		for i, view := range m.views {
 			updatedView, cmd := view.Update(msg)
 			m.views[i] = updatedView
@@ -414,6 +428,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case animation.TickMsg:
+		m.scrollview.UpdateScrollbarAnimation(msg)
 		// Child owners mark the shared tick dirty only at visible frame
 		// boundaries. Invalidate after fanout below.
 
@@ -427,7 +442,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
-		return m.handleKeyPress(msg)
+		before := m.scrollOffset
+		model, cmd := m.handleKeyPress(msg)
+		return model, m.revealAfterScroll(before, cmd)
 	}
 
 	// Forward updates to all message views
@@ -645,12 +662,11 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 	return m, nil
 }
 
-func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.Cmd) {
+func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (model layout.Model, cmd tea.Cmd) {
 	// Unrelated releases must not restore scroll state from a deferred frame.
 	if m.scrollview.IsDragging() {
-		if updated, cmd := m.handleScrollviewUpdate(msg); cmd != nil {
-			return updated, cmd
-		}
+		_, scrollbarCmd := m.handleScrollviewUpdate(msg)
+		defer func() { cmd = tea.Batch(scrollbarCmd, cmd) }()
 	}
 
 	if msg.Button == tea.MouseLeft && m.selection.mouseButtonDown {
@@ -709,7 +725,7 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		if key.Matches(msg, m.inlineEditTextarea.KeyMap.InsertNewline) {
 			// Forward to textarea for newline insertion
 			var cmd tea.Cmd
-			m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
+			*m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
 			m.invalidateItem(m.inlineEditMsgIndex)
 			m.renderDirty = true
 			return m, cmd
@@ -730,7 +746,7 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		default:
 			// Forward all other keys to the textarea
 			var cmd tea.Cmd
-			m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
+			*m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
 			m.invalidateItem(m.inlineEditMsgIndex)
 			m.renderDirty = true
 			return m, cmd
@@ -842,7 +858,7 @@ func (m *model) View() string {
 	// fixed-width padding, pinned scrollbar, and exact height. Selection and
 	// URL-hover restyling preserve display width, so the scrollview can reuse
 	// memoized line widths instead of re-measuring every visible line.
-	m.scrollview.SetContent(m.renderedLines, m.totalScrollableHeight())
+	m.scrollview.SetContentWithTrailingSlack(m.renderedLines, m.totalHeight, m.bottomSlack)
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	// Segmented active lines are not in scrollview's flattened content buffer,
 	// so use its pre-sliced path. Selection/URL restyling already requires the
@@ -868,6 +884,12 @@ func (m *model) renderedLine(global int) string {
 	}
 	if s := m.activeSegments; s != nil && global >= s.start && global < s.start+s.height() {
 		return s.line(global - s.start)
+	}
+	if len(m.inlineEditBlinkLines) > 0 {
+		local := global - m.lineOffsets[m.inlineEditMsgIndex]
+		if local >= 0 && local < len(m.inlineEditBlinkLines) {
+			return m.inlineEditBlinkLines[local]
+		}
 	}
 	if global < len(m.renderedLines) {
 		return m.renderedLines[global]
@@ -1060,16 +1082,17 @@ func (m *model) Bindings() []key.Binding {
 
 // InlineEditBindings returns key bindings for inline edit mode
 func (m *model) InlineEditBindings() []key.Binding {
-	// Get the newline key help based on the configured keymap
-	newlineKeys := m.inlineEditTextarea.KeyMap.InsertNewline.Keys()
-	newlineHelp := "Ctrl+j"
-	if slices.Contains(newlineKeys, "shift+enter") {
-		newlineHelp = "Shift+Enter"
-	}
+	send := core.GetKeys().EditorSend
+	send.SetHelp(send.Help().Key, "save")
+	newline := m.inlineEditTextarea.KeyMap.InsertNewline
+	send.SetKeys(slices.DeleteFunc(slices.Clone(send.Keys()), func(k string) bool {
+		return slices.Contains(newline.Keys(), k)
+	})...)
+	newline.SetHelp(newline.Help().Key, "newline")
 	return []key.Binding{
-		key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "save")),
+		send,
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("Esc", "cancel")),
-		key.NewBinding(key.WithKeys(newlineKeys...), key.WithHelp(newlineHelp, "newline")),
+		newline,
 	}
 }
 
@@ -1168,7 +1191,7 @@ func (m *model) materializeDeferredTailForInteraction() tea.Cmd {
 	if len(m.deferredTail) != 0 {
 		cmd := m.materializeDeferredTail()
 		m.updateScrollState()
-		m.scrollview.SetContent(m.renderedLines, m.totalScrollableHeight())
+		m.scrollview.SetContentWithTrailingSlack(m.renderedLines, m.totalHeight, m.bottomSlack)
 		m.scrollview.SetScrollOffset(m.scrollOffset)
 		return cmd
 	}
@@ -1228,6 +1251,28 @@ func (m *model) scrollByWheel(delta int) tea.Cmd {
 		m.userHasScrolled = false
 	}
 	return cmd
+}
+
+func (m *model) revealAfterScroll(before int, cmd tea.Cmd) tea.Cmd {
+	if before == m.scrollOffset {
+		return cmd
+	}
+	m.scrollview.SetContentWithTrailingSlack(m.renderedLines, m.totalHeight, m.bottomSlack)
+	return tea.Batch(cmd, m.scrollview.RevealScrollbar())
+}
+
+func (m *model) FadeOutScrollbar() tea.Cmd { return m.scrollview.FadeOutScrollbar() }
+
+func (m *model) ScrollbarOpacity() float64 { return m.scrollview.ScrollbarOpacity() }
+
+func (m *model) SetScrollbarPointer(x, y int) tea.Cmd {
+	return m.scrollview.SetScrollbarPointer(x, y)
+}
+
+func (m *model) ScrollbarView() *scrollview.Model { return m.scrollview }
+
+func (m *model) ClearScrollbarPointer() {
+	m.scrollview.ClearScrollbarPointer()
 }
 
 func (m *model) setScrollOffset(offset int) {
@@ -1468,6 +1513,22 @@ func (m *model) renderItem(index int, view layout.Model) renderedItem {
 	return item
 }
 
+func inlineEditTextareaStyles() textarea.Styles {
+	return textarea.Styles{
+		Focused: textarea.StyleState{
+			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
+			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
+		},
+		Blurred: textarea.StyleState{
+			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
+			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
+		},
+		Cursor: textarea.CursorStyle{
+			Color: styles.Accent,
+		},
+	}
+}
+
 // renderInlineEditTextarea renders the inline editing textarea with user message styling.
 func (m *model) renderInlineEditTextarea() string {
 	// Use the same style as user messages but with a highlight to indicate editing
@@ -1524,8 +1585,12 @@ func (m *model) needsSeparator(index int) bool {
 
 func (m *model) ensureAllItemsRendered() {
 	if !m.renderDirty && (len(m.renderedLines) > 0 || m.activeSegments != nil) {
-		return
+		if !m.inlineEditBlinkDirty || m.refreshInlineEditBlink() {
+			return
+		}
 	}
+	m.inlineEditBlinkDirty = false
+	m.inlineEditBlinkLines = nil
 
 	// A cache smaller than the item count would evict every entry during the
 	// sequential scan below, making each rebuild a full re-render.
@@ -1584,6 +1649,28 @@ func (m *model) ensureAllItemsRendered() {
 	m.renderDirty = false
 }
 
+// A caret phase changes styling, not text or geometry. Keep the flattened
+// transcript immutable so the scrollview retains its memoized line widths.
+func (m *model) refreshInlineEditBlink() bool {
+	index := m.inlineEditMsgIndex
+	if index < 0 || index >= len(m.lineOffsets) {
+		return false
+	}
+	start, end := m.lineOffsets[index], len(m.renderedLines)
+	if index+1 < len(m.lineOffsets) {
+		// An edited user message is nonempty and always has a separator
+		// when followed by another message.
+		end = m.lineOffsets[index+1] - 1
+	}
+	item := m.renderItem(index, m.views[index])
+	if item.height != end-start {
+		return false
+	}
+	m.inlineEditBlinkLines = item.lines
+	m.inlineEditBlinkDirty = false
+	return true
+}
+
 //nolint:unparam // Boolean result is retained for cache-refresh callers.
 func (m *model) refreshRenderedItem(index int) bool {
 	wasAtBottom := m.isAtBottom()
@@ -1601,6 +1688,10 @@ func (m *model) refreshRenderedItem(index int) bool {
 	}
 	m.renderedItems.Delete(index)
 	item := m.renderItem(index, m.views[index])
+	if index == m.inlineEditMsgIndex {
+		m.inlineEditBlinkDirty = false
+		m.inlineEditBlinkLines = nil
+	}
 	if item.segments != nil && index == len(m.views)-1 {
 		// The final assistant has exactly one line owner. It may previously have
 		// been flattened (selection/full Render) or virtual (stream segmentation),
@@ -1760,20 +1851,40 @@ func (m *model) AddShellOutputMessage(content string) tea.Cmd {
 	return m.addMessage(types.ShellOutput(content))
 }
 
-// AddAgentReturn appends the delegation-return transition. A pending-response
-// spinner pinned at the tail is re-added (with its label) after the
-// transition so the "spinner is always last" invariant — relied on by
-// RemoveSpinner — keeps holding.
 func (m *model) AddAgentReturn(fromAgent, toAgent string) tea.Cmd {
 	if fromAgent == "" || toAgent == "" {
 		return nil
 	}
+	return m.addBeforePendingSpinner(types.AgentReturn(fromAgent, toAgent))
+}
+
+func (m *model) AddRoutingDecision(decision *session.RoutingDecision) tea.Cmd {
+	if msg := handoffMessage(decision); msg != nil {
+		return m.addBeforePendingSpinner(msg)
+	}
+	return nil
+}
+
+func handoffMessage(d *session.RoutingDecision) *types.Message {
+	if d == nil || d.FromAgent == "" || d.ToAgent == "" || d.FromAgent == d.ToAgent {
+		return nil
+	}
+	args, _ := json.Marshal(handoff.Args{Agent: d.ToAgent})
+	call := tools.ToolCall{
+		ID:       "route:" + d.ID,
+		Function: tools.FunctionCall{Name: handoff.ToolNameHandoff, Arguments: string(args)},
+	}
+	return types.ToolCallMessage(d.FromAgent, call, tools.Tool{Name: handoff.ToolNameHandoff}, types.ToolStatusCompleted)
+}
+
+// Keep any pending-response spinner at the tail, where RemoveSpinner expects it.
+func (m *model) addBeforePendingSpinner(msg *types.Message) tea.Cmd {
 	var trailingSpinner *types.Message
 	if last := m.lastMessage(); last != nil && last.Type == types.MessageTypeSpinner {
 		trailingSpinner = last
 		m.removeSpinner()
 	}
-	cmds := []tea.Cmd{m.addMessage(types.AgentReturn(fromAgent, toAgent))}
+	cmds := []tea.Cmd{m.addMessage(msg)}
 	if trailingSpinner != nil {
 		cmds = append(cmds, m.addMessage(types.SpinnerLabeled(trailingSpinner.Sender, trailingSpinner.Content)))
 	}
@@ -1859,7 +1970,6 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 
 		// Create new reasoning block
 		block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, reasoningblock.WithToolRenderers(m.toolRenderers))
-		block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 		block.SetSize(m.contentWidth(), 0)
 
 		blockMsg := &types.Message{
@@ -1888,10 +1998,8 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 	m.StopAnimations()
 	m.messages = nil
 	m.views = nil
-	m.renderedItems.Clear()
-	m.renderedLines = nil
+	m.invalidateAllItems()
 	m.scrollOffset = 0
-	m.totalHeight = 0
 	m.bottomSlack = 0
 	m.selectedMessageIndex = -1
 	m.hoveredMessageIndex = -1
@@ -1916,6 +2024,10 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 	}
 
 	for pos, item := range sess.Messages {
+		if msg := handoffMessage(item.RoutingDecision); msg != nil {
+			appendSessionMessage(msg, m.createToolCallView(msg))
+			continue
+		}
 		if item.IsError() {
 			errMsg := types.Error(item.Error.Message)
 			appendSessionMessage(errMsg, m.createMessageView(errMsg))
@@ -1975,6 +2087,9 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 					var toolDef tools.Tool
 					if i < len(smsg.Message.ToolDefinitions) {
 						toolDef = smsg.Message.ToolDefinitions[i]
+					}
+					if toolDef.Name == "" && tc.Function.Name == handoff.ToolNameHandoff {
+						toolDef.Name = tc.Function.Name
 					}
 
 					if attachToReasoning {
@@ -2278,27 +2393,6 @@ func (m *model) lastMessage() *types.Message {
 	return m.messages[len(m.messages)-1]
 }
 
-// showReasoningAgentBadge reports whether a new reasoning block for agentName
-// should render its agent badge. Mirrors message.sameAgentAsPrevious: the
-// badge is hidden only when the block visually continues content from the
-// same agent (assistant text, reasoning, or tool activity). In particular, a
-// transfer_task tool call is sent by the parent agent, so reasoning from the
-// sub-agent that follows it shows the sub-agent's badge.
-func showReasoningAgentBadge(previous *types.Message, agentName string) bool {
-	if previous == nil || previous.Sender != agentName {
-		return true
-	}
-	switch previous.Type {
-	case types.MessageTypeAssistant,
-		types.MessageTypeAssistantReasoningBlock,
-		types.MessageTypeToolCall,
-		types.MessageTypeToolResult:
-		return false
-	default:
-		return true
-	}
-}
-
 // addReasoningBlock creates a new reasoning block message.
 //
 // Reasoning blocks routinely interleave with an actively streaming assistant
@@ -2319,7 +2413,6 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	}
 
 	block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, reasoningblock.WithToolRenderers(m.toolRenderers))
-	block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 	block.SetReasoning(content)
 	block.SetSize(m.contentWidth(), 0)
 
@@ -2391,7 +2484,10 @@ func (m *model) createToolCallView(msg *types.Message) layout.Model {
 }
 
 func (m *model) createMessageView(msg *types.Message) layout.Model {
-	view := message.New(m.ar, msg, m.sessionState.PreviousMessage())
+	if msg.Type == types.MessageTypeToolCall {
+		return m.createToolCallView(msg)
+	}
+	view := message.New(m.ar, msg)
 	view.SetSize(m.contentWidth(), 0)
 	return view
 }
@@ -2707,7 +2803,7 @@ func (m *model) handleScrollviewUpdate(msg tea.Msg) (layout.Model, tea.Cmd) {
 	}
 	// Streaming can advance geometry without View, even with no deferred tail.
 	m.updateScrollState()
-	m.scrollview.SetContent(m.renderedLines, m.totalScrollableHeight())
+	m.scrollview.SetContentWithTrailingSlack(m.renderedLines, m.totalHeight, m.bottomSlack)
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	_, cmd := m.scrollview.UpdateMouse(msg)
 	m.scrollOffset = m.scrollview.ScrollOffset()
@@ -2772,9 +2868,8 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	m.inlineEditSessionPos = sessionPosition
 
 	// Create and configure the textarea
-	ta := textarea.New()
+	ta := input.NewArea()
 	ta.SetValue(content)
-	ta.Focus()
 
 	// Configure appearance - use a style similar to user message
 	innerWidth := m.contentWidth() - styles.UserMessageStyle.GetHorizontalFrameSize()
@@ -2792,21 +2887,7 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0 // No limit
 
-	// Set custom styles with background color matching the user message style
-	inlineEditStyle := textarea.Styles{
-		Focused: textarea.StyleState{
-			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
-			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
-		},
-		Blurred: textarea.StyleState{
-			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
-			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
-		},
-		Cursor: textarea.CursorStyle{
-			Color: styles.Accent,
-		},
-	}
-	ta.SetStyles(inlineEditStyle)
+	ta.SetStyles(inlineEditTextareaStyles())
 
 	// Mirror the composer's configurable newline keys (ctrl+j by default),
 	// always offering shift+enter for terminals with keyboard enhancements.
@@ -2818,12 +2899,19 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	ta.KeyMap.InsertNewline.SetKeys(newlineKeys...)
 	ta.KeyMap.InsertNewline.SetEnabled(true)
 
-	m.inlineEditTextarea = ta
+	ta.Focus()
+	ta.OnCursorChange(func() {
+		if m.inlineEditTextarea == &ta {
+			m.inlineEditBlinkDirty = true
+			m.invalidateView()
+		}
+	})
+	m.inlineEditTextarea = &ta
 	m.invalidateItem(msgIndex)
 	m.renderDirty = true
 
 	// Invalidate statusbar cache since bindings have changed
-	return tea.Batch(ta.Focus(), core.CmdHandler(messages.InvalidateStatusBarMsg{}))
+	return core.CmdHandler(messages.InvalidateStatusBarMsg{})
 }
 
 // CancelInlineEdit cancels the current inline edit and restores the original content.
@@ -2837,7 +2925,7 @@ func (m *model) CancelInlineEdit() tea.Cmd {
 
 	m.inlineEditMsgIndex = -1
 	m.inlineEditSessionPos = -1
-	m.inlineEditTextarea = textarea.Model{}
+	m.inlineEditTextarea = nil
 	m.inlineEditPrevSelection = -1
 
 	// Restore the previous selection state if we were in keyboard selection mode
@@ -2859,6 +2947,13 @@ func (m *model) CancelInlineEdit() tea.Cmd {
 		core.CmdHandler(InlineEditCancelledMsg{WasInSelectionMode: prevSelection >= 0}),
 		core.CmdHandler(messages.InvalidateStatusBarMsg{}),
 	)
+}
+
+func (m *model) CursorInput() input.Cursor {
+	if m.IsInlineEditing() {
+		return m.inlineEditTextarea
+	}
+	return nil
 }
 
 // IsInlineEditing returns true if inline editing is currently active.
@@ -2883,7 +2978,7 @@ func (m *model) commitInlineEdit() tea.Cmd {
 	// Reset editing state
 	m.inlineEditMsgIndex = -1
 	m.inlineEditSessionPos = -1
-	m.inlineEditTextarea = textarea.Model{}
+	m.inlineEditTextarea = nil
 
 	m.invalidateAllItems()
 
@@ -2915,6 +3010,7 @@ type InlineEditCommittedMsg struct {
 }
 
 func (m *model) StopAnimations() {
+	m.ClearScrollbarPointer()
 	m.slackAnimationSub.Stop()
 	for _, v := range m.views {
 		animation.StopView(v)

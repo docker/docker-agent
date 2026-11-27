@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 )
 
 func TestRenderInlineImageIncludesKittyImageSequence(t *testing.T) {
@@ -25,12 +27,14 @@ func TestRenderInlineImageIncludesKittyImageSequence(t *testing.T) {
 	lines := RenderInlineImage(img, 80)
 	joined := strings.Join(lines, "\n")
 
-	assert.Contains(t, joined, "sample.png")
-	assert.Contains(t, joined, "image/png")
 	assert.Contains(t, joined, "\x1b_G")
 	assert.Contains(t, joined, "a=T")
 	assert.Contains(t, joined, "f=100")
-	assert.Contains(t, joined, "🖼")
+	require.Len(t, lines, 15)
+	assert.Equal(t, "  "+tuiimage.KittySequence(img.PNGData, 60, 15), lines[0])
+	for _, line := range lines[1:] {
+		assert.Empty(t, line, "remaining rows must only reserve space for the image")
+	}
 }
 
 func testPNGData(t *testing.T) []byte {

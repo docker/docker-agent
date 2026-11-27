@@ -35,7 +35,10 @@ func TestEvaluatorCredentialsRespectModelsGateway(t *testing.T) {
 	for _, gateway := range []string{"", "https://gateway.example.com"} {
 		err := CheckRequiredEnvVars(t.Context(), cfg, gateway, environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test"}))
 		if gateway == "" {
-			require.ErrorContains(t, err, "CORP_KEY")
+			var missing *environment.RequiredEnvError
+			require.ErrorAs(t, err, &missing)
+			assert.Equal(t, []string{"CORP_KEY"}, missing.Missing)
+			assert.False(t, missing.MissingModelCredentials)
 		} else {
 			require.NoError(t, err)
 			assert.Empty(t, RequiredEvaluatorEnvVars(cfg, options.WithGateway(gateway)))

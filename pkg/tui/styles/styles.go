@@ -150,7 +150,7 @@ const (
 // Thresholds outside (0, 1] fall back to [compaction.DefaultThreshold],
 // mirroring compaction.ShouldCompact.
 func ContextGaugeLevelFor(fill, threshold float64) ContextGaugeLevel {
-	if threshold <= 0 || threshold > 1 {
+	if !(threshold > 0 && threshold <= 1) {
 		threshold = compaction.DefaultThreshold
 	}
 	switch {
@@ -362,13 +362,23 @@ var (
 	// words are unmistakable.
 	DiffAddEmphStyle = BaseStyle.
 				Background(DiffAddEmphBg).
-				Foreground(DiffAddFg).
-				Bold(true)
+				Foreground(DiffAddFg)
 
 	DiffRemoveEmphStyle = BaseStyle.
 				Background(DiffRemoveEmphBg).
-				Foreground(DiffRemoveFg).
-				Bold(true)
+				Foreground(DiffRemoveFg)
+
+	DiffAddGutterStyle = BaseStyle.
+				Foreground(LineNumber).
+				Background(DiffAddBg)
+
+	DiffRemoveGutterStyle = BaseStyle.
+				Foreground(LineNumber).
+				Background(DiffRemoveBg)
+
+	DiffHunkHeaderStyle = BaseStyle.
+				Foreground(LineNumber).
+				Background(BackgroundAlt)
 )
 
 // Syntax highlighting UI element styles

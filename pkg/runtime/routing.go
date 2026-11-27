@@ -20,8 +20,6 @@ const (
 	maxRouteTransitions = 100
 	// maxRoutingConversation bounds the prior visible messages sent to control hooks.
 	maxRoutingConversation = 10
-
-	agentSwitchKindRoute = "route"
 )
 
 // routeState is the per-invocation state of a hook-routed conversation. It
@@ -142,7 +140,7 @@ func (r *LocalRuntime) activateAgent(ctx context.Context, sess *session.Session,
 		if next == nil {
 			return a, nil
 		}
-		r.applyRoute(ctx, sess, a, next, route, string(hooks.EventBeforeAgentRun), result, false, events)
+		r.applyRoute(ctx, sess, a, next, route, string(hooks.EventBeforeAgentRun), result, events)
 		a = next
 	}
 	return a, nil
@@ -180,7 +178,7 @@ func (r *LocalRuntime) routeCompletion(ctx context.Context, sess *session.Sessio
 		return routeFinished, nil
 	}
 	route.previousOutput = content
-	r.applyRoute(ctx, sess, a, next, route, phase, result, true, events)
+	r.applyRoute(ctx, sess, a, next, route, phase, result, events)
 	return routeContinued, nil
 }
 
@@ -231,30 +229,25 @@ func (r *LocalRuntime) resolveTransition(a *agent.Agent, result *hooks.Result, r
 // implicit handoff note as force_handoff so the next model call never starts
 // on a dangling assistant message; an entry route replaces the activation and
 // leaves the user's request as the last message.
-func (r *LocalRuntime) applyRoute(ctx context.Context, sess *session.Session, from, next *agent.Agent, route *routeState, phase string, result *hooks.Result, afterCompletion bool, events EventSink) {
-	kind := agentSwitchKindRoute
-	if phase == agentSwitchKindForceHandoff {
-		kind = agentSwitchKindForceHandoff
-	}
-	slog.InfoContext(ctx, "Routing conversation", "from_agent", from.Name(), "to_agent", next.Name(),
-		"session_id", sess.ID, "invocation_id", route.invocationID, "step_id", route.stepID(), "phase", phase)
-
-	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), next.Name(), kind)
-	r.switchSessionAgent(sess, next.Name())
-	if afterCompletion {
-		sess.AddMessage(session.ImplicitUserMessage(forcedHandoffNote(from.Name())))
-	}
-
-	event := &AgentRouteEvent{
-		Type: "agent_route", SessionID: sess.ID, InvocationID: route.invocationID, StepID: route.stepID(),
-		Phase: phase, FromAgent: from.Name(), ToAgent: next.Name(),
-		AgentContext: newAgentContext(from.Name()),
-	}
+func (r *LocalRuntime) applyRoute(ctx context.Context, sess *session.Session, from, next *agent.Agent, route *routeState, phase string, result *hooks.Result, events EventSink) {
 	action := hooks.TransitionActionRoute
 	if phase == agentSwitchKindForceHandoff {
 		action = agentSwitchKindForceHandoff
 	}
+	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), next.Name(), action)
+	r.switchSessionAgent(sess, next.Name())
+	if phase != string(hooks.EventBeforeAgentRun) {
+		sess.AddMessage(session.ImplicitUserMessage(forcedHandoffNote(from.Name())))
+	}
+
 	decision := r.recordRoutingDecision(sess, from.Name(), next.Name(), route, phase, action, "", result, events)
+	slog.InfoContext(ctx, "Routing conversation", "from_agent", from.Name(), "to_agent", next.Name(),
+		"session_id", sess.ID, "invocation_id", decision.InvocationID, "step_id", decision.StepID, "phase", phase)
+	event := &AgentRouteEvent{
+		Type: "agent_route", SessionID: sess.ID, InvocationID: decision.InvocationID, StepID: decision.StepID,
+		Phase: phase, FromAgent: from.Name(), ToAgent: next.Name(),
+		AgentContext: newAgentContext(from.Name()),
+	}
 	event.Evaluator, event.Selected, event.Model = decision.Evaluator, decision.Selected, decision.Model
 	event.Probability, event.FallbackReason = decision.Probability, decision.FallbackReason
 	events.Emit(event)
@@ -273,8 +266,11 @@ const (
 // reloads and exports. toAgent is empty when no route was taken.
 func (r *LocalRuntime) recordRoutingDecision(sess *session.Session, fromAgent, toAgent string, route *routeState, phase, action, reason string, result *hooks.Result, events EventSink) *session.RoutingDecision {
 	decision := &session.RoutingDecision{
-		ID: uuid.NewV4().String(), InvocationID: route.invocationID, StepID: route.stepID(),
-		Phase: phase, FromAgent: fromAgent, ToAgent: toAgent, Action: action, Reason: reason, CreatedAt: r.now(),
+		ID: uuid.NewV4().String(), CreatedAt: r.now(),
+		Phase: phase, FromAgent: fromAgent, ToAgent: toAgent, Action: action, Reason: reason,
+	}
+	if route != nil {
+		decision.InvocationID, decision.StepID = route.invocationID, route.stepID()
 	}
 	if result != nil {
 		decision.Evaluator = result.Metadata["evaluator"]

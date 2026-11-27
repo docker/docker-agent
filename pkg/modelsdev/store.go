@@ -312,6 +312,26 @@ func (s *Store) GetModel(ctx context.Context, id ID) (*Model, error) {
 		return &model, nil
 	}
 
+	if id.Provider == "google" {
+		if base, _, hasAt := strings.Cut(id.Model, "@"); hasAt && base != "" {
+			vertexProvider := db.Providers["google-vertex"]
+			for _, candidate := range []struct {
+				prov Provider
+				id   ID
+			}{
+				// Exact regional Vertex entry first to preserve regional pricing (e.g. @eu/@us).
+				{vertexProvider, NewID("google-vertex", id.Model)},
+				{provider, NewID("google", base)},
+				{vertexProvider, NewID("google-vertex", base)},
+			} {
+				if model, ok := lookupModel(candidate.prov, candidate.id); ok {
+					model.Cost = model.Cost.withFastPricing(db, candidate.id)
+					return &model, nil
+				}
+			}
+		}
+	}
+
 	if canonical := CanonicalProviderID(id.Provider); canonical != id.Provider {
 		aliasedProvider, aliasExists := db.Providers[canonical]
 		exists = exists || aliasExists

@@ -2,8 +2,6 @@
  ┃ What's 2+2?
  ┃
 
-    root
-
 
    2 + 2 equals 4.
 
@@ -31,10 +29,12 @@
 
 
 
- ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
 
  Type your message here…
 
 
 
- Ctrl+c quit  Tab switch focus  Ctrl+t/w new/close tab  Ctrl+p/n prev/next tab  Ctrl...  │ + new tab  docker agent test
+ Ctrl+h help                                                                             │ + new tab  docker agent test

@@ -143,6 +143,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "hopbase",
 		},
 		{
+			name: "straitly api key present",
+			envVars: map[string]string{
+				"STRAITLY_API_KEY": "test-key",
+			},
+			expectedProvider: "straitly",
+		},
+		{
 			name: "baseten api key present",
 			envVars: map[string]string{
 				"BASETEN_API_KEY": "test-key",
@@ -360,7 +367,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"GOOGLE_API_KEY": "test-key",
 			},
 			expectedProvider:  "google",
-			expectedModel:     "gemini-3.8-flash",
+			expectedModel:     "gemini-4-hydrogen",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -440,6 +447,15 @@ func TestAutoModelConfig(t *testing.T) {
 			},
 			expectedProvider:  "hopbase",
 			expectedModel:     "glm-5.3",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "straitly provider",
+			envVars: map[string]string{
+				"STRAITLY_API_KEY": "test-key",
+			},
+			expectedProvider:  "straitly",
+			expectedModel:     "deepseek/deepseek-v4-1-flash",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -646,7 +662,7 @@ func TestDefaultModels(t *testing.T) {
 	assert.Equal(t, "gpt-5.6", DefaultModels["openai"])
 	assert.Equal(t, "gpt-5.6-sol", DefaultModels["github-copilot"])
 	assert.Equal(t, "claude-sonnet-5", DefaultModels["anthropic"])
-	assert.Equal(t, "gemini-3.8-flash", DefaultModels["google"])
+	assert.Equal(t, "gemini-4-hydrogen", DefaultModels["google"])
 	assert.Equal(t, "ai/qwen3:latest", DefaultModels["dmr"])
 	assert.Equal(t, "mistral-small-latest", DefaultModels["mistral"])
 	assert.Equal(t, "meta-llama/llama-4-maverick", DefaultModels["openrouter"])
@@ -1004,7 +1020,7 @@ func TestAutoModelConfig_UserDefaultModel(t *testing.T) {
 			defaultModel:      nil,
 			envVars:           map[string]string{"GOOGLE_API_KEY": "test-key"},
 			expectedProvider:  "google",
-			expectedModel:     "gemini-3.8-flash",
+			expectedModel:     "gemini-4-hydrogen",
 			expectedMaxTokens: 32000,
 		},
 		{

@@ -73,6 +73,99 @@ func TestResolveReasoningSupport(t *testing.T) {
 	}
 }
 
+func TestResolveGeminiThinkingSupport(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"gemini-3.1-flash-image": {Reasoning: true},
+			"gemini-4-custom":        {Reasoning: false},
+		}},
+		"vercel": {Models: map[string]modelsdev.Model{
+			"google/gemini-3.1-flash-image": {Reasoning: true},
+		}},
+	}})
+
+	tests := []struct {
+		name     string
+		store    *modelsdev.Store
+		provider string
+		model    string
+		want     bool
+	}{
+		{
+			name:     "catalogue positive overrides -image suffix",
+			store:    store,
+			provider: "google",
+			model:    "gemini-3.1-flash-image",
+			want:     true,
+		},
+		{
+			name:     "gateway catalogue positive overrides -image suffix",
+			store:    store,
+			provider: "vercel",
+			model:    "google/gemini-3.1-flash-image",
+			want:     true,
+		},
+		{
+			name:     "catalogue negative disables reasoning",
+			store:    store,
+			provider: "google",
+			model:    "gemini-4-custom",
+			want:     false,
+		},
+		{
+			name:     "unknown -image model falls back to non-reasoning",
+			store:    store,
+			provider: "google",
+			model:    "gemini-3-pro-image",
+			want:     false,
+		},
+		{
+			name:     "unknown -tts model falls back to non-reasoning",
+			store:    store,
+			provider: "google",
+			model:    "gemini-3.1-flash-tts-preview",
+			want:     false,
+		},
+		{
+			name:     "unknown -live model falls back to non-reasoning",
+			store:    store,
+			provider: "google",
+			model:    "gemini-3.5-live-translate-preview",
+			want:     false,
+		},
+		{
+			name:     "unknown non-suffix model defaults to reasoning",
+			store:    store,
+			provider: "google",
+			model:    "gemini-4-neon",
+			want:     true,
+		},
+		{
+			name:     "nil store excludes -image suffix",
+			provider: "vercel",
+			model:    "google/gemini-3-pro-image",
+			want:     false,
+		},
+		{
+			name:     "nil store allows regular gemini model",
+			provider: "vercel",
+			model:    "google/gemini-4-neon",
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ResolveGeminiThinkingSupport(t.Context(), tt.store, modelsdev.NewID(tt.provider, tt.model), tt.model)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestResolveOutputImage(t *testing.T) {
 	t.Parallel()
 

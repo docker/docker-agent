@@ -38,9 +38,10 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
-var defaultMaxTokens int64 = 32000
+const defaultMaxTokens int64 = 32000
 
 type loadOptions struct {
 	workingDir       string
@@ -348,6 +349,13 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			return nil, err
 		}
 	}
+	if !skillLoadingEnabled {
+		for _, a := range cfg.Agents {
+			if a.Skills.Enabled() {
+				return nil, fmt.Errorf("agents.%s.skills: skill loading is not available in this build", a.Name)
+			}
+		}
+	}
 
 	// Toolsets referencing an MCP catalog server (ref: docker:...) need the
 	// catalog to be built. Kick the fetch off now so its network round-trip
@@ -645,6 +653,12 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	}
 
 	// Create permissions checker from config
+	for _, shadow := range permissions.ShadowedAskPatterns(cfg.Permissions) {
+		slog.WarnContext(ctx, "permissions.ask rule is shadowed by an allow rule and will never prompt; allow rules are evaluated before ask rules",
+			"ask", shadow.Ask,
+			"allow", shadow.Allow,
+		)
+	}
 	permChecker := permissions.NewChecker(cfg.Permissions)
 
 	// Build agent default models map
@@ -692,11 +706,38 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	}, nil
 }
 
+// agentModelFactory obtains the shared store once; catalog and environment
+// lookups for an individual model wait until its reference has been resolved.
+func agentModelFactory(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, runConfig *config.RuntimeConfig, registry *provider.Registry, modelOpts []options.Opt) func(*latest.ModelConfig) (provider.Provider, error) {
+	store, storeErr := runConfig.ModelsDevStore()
+	return func(model *latest.ModelConfig) (provider.Provider, error) {
+		maxTokens := defaultMaxTokens
+		if model.MaxTokens != nil {
+			maxTokens = *model.MaxTokens
+		} else if storeErr == nil {
+			if m, err := store.GetModel(ctx, modelsdev.NewID(model.Provider, model.Model)); err == nil {
+				maxTokens = m.Limit.Output
+			}
+		}
+		opts := []options.Opt{
+			options.WithGateway(runConfig.ModelsGateway),
+			options.WithEncryptedConfig(runConfig.EncryptedConfig),
+			options.WithStructuredOutput(a.StructuredOutput),
+			options.WithProviders(cfg.Providers),
+			options.WithMaxTokens(maxTokens),
+		}
+		if storeErr == nil {
+			opts = append(opts, options.WithModelsDevStore(store))
+		}
+		opts = append(opts, modelOpts...)
+		return registry.NewWithModels(ctx, model, cfg.Models, runConfig.EnvProvider(), opts...)
+	}
+}
+
 func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, autoModelFn func() latest.ModelConfig, dmrFallbackSelectors map[string]bool, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry, modelOpts []options.Opt) ([]provider.Provider, error) {
 	var models []provider.Provider
 
-	// Obtain the singleton store once, outside the loop.
-	modelsStore, modelsStoreErr := runConfig.ModelsDevStore()
+	buildModel := agentModelFactory(ctx, cfg, a, runConfig, providerRegistry, modelOpts)
 
 	for name := range strings.SplitSeq(a.Model, ",") {
 		modelCfg, exists := cfg.Models[name]
@@ -719,38 +760,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 		modelCfg.Name = name
 		config.ApplyModelOverridePolicy(cfg, a.Name, name, &modelCfg)
 
-		// Use max_tokens from config if specified, otherwise look up from models.dev
-		maxTokens := &defaultMaxTokens
-		if modelCfg.MaxTokens != nil {
-			maxTokens = modelCfg.MaxTokens
-		} else if modelsStoreErr == nil {
-			m, err := modelsStore.GetModel(ctx, modelsdev.NewID(modelCfg.Provider, modelCfg.Model))
-			if err == nil {
-				maxTokens = &m.Limit.Output
-			}
-		}
-
-		opts := []options.Opt{
-			options.WithGateway(runConfig.ModelsGateway),
-			options.WithEncryptedConfig(runConfig.EncryptedConfig),
-			options.WithStructuredOutput(a.StructuredOutput),
-			options.WithProviders(cfg.Providers),
-		}
-		if maxTokens != nil {
-			opts = append(opts, options.WithMaxTokens(*maxTokens))
-		}
-		if modelsStoreErr == nil {
-			opts = append(opts, options.WithModelsDevStore(modelsStore))
-		}
-		opts = append(opts, modelOpts...)
-
-		// Pass the full models map for routing rules to resolve model references
-		model, err := providerRegistry.NewWithModels(ctx,
-			&modelCfg,
-			cfg.Models,
-			runConfig.EnvProvider(),
-			opts...,
-		)
+		model, err := buildModel(&modelCfg)
 		if err != nil {
 			// Return a cleaner error message for auto model selection failures,
 			// keeping the underlying cause (e.g. a declined DMR pull) so the
@@ -771,8 +781,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry, modelOpts []options.Opt) ([]provider.Provider, error) {
 	var fallbackModels []provider.Provider
 
-	// Obtain the singleton store once, outside the loop.
-	modelsStore, modelsStoreErr := runConfig.ModelsDevStore()
+	buildModel := agentModelFactory(ctx, cfg, a, runConfig, providerRegistry, modelOpts)
 
 	for _, name := range a.GetFallbackModels() {
 		modelCfg, exists := cfg.Models[name]
@@ -786,38 +795,7 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 		}
 		modelCfg.Name = name
 
-		// Use max_tokens from config if specified, otherwise look up from models.dev
-		maxTokens := &defaultMaxTokens
-		if modelCfg.MaxTokens != nil {
-			maxTokens = modelCfg.MaxTokens
-		} else if modelsStoreErr == nil {
-			m, err := modelsStore.GetModel(ctx, modelsdev.NewID(modelCfg.Provider, modelCfg.Model))
-			if err == nil {
-				maxTokens = &m.Limit.Output
-			}
-		}
-
-		opts := []options.Opt{
-			options.WithGateway(runConfig.ModelsGateway),
-			options.WithEncryptedConfig(runConfig.EncryptedConfig),
-			options.WithStructuredOutput(a.StructuredOutput),
-			options.WithProviders(cfg.Providers),
-		}
-		if maxTokens != nil {
-			opts = append(opts, options.WithMaxTokens(*maxTokens))
-		}
-		if modelsStoreErr == nil {
-			opts = append(opts, options.WithModelsDevStore(modelsStore))
-		}
-		opts = append(opts, modelOpts...)
-
-		// Pass the full models map for routing rules to resolve model references
-		model, err := providerRegistry.NewWithModels(ctx,
-			&modelCfg,
-			cfg.Models,
-			runConfig.EnvProvider(),
-			opts...,
-		)
+		model, err := buildModel(&modelCfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create fallback model '%s': %w", name, err)
 		}
@@ -842,7 +820,7 @@ func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.Ag
 		return nil, nil
 	}
 
-	modelsStore, modelsStoreErr := runConfig.ModelsDevStore()
+	buildModel := agentModelFactory(ctx, cfg, a, runConfig, providerRegistry, modelOpts)
 
 	modelCfg, exists := cfg.Models[titleRef]
 	if !exists {
@@ -854,31 +832,7 @@ func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.Ag
 	}
 	modelCfg.Name = titleRef
 
-	maxTokens := &defaultMaxTokens
-	if modelCfg.MaxTokens != nil {
-		maxTokens = modelCfg.MaxTokens
-	} else if modelsStoreErr == nil {
-		m, err := modelsStore.GetModel(ctx, modelsdev.NewID(modelCfg.Provider, modelCfg.Model))
-		if err == nil {
-			maxTokens = &m.Limit.Output
-		}
-	}
-
-	opts := []options.Opt{
-		options.WithGateway(runConfig.ModelsGateway),
-		options.WithEncryptedConfig(runConfig.EncryptedConfig),
-		options.WithStructuredOutput(a.StructuredOutput),
-		options.WithProviders(cfg.Providers),
-	}
-	if maxTokens != nil {
-		opts = append(opts, options.WithMaxTokens(*maxTokens))
-	}
-	if modelsStoreErr == nil {
-		opts = append(opts, options.WithModelsDevStore(modelsStore))
-	}
-	opts = append(opts, modelOpts...)
-
-	model, err := providerRegistry.NewWithModels(ctx, &modelCfg, cfg.Models, runConfig.EnvProvider(), opts...)
+	model, err := buildModel(&modelCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create title model '%s': %w", titleRef, err)
 	}
@@ -897,7 +851,7 @@ func getCompactionModelForAgent(ctx context.Context, cfg *latest.Config, a *late
 		return nil, nil
 	}
 
-	modelsStore, modelsStoreErr := runConfig.ModelsDevStore()
+	buildModel := agentModelFactory(ctx, cfg, a, runConfig, providerRegistry, modelOpts)
 
 	modelCfg, exists := cfg.Models[compactionRef]
 	if !exists {
@@ -909,31 +863,7 @@ func getCompactionModelForAgent(ctx context.Context, cfg *latest.Config, a *late
 	}
 	modelCfg.Name = compactionRef
 
-	maxTokens := &defaultMaxTokens
-	if modelCfg.MaxTokens != nil {
-		maxTokens = modelCfg.MaxTokens
-	} else if modelsStoreErr == nil {
-		m, err := modelsStore.GetModel(ctx, modelsdev.NewID(modelCfg.Provider, modelCfg.Model))
-		if err == nil {
-			maxTokens = &m.Limit.Output
-		}
-	}
-
-	opts := []options.Opt{
-		options.WithGateway(runConfig.ModelsGateway),
-		options.WithEncryptedConfig(runConfig.EncryptedConfig),
-		options.WithStructuredOutput(a.StructuredOutput),
-		options.WithProviders(cfg.Providers),
-	}
-	if maxTokens != nil {
-		opts = append(opts, options.WithMaxTokens(*maxTokens))
-	}
-	if modelsStoreErr == nil {
-		opts = append(opts, options.WithModelsDevStore(modelsStore))
-	}
-	opts = append(opts, modelOpts...)
-
-	model, err := providerRegistry.NewWithModels(ctx, &modelCfg, cfg.Models, runConfig.EnvProvider(), opts...)
+	model, err := buildModel(&modelCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create compaction model '%s': %w", compactionRef, err)
 	}
@@ -973,8 +903,9 @@ func agentToolOptions(ctx context.Context, cfg *latest.Config, agentConfig *late
 	if requireTools && len(warnings) > 0 {
 		return nil, nil, fmt.Errorf("workspace tool creation failed: %s", strings.Join(warnings, "; "))
 	}
-	// Add skills toolset if skills are enabled
-	if agentConfig.Skills.Enabled() {
+	var skillSet *skillstool.ToolSet
+	// A build without skill loading rejects skills before reaching tool creation.
+	if skillLoadingEnabled && agentConfig.Skills.Enabled() {
 		skillDir := runConfig.WorkingDir
 		if skillDir == "" {
 			skillDir, _ = os.Getwd()
@@ -989,7 +920,7 @@ func agentToolOptions(ctx context.Context, cfg *latest.Config, agentConfig *late
 		// always exposed and never subject to the include filter.
 		loadedSkills = overrideWithInlineSkills(loadedSkills, inlineSkills(agentConfig.Skills.Inline))
 		if len(loadedSkills) > 0 {
-			skillSet := skillstool.New(loadedSkills, runConfig.WorkingDir)
+			skillSet = skillstool.New(loadedSkills, runConfig.WorkingDir)
 			// Resolve the additional toolsets each fork skill exposes in
 			// its sub-session from the top-level toolsets section.
 			forkToolSets, forkWarnings, err := forkSkillToolSets(ctx, cfg, agentConfig, loadedSkills, parentDir, runConfig, configName, loadOpts, expander)
@@ -1004,6 +935,20 @@ func agentToolOptions(ctx context.Context, cfg *latest.Config, agentConfig *late
 			}
 			warnings = append(warnings, forkWarnings...)
 			agentTools = append(agentTools, skillSet)
+		}
+	}
+
+	if skillLoadingEnabled && userconfig.Get().MCPSkillsEnabled() {
+		var mcpSkillProviders []skills.MCPSkillProvider
+		for _, ts := range agentTools {
+			mcpSkillProviders = append(mcpSkillProviders, tools.FindAll[skills.MCPSkillProvider](ts)...)
+		}
+		if len(mcpSkillProviders) > 0 {
+			if skillSet == nil {
+				skillSet = skillstool.New(nil, runConfig.WorkingDir)
+				agentTools = append(agentTools, skillSet)
+			}
+			skillSet.SetMCPProviders(mcpSkillProviders)
 		}
 	}
 

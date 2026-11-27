@@ -111,19 +111,6 @@ func TestResolveCommand_PositionalArgsWithQuotes(t *testing.T) {
 	assert.Equal(t, "Search for hello world in ./src", result)
 }
 
-func TestResolveCommand_AllArgs(t *testing.T) {
-	t.Parallel()
-
-	rt := &mockRuntime{
-		commands: types.Commands{
-			"run": types.Command{Instruction: `Run command with args: ${args.join(" ")}`},
-		},
-	}
-
-	result := ResolveCommand(t.Context(), rt, "/run arg1 arg2 arg3")
-	assert.Equal(t, "Run command with args: arg1 arg2 arg3", result)
-}
-
 func TestResolveCommand_ArgsPlaceholder(t *testing.T) {
 	t.Parallel()
 

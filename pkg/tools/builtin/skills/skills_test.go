@@ -175,7 +175,7 @@ func TestSkillsToolset_Skills(t *testing.T) {
 	}
 	st := New(input, "")
 
-	assert.Equal(t, input, st.Skills())
+	assert.Equal(t, input, st.Skills(t.Context()))
 }
 
 func TestSkillsToolset_HandleReadSkill(t *testing.T) {
@@ -380,8 +380,9 @@ func TestSkillsToolset_ReadSkillContent_ExpandsCommands(t *testing.T) {
 	assert.Equal(t, "# Skill\nBranch: main\nDone.", result)
 }
 
+// Not parallel: a concurrent fork in another test can inherit the write fd of
+// gather.sh, making exec fail with ETXTBSY (golang/go#22315).
 func TestSkillsToolset_ReadSkillContent_ExpandsScript(t *testing.T) {
-	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}
@@ -601,6 +602,26 @@ func TestSkillsToolset_Tools_WithForkSkills(t *testing.T) {
 	require.Len(t, result, 2)
 	assert.Equal(t, ToolNameReadSkill, result[0].Name)
 	assert.Equal(t, ToolNameRunSkill, result[1].Name)
+}
+
+// TestSkillsToolset_RunSkillIsDelegationWrapper pins the annotation that
+// keeps the legacy and balanced approval modes from prompting on every fork
+// launch. Tool calls inside the fork are still gated by the child dispatcher.
+func TestSkillsToolset_RunSkillIsDelegationWrapper(t *testing.T) {
+	t.Parallel()
+	st := New([]skills.Skill{
+		{Name: "forked", Description: "Forked skill", Context: "fork"},
+	}, "")
+
+	result, err := st.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+
+	runSkill := result[1]
+	require.Equal(t, ToolNameRunSkill, runSkill.Name)
+	assert.True(t, runSkill.Annotations.ReadOnlyHint)
+	assert.True(t, runSkill.Delegation)
+	assert.Equal(t, "Run Skill", runSkill.Annotations.Title)
 }
 
 func TestSkillsToolset_Tools_NoForkSkills(t *testing.T) {

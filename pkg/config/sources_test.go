@@ -605,42 +605,6 @@ func TestURLSource_Read_WithGitHubAuth_GitHubURL(t *testing.T) {
 	}
 }
 
-func TestURLSource_Read_WithGitHubAuth_NoToken(t *testing.T) {
-	t.Parallel()
-
-	var receivedAuth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte("test content"))
-	}))
-	t.Cleanup(server.Close)
-
-	// Create a mock env provider without a GitHub token
-	envProvider := environment.NewNoEnvProvider()
-
-	source := newURLSourceForTest(server.URL, envProvider)
-	_, err := source.Read(t.Context())
-	require.NoError(t, err)
-	assert.Empty(t, receivedAuth, "should not add auth header when token is missing")
-}
-
-func TestURLSource_Read_WithGitHubAuth_NoEnvProvider(t *testing.T) {
-	t.Parallel()
-
-	var receivedAuth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte("test content"))
-	}))
-	t.Cleanup(server.Close)
-
-	// No env provider
-	source := newURLSourceForTest(server.URL, nil)
-	_, err := source.Read(t.Context())
-	require.NoError(t, err)
-	assert.Empty(t, receivedAuth, "should not add auth header without env provider")
-}
-
 func TestIsGitHubURL(t *testing.T) {
 	t.Parallel()
 
@@ -730,38 +694,6 @@ func TestIsTrustedDockerURL(t *testing.T) {
 	}
 }
 
-func TestURLSource_Read_WithDockerAuth_NonDockerURL(t *testing.T) {
-	t.Parallel()
-
-	var receivedAuth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte("test content"))
-	}))
-	t.Cleanup(server.Close)
-
-	envProvider := environment.NewMapEnvProvider(map[string]string{
-		environment.DockerDesktopTokenEnv: "docker-jwt-token",
-	})
-
-	// Use a non-Docker, non-localhost URL as the source URL so
-	// isTrustedDockerURL returns false. The actual HTTP request still goes to
-	// the local test server via the unsafe flag.
-	src := &urlSource{
-		url:         "https://example.com/agent.yaml",
-		envProvider: envProvider,
-		unsafe:      true,
-	}
-	// Override the url to point at our test server for the actual fetch,
-	// but addDockerAuth checks the url field which is example.com.
-	// We need to actually fetch from the test server though, so we
-	// manually test addDockerAuth in isolation instead.
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
-	require.NoError(t, err)
-	src.addDockerAuth(t.Context(), req)
-	assert.Empty(t, receivedAuth, "non-Docker URLs should not receive Docker auth header")
-}
-
 func TestURLSource_Read_WithDockerAuth_LocalhostURL(t *testing.T) {
 	t.Parallel()
 
@@ -784,7 +716,7 @@ func TestURLSource_Read_WithDockerAuth_LocalhostURL(t *testing.T) {
 	assert.Equal(t, "Bearer docker-jwt-token", receivedAuth, "localhost URLs should receive Docker auth header")
 }
 
-func TestURLSource_Read_WithDockerAuth_NoToken(t *testing.T) {
+func TestURLSource_Read_WithoutTokens(t *testing.T) {
 	t.Parallel()
 
 	var receivedAuth string
@@ -796,16 +728,13 @@ func TestURLSource_Read_WithDockerAuth_NoToken(t *testing.T) {
 
 	envProvider := environment.NewNoEnvProvider()
 
-	// Even if we construct a source with a Docker URL hostname, the
-	// addDockerAuth method checks the url field, not the request URL.
-	// We use the test server URL here, which is NOT a docker.com URL.
 	source := newURLSourceForTest(server.URL, envProvider)
 	_, err := source.Read(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, receivedAuth, "should not add auth header when token is missing")
 }
 
-func TestURLSource_Read_WithDockerAuth_NoEnvProvider(t *testing.T) {
+func TestURLSource_Read_WithoutEnvProvider(t *testing.T) {
 	t.Parallel()
 
 	var receivedAuth string
@@ -968,7 +897,7 @@ const testConfigBody = "version: \"2\"\n"
 
 // writeConfigWithEncrypted writes a 200 response carrying the agent YAML with
 // the encrypted config injected as a top-level `encrypted_agent_config` field,
-// plus the digest header, mirroring the Docker gateway (gordon proxy).
+// plus the digest header, mirroring the Docker gateway.
 func writeConfigWithEncrypted(w http.ResponseWriter, enc string) {
 	w.Header().Set(httpclient.EncryptedConfigDigestHeader, digestOf(enc))
 	_, _ = w.Write([]byte(testConfigBody + "encrypted_agent_config: " + enc + "\n"))

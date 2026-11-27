@@ -17,7 +17,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/docker/go-units"
 	"github.com/mattn/go-runewidth"
 	"github.com/rivo/uniseg"
@@ -27,7 +26,9 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/internal/ansiline"
 	"github.com/docker/docker-agent/pkg/tui/internal/termfeatures"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -121,11 +122,12 @@ type historySearchState struct {
 
 // editor implements [Editor]
 type editor struct {
-	textarea textarea.Model
-	hist     *history.History
-	width    int
-	height   int
-	working  bool
+	textarea  input.Area
+	occupancy textOccupancyCache
+	hist      *history.History
+	width     int
+	height    int
+	working   bool
 	// completions are the available completions
 	completions []completions.Completion
 
@@ -173,7 +175,7 @@ type editor struct {
 	// historySearch holds state for history search mode
 	historySearch historySearchState
 	// searchInput is the input field for history search queries
-	searchInput textinput.Model
+	searchInput input.Text
 }
 
 // Option configures the Editor.
@@ -220,7 +222,7 @@ func searchInputStyles() textinput.Styles {
 
 // New creates a new editor component
 func New(hist *history.History, opts ...Option) Editor {
-	ta := textarea.New()
+	ta := input.NewArea()
 	ta.SetStyles(styles.InputStyle)
 	ta.Placeholder = defaultPlaceholder
 	ta.Prompt = ""
@@ -230,13 +232,14 @@ func New(hist *history.History, opts ...Option) Editor {
 	ta.Focus()
 	ta.ShowLineNumbers = false
 
-	si := textinput.New()
+	si := input.NewText()
 	si.Prompt = ""
 	si.Placeholder = "Type to search..."
 	si.SetStyles(searchInputStyles())
 
 	e := &editor{
 		textarea:                      ta,
+		height:                        ta.Height(),
 		searchInput:                   si,
 		hist:                          hist,
 		placeholder:                   defaultPlaceholder,
@@ -254,10 +257,8 @@ func New(hist *history.History, opts ...Option) Editor {
 	return e
 }
 
-// Init initializes the component
-func (e *editor) Init() tea.Cmd {
-	return textarea.Blink
-}
+// Init initializes the component.
+func (e *editor) Init() tea.Cmd { return nil }
 
 // stripANSI removes ANSI escape sequences from the provided string so width
 // calculations can be performed on plain text.
@@ -325,7 +326,7 @@ func (e *editor) computeWrappedLines(text string, startOffset int) []string {
 // applySuggestionOverlay draws the inline suggestion on top of the textarea
 // view using the configured ghost style. The first character appears with
 // cursor styling (reverse video) so it's visible inside the cursor block.
-// Multi-line suggestions are rendered across multiple visual lines.
+// The preview is clipped to the visible textarea rows.
 func (e *editor) applySuggestionOverlay(view string) string {
 	lines := strings.Split(view, "\n")
 	value := e.textarea.Value()
@@ -418,15 +419,14 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	var overlays []overlay
 
 	for i, suggLine := range wrappedLines {
+		currentY := targetLine + i
+		if currentY >= len(lines) {
+			break
+		}
 		if suggLine == "" && i > 0 {
 			// Empty line in middle of suggestion - skip but keep line count
 			continue
 		}
-
-		currentY := targetLine + i
-		// Note: We intentionally don't skip lines beyond the view; the
-		// output is extended to accommodate overlays positioned beyond
-		// the base view's boundaries.
 
 		var xOffset int
 		if i == 0 {
@@ -438,9 +438,13 @@ func (e *editor) applySuggestionOverlay(view string) string {
 		}
 
 		if i == 0 {
-			// First line: first character gets cursor styling, rest gets ghost styling
+			// Preserve the textarea cursor's blink phase under the suggestion.
 			firstRune, restOfLine := splitFirstRune(suggLine)
-			cursorChar := styles.SuggestionCursorStyle.Render(firstRune)
+			style := styles.SuggestionGhostStyle
+			if e.textarea.VirtualCursor() && e.textarea.Focused() {
+				style = styles.SuggestionCursorStyle
+			}
+			cursorChar := style.Render(firstRune)
 
 			overlays = append(overlays, overlay{x: xOffset, y: currentY, content: cursorChar})
 
@@ -468,37 +472,10 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	// the editor does not depend on canvas/compositor APIs that differ
 	// across lipgloss v2 pre-releases (it keeps the editor embeddable by
 	// consumers pinned to other lipgloss snapshots, e.g. Docker Sandboxes).
-	outLines := strings.Split(view, "\n")
 	for _, ov := range overlays {
-		for len(outLines) <= ov.y {
-			outLines = append(outLines, "")
-		}
-		outLines[ov.y] = spliceLine(outLines[ov.y], ov.content, ov.x)
+		lines[ov.y] = ansiline.Splice(lines[ov.y], ov.content, ov.x)
 	}
-	return strings.Join(outLines, "\n")
-}
-
-// spliceLine overwrites line content at column x with overlay, preserving
-// ANSI styling on both sides and padding when the line is shorter than x.
-func spliceLine(line, overlay string, x int) string {
-	left := ansi.Truncate(line, x, "")
-	if pad := x - ansi.StringWidth(left); pad > 0 {
-		left += strings.Repeat(" ", pad)
-	}
-	cut := x + ansi.StringWidth(overlay)
-	right := ""
-	if lineWidth := ansi.StringWidth(line); cut < lineWidth {
-		right = ansi.TruncateLeft(line, cut, "")
-		// A wide rune straddling the cut is kept whole by TruncateLeft,
-		// which would shift the rest of the line one cell to the right.
-		// Cut the straddled rune entirely and pad its uncovered cell with
-		// a space — what a terminal shows for a half-overwritten cell.
-		if extra := ansi.StringWidth(right) - (lineWidth - cut); extra > 0 {
-			right = ansi.TruncateLeft(right, extra+1, "")
-			right = strings.Repeat(" ", lineWidth-cut-ansi.StringWidth(right)) + right
-		}
-	}
-	return left + overlay + right
+	return strings.Join(lines, "\n")
 }
 
 // splitFirstRune splits a string into its first rune and the rest.
@@ -710,6 +687,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		content, handled := e.handlePaste(msg.Content)
 		if handled {
+			e.textarea.WakeCursor()
 			return e, nil
 		}
 		// Forward the normalized content explicitly; falling through would
@@ -815,7 +793,8 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			e.fileLoadCancel()
 			e.fileLoadCancel = nil
 		}
-		return e, e.textarea.Focus()
+		cmd := e.Focus()
+		return e, cmd
 
 	case fileLoadResultMsg:
 		// Ignore stale results from older loads.
@@ -855,7 +834,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 
 		if key.Matches(msg, e.textarea.KeyMap.Paste) {
-			return e.handleClipboardPaste()
+			return e.handleClipboardPaste(clipboard.ReadAll)
 		}
 
 		// Handle backspace with grapheme cluster awareness.
@@ -997,8 +976,9 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return e, tea.Batch(cmds...)
 }
 
-func (e *editor) handleClipboardPaste() (layout.Model, tea.Cmd) {
-	content, err := clipboard.ReadAll()
+func (e *editor) handleClipboardPaste(read func() (string, error)) (layout.Model, tea.Cmd) {
+	content, err := read()
+	e.textarea.WakeCursor()
 	if err != nil {
 		slog.Warn("failed to read clipboard", "error", err)
 		return e, nil
@@ -1010,13 +990,14 @@ func (e *editor) handleClipboardPaste() (layout.Model, tea.Cmd) {
 	if !handled {
 		e.textarea.InsertString(normalized)
 	}
-	return e, textarea.Blink
+	return e, nil
 }
 
 // handleGraphemeBackspace implements backspace with grapheme cluster awareness.
 // It removes the entire last grapheme cluster, not just the last rune.
 // This fixes deletion of multi-codepoint characters like emoji sequences.
 func (e *editor) handleGraphemeBackspace() (layout.Model, tea.Cmd) {
+	e.textarea.WakeCursor()
 	value := e.textarea.Value()
 	if value == "" {
 		return e, nil
@@ -1114,7 +1095,8 @@ func (e *editor) handleGraphemeBackspace() (layout.Model, tea.Cmd) {
 	}
 
 	e.refreshSuggestion()
-	return e, tea.Batch(textarea.Blink, e.updateCompletionQuery())
+	cmd := e.updateCompletionQuery()
+	return e, cmd
 }
 
 // updateCompletionQuery sends the appropriate completion message based on current editor state.
@@ -1368,17 +1350,15 @@ func (e *editor) SetSize(width, height int) tea.Cmd {
 }
 
 func (e *editor) updateTextareaHeight() {
-	available := e.height
-	if e.banner != nil {
-		available -= e.banner.Height()
-	}
+	e.textarea.SetHeight(max(e.height-e.chromeHeight(), 1))
+}
+
+func (e *editor) chromeHeight() int {
+	height := e.BannerHeight()
 	if e.historySearch.active {
-		available--
+		height++
 	}
-
-	available = max(available, 1)
-
-	e.textarea.SetHeight(available)
+	return height
 }
 
 // BannerHeight returns the current height of the attachment banner (0 if hidden)
@@ -1392,7 +1372,7 @@ func (e *editor) BannerHeight() int {
 // GetSize returns the rendered dimensions including EditorStyle padding.
 func (e *editor) GetSize() (width, height int) {
 	return e.width + styles.EditorStyle.GetHorizontalFrameSize(),
-		e.height + styles.EditorStyle.GetVerticalFrameSize()
+		max(e.height, 1+e.chromeHeight()) + styles.EditorStyle.GetVerticalFrameSize()
 }
 
 // AttachmentAt returns preview information for the attachment rendered at the given X position.
@@ -1428,14 +1408,25 @@ func (e *editor) AttachmentAt(x int) (AttachmentPreview, bool) {
 
 // Focus gives focus to the component
 func (e *editor) Focus() tea.Cmd {
+	if e.historySearch.active {
+		return e.searchInput.Focus()
+	}
 	return e.textarea.Focus()
 }
 
 // Blur removes focus from the component
 func (e *editor) Blur() tea.Cmd {
+	e.searchInput.Blur()
 	e.textarea.Blur()
 	e.clearSuggestion()
 	return nil
+}
+
+func (e *editor) CursorInput() input.Cursor {
+	if e.historySearch.active {
+		return &e.searchInput
+	}
+	return &e.textarea
 }
 
 func (e *editor) SetWorking(working bool) tea.Cmd {
@@ -1785,6 +1776,7 @@ func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
 	e.textarea.Placeholder = ""
 	e.textarea.Blur()
 	e.clearSuggestion()
+	e.updateTextareaHeight()
 	return e, tea.Batch(
 		e.searchInput.Focus(),
 		core.CmdHandler(completion.CloseMsg{}),
@@ -1880,8 +1872,10 @@ func (e *editor) historySearchComputeMatch() {
 }
 
 func (e *editor) exitHistorySearch() tea.Cmd {
+	e.searchInput.Blur()
 	e.textarea.SetValue(e.historySearch.origTextValue)
 	e.textarea.Placeholder = e.historySearch.origTextPlaceholderValue
 	e.historySearch = historySearchState{matchIndex: -1}
+	e.updateTextareaHeight()
 	return e.textarea.Focus()
 }

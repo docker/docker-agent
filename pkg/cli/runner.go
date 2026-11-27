@@ -280,12 +280,8 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 					switch result {
 					case ConfirmationApprove:
 						rt.Resume(runCtx, runtime.ResumeApprove())
-					case ConfirmationReject:
+					case ConfirmationReject, ConfirmationAbort:
 						rt.Resume(runCtx, runtime.ResumeReject(""))
-						return nil
-					case ConfirmationAbort:
-						rt.Resume(runCtx, runtime.ResumeReject(""))
-						return nil
 					}
 				}
 			case *runtime.ElicitationRequestEvent:
@@ -321,41 +317,27 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 		return nil
 	}
 
+	readStdin := len(userMessages) == 1 && userMessages[0] == "-"
 	switch {
-	case len(userMessages) == 1 && userMessages[0] == "-":
-		// Single "-" argument: read from stdin
+	case readStdin || (len(userMessages) == 0 && !isatty.IsTerminal(os.Stdin.Fd())):
 		buf, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return fmt.Errorf("failed to read from stdin: %w", err)
 		}
 		if strings.TrimSpace(string(buf)) == "" {
-			return errors.New(`no message received on stdin: with "-" the prompt is read from stdin, e.g. echo "Hello" | docker agent run <agent> -`)
+			if readStdin {
+				return errors.New(`no message received on stdin: with "-" the prompt is read from stdin, e.g. echo "Hello" | docker agent run <agent> -`)
+			}
+			return errors.New("no message provided and stdin is not a terminal: pass a message (docker agent run <agent> \"<message>\"), pipe one on stdin, or run from an interactive terminal to use the chat UI")
 		}
-
 		if err := oneLoop(string(buf), os.Stdin); err != nil {
 			return err
 		}
 	case len(userMessages) > 0:
-		// One or more messages: multi-turn conversation
 		for _, msg := range userMessages {
 			if err := oneLoop(msg, os.Stdin); err != nil {
 				return err
 			}
-		}
-	case !isatty.IsTerminal(os.Stdin.Fd()):
-		// Stdin is not a terminal: read all input from stdin
-		buf, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("failed to read from stdin: %w", err)
-		}
-		// Exiting 0 with no output on empty input (e.g. bare `docker agent`
-		// in CI) would be a silent no-op; fail with the next steps instead.
-		if strings.TrimSpace(string(buf)) == "" {
-			return errors.New("no message provided and stdin is not a terminal: pass a message (docker agent run <agent> \"<message>\"), pipe one on stdin, or run from an interactive terminal to use the chat UI")
-		}
-
-		if err := oneLoop(string(buf), os.Stdin); err != nil {
-			return err
 		}
 	default:
 		// No messages: interactive prompt loop

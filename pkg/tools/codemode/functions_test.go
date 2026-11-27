@@ -199,7 +199,7 @@ func TestSchemaType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, schemaType(tt.schema, tt.schema, 0))
+			assert.Equal(t, tt.want, schemaType(tt.schema, tt.schema))
 			if tt.name == "nullable" {
 				assert.Equal(t, map[string]any{"type": []any{"string", "null"}}, tt.schema)
 			}
@@ -217,10 +217,10 @@ func TestSchemaTypeReferences(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, "string", schemaType(map[string]any{"$ref": "#/$defs/plain"}, root, 0))
-	assert.Equal(t, "boolean", schemaType(map[string]any{"$ref": "#/$defs/a~1b~0c"}, root, 0))
-	assert.Equal(t, "unknown", schemaType(map[string]any{"$ref": "https://example.com/schema"}, root, 0))
-	assert.Equal(t, "unknown", schemaType(map[string]any{"$ref": "#/$defs/missing"}, root, 0))
+	assert.Equal(t, "string", schemaType(map[string]any{"$ref": "#/$defs/plain"}, root))
+	assert.Equal(t, "boolean", schemaType(map[string]any{"$ref": "#/$defs/a~1b~0c"}, root))
+	assert.Equal(t, "unknown", schemaType(map[string]any{"$ref": "https://example.com/schema"}, root))
+	assert.Equal(t, "unknown", schemaType(map[string]any{"$ref": "#/$defs/missing"}, root))
 }
 
 func TestObjectType(t *testing.T) {
@@ -245,7 +245,7 @@ func TestObjectType(t *testing.T) {
 				"properties":           map[string]any{"id": map[string]any{"type": "string"}},
 				"additionalProperties": tt.additional,
 			}
-			assert.Equal(t, tt.want, objectType(schema, schema, 0))
+			assert.Equal(t, tt.want, objectType(schema, schema))
 		})
 	}
 }
@@ -269,7 +269,7 @@ func TestObjectTypePropertyNamesAndComments(t *testing.T) {
   // Second line
   validName?: string;
   "with-dash"?: boolean;
-}`, objectType(schema, schema, 0))
+}`, objectType(schema, schema))
 }
 
 func TestSchemaMapAndLiteralFallbacks(t *testing.T) {
@@ -338,4 +338,48 @@ func TestTypeScriptArgumentsFollowDeclarationOrder(t *testing.T) {
 	}
 	declaration := toolToTypeScript(tools.Tool{Name: "ordered", Parameters: tools.MustSchemaFor[args]()})
 	assert.Less(t, strings.Index(declaration, "zulu?:"), strings.Index(declaration, "alpha:"))
+}
+
+func TestToolToTypeScriptRecursiveRef(t *testing.T) {
+	t.Parallel()
+
+	tool := tools.Tool{
+		Name:        "mcp_events_subscribe",
+		Description: "Subscribe to push events",
+		Parameters: map[string]any{
+			"type": "object",
+			"$defs": map[string]any{
+				"json_value": map[string]any{
+					"anyOf": []any{
+						map[string]any{"type": "string"},
+						map[string]any{"type": "number"},
+						map[string]any{"type": "integer"},
+						map[string]any{"type": "boolean"},
+						map[string]any{"type": "null"},
+						map[string]any{
+							"type":                 "object",
+							"additionalProperties": map[string]any{"$ref": "#/$defs/json_value"},
+						},
+						map[string]any{
+							"type":  "array",
+							"items": map[string]any{"$ref": "#/$defs/json_value"},
+						},
+					},
+				},
+			},
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string"},
+				"arguments": map[string]any{
+					"type":                 "object",
+					"additionalProperties": map[string]any{"$ref": "#/$defs/json_value"},
+				},
+			},
+			"required": []string{"name"},
+		},
+	}
+
+	declaration := toolToTypeScript(tool)
+	assert.Contains(t, declaration, "interface McpEventsSubscribeInput {")
+	assert.Contains(t, declaration, "name: string;")
+	assert.Contains(t, declaration, "unknown[]")
 }

@@ -113,3 +113,6 @@ func TestToggleToolApproval_RestoresExplicitMode(t *testing.T) {
 	assert.Equal(t, session.SafetyPolicyBalanced, sess.GetSafetyPolicy())
 	assert.False(t, sess.IsToolsApproved())
 }
+
+// Close is a no-op: server-owned runtimes are closed when their session is deleted.
+func (r *resumeRecordingRuntime) Close() error { return nil }

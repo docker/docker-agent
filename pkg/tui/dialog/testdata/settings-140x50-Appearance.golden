@@ -4,18 +4,19 @@
 │                                        Appearance   ·   Behavior   ·   Notifications                                         │
 │                                                                                                                              │
 │   › Theme                                                    ‹ default ›     Layout preview                                  │
-│                                                                                                                              │
-│   ── Sidebar layout ──────────────────────────────────────────────────       ╭───────────────────────────┬──────────────╮    │
-│     Sidebar position                                           ‹ Right ›     │                           │ session/path │    │
-│     Section spacing                                           ‹ Normal ›     │                           │ usage        │    │
-│     Sidebar info mode                                        ‹ Compact ›     │           chat            │ agents       │    │
-│                                                                              │                           │ tools        │    │
-│   ── Sidebar sections ────────────────────────────────────────────────       │                           │ todos        │    │
-│     [x] Session path                                                         ├───────────────────────────┴──────────────┤    │
-│     [x] Token usage                                                          │ input                                    │    │
-│     [x] Agents                                                               ╰──────────────────────────────────────────╯    │
-│       [ ] Active agents only                                                                                                 │
-│     [x] Tools                                                                Layout changes preview immediately.             │
+│     [x] Fade scroll edges                                                                                                    │
+│                                                                              ╭───────────────────────────┬──────────────╮    │
+│   ── Sidebar layout ──────────────────────────────────────────────────       │                           │ session/path │    │
+│     Sidebar position                                           ‹ Right ›     │                           │ usage        │    │
+│     Section spacing                                           ‹ Normal ›     │           chat            │ agents       │    │
+│     Sidebar info mode                                        ‹ Compact ›     │                           │ tools        │    │
+│                                                                              │                           │ todos        │    │
+│   ── Sidebar sections ────────────────────────────────────────────────       ├───────────────────────────┴──────────────┤    │
+│     [x] Session path                                                         │ input                                    │    │
+│     [x] Token usage                                                          ╰──────────────────────────────────────────╯    │
+│     [x] Agents                                                                                                               │
+│       [ ] Active agents only                                                 Layout changes preview immediately.             │
+│     [x] Tools                                                                                                                │
 │     [ ] Plans                                                                                                                │
 │     [x] Todos                                                                                                                │
 │                                                                                                                              │
@@ -25,7 +26,7 @@
 │     [ ] Hide tool results by default                                                                                         │
 │     [x] Render images                                                                                                        │
 │     [x] Show startup banner                                                                                                  │
-│                                                                                                                              │
+│     [ ] Show top margin                                                                                                      │
 │                                                                                                                              │
 │                                                                                                                              │
 │                                ↑↓ move  ←→/space change  tab category  enter open  esc cancel                                │

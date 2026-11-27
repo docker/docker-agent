@@ -4,12 +4,12 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -21,7 +21,7 @@ type MCPPromptInputDialog struct {
 
 	promptName   string
 	promptInfo   tools.PromptInfo
-	inputs       []textinput.Model
+	inputs       []input.Text
 	arguments    []tools.PromptArgument
 	currentInput int
 	keyMap       mcpPromptInputKeyMap
@@ -65,11 +65,11 @@ func defaultMCPPromptInputKeyMap() mcpPromptInputKeyMap {
 // NewMCPPromptInputDialog creates a new MCP prompt input dialog
 func NewMCPPromptInputDialog(promptName string, promptInfo tools.PromptInfo) Dialog {
 	// Create text inputs for all arguments (both required and optional)
-	var inputs []textinput.Model
+	var inputs []input.Text
 	var arguments []tools.PromptArgument
 
 	for _, arg := range promptInfo.Arguments {
-		ti := textinput.New()
+		ti := input.NewText()
 		ti.SetStyles(styles.DialogInputStyle)
 		ti.Placeholder = arg.Description
 		ti.CharLimit = 500
@@ -96,10 +96,17 @@ func NewMCPPromptInputDialog(promptName string, promptInfo tools.PromptInfo) Dia
 
 // Init initializes the MCP prompt input dialog
 func (d *MCPPromptInputDialog) Init() tea.Cmd {
-	return textinput.Blink
+	return nil
 }
 
-// Update handles messages for the MCP prompt input dialog
+func (d *MCPPromptInputDialog) CursorInput() input.Cursor {
+	if d.currentInput < len(d.inputs) {
+		return &d.inputs[d.currentInput]
+	}
+	return nil
+}
+
+// Update handles messages for the MCP prompt input dialog.
 func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -107,6 +114,12 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
+
+	case messages.ThemeChangedMsg:
+		for i := range d.inputs {
+			d.inputs[i].SetStyles(styles.DialogInputStyle)
+		}
+		return d, nil
 
 	case tea.PasteMsg:
 		// Forward paste to current text input

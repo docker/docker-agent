@@ -22,12 +22,15 @@ func SupportedThinkingLevels(provider, modelID string) []effort.Level {
 // [effort.SupportedLevels].
 func thinkingLevelMap(provider, modelID string) effort.LevelMap {
 	family := providerFamily(provider)
-	if family != "openai" && IsOpenAIVendor(provider, modelID) {
+	switch {
+	case family != "openai" && IsOpenAIVendor(provider, modelID):
 		// A gateway (Vercel AI Gateway, OpenRouter, ...) fronts many vendors'
 		// models under one provider name; an explicit "openai/" qualifier on
 		// the model id pins its effort vocabulary to OpenAI's regardless of
 		// which gateway provider name is configured.
 		family = "openai"
+	case family != "google" && HasGoogleQualifier(modelID):
+		family = "google"
 	}
 	switch family {
 	case "anthropic":
@@ -54,7 +57,19 @@ func thinkingLevelMap(provider, modelID string) effort.LevelMap {
 		}
 		return m
 	case "google":
-		return nil
+		m := effort.LevelMap{}
+		for _, top := range geminiTopEfforts(modelID) {
+			m[top] = true
+		}
+		if geminiDropsMinimalEffort(modelID) {
+			// Gemini 4+ dropped minimal from its accepted thinking levels;
+			// offering it would make Shift+Tab cycling land on a value the API rejects.
+			m[effort.Minimal] = false
+		}
+		if len(m) == 0 {
+			return nil
+		}
+		return m
 	default:
 		// Unknown providers (e.g. dmr) get the conservative low/medium/high
 		// scale; minimal is far from universally accepted.
@@ -294,6 +309,33 @@ func OpenAIRejectsToolsWithReasoningEffort(modelID string) bool {
 // client gates on this before putting breakpoints on the wire.
 func OpenAISupportsExplicitPromptCache(modelID string) bool {
 	return atLeastGPT(modelID, 5, 6)
+}
+
+// geminiTopEfforts returns the explicit-only effort tiers a Gemini model
+// accepts beyond low/medium/high. Gemini 4 Hydrogen and Neon accept xhigh;
+// Carbon, Argon, and earlier Gemini families top out at high.
+// https://ai.google.dev/gemini-api/docs/thinking#thinking-levels
+func geminiTopEfforts(modelID string) []effort.Level {
+	maj, variant, ok := geminiGeneration(modelID)
+	if !ok || maj < 4 {
+		return nil
+	}
+	variant, _, _ = strings.Cut(variant, "@")
+	variant, _, _ = strings.Cut(variant, ":")
+	head, _, _ := strings.Cut(variant, "-")
+	switch head {
+	case "hydrogen", "neon":
+		return []effort.Level{effort.XHigh}
+	default:
+		return nil
+	}
+}
+
+// geminiDropsMinimalEffort reports whether a Gemini model rejects "minimal".
+// Gemini 4+ models do not support minimal.
+func geminiDropsMinimalEffort(modelID string) bool {
+	maj, _, ok := geminiGeneration(modelID)
+	return ok && maj >= 4
 }
 
 // leadingInt parses the run of decimal digits at the start of s, returning

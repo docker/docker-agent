@@ -2733,8 +2733,12 @@ type RAGFusionConfig struct {
 type PermissionsConfig struct {
 	// Allow lists tool name patterns that are auto-approved without user confirmation
 	Allow []string `json:"allow,omitempty"`
-	// Ask lists tool name patterns that always require user confirmation,
-	// even for tools that are normally auto-approved (e.g. read-only tools)
+	// Ask lists tool name patterns that require user confirmation even for
+	// tools that are normally auto-approved (e.g. read-only tools). Allow
+	// rules are evaluated before ask rules, so an ask pattern shadowed by a
+	// matching allow pattern never prompts; config-level ask rules also yield
+	// to balanced, restricted and autonomous modes (only session-level ask
+	// rules are enforced there).
 	Ask []string `json:"ask,omitempty"`
 	// Deny lists tool name patterns that are always rejected
 	Deny []string `json:"deny,omitempty"`

@@ -75,10 +75,10 @@ agents:
       - type: shell
       - type: filesystem
 `, hooks)
-	tm, err := teamloader.Load(t.Context(), config.NewBytesSource("test", []byte(source)), &config.RuntimeConfig{
+	tm, err := teamloader.Load(t.Context(), config.NewBytesSource("test", []byte(source)), withTestCatalog(&config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: dir},
 		EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test"}),
-	}, teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{
+	}), teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{
 		"openai": func(_ context.Context, cfg *latest.ModelConfig, _ environment.Provider, _ ...options.Opt) (provider.Provider, error) {
 			return models[cfg.Model], nil
 		},

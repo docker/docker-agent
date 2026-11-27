@@ -236,7 +236,7 @@ func (a *App) Start(ctx context.Context) {
 		// RunStream channel Run/Retry/RunWithMessage read from below), this
 		// sink is the single, exactly-once delivery point and those loops skip
 		// the mirrored copy (see mustSkipMirroredElicitation). Runtimes that
-		// don't mirror it (RemoteRuntime, whose OnElicitationRequest below is
+		// don't mirror it (remote.Runtime, whose OnElicitationRequest below is
 		// a no-op) deliver elicitations only through that RunStream copy,
 		// which those loops forward unfiltered (#3584 review).
 		if contextual, ok := a.runtime.(interface {
@@ -364,12 +364,12 @@ func (a *App) CurrentAgentCommands(ctx context.Context) types.Commands {
 }
 
 // CurrentAgentSkills returns the available skills if skills are enabled for the current agent.
-func (a *App) CurrentAgentSkills() []skills.Skill {
+func (a *App) CurrentAgentSkills(ctx context.Context) []skills.Skill {
 	st := a.runtime.CurrentAgentSkillsToolset()
 	if st == nil {
 		return nil
 	}
-	return st.Skills()
+	return st.Skills(ctx)
 }
 
 // ResolveSkillCommand checks if the input matches a skill slash command (e.g. /skill-name args).
@@ -390,7 +390,7 @@ func (a *App) ResolveSkillCommand(ctx context.Context, input string) (string, er
 	cmd, arg, _ := strings.Cut(input[1:], " ")
 	arg = strings.TrimSpace(arg)
 
-	for _, skill := range st.Skills() {
+	for _, skill := range st.Skills(ctx) {
 		if skill.Name != cmd {
 			continue
 		}
@@ -424,7 +424,7 @@ func (a *App) ResolveSkillCommand(ctx context.Context, input string) (string, er
 // SkillCommandFork returns (skillName, task, true) when input is a slash
 // command for a `context: fork` skill, otherwise (_, _, false). Chat layers
 // must call this before ResolveInput and route to RunSkillFork on a hit.
-func (a *App) SkillCommandFork(_ context.Context, input string) (skillName, task string, ok bool) {
+func (a *App) SkillCommandFork(ctx context.Context, input string) (skillName, task string, ok bool) {
 	if !strings.HasPrefix(input, "/") {
 		return "", "", false
 	}
@@ -437,7 +437,7 @@ func (a *App) SkillCommandFork(_ context.Context, input string) (skillName, task
 	cmd, arg, _ := strings.Cut(input[1:], " ")
 	arg = strings.TrimSpace(arg)
 
-	for _, skill := range st.Skills() {
+	for _, skill := range st.Skills(ctx) {
 		if skill.Name != cmd {
 			continue
 		}
@@ -456,9 +456,7 @@ func (a *App) SkillCommandFork(_ context.Context, input string) (skillName, task
 // SKILL.md body. Companion of SkillCommandFork.
 func (a *App) RunSkillFork(ctx context.Context, cancel context.CancelFunc, skillName, task string, _ []messages.Attachment) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 	// Snapshot the session like Run does: the goroutines below outlive any
 	// concurrent ReplaceSession and must keep working against this session.
@@ -602,9 +600,7 @@ func (a *App) EmitStartupInfo(ctx context.Context, events chan<- runtime.Event) 
 // Run one agent loop
 func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 	sess := a.session
 
@@ -828,7 +824,7 @@ type elicitationSinkMirror interface {
 // duplicate that Run/Retry/RunWithMessage must skip to avoid a second
 // dialog for the same request.
 //
-// Runtimes that do NOT implement it (RemoteRuntime, whose
+// Runtimes that do NOT implement it (remote.Runtime, whose
 // OnElicitationRequest is a documented no-op) deliver elicitations ONLY via
 // RunStream, so that copy is the sole delivery and must reach a.events
 // unfiltered — an earlier fix skipped this event unconditionally and
@@ -852,9 +848,7 @@ func mustSkipMirroredElicitation(rt runtime.Runtime) bool {
 // suppress the pre-StreamStarted re-emitted user message; Run and
 // RunWithMessage pass nil.
 func (a *App) forwardRunStreamEvents(ctx context.Context, sess *session.Session, ch <-chan runtime.Event, filter func(event runtime.Event) (forward bool)) {
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	skipMirroredElicitation := mustSkipMirroredElicitation(a.runtime)
 
 	// sawRootStop/sawRootError/agentName drive the #4136 fallback below: the
@@ -901,7 +895,7 @@ func (a *App) forwardRunStreamEvents(ctx context.Context, sess *session.Session,
 		// Already delivered via the OnElicitationRequest sink (Start) for
 		// runtimes that mirror it onto RunStream too; skip that duplicate
 		// copy to avoid a second dialog for the same request. Runtimes that
-		// deliver ONLY via RunStream (e.g. RemoteRuntime) are unaffected —
+		// deliver ONLY via RunStream (e.g. remote.Runtime) are unaffected —
 		// mustSkipMirroredElicitation is false for them (#3584 review).
 		if skipMirroredElicitation && isElicitationRequestEvent(event) {
 			continue
@@ -1003,9 +997,7 @@ func (a *App) processInlineAttachment(att messages.Attachment, textBuilder *stri
 // arrive after StreamStarted and are forwarded normally.
 func (a *App) Retry(ctx context.Context, cancel context.CancelFunc) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 	sess := a.session
 
@@ -1035,9 +1027,7 @@ func (a *App) Retry(ctx context.Context, cancel context.CancelFunc) {
 // This is used for special cases like image attachments.
 func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg *session.Message) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 	sess := a.session
 
@@ -1070,9 +1060,7 @@ func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg
 }
 
 func (a *App) RunBangCommand(ctx context.Context, command string) {
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	command = strings.TrimSpace(command)
 	if command == "" {
 		a.sendEvent(ctx, runtime.ShellOutput("Error: empty command"))
@@ -1338,14 +1326,8 @@ func (a *App) QueueSteerMessage(ctx context.Context, content string, attachments
 
 // QueueSteerMessageForSession uses the caller's session snapshot during asynchronous attachment resolution.
 func (a *App) QueueSteerMessageForSession(ctx context.Context, sess *session.Session, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
-	msg := runtime.QueuedMessage{ID: uuid.NewV4().String(), Content: content}
-	if err := ctx.Err(); err != nil {
-		return msg, err
-	}
-	if len(attachments) > 0 {
-		msg.MultiContent = a.buildUserMultiContent(ctx, sess, content, attachments)
-	}
-	if err := ctx.Err(); err != nil {
+	msg, err := a.prepareQueuedMessage(ctx, sess, content, attachments)
+	if err != nil {
 		return msg, err
 	}
 	return msg, a.runtime.Steer(ctx, msg)
@@ -1365,6 +1347,14 @@ func (a *App) QueueFollowUpMessage(ctx context.Context, content string, attachme
 
 // QueueFollowUpMessageForSession uses the caller's session snapshot during asynchronous attachment resolution.
 func (a *App) QueueFollowUpMessageForSession(ctx context.Context, sess *session.Session, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
+	msg, err := a.prepareQueuedMessage(ctx, sess, content, attachments)
+	if err != nil {
+		return msg, err
+	}
+	return msg, a.runtime.FollowUp(ctx, msg)
+}
+
+func (a *App) prepareQueuedMessage(ctx context.Context, sess *session.Session, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
 	msg := runtime.QueuedMessage{ID: uuid.NewV4().String(), Content: content}
 	if err := ctx.Err(); err != nil {
 		return msg, err
@@ -1372,10 +1362,7 @@ func (a *App) QueueFollowUpMessageForSession(ctx context.Context, sess *session.
 	if len(attachments) > 0 {
 		msg.MultiContent = a.buildUserMultiContent(ctx, sess, content, attachments)
 	}
-	if err := ctx.Err(); err != nil {
-		return msg, err
-	}
-	return msg, a.runtime.FollowUp(ctx, msg)
+	return msg, ctx.Err()
 }
 
 // TogglePause toggles whether the runtime loop is paused at iteration
@@ -1444,9 +1431,7 @@ func (a *App) NewSession() {
 // reEmitStartupInfo resets and re-emits startup info (agent, team, tools)
 // through the events channel so the sidebar updates.
 func (a *App) reEmitStartupInfo(ctx context.Context) {
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.runtime.ResetStartupInfo()
 	// Snapshot before handing off to the background goroutine so a later
 	// ReplaceSession cannot race with this read.
@@ -1566,9 +1551,7 @@ type liveSessionCompactor interface {
 // runtime cannot target live sessions (e.g. remote runtimes), or the
 // runtime's rejection for unknown/finished sessions and duplicate requests.
 func (a *App) CompactLiveSession(ctx context.Context, sessionID, additionalPrompt string) error {
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	compactor, ok := a.runtime.(liveSessionCompactor)
 	if !ok {
 		return fmt.Errorf("targeted session compaction: %w", runtime.ErrUnsupported)
@@ -1850,9 +1833,7 @@ func (a *App) IsReadOnly() bool {
 
 func (a *App) CompactSession(ctx context.Context, cancel context.CancelFunc, additionalPrompt string) {
 	ctx = a.operationContext(ctx)
-	if _, ok := ctx.Value(eventGenerationKey{}).(uint64); !ok {
-		ctx = a.eventContext(ctx)
-	}
+	ctx = a.ensureEventContext(ctx)
 	a.cancel = cancel
 
 	sess := a.session

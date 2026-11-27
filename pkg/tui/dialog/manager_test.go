@@ -1,14 +1,22 @@
 package dialog
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/plans"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
 // TestManagerBackgroundDialog verifies that opening a dialog with a non-nil
@@ -204,4 +212,233 @@ func TestManagerSettingsTabsRemainClickableAfterDragging(t *testing.T) {
 	assert.False(t, mgr.drag.active)
 	assert.Equal(t, 3, mgr.stack[0].offsetX)
 	assert.Equal(t, 2, mgr.stack[0].offsetY)
+}
+
+type dialogScrollbarClock struct{ now time.Time }
+
+func (c *dialogScrollbarClock) Now() time.Time { return c.now }
+func (c *dialogScrollbarClock) Tick(delay time.Duration, deliver func(time.Time) tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		c.now = c.now.Add(delay)
+		return deliver(c.now)
+	}
+}
+
+func TestManagerRevealsScrollbarAfterAdjustedPointerAndScroll(t *testing.T) {
+	d := newReadOnlyScrollDialog(readOnlyScrollDialogSize{
+		widthPercent: 80, minWidth: 20, maxWidth: 60, heightPercent: 80, heightMax: 20,
+	}, func(_, _ int) []string {
+		return make([]string, 60)
+	})
+	clock := animation.NewRuntimeWithScheduler(&dialogScrollbarClock{now: time.Unix(1, 0)})
+	mgr := NewWithAnimation(clock).(*manager)
+	mgr.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	mgr.Update(OpenDialogMsg{Model: &d})
+	mgr.stack[0].offsetX, mgr.stack[0].offsetY = 3, 2
+	mgr.GetLayers()
+	row, _ := d.Position()
+	x := d.scrollview.ScrollbarX() + 3
+	y := row + 7
+	step := func(cmd tea.Cmd) tea.Cmd {
+		t.Helper()
+		require.NotNil(t, cmd)
+		tick, ok := clock.Accept(cmd().(animation.TickMsg))
+		require.True(t, ok)
+		mgr.Update(tick)
+		return clock.Continue()
+	}
+
+	hidden := mgr.View()
+	_, cmd := mgr.Update(tea.MouseMotionMsg{X: x, Y: y})
+	require.Equal(t, hidden, mgr.View())
+	cmd = step(cmd)
+	partial := mgr.View()
+	require.NotEqual(t, hidden, partial, "manager translates pointer into the moved dialog")
+	for cmd != nil {
+		cmd = step(cmd)
+	}
+	full := mgr.View()
+	require.NotEqual(t, partial, full, "dialog paints an intermediate fade-in frame")
+	_, cmd = mgr.Update(tea.MouseMotionMsg{X: x - 10, Y: y})
+	cmd = step(cmd)
+	require.NotEqual(t, hidden, mgr.View())
+	require.NotEqual(t, full, mgr.View(), "dialog paints an intermediate fade-out frame")
+
+	mgr.Update(messages.WheelCoalescedMsg{X: x - 10, Y: y, Delta: 1})
+	require.Positive(t, d.scrollview.ScrollOffset())
+	for cmd != nil {
+		cmd = step(cmd)
+	}
+	require.False(t, clock.HasActive())
+}
+
+func TestManagerDrawsSettingsScrollbarOnFirstResizedFrame(t *testing.T) {
+	clock := animation.NewRuntimeWithScheduler(&dialogScrollbarClock{now: time.Unix(1, 0)})
+	mgr := NewWithAnimation(clock).(*manager)
+	mgr.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
+	mgr.Update(OpenDialogMsg{Model: d})
+	mgr.GetLayers()
+	require.True(t, d.body.NeedsScrollbar())
+
+	const y = 10
+	cell := func(x int) string {
+		layer := mgr.GetLayers()[0]
+		line := strings.Split(layer.GetContent(), "\n")[y-layer.GetY()]
+		col := x - layer.GetX()
+		return ansi.Strip(ansi.Cut(line, col, col+1))
+	}
+	drain := func(cmd tea.Cmd) {
+		t.Helper()
+		for range 100 {
+			if cmd == nil {
+				break
+			}
+			tick, ok := clock.Accept(cmd().(animation.TickMsg))
+			require.True(t, ok)
+			mgr.Update(tick)
+			cmd = clock.Continue()
+		}
+		require.False(t, clock.HasActive())
+	}
+
+	oldX := d.body.ScrollbarX()
+	_, cmd := mgr.Update(tea.MouseMotionMsg{X: oldX, Y: y})
+	drain(cmd)
+	require.Equal(t, "│", cell(oldX))
+
+	// The dialog is already at its maximum width, so 20 new columns move
+	// the scrollbar exactly 10 columns without changing the body size.
+	x := oldX + 10
+	_, cmd = mgr.Update(tea.MouseMotionMsg{X: x, Y: y})
+	drain(cmd)
+	require.Equal(t, " ", cell(oldX), "the old scrollbar has faded out")
+
+	mgr.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
+	first := cell(x)
+	require.Equal(t, x, d.body.ScrollbarX(), "the resized track must be under the pointer")
+	require.Equal(t, "│", first, "the first resized layer must paint the scrollbar")
+}
+
+func TestSettingsValueKeysRevealSnapBackToSelection(t *testing.T) {
+	for _, key := range []tea.KeyPressMsg{
+		{Code: tea.KeySpace, Text: " "},
+		{Code: tea.KeyLeft},
+		{Code: tea.KeyRight},
+	} {
+		t.Run(key.String(), func(t *testing.T) {
+			d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
+			d.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+			clock := animation.NewRuntimeWithScheduler(&dialogScrollbarClock{now: time.Unix(1, 0)})
+			d.body.SetAnimationRuntime(clock)
+			d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+			require.Equal(t, rowFadeScrollEdges, d.selected[tabAppearance])
+			d.View()
+			require.True(t, d.body.NeedsScrollbar(), "the fixture must overflow")
+			require.Zero(t, d.body.ScrollOffset())
+
+			step := func(cmd tea.Cmd) tea.Cmd {
+				t.Helper()
+				require.NotNil(t, cmd)
+				tick, ok := clock.Accept(cmd().(animation.TickMsg))
+				require.True(t, ok)
+				d.body.UpdateScrollbarAnimation(tick)
+				return clock.Continue()
+			}
+			var cmd tea.Cmd
+			for range 20 {
+				_, wheel := d.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+				cmd = tea.Batch(cmd, wheel)
+			}
+			d.View()
+			scrolled := d.body.ScrollOffset()
+			require.Positive(t, scrolled, "manual scrolling moves the selection out of view")
+			for cmd != nil {
+				cmd = step(cmd)
+			}
+			require.False(t, clock.HasActive(), "the scrollbar has faded out")
+
+			_, cmd = d.Update(key)
+			require.Less(t, d.body.ScrollOffset(), scrolled, "the value key returns to the selection")
+			require.True(t, clock.HasActive(), "the snap reveals the scrollbar")
+			require.NotNil(t, cmd)
+		})
+	}
+}
+
+func TestManagerRoutesTicksAndTeardownToToolConfirmation(t *testing.T) {
+	clock := animation.NewRuntimeWithScheduler(&dialogScrollbarClock{now: time.Unix(1, 0)})
+	mgr := NewWithAnimation(clock).(*manager)
+	mgr.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	args := make([]string, 40)
+	for i := range args {
+		args[i] = fmt.Sprintf("%q: %d", fmt.Sprintf("key_%02d", i), i)
+	}
+	open := func() {
+		t.Helper()
+		mgr.Update(OpenDialogMsg{Model: NewToolConfirmationDialog(clock, &runtime.ToolCallConfirmationEvent{
+			ToolCall:       tools.ToolCall{ID: "x", Function: tools.FunctionCall{Name: "write", Arguments: "{" + strings.Join(args, ",") + "}"}},
+			ToolDefinition: tools.Tool{Name: "write"},
+		}, &service.EmbeddedSessionState{})})
+		mgr.View()
+		mgr.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+		require.True(t, clock.HasActive(), "keyboard scrolling reveals the arguments scrollbar")
+	}
+
+	open()
+	cmd := clock.EnsureRunning()
+	for range 200 {
+		if cmd == nil {
+			break
+		}
+		tick, ok := clock.Accept(cmd().(animation.TickMsg))
+		require.True(t, ok)
+		mgr.Update(tick)
+		cmd = clock.Continue()
+	}
+	require.False(t, clock.HasActive(), "manager ticks reach the dialog and expire")
+
+	mgr.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	require.True(t, clock.HasActive())
+	mgr.Update(OpenDialogMsg{Model: NewExitConfirmationDialog()})
+	require.False(t, clock.HasActive(), "a covered dialog releases its ticks")
+	mgr.Update(CloseDialogMsg{})
+
+	mgr.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	require.True(t, clock.HasActive())
+	mgr.Update(CloseDialogMsg{})
+	require.False(t, clock.HasActive(), "closing stops the dialog's animation")
+
+	open()
+	mgr.Update(CloseAllDialogsMsg{})
+	require.False(t, clock.HasActive(), "closing all stops the dialog's animation")
+}
+
+func TestManagerMovesScrollbarAnimationWithWorkingDirSection(t *testing.T) {
+	favorites := make([]string, 40)
+	for i := range favorites {
+		favorites[i] = fmt.Sprintf("/pinned/%02d", i)
+	}
+	clock := animation.NewRuntimeWithScheduler(&dialogScrollbarClock{now: time.Unix(1, 0)})
+	mgr := NewWithAnimation(clock).(*manager)
+	mgr.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	d := NewWorkingDirPickerDialog(t.Context(), nil, favorites, nil, "/").(*workingDirPickerDialog)
+	mgr.Update(OpenDialogMsg{Model: d})
+	mgr.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	require.Equal(t, sectionPinned, d.section)
+	mgr.View()
+	require.True(t, d.pinnedScroll.NeedsScrollbar(), "the fixture must overflow")
+
+	mgr.Update(messages.WheelCoalescedMsg{Delta: 1})
+	require.Positive(t, d.pinnedScroll.ScrollOffset())
+	require.True(t, clock.HasActive(), "the active section reveals its scrollbar")
+	mgr.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.Equal(t, sectionBrowse, d.section)
+	require.False(t, clock.HasActive(), "leaving a section releases its scrollbar ticks")
+
+	mgr.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	mgr.Update(messages.WheelCoalescedMsg{Delta: 1})
+	require.True(t, clock.HasActive())
+	mgr.ClearScrollbarPointer()
+	require.False(t, clock.HasActive(), "pane and focus changes clear the active section")
 }

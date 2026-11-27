@@ -24,7 +24,9 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -92,7 +94,8 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 	m.bindTabSession(activeID, newSess.ID)
 	m.application.ReplaceSession(ctx, newSess)
 	m.initSessionComponents(activeID, m.application, newSess)
-	m.dialogMgr = dialog.New()
+	m.clearDialogScrollbarPointer()
+	m.dialogMgr = dialog.NewWithAnimation(m.ar)
 
 	// Restore sidebar settings
 	m.activeTab.chatPage.SetSidebarSettings(sidebarSettings)
@@ -155,6 +158,26 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 	}
 
 	return m.handleSwitchTab(forkedSession.ID)
+}
+
+// handleAskSideQuestion opens the /btw dialog: an isolated, tool-free,
+// non-persisted side request that never touches the running conversation or
+// its foreground operation lifecycle. Context is captured once, at open
+// time, from the session as it stands; a later retry reuses that snapshot
+// rather than recapturing it.
+func (m *appModel) handleAskSideQuestion(question string) (tea.Model, tea.Cmd) {
+	query, err := m.application.PrepareSideQuery(m.ctx())
+	if err != nil {
+		return m, notification.ErrorCmd(err.Error())
+	}
+	status := func() string {
+		if m.activeTab != nil && m.activeTab.chatPage != nil && m.activeTab.chatPage.IsWorking() {
+			return "working"
+		}
+		return "idle"
+	}
+	d := dialog.NewSideQueryDialog(m.ctx(), question, query.Run, status)
+	return m, core.CmdHandler(dialog.OpenDialogMsg{Model: d})
 }
 
 func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd) {
@@ -441,11 +464,6 @@ func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
 // handleTogglePause toggles whether the runtime loop is paused at iteration
 // boundaries. The pause kicks in once the in-flight LLM request and its tool
 // calls finish; running /pause again resumes the loop.
-//
-// The TUI reflects this in the resize-handle indicator: requesting a pause
-// while the agent is working shows "Pausing…" until the runtime emits a
-// RuntimePausedEvent at the next iteration boundary (flipping it to
-// "Paused"); requesting a pause while idle shows "Paused" immediately.
 func (m *appModel) handleTogglePause() (tea.Model, tea.Cmd) {
 	paused, supported := m.application.TogglePause()
 	switch {
@@ -568,7 +586,7 @@ func (m *appModel) handleShowToolsDialog() (tea.Model, tea.Cmd) {
 
 func (m *appModel) handleShowSkillsDialog() (tea.Model, tea.Cmd) {
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewSkillsDialog(m.application.CurrentAgentSkills()),
+		Model: dialog.NewSkillsDialog(m.application.CurrentAgentSkills(m.ctx())),
 	})
 }
 
@@ -891,10 +909,26 @@ func (m *appModel) applyThemeChanged() (tea.Model, tea.Cmd) {
 	// Re-target the file watcher: theme changes (picker selection, preview,
 	// hot reload) can move the active theme to a different backing file.
 	m.watchCurrentTheme()
-	return m, tea.Batch(
-		m.updateDialogCmd(messages.ThemeChangedMsg{}),
-		m.updateChatCmd(messages.ThemeChangedMsg{}),
-	)
+	msg := messages.ThemeChangedMsg{}
+	cmds := []tea.Cmd{m.updateDialogCmd(msg)}
+	for _, tab := range m.tabs {
+		if tab.chatPage != nil {
+			updated, effects := tab.chatPage.UpdateEffects(msg)
+			tab.chatPage = updated
+			cmds = append(cmds, effects.Cmd(tab == m.activeTab))
+		}
+		if tab.editor != nil {
+			updated, cmd := tab.editor.Update(msg)
+			tab.editor = updated.(editor.Editor)
+			cmds = append(cmds, cmd)
+		}
+		for event, parked := range tab.attentionDialogs {
+			updated, cmd := parked.Update(msg)
+			tab.attentionDialogs[event] = updated.(dialog.Dialog)
+			cmds = append(cmds, cmd)
+		}
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // handleThemeFileChanged hot-reloads a theme that was modified on disk.
@@ -929,6 +963,8 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		HideToolResults:               settings.HideToolResults,
 		RenderImages:                  settings.GetRenderImages(),
 		ShowBanner:                    settings.GetShowBanner(),
+		TopMargin:                     m.showTopMargin,
+		FadeScrollEdges:               settings.GetFadeScrollEdges(),
 		YOLO:                          settings.YOLO,
 		RestoreTabs:                   settings.GetRestoreTabs(),
 		Snapshot:                      settings.SnapshotsEnabled(),
@@ -957,6 +993,7 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	m.sendMode = messages.ParseSendMode(string(preferences.SendMode))
 	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
 	m.showBanner = preferences.ShowBanner
+	scrollview.SetEdgeFadeEnabled(preferences.FadeScrollEdges)
 	for _, tab := range m.tabs {
 		page := tab.chatPage
 		if page == nil {
@@ -980,7 +1017,15 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 		cmd = tea.Batch(cmd, m.syncImageRendering(before))
 	}
 	m.tabBar.SetMaxTitleLength(preferences.TabTitleMaxLength)
-	cmd = tea.Batch(cmd, m.updateChatCmd(messages.SessionToggleChangedMsg{}), m.resizeAll())
+	cmd = tea.Batch(cmd, m.updateChatCmd(messages.SessionToggleChangedMsg{}))
+	oldMargin := m.topMargin()
+	terminalHeight := m.height + oldMargin
+	m.showTopMargin = preferences.TopMargin
+	if m.ready && oldMargin != m.topMarginForHeight(terminalHeight) {
+		cmd = tea.Batch(cmd, m.handleWindowResize(m.width, terminalHeight))
+	} else {
+		cmd = tea.Batch(cmd, m.resizeAll())
+	}
 
 	if err := savePreferences(preferences); err != nil {
 		slog.Warn("Failed to save settings to user config", "error", err)
@@ -1065,6 +1110,8 @@ func savePreferences(p messages.Preferences) error {
 		s.HideToolResults = p.HideToolResults
 		s.RenderImages = boolPreference(p.RenderImages, true)
 		s.ShowBanner = boolPreference(p.ShowBanner, true)
+		s.TopMargin = p.TopMargin
+		s.FadeScrollEdges = boolPreference(p.FadeScrollEdges, true)
 		s.YOLO = p.YOLO
 		s.Lean = p.Lean
 		s.KeepAwake = p.KeepAwake
@@ -1127,7 +1174,9 @@ func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.Send
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
-		YOLO: settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
+		TopMargin:       settings.GetTopMargin(),
+		FadeScrollEdges: settings.GetFadeScrollEdges(),
+		YOLO:            settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
 		BackgroundCompaction:          settings.BackgroundCompaction,
 		BackgroundCompactionThreshold: settings.GetBackgroundCompactionThreshold(),
 		CacheStablePrompts:            settings.CacheStablePromptsEnabled(),

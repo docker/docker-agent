@@ -395,14 +395,16 @@ $ docker agent serve a2a <config> [flags]
 | `--auth-token <token>` | (none)             | Bearer token required for agent-card and invocation requests.                              |
 | `--cors-origin <origins>` | (none)          | Allowed browser origins, comma-separated; empty disables CORS.                             |
 | `--insecure-no-auth`   | `false`            | Allow an unauthenticated non-loopback listener (unsafe).                                   |
+| `--push-allow-private` | `false`            | Let push-notification webhooks reach loopback, private and link-local addresses, and route them through `HTTP(S)_PROXY`. See [push notifications](../a2a/index.md#push-notifications). |
 | `--safety <policy>`    | `restricted`       | Tool safety policy; `autonomous` is permitted only through this explicit CLI flag.         |
-| `-s, --session-db <path>` | `<data-dir>/session.db` | Path to the SQLite session database.                                                 |
+| `-s, --session-db <path>` | `<data-dir>/session.db` | Path to the SQLite session database. A2A tasks and webhook registrations are kept in a private `<path>-a2a/` directory next to it; only one A2A server may use a given path at a time. |
 
 All [runtime configuration flags](#runtime-configuration-flags) are also accepted.
 
 ```bash
 # Examples
 $ docker agent serve a2a agent.yaml
+$ docker agent serve a2a agent.yaml --push-allow-private   # webhooks on localhost
 $ docker agent serve a2a agent.yaml --listen 127.0.0.1:9000
 $ docker agent serve a2a myorg/agent:tag
 ```

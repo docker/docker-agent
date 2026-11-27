@@ -156,6 +156,35 @@ func TestPlanSidebar_CancelledEditDoesNotTakeOverTerminal(t *testing.T) {
 	}
 }
 
+func TestPlanSidebar_HelpCancelsPendingEdit(t *testing.T) {
+	t.Parallel()
+	m, svc := newPlansTestModel(t)
+	m.layoutSettings.ShowPlans = true
+	p := mustCreatePlan(t, svc, "release", "content")
+	edit := messages.EditSidebarPlanMsg{Ref: plans.SharedRef(p.Name), ExpectedVersion: *p.Version}
+	_, cmd := m.Update(edit)
+	require.NotNil(t, cmd)
+
+	m.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)})
+	ready := cmd().(planEditReadyMsg)
+	require.NoError(t, ready.err)
+	require.NoError(t, ready.draftErr)
+	require.NotEmpty(t, ready.draftPath)
+	t.Cleanup(func() { _ = os.Remove(ready.draftPath) })
+	_, cmd = m.Update(ready)
+	require.Nil(t, cmd, "a pending edit must not open the editor over Help")
+	_, err := os.Stat(ready.draftPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	assert.False(t, m.sidebarPlanEditInFlight)
+
+	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	closeMsg, ok := firstOfType[dialog.CloseDialogMsg](collectMsgs(cmd))
+	require.True(t, ok, "the first Escape must close Help")
+	m.Update(closeMsg)
+	_, cmd = m.Update(edit)
+	require.NotNil(t, cmd, "the sidebar must accept an edit after Help closes")
+}
+
 func TestPlanSidebar_StaleRevisionAndMissingPlan(t *testing.T) {
 	t.Parallel()
 	m, svc := newPlansTestModel(t)

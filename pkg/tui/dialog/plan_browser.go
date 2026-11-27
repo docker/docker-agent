@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -121,7 +121,7 @@ const (
 type planBrowserDialog struct {
 	BaseDialog
 
-	filterInput textinput.Model
+	filterInput input.Text
 	// filtering is true while keystrokes go to the filter input; outside
 	// filter mode plain letters are action keys (r/x/s/d/n/e).
 	filtering bool
@@ -152,7 +152,7 @@ var (
 // the pkg/plans service. The dialog never touches plan storage itself: every
 // action is emitted as a message the app model services.
 func NewPlanBrowserDialog(result plans.ListResult) Dialog {
-	ti := textinput.New()
+	ti := input.NewText()
 	ti.Placeholder = "Filter plans…"
 	ti.CharLimit = 100
 	ti.SetWidth(50)
@@ -241,6 +241,10 @@ func (d *planBrowserDialog) ensureSelectedVisible() {
 	if d.selected >= 0 && d.selected < len(d.filtered) {
 		d.scrollview.EnsureLineVisible(d.selected)
 	}
+}
+
+func (d *planBrowserDialog) CursorInput() input.Cursor {
+	return &d.filterInput
 }
 
 func (d *planBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
@@ -642,7 +646,7 @@ var planTextInputKeys = struct {
 type planStatusDialog struct {
 	BaseDialog
 
-	input   textinput.Model
+	input   input.Text
 	name    string
 	version int
 }
@@ -653,7 +657,7 @@ var (
 )
 
 func newPlanStatusDialog(name, currentStatus string, version int) Dialog {
-	ti := textinput.New()
+	ti := input.NewText()
 	ti.Placeholder = "e.g. in-progress, blocked, done"
 	ti.CharLimit = 100
 	ti.SetWidth(50)
@@ -666,7 +670,11 @@ func newPlanStatusDialog(name, currentStatus string, version int) Dialog {
 func (d *planStatusDialog) planDialog() {}
 
 func (d *planStatusDialog) Init() tea.Cmd {
-	return textinput.Blink
+	return nil
+}
+
+func (d *planStatusDialog) CursorInput() input.Cursor {
+	return &d.input
 }
 
 func (d *planStatusDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
@@ -823,7 +831,7 @@ func (d *planDeleteConfirmDialog) Position() (row, col int) {
 type planNameDialog struct {
 	BaseDialog
 
-	input textinput.Model
+	input input.Text
 }
 
 var (
@@ -832,7 +840,7 @@ var (
 )
 
 func newPlanNameDialog() Dialog {
-	ti := textinput.New()
+	ti := input.NewText()
 	ti.Placeholder = "plan-name (lowercase letters, digits, - and _)"
 	ti.CharLimit = 100
 	ti.SetWidth(50)
@@ -844,7 +852,11 @@ func newPlanNameDialog() Dialog {
 func (d *planNameDialog) planDialog() {}
 
 func (d *planNameDialog) Init() tea.Cmd {
-	return textinput.Blink
+	return nil
+}
+
+func (d *planNameDialog) CursorInput() input.Cursor {
+	return &d.input
 }
 
 func (d *planNameDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {

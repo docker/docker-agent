@@ -224,11 +224,11 @@ agents:
 `
 			parentYAML := fmt.Sprintf(sourceYAML, "safety", server.URL+"/parent", "PARENT_KEY", "sub_agents: [child:example/helper]")
 			childYAML := fmt.Sprintf(sourceYAML, childEvaluator, server.URL+"/child", "CHILD_KEY", "")
-			tm, err := teamloader.Load(t.Context(), config.NewBytesSource("parent.yaml", []byte(parentYAML)), &config.RuntimeConfig{
+			tm, err := teamloader.Load(t.Context(), config.NewBytesSource("parent.yaml", []byte(parentYAML)), withTestCatalog(&config.RuntimeConfig{
 				EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{
 					"OPENAI_API_KEY": "fake-chat-key", "PARENT_KEY": "parent-secret", "CHILD_KEY": "child-secret",
 				}),
-			}, teamloader.WithProviderRegistry(testProviderRegistry()),
+			}), teamloader.WithProviderRegistry(testProviderRegistry()),
 				teamloader.WithStrict(config.FeatureHooks, config.FeatureEvaluators, config.FeatureExternalAgents),
 				teamloader.WithSourceResolver(func(ref string, _ environment.Provider) (config.Source, error) {
 					assert.Equal(t, "example/helper", ref)

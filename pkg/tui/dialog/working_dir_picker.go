@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/fsx"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
@@ -114,7 +114,7 @@ type workingDirPickerDialog struct {
 
 	ctx func() context.Context
 
-	textInput textinput.Model
+	textInput input.Text
 	section   dirSection
 
 	// Pinned section state
@@ -157,7 +157,7 @@ type workingDirPickerDialog struct {
 // sessionWorkingDir is the working directory of the active session; when non-empty
 // it is used as the initial browse directory instead of the process working directory.
 func NewWorkingDirPickerDialog(ctx context.Context, recentDirs, favoriteDirs []string, store *tuistate.Store, sessionWorkingDir string) Dialog {
-	ti := textinput.New()
+	ti := input.NewText()
 	ti.Placeholder = "Type to filter directories…"
 	ti.Focus()
 	ti.CharLimit = dirPickerFilterCharLimit
@@ -300,7 +300,11 @@ func (d *workingDirPickerDialog) loadBrowseDirectory() {
 }
 
 func (d *workingDirPickerDialog) Init() tea.Cmd {
-	return textinput.Blink
+	return nil
+}
+
+func (d *workingDirPickerDialog) CursorInput() input.Cursor {
+	return &d.textInput
 }
 
 func (d *workingDirPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {

@@ -175,7 +175,9 @@ tasks:
     cmds:
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - GOOS=js GOARCH=wasm go test -tags docker_agent_wasm_rag -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
-      - GOOS=js GOARCH=wasm go test -tags {{.WASM_SMALL_TAGS}} -run '^TestSmallProfile' -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
+      - go run ./scripts/wasmsmall bin/wasm-small/test
+      - go test -mod=readonly -modfile=bin/wasm-small/test/small.mod github.com/anthropics/anthropic-sdk-go/internal/apijson github.com/pb33f/ordered-map/v2
+      - GOOS=js GOARCH=wasm go test -mod=readonly -modfile=bin/wasm-small/test/small.mod -tags {{.WASM_SMALL_TAGS}} -run '^Test(SmallProfile|DemoProviders)' -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" pkg/model/provider/factory_js_openai_vendor_test.go
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run '^TestLimitLargeToolResults|^TestEnvironmentInfo' ./pkg/hooks/builtins
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./pkg/embeddedchat ./pkg/fuzzy/... ./pkg/tools/builtin/calculator ./pkg/tools/builtin/datetime ./pkg/tools/builtin/deferred ./pkg/tools/builtin/think ./pkg/tools/builtin/random ./pkg/tools/builtin/todo ./pkg/tools/builtin/memory ./pkg/memory/database/inmemory ./pkg/tools/codemode ./pkg/tools/toon ./pkg/rag ./pkg/rag/strategy
@@ -197,10 +199,17 @@ tasks:
       - node --test cmd/wasm/node/bridge_test.js cmd/wasm/node/rag_off_test.js
 
   build-wasm-small:
-    desc: Build the size-optimised browser binary (the cmd/wasm small profile)
+    desc: Build the size-optimised browser binary (requires Binaryen's wasm-opt)
+    preconditions:
+      - sh: command -v wasm-opt
+        msg: Install Binaryen to build the small WASM profile (CI uses version 132).
     cmds:
-      - GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
-      - go run ./scripts/wasmpack cmd/wasm/web/docker-agent.wasm
+      - go run ./scripts/wasmsmall bin/wasm-small
+      - GOOS=js GOARCH=wasm go build -mod=readonly -modfile=bin/wasm-small/small.mod -trimpath -gcflags=all=-l -ldflags="-s -w" -tags {{.WASM_SMALL_TAGS}} -o bin/wasm-small/unpacked.wasm ./cmd/wasm
+      - go run ./scripts/wasmpack -o bin/wasm-small/packed.wasm bin/wasm-small/unpacked.wasm
+      - >-
+        wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext
+        --strip-debug --strip-producers bin/wasm-small/packed.wasm -o cmd/wasm/web/docker-agent.wasm
 
   test-wasm-browser:
     desc: Test real browser fetch, tools and RAG (requires Chrome and openssl)
@@ -226,7 +235,7 @@ tasks:
   cross:
     desc: Build binaries for multiple platforms
     cmds:
-      - docker buildx build --target=cross --build-arg GIT_TAG --build-arg GIT_COMMIT --platform linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64 --output=./dist .
+      - docker buildx build --target=cross --build-arg GIT_TAG --build-arg GIT_COMMIT --platform linux/amd64,linux/arm64,linux/riscv64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64 --output=./dist .
 
   build-image:
     desc: Build Docker image

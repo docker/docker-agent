@@ -853,22 +853,6 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 	return tools.ResultSuccess(handoffMessage), nil
 }
 
-// applyForceHandoff routes the conversation to the agent's configured
-// force_handoff target after a natural stop, bypassing the LLM's
-// tool-calling entirely. The conversation context carries over because
-// the same session keeps running; an implicit user message tells the
-// target agent what happened so the next model call doesn't start on a
-// dangling assistant message. The caller (runTurn) is responsible for
-// continuing the run loop, where the next iteration re-resolves the
-// current agent and emits the AgentInfo event.
-func (r *LocalRuntime) applyForceHandoff(ctx context.Context, sess *session.Session, from, to *agent.Agent) {
-	slog.InfoContext(ctx, "Forced handoff", "from_agent", from.Name(), "to_agent", to.Name(), "session_id", sess.ID)
-
-	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), to.Name(), agentSwitchKindForceHandoff)
-	r.switchSessionAgent(sess, to.Name())
-	sess.AddMessage(session.ImplicitUserMessage(forcedHandoffNote(from.Name())))
-}
-
 func forcedHandoffNote(from string) string {
 	return "The agent " + from + " finished its response and the conversation was automatically " +
 		"handed off to you. Your available handoff agents and tools are specified in the system " +

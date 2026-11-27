@@ -3,6 +3,208 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.166.0] - 2026-11-26
+
+This release adds A2A push notification support, experimental MCP Skills and Tasks extensions, a new Straitly provider, and several TUI and bug fixes.
+
+## What's New
+
+- Adds A2A push notification support to `docker agent serve a2a`, including webhook registration, SQLite-backed persistent task state, and hardened push-notification delivery
+- Adds experimental MCP Skills extension support (`io.modelcontextprotocol/skills`) behind a global user setting (`settings.experimental.mcp_skills`)
+- Adds experimental MCP Tasks extension support (`io.modelcontextprotocol/tasks`) behind a global user setting (`settings.experimental.mcp_tasks`)
+- Adds Straitly to the built-in provider catalog
+- Adds a subtle sidebar separator to the TUI
+- Adds a Rapid-MLX provider guide to the documentation
+
+## Bug Fixes
+
+- Fixes A2A push notifications being dropped under backpressure (final notifications are now always delivered)
+- Fixes A2A tasks not being marked as failed when interrupted by a server restart
+- Fixes A2A push redirects that would drop the POST body
+- Fixes A2A push deliveries not being scoped to the registered webhook origin
+- Fixes A2A store not holding an exclusive lock, and scopes it to a private session directory
+- Fixes `run_skill` missing a `ReadOnlyHint`, causing unnecessary confirmation prompts for read-only fork skills
+- Fixes the file picker incorrectly truncating multi-byte (e.g. Unicode) directory paths by byte length instead of display width
+- Fixes text cursor blinking in the TUI
+- Fixes the experimental `mcp_events` setting location, moving it from agent toolset YAML config to global user settings (`~/.config/cagent/config.yaml`)
+- Fixes `mcp_events_subscribe` schema to allow arbitrary argument types instead of rejecting non-string properties
+
+## Technical Changes
+
+- Adds `api_flavor` classification (`openai`, `openai-compatible`, `gateway`) to the provider catalog
+- Adds `linux/riscv64` to the cross-compilation build target
+- Moves A2A push-notification logging to emit only an error category and status code for failed deliveries
+### Pull Requests
+
+- [#4660](https://github.com/docker/docker-agent/pull/4660) - docs: add Rapid-MLX provider guide
+- [#4818](https://github.com/docker/docker-agent/pull/4818) - refactor(catalog): add api_flavor classification
+- [#4915](https://github.com/docker/docker-agent/pull/4915) - fix(skills): treat run_skill as a delegation wrapper
+- [#4965](https://github.com/docker/docker-agent/pull/4965) - feat(a2a): support push notifications with persistent config store
+- [#5001](https://github.com/docker/docker-agent/pull/5001) - TUI - make cursors blink again
+- [#5008](https://github.com/docker/docker-agent/pull/5008) - feat: add Straitly to the built-in provider catalog
+- [#5026](https://github.com/docker/docker-agent/pull/5026) - fix(tui): truncate the file picker's directory by display width
+- [#5029](https://github.com/docker/docker-agent/pull/5029) - docs: update CHANGELOG.md for v1.165.0
+- [#5033](https://github.com/docker/docker-agent/pull/5033) - TUI - subtle sidebar separator
+- [#5034](https://github.com/docker/docker-agent/pull/5034) - fix(mcp): move experimental mcp_events setting to global user settings
+- [#5035](https://github.com/docker/docker-agent/pull/5035) - feat(mcp): add experimental MCP Skills extension support
+- [#5037](https://github.com/docker/docker-agent/pull/5037) - feat(mcp): add experimental MCP Tasks extension support
+- [#5039](https://github.com/docker/docker-agent/pull/5039) - fix(mcp): allow arbitrary arguments in mcp_events_subscribe schema
+- [#5040](https://github.com/docker/docker-agent/pull/5040) - test(dmr): stop reusing a closed httptest server port in TestCheckModelAvailable
+- [#5042](https://github.com/docker/docker-agent/pull/5042) - build(cross): add linux/riscv64 to the cross target
+
+
+## [v1.165.0] - 2026-11-24
+
+This release adds experimental MCP Events push subscriptions, improves Gemini 4 model support, expands the browser WASM profile, and includes several TUI enhancements and bug fixes.
+
+## What's New
+
+- Adds experimental MCP Events push subscriptions (SEP-3415 event discovery over stdio and Streamable HTTP), gated behind per-toolset `experimental.mcp_events: true`
+- Adds an optional top margin in taller terminals (enabled via `Settings → Appearance → Show top margin`)
+- Sets the terminal window title from the session title in the lean TUI, formatted as `<appName>: <session title>`
+- Includes Anthropic (Claude) support in the small browser WASM profile alongside OpenAI
+
+## Improvements
+
+- Improves Gemini 4 thinking, gateway effort forwarding, and catalog support; refreshes the `models.dev` snapshot to include `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-hydrogen`, and `gemini-4-argon`
+- Applies low thinking and output headroom for Gemini title generation
+- Honors `NoThinking` budget 0 on Gemini 2.5 title generation
+- Shrinks the small browser WASM profile by excluding unused HTTP tracing, skill loading, image codecs, unsupported hooks, and unused Anthropic dependency code
+
+## Bug Fixes
+
+- Fixes run registry incorrectly treating a process as dead when `kill(pid, 0)` returns `EPERM` (process exists but belongs to another user)
+- Fixes TUI crash on files containing invalid UTF-8 bytes during word-diff tokenizing
+- Preserves invalid UTF-8 bytes correctly in word-diff tokenizing (previously expanded one-byte U+FFFD to three bytes)
+
+## Technical Changes
+
+- Fixes flaky script-expansion test on Linux CI caused by `ETXTBSY` when parallel tests fork processes during script writes
+### Pull Requests
+
+- [#4895](https://github.com/docker/docker-agent/pull/4895) - feat: add experimental MCP Events push subscriptions
+- [#4956](https://github.com/docker/docker-agent/pull/4956) - fix(tui): keep invalid UTF-8 from overflowing diff wrapping
+- [#4982](https://github.com/docker/docker-agent/pull/4982) - fix(runregistry): keep runs whose pid we may not signal
+- [#5003](https://github.com/docker/docker-agent/pull/5003) - fix(gemini): improve Gemini 4 thinking, gateway effort, and catalog support
+- [#5004](https://github.com/docker/docker-agent/pull/5004) - feat(tui): add /btw side-question dialog
+- [#5006](https://github.com/docker/docker-agent/pull/5006) - chore(deps): bump the actions group across 1 directory with 2 updates
+- [#5015](https://github.com/docker/docker-agent/pull/5015) - TUI  - Add top margin
+- [#5019](https://github.com/docker/docker-agent/pull/5019) - docs: update CHANGELOG.md for v1.164.0
+- [#5020](https://github.com/docker/docker-agent/pull/5020) - test(skills): fix flaky script-expansion test (ETXTBSY)
+- [#5021](https://github.com/docker/docker-agent/pull/5021) - feat(leantui): set terminal title from session title
+- [#5023](https://github.com/docker/docker-agent/pull/5023) - fix(tui): preserve invalid UTF-8 bytes in word-diff tokenizing
+- [#5025](https://github.com/docker/docker-agent/pull/5025) - docs: auto-update for merged PRs (2026-11-24)
+- [#5027](https://github.com/docker/docker-agent/pull/5027) - feat(wasm): include Anthropic in the small browser profile
+- [#5028](https://github.com/docker/docker-agent/pull/5028) - perf(wasm): shrink the small browser profile
+
+
+## [v1.164.0] - 2026-11-23
+
+This release brings several TUI polish improvements including scrollbar auto-hiding, scroll edge fading, a new `/btw` side-question dialog, and a searchable help dialog, alongside fixes for file editing on Windows CRLF files, Gemini 4 thinking level support, and various TUI rendering issues.
+
+## What's New
+
+- Adds `/btw` side-question dialog for asking isolated questions about the current conversation without affecting the conversation itself
+- Adds auto-hiding scrollbars to the TUI that only appear when scrolling or hovering near the scrollbar area
+- Adds subtle fade effect to scroll view edges when content is hidden above or below the visible area
+- Shows contextual keyboard help in the TUI with a searchable help dialog; status bar now shows only the `Ctrl+H` hint
+
+## Improvements
+
+- Polishes TUI resize grips for the input area and sidebar, including hover-to-reveal behavior and a positional guide line when resizing the sidebar
+- Removes agent badges from ordinary chat replies to reduce visual noise
+- Improves `edit_file` diff rendering and word-diff highlighting, including similarity-gated inline emphasis and cleaner split/unified diff display
+- Keeps TUI notifications from overlapping typed input text
+- Fixes stacked notifications so each uses only the space it needs, preventing empty space from covering chat output
+- Clips inline prompt history suggestions to the composer viewport to prevent overflow
+- Skips the sidebar resize guide on standalone views
+
+## Bug Fixes
+
+- Fixes `edit_file` failures on Windows CRLF files where LF-only `oldText` from models did not match CRLF file content
+- Fixes TUI crash when rendering diffs on files containing invalid UTF-8 bytes
+- Fixes the parent agent being killed when a sub-agent's max-iterations prompt is declined in `--exec` mode
+- Fixes NaN values being accepted as compaction thresholds in configuration
+- Fixes Gemini 4 models (e.g. `gemini-4-hydrogen`, `gemini-4-neon`) not reporting thinking level support and not sending `thinkingLevel` on API requests
+- Fixes Gemini configured thinking levels being clamped to model-supported values
+- Fixes TUI cached colors not refreshing on theme change, causing stale renders for user messages, input text, and spinners
+- Fixes copy controls missing from elicitation messages; adds Ctrl+O to copy the entire message as Markdown
+- Fixes preservation of fenced code blocks and nested quote edge cases when copying
+- Fixes incorrect CLI message stating the CLI stops instead of the capped agent when max-iterations is reached
+- Fixes markdown streaming boundary preservation
+
+## Technical Changes
+
+- Shrinks the Go small browser (WASM) build from 35.80 MiB to 28.28 MiB raw (~21% reduction) by running Binaryen `wasm-opt -Oz` and disabling Go inlining
+- Updates stale code comments following runtime package splits
+- Drops internal repository references from comments and test data
+### Pull Requests
+
+- [#4933](https://github.com/docker/docker-agent/pull/4933) - fix(filesystem): apply LF edit_file text to CRLF files
+- [#4956](https://github.com/docker/docker-agent/pull/4956) - fix(tui): keep invalid UTF-8 from overflowing diff wrapping
+- [#4958](https://github.com/docker/docker-agent/pull/4958) - fix(cli): keep the turn alive when a max-iterations prompt is declined
+- [#4960](https://github.com/docker/docker-agent/pull/4960) - fix(config): reject NaN compaction thresholds
+- [#4969](https://github.com/docker/docker-agent/pull/4969) - chore(devcontainer): update Go image to 1.27 and install gopls
+- [#4978](https://github.com/docker/docker-agent/pull/4978) - docs: update CHANGELOG.md for v1.163.0
+- [#4979](https://github.com/docker/docker-agent/pull/4979) - chore(deps): bump mcp from 1.28.1 to 1.30.0 in /examples/dhi/dhi_mcp_server in the pip group across 1 directory
+- [#4983](https://github.com/docker/docker-agent/pull/4983) - fix(gemini): support thinking levels on Gemini 4 models
+- [#4986](https://github.com/docker/docker-agent/pull/4986) - TUI - Polish resize grips and ux
+- [#4988](https://github.com/docker/docker-agent/pull/4988) - TUI - don't let prompt history suggestions overflow
+- [#4989](https://github.com/docker/docker-agent/pull/4989) - TUI - notifications, outta my way!
+- [#4990](https://github.com/docker/docker-agent/pull/4990) - TUI - fade scrollviews
+- [#4992](https://github.com/docker/docker-agent/pull/4992) - fix: add copy controls to elicitation messages
+- [#4993](https://github.com/docker/docker-agent/pull/4993) - TUI - skip sidebar resize guide on standalone views
+- [#4994](https://github.com/docker/docker-agent/pull/4994) - TUI - autohide scrollbars
+- [#4995](https://github.com/docker/docker-agent/pull/4995) - TUI - each notification in a stack should use its own space
+- [#4996](https://github.com/docker/docker-agent/pull/4996) - TUI - Remove agent badges from ordinary chat replies
+- [#4997](https://github.com/docker/docker-agent/pull/4997) - docs: auto-update for merged PRs (2026-11-22)
+- [#4998](https://github.com/docker/docker-agent/pull/4998) - TUI - refresh properly on theme changes
+- [#5000](https://github.com/docker/docker-agent/pull/5000) - TUI - clean up status bar and improve help dialog
+- [#5004](https://github.com/docker/docker-agent/pull/5004) - feat(tui): add /btw side-question dialog
+- [#5005](https://github.com/docker/docker-agent/pull/5005) - fix(tui): improve edit_file diff rendering and word-diff highlighting
+- [#5007](https://github.com/docker/docker-agent/pull/5007) - docs: auto-update for merged PRs (2026-11-23)
+- [#5009](https://github.com/docker/docker-agent/pull/5009) - chore: refresh models.dev snapshot (+297 -74 ~3472)
+- [#5012](https://github.com/docker/docker-agent/pull/5012) - perf(wasm): shrink the Go small browser build
+- [#5016](https://github.com/docker/docker-agent/pull/5016) - fix stale comments after the runtime package splits
+
+
+## [v1.163.0] - 2026-11-19
+
+This release adds MCP elicitation and OAuth prompt support to the lean TUI, introduces new startup banner animations and a sunset gradient logo, and includes several bug fixes and internal refactoring.
+
+## What's New
+
+- Adds support for MCP elicitations and OAuth prompts in the lean TUI, including form display, field validation, and answer collection
+- Adds a windblown startup banner animation to the full TUI, using a block-character Docker Agent title with a violet-to-pink-to-apricot gradient on TrueColor terminals
+- Applies a sunset gradient (violet → hot pink → apricot) to the startup logo in both the full and lean TUIs
+
+## Bug Fixes
+
+- Fixes elicitations getting stuck when leaving a conversation by cancelling pending elicitations on retired conversations
+- Removes emoji, image name, MIME type, and caption row from inline tool images
+
+## Technical Changes
+
+- Extracts elicitation schema parsing, field validation, and answer collection into a shared `elicitform` package used by both TUIs
+- Refactors app, server, CLI, plans, board, teamloader, embeddedchat, and chatserver packages to share code and clarify ownership boundaries
+- Removes redundant and duplicate tests across bedrock, telemetry, options, runtime, todo, app, environment, history, config, session, and sidebar packages
+- Updates the Docker Agent logo and favicon on the docs site
+- Documents MCP elicitation forms, URL prompts, and OAuth consent prompts in the lean TUI
+### Pull Requests
+
+- [#4961](https://github.com/docker/docker-agent/pull/4961) - docs: update CHANGELOG.md for v1.162.0
+- [#4962](https://github.com/docker/docker-agent/pull/4962) - feat(leantui): support MCP elicitations and OAuth prompts
+- [#4963](https://github.com/docker/docker-agent/pull/4963) - Bump direct Go dependencies
+- [#4964](https://github.com/docker/docker-agent/pull/4964) - feat(tui): use a sunset gradient for the startup logo
+- [#4967](https://github.com/docker/docker-agent/pull/4967) - docs: auto-update for merged PRs (2026-11-19)
+- [#4968](https://github.com/docker/docker-agent/pull/4968) - docs: use the new Docker Agent logo on the docs site
+- [#4972](https://github.com/docker/docker-agent/pull/4972) - chore: update Go dependencies
+- [#4973](https://github.com/docker/docker-agent/pull/4973) - refactor: simplify Go package boundaries and shared code
+- [#4974](https://github.com/docker/docker-agent/pull/4974) - test: remove redundant and ineffective Go tests
+- [#4975](https://github.com/docker/docker-agent/pull/4975) - fix: remove captions from inline tool images
+- [#4977](https://github.com/docker/docker-agent/pull/4977) - feat(tui): add windblown startup banner
+
+
 ## [v1.162.0] - 2026-11-18
 
 This release adds new providers, a redesigned startup banner, and several bug fixes including a security fix for terminal control sequences in rendered Markdown.
@@ -7580,3 +7782,11 @@ This release improves the terminal user interface with better error handling and
 [v1.161.0]: https://github.com/docker/docker-agent/releases/tag/v1.161.0
 
 [v1.162.0]: https://github.com/docker/docker-agent/releases/tag/v1.162.0
+
+[v1.163.0]: https://github.com/docker/docker-agent/releases/tag/v1.163.0
+
+[v1.164.0]: https://github.com/docker/docker-agent/releases/tag/v1.164.0
+
+[v1.165.0]: https://github.com/docker/docker-agent/releases/tag/v1.165.0
+
+[v1.166.0]: https://github.com/docker/docker-agent/releases/tag/v1.166.0

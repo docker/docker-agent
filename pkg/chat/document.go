@@ -1,5 +1,8 @@
 package chat
 
+// MaxInlineBinarySize bounds the number of bytes read for a binary attachment.
+const MaxInlineBinarySize = 20 * 1024 * 1024
+
 // MessagePartTypeDocument is the part type for a structured document attachment.
 // Use this type when attaching files (images, PDFs, text, Office docs, etc.) to
 // a message. The Document field must be set when this type is used.

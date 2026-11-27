@@ -9,6 +9,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/docker/docker-agent/pkg/tui/page/chat"
 )
 
 const (
@@ -68,6 +70,10 @@ func (m *appModel) setPaneHidden(hidden bool) tea.Cmd {
 	m.paneHidden = hidden
 	m.viewCacheValid = false
 	if hidden {
+		m.resetResizeGrips()
+		if m.activeTab != nil {
+			chat.CancelStartupBanner(m.activeTab.chatPage)
+		}
 		m.ar.Pause()
 		return nil
 	}

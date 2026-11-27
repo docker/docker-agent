@@ -554,6 +554,62 @@ func TestSupportsFullThinkingDisplay(t *testing.T) {
 	}
 }
 
+func TestGeminiGeneration(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model       string
+		wantMajor   int
+		wantVariant string
+		wantOK      bool
+	}{
+		{"gemini-4-hydrogen", 4, "hydrogen", true},
+		{"gemini-4-neon", 4, "neon", true},
+		{"gemini-4-carbon", 4, "carbon", true},
+		{"gemini-4-argon", 4, "argon", true},
+		{"gemini-4-hydrogen@eu", 4, "hydrogen@eu", true},
+		{"gemini-4.1-neon", 4, "neon", true},
+		{"gemini-3-pro", 3, "pro", true},
+		{"gemini-3.1-pro-preview", 3, "pro-preview", true},
+		{"gemini-3.8-flash", 3, "flash", true},
+		{"gemini-3-8-flash", 3, "flash", true},
+		{"google/gemini-4-neon", 4, "neon", true},
+		{"vercel/google/gemini-4-carbon", 4, "carbon", true},
+		{"GEMINI-4-HYDROGEN", 4, "hydrogen", true},
+		{"gemini-5-foo", 5, "foo", true},
+
+		// Pre-Gemini-3, malformed, or OpenAI-qualified ids.
+		{"gemini-2.5-flash", 0, "", false},
+		{"gemini-2.0-flash", 0, "", false},
+		{"gemini-1.5-pro", 0, "", false},
+		{"gemini-3", 0, "", false},
+		{"gemini-4", 0, "", false},
+		{"gemini-4-", 0, "", false},
+		{"gemini-30-pro", 0, "", false},
+		{"gemini-3.", 0, "", false},
+		{"gemini-3.1", 0, "", false},
+		{"gemini-3.1-", 0, "", false},
+		{"gemini-3-1", 0, "", false},
+		{"gemini-3.1pro", 0, "", false},
+		{"gemini-3.-pro", 0, "", false},
+		{"gemini-3.20260709-pro", 0, "", false},
+		{"gemini-embedding-2", 0, "", false},
+		{"openai/gemini-4-hydrogen", 0, "", false},
+		{"", 0, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			t.Parallel()
+			major, variant, ok := geminiGeneration(tc.model)
+			require.Equal(t, tc.wantOK, ok, "ok mismatch")
+			if tc.wantOK {
+				assert.Equal(t, tc.wantMajor, major, "major mismatch")
+				assert.Equal(t, tc.wantVariant, variant, "variant mismatch")
+			}
+		})
+	}
+}
+
 func TestUsesThinkingLevel(t *testing.T) {
 	t.Parallel()
 
@@ -562,23 +618,31 @@ func TestUsesThinkingLevel(t *testing.T) {
 		"gemini-3-flash", "gemini-3-flash-preview",
 		"gemini-3.1-pro-preview", "gemini-3.1-flash-preview",
 		"gemini-3.5-pro", "gemini-3.5-flash",
-		"GEMINI-3-PRO", // case-insensitive
-		"  gemini-3-pro  ",
-		"google/gemini-3-pro", // provider-qualified id
+		"gemini-3.8-flash", "gemini-3-8-flash",
+		"gemini-4-hydrogen", "gemini-4-neon", "gemini-4-carbon", "gemini-4-argon",
+		"gemini-4-hydrogen@eu", "gemini-4.1-neon",
+		"GEMINI-3-PRO", "GEMINI-4-HYDROGEN", // case-insensitive
+		"  gemini-3-pro  ", "  gemini-4-neon  ",
+		"google/gemini-3-pro", "google/gemini-4-carbon", // provider-qualified id
+		"gemini-3.1-flash-image", "google/gemini-3.1-flash-image",
 	}
 	noMatch := []string{
 		"gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash",
 		"gemini-1.5-pro", "gpt-4o", "claude-sonnet-4-0",
 		"gemini-3",      // no trailing separator
+		"gemini-4",      // no trailing separator
+		"gemini-4-",     // trailing dash with no variant
 		"gemini-30-pro", // "0" is neither '-' nor '.'
 		"gemini-3.",     // dot with no version digit or dash
 		"gemini-3.1",    // dot-version but no trailing dash
+		"gemini-3.-pro", // dot with no minor digits
 		"",
 		// An "openai/" qualifier must NOT be stripped by the generic
 		// normalize(): a weird qualified id naming a Gemini model must not
 		// be recognized as level-based thinking just because it starts
 		// with the gateway's OpenAI vendor prefix.
 		"openai/gemini-3-pro",
+		"openai/gemini-4-hydrogen",
 	}
 
 	for _, m := range match {
@@ -591,6 +655,53 @@ func TestUsesThinkingLevel(t *testing.T) {
 		t.Run("no:"+m, func(t *testing.T) {
 			t.Parallel()
 			assert.Falsef(t, UsesThinkingLevel(m), "%q should not match", m)
+		})
+	}
+}
+
+func TestGeminiRejectsThinkingBudget(t *testing.T) {
+	t.Parallel()
+
+	match := []string{
+		"gemini-4-hydrogen", "gemini-4-neon", "gemini-4-carbon", "gemini-4-argon",
+		"gemini-4.1-neon", "gemini-4-hydrogen@eu", "google/gemini-4-neon", "gemini-5-foo",
+	}
+	noMatch := []string{
+		"gemini-3-pro", "gemini-3-flash-preview", "gemini-3.8-flash",
+		"gemini-2.5-flash", "gemini-2.5-pro", "openai/gemini-4-hydrogen", "",
+	}
+	for _, m := range match {
+		t.Run(m, func(t *testing.T) {
+			t.Parallel()
+			assert.Truef(t, GeminiRejectsThinkingBudget(m), "%q should reject thinkingBudget", m)
+		})
+	}
+	for _, m := range noMatch {
+		t.Run("no:"+m, func(t *testing.T) {
+			t.Parallel()
+			assert.Falsef(t, GeminiRejectsThinkingBudget(m), "%q should not reject thinkingBudget", m)
+		})
+	}
+}
+
+func TestHasGoogleQualifier(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		modelID string
+		want    bool
+	}{
+		{"google/gemini-4-neon", true},
+		{"GOOGLE/gemini-4-carbon", true},
+		{"  gemini/gemini-4-argon  ", true},
+		{"gemini-4-neon", false},
+		{"openai/gemini-4-neon", false},
+		{"anthropic/claude-sonnet-4.5", false},
+		{"", false},
+	} {
+		t.Run(tc.modelID, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, HasGoogleQualifier(tc.modelID))
 		})
 	}
 }

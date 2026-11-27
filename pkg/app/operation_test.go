@@ -21,6 +21,10 @@ func TestOperationIdentity(t *testing.T) {
 	assert.True(t, a.IsCurrentOperation(tagged))
 	second := a.BeginOperation(t.Context())
 	assert.False(t, a.IsCurrentOperation(tagged))
+	for _, route := range []runtime.Event{&runtime.RoutingDecisionEvent{}, &runtime.AgentRouteEvent{}} {
+		assert.False(t, a.IsCurrentOperation(operationEvent(first, route)), "%T from the replaced run", route)
+		assert.True(t, a.IsCurrentOperation(operationEvent(second, route)), "%T from the new run", route)
+	}
 	assert.True(t, a.IsCurrentOperation(operationEvent(second, runtime.StreamStarted(a.session.ID, "root"))))
 	assert.Zero(t, stop.(*runtime.StreamStoppedEvent).OperationID, "do not mutate shared events")
 	wire, err := json.Marshal(tagged)

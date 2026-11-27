@@ -9,7 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/leantui/ui"
+	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
 )
+
+func TestDefaultBannerMatchesFullTUIStaticBanner(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, tuibanner.Render(), renderBanner(nil))
+	assert.Equal(t, tuibanner.Render(), renderBanner([]string{}))
+}
 
 func TestCommitWelcomePadsBanner(t *testing.T) {
 	t.Parallel()

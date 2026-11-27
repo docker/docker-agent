@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -118,7 +117,7 @@ func newModelPickerDialog(models []modelcatalog.ModelChoice, query string) Dialo
 	return d
 }
 
-// modelSortKeys derives the sort key tuple from a runtime.ModelChoice.
+// modelSortKeys derives the sort key tuple from a modelcatalog.ModelChoice.
 func modelSortKeys(m modelcatalog.ModelChoice) pickerSortKeys {
 	section := 0
 	switch {
@@ -135,8 +134,6 @@ func modelSortKeys(m modelcatalog.ModelChoice) pickerSortKeys {
 	}
 }
 
-func (d *modelPickerDialog) Init() tea.Cmd { return textinput.Blink }
-
 func (d *modelPickerDialog) setQuery(query string) {
 	d.textInput.SetValue(query)
 	d.filterModels()
@@ -152,6 +149,10 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
+
+	case messages.ThemeChangedMsg:
+		d.refreshInputStyles()
+		return d, nil
 
 	case tea.PasteMsg:
 		cmd := d.handleInputChange(msg)

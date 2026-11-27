@@ -5,12 +5,13 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -100,8 +101,8 @@ type multiChoiceDialog struct {
 	BaseDialog
 
 	config            MultiChoiceConfig
-	selected          selection       // Currently selected item (-1 = none)
-	customInput       textinput.Model // Text input for custom response
+	selected          selection  // Currently selected item (-1 = none)
+	customInput       input.Text // Text input for custom response
 	keyMap            multiChoiceKeyMap
 	clickables        []clickableRange // Clickable areas for mouse handling (supports multi-row)
 	contentAbsRow     int              // Absolute screen row where content starts
@@ -146,7 +147,7 @@ func NewMultiChoiceDialog(config MultiChoiceConfig) Dialog {
 	}
 
 	// Create text input
-	ti := textinput.New()
+	ti := input.NewText()
 	ti.SetStyles(styles.DialogInputStyle)
 	ti.Placeholder = config.CustomPlaceholder
 	ti.CharLimit = 500
@@ -274,7 +275,11 @@ func (d *multiChoiceDialog) computeDialogWidth() int {
 
 // Init initializes the dialog.
 func (d *multiChoiceDialog) Init() tea.Cmd {
-	return textinput.Blink
+	return nil
+}
+
+func (d *multiChoiceDialog) CursorInput() input.Cursor {
+	return &d.customInput
 }
 
 // Update handles messages.
@@ -283,6 +288,10 @@ func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
+
+	case messages.ThemeChangedMsg:
+		d.customInput.SetStyles(styles.DialogInputStyle)
+		return d, nil
 
 	case tea.PasteMsg:
 		// Forward paste to custom text input if custom is selected or allowed

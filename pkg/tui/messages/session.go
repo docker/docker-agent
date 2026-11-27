@@ -96,6 +96,9 @@ type (
 	// ForkSessionMsg requests forking the current session into a new tab.
 	ForkSessionMsg struct{}
 
+	// AskSideQuestionMsg opens the /btw dialog for an isolated, non-persisted question.
+	AskSideQuestionMsg struct{ Question string }
+
 	// StreamCancelledMsg notifies components that the stream has been cancelled.
 	StreamCancelledMsg struct{ ShowMessage bool }
 

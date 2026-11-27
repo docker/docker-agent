@@ -13,7 +13,7 @@ import (
 
 func newTestSettingsDialog(t *testing.T, layout messages.LayoutSettings) *settingsDialog {
 	t.Helper()
-	d, ok := NewSettingsDialog(messages.Preferences{Layout: layout, SendMode: messages.SendModeSteer, SplitDiffView: true, RenderImages: true, ShowBanner: true, TabTitleMaxLength: 20, SoundThreshold: 10}, true).(*settingsDialog)
+	d, ok := NewSettingsDialog(messages.Preferences{Layout: layout, SendMode: messages.SendModeSteer, SplitDiffView: true, RenderImages: true, ShowBanner: true, FadeScrollEdges: true, TabTitleMaxLength: 20, SoundThreshold: 10}, true).(*settingsDialog)
 	require.True(t, ok)
 	d.Init()
 	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
@@ -61,6 +61,9 @@ func TestSettingsDialogNavigation(t *testing.T) {
 	require.Equal(t, rowTheme, d.selected[tabAppearance])
 
 	d.Update(down)
+	require.Equal(t, rowFadeScrollEdges, d.selected[tabAppearance])
+
+	d.Update(down)
 	require.Equal(t, rowPosition, d.selected[tabAppearance])
 
 	d.Update(down)
@@ -81,10 +84,10 @@ func TestSettingsDialogNavigation(t *testing.T) {
 	for range 20 {
 		d.Update(down)
 	}
-	require.Equal(t, rowShowBanner, d.selected[tabAppearance], "down must stop at the last row")
+	require.Equal(t, rowTopMargin, d.selected[tabAppearance], "down must stop at the last row")
 
 	d.Update(up)
-	require.Equal(t, rowRenderImages, d.selected[tabAppearance])
+	require.Equal(t, rowShowBanner, d.selected[tabAppearance])
 }
 
 func TestSettingsDialogTabSwitching(t *testing.T) {
@@ -125,6 +128,7 @@ func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
 	assert.NotContains(t, view, "Active agents only")
 	assert.NotContains(t, view, "Plans")
 	assert.Contains(t, view, "Split diff view")
+	assert.Contains(t, view, "Fade scroll edges")
 
 	assert.False(t, d.selectable(tabAppearance, rowInfoMode),
 		"the info mode row is not selectable without a sidebar")
@@ -134,9 +138,11 @@ func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
 		"the Plans row is not selectable without a sidebar")
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	assert.Equal(t, rowFadeScrollEdges, d.selected[tabAppearance])
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	assert.Equal(t, rowSplitDiff, d.selected[tabAppearance], "navigation skips every sidebar row")
 	d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	assert.Equal(t, rowTheme, d.selected[tabAppearance], "reverse navigation skips every sidebar row")
+	assert.Equal(t, rowFadeScrollEdges, d.selected[tabAppearance], "reverse navigation skips every sidebar row")
 	assert.True(t, d.current.Layout.ShowPlans, "hidden sidebar preferences are preserved")
 }
 
@@ -439,6 +445,24 @@ func TestSettingsDialogTogglesShowBanner(t *testing.T) {
 	applied, ok := msgs[1].(messages.ApplySettingsMsg)
 	require.True(t, ok)
 	assert.False(t, applied.Preferences.ShowBanner)
+}
+
+func TestSettingsDialogTogglesTopMargin(t *testing.T) {
+	t.Parallel()
+
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.selected[tabAppearance] = rowTopMargin
+	assert.Contains(t, ansi.Strip(d.View()), "[ ] Show top margin")
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	assert.Nil(t, cmd, "the top margin changes only on save")
+	assert.Contains(t, ansi.Strip(d.View()), "[x] Show top margin")
+
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	msgs := collectMsgs(cmd)
+	require.Len(t, msgs, 2)
+	applied, ok := msgs[1].(messages.ApplySettingsMsg)
+	require.True(t, ok)
+	assert.True(t, applied.Preferences.TopMargin)
 }
 
 func TestSettingsDialogApplyEmitsApplySettings(t *testing.T) {

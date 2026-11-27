@@ -74,3 +74,29 @@ func TestRuntimeResumeExcludesHiddenTime(t *testing.T) {
 	assert.Equal(t, 2*TickRate, ar.Now(), "fades must not jump by the time spent hidden")
 	sub.Stop()
 }
+
+func TestRuntimeRestartExcludesIdleTimeAfterLastSubscriberCancels(t *testing.T) {
+	t.Parallel()
+	clock := &pauseScheduler{now: time.Unix(1, 0)}
+	ar := NewRuntimeWithScheduler(clock)
+	sub, other := ar.Subscribe(), ar.Subscribe()
+	_, ok := ar.Accept(sub.Start()().(TickMsg))
+	require.True(t, ok)
+	require.Nil(t, other.Start())
+	clock.now = clock.now.Add(2 * TickRate)
+	queued := ar.Continue()
+	sub.Stop()
+	_, ok = ar.Accept(queued().(TickMsg))
+	require.True(t, ok, "the remaining subscription keeps its lease")
+	require.Equal(t, 3*TickRate, ar.Now(), "cancelling one subscriber preserves timing")
+	stale := ar.Continue()
+	other.Stop()
+	clock.now = clock.now.Add(time.Hour)
+	restarted := sub.Start()
+	_, ok = ar.Accept(stale().(TickMsg))
+	require.False(t, ok, "last cancellation invalidates its queued tick")
+	_, ok = ar.Accept(restarted().(TickMsg))
+	require.True(t, ok)
+	assert.Equal(t, 4*TickRate, ar.Now(), "new animations start without counting idle time")
+	sub.Stop()
+}

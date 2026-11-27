@@ -308,9 +308,10 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 // agentToolAnnotations inspects the agent's tools and derives
 // [mcp.ToolAnnotations] that describe the aggregate behaviour of the agent.
 //
-//   - ReadOnlyHint is true when every tool is read-only.
+//   - ReadOnlyHint is true when every tool is read-only and no tool delegates
+//     to another agent or session.
 //   - DestructiveHint is explicitly false when no tool is destructive.
-//   - IdempotentHint is true when every tool is idempotent.
+//   - IdempotentHint is true when every tool is idempotent and no tool delegates.
 //   - OpenWorldHint is explicitly false when no tool interacts with an open world.
 func agentToolAnnotations(ctx context.Context, ag *agent.Agent) (*mcp.ToolAnnotations, error) {
 	allTools, err := ag.Tools(ctx)
@@ -325,10 +326,10 @@ func agentToolAnnotations(ctx context.Context, ag *agent.Agent) (*mcp.ToolAnnota
 
 	for _, tool := range allTools {
 		a := tool.Annotations
-		if !a.ReadOnlyHint {
+		if !a.ReadOnlyHint || tool.Delegation {
 			readOnly = false
 		}
-		if !a.IdempotentHint {
+		if !a.IdempotentHint || tool.Delegation {
 			idempotent = false
 		}
 		// *bool hints default to true per the MCP spec; nil means "assumed true".

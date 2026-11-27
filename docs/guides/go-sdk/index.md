@@ -579,7 +579,9 @@ ctx := mcp.WithOAuthTokenStore(ctx, mcp.NewInMemoryTokenStore())
 team, err := teamloader.Load(ctx, source, runConfig, opts...)
 ```
 
-The override is read by `mcp.CreateToolSet` / `mcp.Creator`, so it only takes effect for remote MCP toolsets built from that context; a nil store (or no override) falls back to the process-wide default. Passing the same context to multiple `teamloader.Load` calls shares one store across them, matching the process-wide default's behavior for a single session.
+`mcp.CreateToolSet` / `mcp.Creator` and `mcp.NewRemoteToolsetFromConfig` read the override from the construction context; a nil store (or no override) falls back to the process-wide default. Passing the same context to multiple `teamloader.Load` calls shares one store across them, matching the process-wide default's behavior for a single session.
+
+A remote-only registry can require `remote.url`, reject local-only fields, and call `mcp.NewRemoteToolsetFromConfig(ctx, toolset, env)` instead of linking the stdio and catalog constructors. The toolset still connects lazily.
 
 ## JavaScript Command Expressions (opt-in)
 

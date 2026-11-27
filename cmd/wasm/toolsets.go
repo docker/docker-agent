@@ -96,11 +96,11 @@ func browserMemory(db memory.DB) tools.ToolSet {
 	return teamloader.WithInstructions(ts, strings.Replace(ts.Instructions(), memoryPersistenceClaim, browserMemoryScope, 1))
 }
 
-func mcpCreator(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
+func mcpCreator(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	if err := checkRemoteMCP(toolset); err != nil {
 		return nil, err
 	}
-	return mcptools.Creator(ctx, toolset, parentDir, runConfig, configName)
+	return mcptools.NewRemoteToolsetFromConfig(ctx, toolset, runConfig.EnvProvider()), nil
 }
 
 // checkBrowserToolset rejects toolset declarations the browser build cannot

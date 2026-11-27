@@ -57,7 +57,7 @@ func (e *ImageOutputRequestIncompatibleError) Error() string {
 // an incompatible request when image output is enabled by configuration or the
 // models.dev catalogue.
 func (c *Client) checkImageOutputRequestCompatibility(ctx context.Context, imageOutputEnabled bool, config *genai.GenerateContentConfig, requestTools int) error {
-	if !imageOutputEnabled || c.ModelOptions.GeneratingTitle() || c.ModelOptions.Compacting() {
+	if !imageOutputEnabled || c.ModelOptions.GeneratingTitle() || c.ModelOptions.Compacting() || c.ModelOptions.TextOnly() {
 		return nil
 	}
 

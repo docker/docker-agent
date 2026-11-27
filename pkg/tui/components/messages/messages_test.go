@@ -21,11 +21,69 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
 	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/defaults"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuimessages "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
+
+func TestThemeChangedRestylesExistingUserPrompt(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	styles.ApplyTheme(styles.DefaultTheme())
+
+	const prompt = "Explain the code"
+	newTranscript := func() Model {
+		m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{})
+		m.AddUserMessage(prompt)
+		return m
+	}
+	existing := newTranscript()
+	before := existing.View()
+	require.Contains(t, ansi.Strip(before), prompt)
+
+	theme := styles.DefaultTheme()
+	theme.Colors.TextPrimary = "#123456"
+	theme.Colors.BackgroundAlt = "#abcdef"
+	theme.Colors.Accent = "#316497"
+	styles.ApplyTheme(theme)
+
+	updated, _ := existing.Update(tuimessages.ThemeChangedMsg{})
+	want := newTranscript().View()
+	require.NotEqual(t, want, before, "a fresh prompt should use the new colors")
+	require.Equal(t, ansi.Strip(before), ansi.Strip(want), "only styles should change")
+	assert.Equal(t, want, updated.View(), "an existing prompt should use the same colors as a fresh one")
+}
+
+func TestThemeChangedRestylesInlineEdit(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	styles.ApplyTheme(styles.DefaultTheme())
+
+	newEditor := func(content string) *model {
+		m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+		m.AddUserMessage("original prompt")
+		m.StartInlineEdit(0, 0, content)
+		return m
+	}
+	m := newEditor("draft")
+	_, _ = m.Update(tea.PasteMsg{Content: " text"})
+	before := m.inlineEditTextarea.View()
+
+	theme := styles.DefaultTheme()
+	theme.Colors.TextPrimary = "#123456"
+	theme.Colors.BackgroundAlt = "#abcdef"
+	styles.ApplyTheme(theme)
+	_, _ = m.Update(tuimessages.ThemeChangedMsg{})
+
+	require.Equal(t, "draft text", m.inlineEditTextarea.Value())
+	want := newEditor("draft text").inlineEditTextarea.View()
+	require.NotEqual(t, want, before)
+	require.Equal(t, ansi.Strip(before), ansi.Strip(want))
+	assert.Equal(t, want, m.inlineEditTextarea.View())
+}
 
 func TestViewDoesNotWrapWideLines(t *testing.T) {
 	t.Parallel()
@@ -1290,63 +1348,80 @@ func TestAddOrUpdateToolCallFindsToolInNonActiveReasoningBlock(t *testing.T) {
 	assert.Equal(t, 1, block.ToolCount(), "reasoning block should still have exactly one tool call")
 }
 
-func TestAppendReasoningAfterTransferTaskShowsAgentBadge(t *testing.T) {
+// flatten collapses badge padding and line breaks so assertions can match
+// "root calls developer" regardless of styling.
+func flatten(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// TestRepliesHaveNoAgentBadge covers ordinary replies: neither reasoning nor
+// assistant text renders an agent badge, even when the agent changes after a
+// transfer_task. The transfer card is the agent boundary.
+func TestRepliesHaveNoAgentBadge(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
-	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState).(*model)
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState, WithToolRenderers(defaults.NewRegistry())).(*model)
 	m.SetSize(80, 24)
 
-	// root delegates to developer: the transfer_task tool call is sent by the
-	// parent agent...
+	m.AddUserMessage("hi")
+	m.AppendToLastMessage("root", "Let me delegate.")
 	transferCall := tools.ToolCall{
 		ID:       "call_transfer",
 		Function: tools.FunctionCall{Name: transfertask.ToolNameTransferTask, Arguments: `{"agent":"developer","task":"fix it"}`},
 	}
-	m.AddOrUpdateToolCall("root", transferCall, tools.Tool{Name: transfertask.ToolNameTransferTask}, types.ToolStatusCompleted)
-
-	// ...and the sub-agent starts its turn with reasoning.
+	m.AddOrUpdateToolCall("root", transferCall, tools.Tool{Name: transfertask.ToolNameTransferTask}, types.ToolStatusRunning)
 	m.AppendReasoning("developer", "Analyzing the request...")
+	m.AppendToLastMessage("developer", "Fixed it.")
 
-	require.Len(t, m.messages, 2)
-	require.Equal(t, types.MessageTypeAssistantReasoningBlock, m.messages[1].Type)
-	block, ok := m.views[1].(*reasoningblock.Model)
+	require.Len(t, m.messages, 5)
+	for i, msg := range m.messages {
+		view := ansi.Strip(m.views[i].View())
+		switch msg.Type {
+		case types.MessageTypeAssistant, types.MessageTypeAssistantReasoningBlock:
+			assert.NotContains(t, view, msg.Sender, "reply from %s must not render an agent badge", msg.Sender)
+		case types.MessageTypeToolCall:
+			assert.Contains(t, flatten(view), "root calls developer", "the transfer keeps its agent badges")
+		}
+	}
+	block, ok := m.views[3].(*reasoningblock.Model)
 	require.True(t, ok)
-
-	view := ansi.Strip(block.View())
-	badgeIdx := strings.Index(view, "developer")
-	thinkingIdx := strings.Index(view, "Thinking")
-	require.GreaterOrEqual(t, badgeIdx, 0, "reasoning block should render the developer badge")
-	require.GreaterOrEqual(t, thinkingIdx, 0)
-	assert.Less(t, badgeIdx, thinkingIdx, "agent badge should render before the Thinking header")
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(ansi.Strip(block.View())), "Thinking"))
 }
 
-func TestAppendReasoningContinuingSameAgentOmitsAgentBadge(t *testing.T) {
+// TestTransferInsideCollapsedReasoningStaysVisible covers a transfer_task
+// that joins the parent's collapsed reasoning block: once completed it must
+// still render, since the sub-agent's reply below carries no badge.
+func TestTransferInsideCollapsedReasoningStaysVisible(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
-	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState).(*model)
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState, WithToolRenderers(defaults.NewRegistry())).(*model)
 	m.SetSize(80, 24)
 
-	m.AddUserMessage("hi")
-	m.AppendToLastMessage("developer", "Here is a first answer.")
-	m.AppendReasoning("developer", "Reconsidering the answer...")
+	m.AppendReasoning("root", "I should delegate this.")
+	transferCall := tools.ToolCall{
+		ID:       "call_transfer",
+		Function: tools.FunctionCall{Name: transfertask.ToolNameTransferTask, Arguments: `{"agent":"developer","task":"fix it"}`},
+	}
+	m.AddOrUpdateToolCall("root", transferCall, tools.Tool{Name: transfertask.ToolNameTransferTask}, types.ToolStatusRunning)
+	m.AppendToLastMessage("developer", "Fixed it.")
+	m.AddToolResult(&runtime.ToolCallResponseEvent{ToolCallID: "call_transfer", Response: "done"}, types.ToolStatusCompleted)
 
-	require.Len(t, m.messages, 3)
-	require.Equal(t, types.MessageTypeAssistantReasoningBlock, m.messages[2].Type)
-	block, ok := m.views[2].(*reasoningblock.Model)
+	require.Len(t, m.messages, 2)
+	block, ok := m.views[0].(*reasoningblock.Model)
 	require.True(t, ok)
-
-	view := ansi.Strip(block.View())
-	assert.NotContains(t, view, "developer", "no badge when the block continues the same agent's content")
-	assert.Contains(t, view, "Thinking")
+	block.SetExpanded(false)
+	require.True(t, block.HasToolCall("call_transfer"))
+	assert.Contains(t, flatten(ansi.Strip(block.View())), "root calls developer")
+	assert.NotContains(t, ansi.Strip(m.views[1].View()), "developer", "the sub-agent reply has no badge")
 }
 
-func TestLoadFromSessionReasoningBlockAgentBadges(t *testing.T) {
+func TestLoadFromSessionRepliesHaveNoAgentBadge(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
-	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState).(*model)
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState, WithToolRenderers(defaults.NewRegistry())).(*model)
 	m.SetSize(80, 24)
 
 	sess := &session.Session{
@@ -1355,57 +1430,13 @@ func TestLoadFromSessionReasoningBlockAgentBadges(t *testing.T) {
 			session.NewMessageItem(&session.Message{
 				Message: chat.Message{Role: chat.MessageRoleUser, Content: "Hello"},
 			}),
+			// root reasons, then delegates to developer from inside its
+			// reasoning block...
 			session.NewMessageItem(&session.Message{
 				AgentName: "root",
 				Message: chat.Message{
 					Role:             chat.MessageRoleAssistant,
-					ReasoningContent: "First thoughts.",
-					Content:          "Answer one.",
-				},
-			}),
-			session.NewMessageItem(&session.Message{
-				AgentName: "root",
-				Message: chat.Message{
-					Role:             chat.MessageRoleAssistant,
-					ReasoningContent: "Second thoughts.",
-					Content:          "Answer two.",
-				},
-			}),
-		},
-	}
-
-	m.LoadFromSession(sess, nil)
-
-	// user + (reasoning block + content) x 2
-	require.Len(t, m.messages, 5)
-
-	first, ok := m.views[1].(*reasoningblock.Model)
-	require.True(t, ok)
-	assert.Contains(t, ansi.Strip(first.View()), "root",
-		"the block starting the agent's turn should show its badge")
-
-	second, ok := m.views[3].(*reasoningblock.Model)
-	require.True(t, ok)
-	assert.NotContains(t, ansi.Strip(second.View()), "root",
-		"no badge when the block continues the same agent's content")
-}
-
-func TestLoadFromSessionReasoningAfterTransferTaskShowsAgentBadge(t *testing.T) {
-	t.Parallel()
-
-	sessionState := &service.SessionState{}
-	m := NewScrollableView(animation.NewRuntime(), 80, 24, sessionState).(*model)
-	m.SetSize(80, 24)
-
-	sess := &session.Session{
-		ID: "test-session",
-		Messages: []session.Item{
-			// root delegates to developer: the transfer_task tool call is
-			// sent by the parent agent...
-			session.NewMessageItem(&session.Message{
-				AgentName: "root",
-				Message: chat.Message{
-					Role: chat.MessageRoleAssistant,
+					ReasoningContent: "I should delegate.",
 					ToolCalls: []tools.ToolCall{
 						{ID: "call_transfer", Function: tools.FunctionCall{Name: transfertask.ToolNameTransferTask, Arguments: `{"agent":"developer","task":"fix it"}`}},
 					},
@@ -1414,12 +1445,12 @@ func TestLoadFromSessionReasoningAfterTransferTaskShowsAgentBadge(t *testing.T) 
 					},
 				},
 			}),
-			// ...and the sub-agent starts its turn with reasoning.
+			// ...and replies after the sub-session.
 			session.NewMessageItem(&session.Message{
-				AgentName: "developer",
+				AgentName: "root",
 				Message: chat.Message{
-					Role:             chat.MessageRoleAssistant,
-					ReasoningContent: "Analyzing the request...",
+					Role:    chat.MessageRoleAssistant,
+					Content: "Fixed it.",
 				},
 			}),
 		},
@@ -1427,20 +1458,16 @@ func TestLoadFromSessionReasoningAfterTransferTaskShowsAgentBadge(t *testing.T) 
 
 	m.LoadFromSession(sess, nil)
 
-	// standalone transfer_task tool call + developer reasoning block
-	require.Len(t, m.messages, 2)
-	assert.Equal(t, types.MessageTypeToolCall, m.messages[0].Type)
-	assert.Equal(t, "root", m.messages[0].Sender)
-	require.Equal(t, types.MessageTypeAssistantReasoningBlock, m.messages[1].Type)
-	block, ok := m.views[1].(*reasoningblock.Model)
+	// user + root reasoning block (with transfer) + root reply
+	require.Len(t, m.messages, 3)
+	rootBlock, ok := m.views[1].(*reasoningblock.Model)
 	require.True(t, ok)
+	rootBlock.SetExpanded(false)
+	assert.NotContains(t, rootBlock.View(), "root ─►")
+	assert.Contains(t, flatten(ansi.Strip(rootBlock.View())), "root calls developer",
+		"the restored transfer stays visible in a collapsed block")
 
-	view := ansi.Strip(block.View())
-	badgeIdx := strings.Index(view, "developer")
-	thinkingIdx := strings.Index(view, "Thinking")
-	require.GreaterOrEqual(t, badgeIdx, 0, "reasoning block should render the developer badge")
-	require.GreaterOrEqual(t, thinkingIdx, 0)
-	assert.Less(t, badgeIdx, thinkingIdx, "agent badge should render before the Thinking header")
+	assert.NotContains(t, ansi.Strip(m.views[2].View()), "root")
 }
 
 func TestBindingsExcludesEditKeyWhenAssistantMessageSelected(t *testing.T) {

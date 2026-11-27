@@ -177,6 +177,11 @@ type Tool struct { //nolint:recvcheck // JSON marshaling needs a value receiver 
 	// Empty means Handler owns execution, regardless of name collisions with
 	// runtime-managed tools.
 	RuntimeHandler string `json:"-"`
+	// Delegation marks a wrapper that starts or switches to another agent or
+	// session. The wrapper does not write to the workspace itself, but the child
+	// and its toolsets can; the runtime may auto-approve the launch, while the
+	// MCP surface must not advertise an agent containing one as read-only.
+	Delegation bool `json:"-"`
 	// AllowRepeatedCalls exempts successful calls from duplicate-loop detection.
 	AllowRepeatedCalls      bool `json:"-"`
 	AddDescriptionParameter bool `json:"-"`

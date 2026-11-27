@@ -163,6 +163,8 @@ type Preferences struct {
 	HideToolResults               bool
 	RenderImages                  bool
 	ShowBanner                    bool
+	TopMargin                     bool
+	FadeScrollEdges               bool
 	YOLO                          bool
 	RestoreTabs                   bool
 	Snapshot                      bool

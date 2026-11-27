@@ -443,23 +443,6 @@ func (s *stubSnapshotController) AutoInject(*hooks.Config) {}
 
 var _ builtins.SnapshotController = (*stubSnapshotController)(nil)
 
-func TestApp_NewSession_PreservesToolsApproved(t *testing.T) {
-	t.Parallel()
-
-	rt := &mockRuntime{}
-
-	// Create initial session with tools approved
-	initialSess := session.New(session.WithToolsApproved(true))
-	require.True(t, initialSess.ToolsApproved, "Initial session should have tools approved")
-
-	app := New(t.Context(), rt, initialSess)
-
-	// Call NewSession - should preserve ToolsApproved
-	app.NewSession()
-
-	assert.True(t, app.Session().ToolsApproved, "NewSession should preserve ToolsApproved")
-}
-
 // Explicit strict/balanced modes leave ToolsApproved=false, so preserving
 // only that legacy flag silently dropped the mode on /new.
 func TestApp_NewSession_PreservesSafetyPolicy(t *testing.T) {
@@ -508,23 +491,6 @@ func TestApp_NewSession_PreservesPriorSafetyPolicy(t *testing.T) {
 	// The preserved memory must actually work: toggling off restores balanced.
 	sess.ToggleYolo()
 	assert.Equal(t, session.SafetyPolicyBalanced, sess.GetSafetyPolicy())
-}
-
-func TestApp_NewSession_PreservesHideToolResults(t *testing.T) {
-	t.Parallel()
-
-	rt := &mockRuntime{}
-
-	// Create initial session with hide tool results
-	initialSess := session.New(session.WithHideToolResults(true))
-	require.True(t, initialSess.HideToolResults, "Initial session should have HideToolResults")
-
-	app := New(t.Context(), rt, initialSess)
-
-	// Call NewSession - should preserve HideToolResults
-	app.NewSession()
-
-	assert.True(t, app.Session().HideToolResults, "NewSession should preserve HideToolResults")
 }
 
 func TestApp_NewSession_WithNilSession(t *testing.T) {
@@ -1070,11 +1036,11 @@ func (m *composedElicitationMockRuntime) RunStream(_ context.Context, sess *sess
 	return ch
 }
 
-// remoteLikeMockRuntime mirrors RemoteRuntime's elicitation contract: its
+// remoteLikeMockRuntime mirrors remote.Runtime's elicitation contract: its
 // OnElicitationRequest sink is a no-op (mockRuntime's default; see
-// pkg/runtime/remote_runtime.go's OnElicitationRequest) and every
+// pkg/runtime/remote/remote_runtime.go's OnElicitationRequest) and every
 // elicitation request arrives ONLY as a *runtime.ElicitationRequestEvent on
-// the RunStream channel, exactly like remote_runtime.go's RunStream
+// the RunStream channel, exactly like remote/remote_runtime.go's RunStream
 // forwarding loop. It deliberately does NOT implement
 // elicitationSinkMirror, so App must not skip this event for it.
 type remoteLikeMockRuntime struct {
@@ -1124,7 +1090,7 @@ func countElicitationDeliveries(t *testing.T, events <-chan tea.Msg) int {
 // made App.Run/Retry/RunWithMessage skip every
 // *runtime.ElicitationRequestEvent read off RunStream UNCONDITIONALLY, which
 // also silently dropped elicitations for runtimes whose OnElicitationRequest
-// sink is a no-op and that deliver ONLY via RunStream (RemoteRuntime) — a
+// sink is a no-op and that deliver ONLY via RunStream (remote.Runtime) — a
 // remote-backed session showed zero dialogs instead of one. A runtime that
 // does not mirror sink deliveries onto RunStream must have that event pass
 // through to a.events untouched.
@@ -1176,11 +1142,11 @@ func TestReview_ForegroundElicitationIsNotDeliveredTwice(t *testing.T) {
 // production runtimes, not just marker-shaped mocks. The composed/remote
 // regression tests above exercise independent mock types that each
 // hand-declare whether they implement elicitationSinkMirror; they never
-// touch runtime.LocalRuntime or runtime.RemoteRuntime, so an inverted
+// touch runtime.LocalRuntime or remote.Runtime, so an inverted
 // production mapping (marker removed from LocalRuntime, or added to
-// RemoteRuntime) would leave every other test in this file green (#3584
+// remote.Runtime) would leave every other test in this file green (#3584
 // review — mutation testing proof). *runtime.LocalRuntime and
-// *runtime.RemoteRuntime are asserted directly here; a nil pointer of each
+// *remote.Runtime are asserted directly here; a nil pointer of each
 // concrete type is enough since mustSkipMirroredElicitation only performs a
 // type assertion and never calls a method on rt.
 func TestMustSkipMirroredElicitation_ConcreteRuntimeClassification(t *testing.T) {
@@ -1189,7 +1155,7 @@ func TestMustSkipMirroredElicitation_ConcreteRuntimeClassification(t *testing.T)
 	assert.True(t, mustSkipMirroredElicitation((*runtime.LocalRuntime)(nil)),
 		"LocalRuntime mirrors OnElicitationRequest sink deliveries onto RunStream; App must skip the duplicate RunStream copy")
 	assert.False(t, mustSkipMirroredElicitation((*remote.Runtime)(nil)),
-		"RemoteRuntime delivers elicitations ONLY via RunStream (its OnElicitationRequest sink is a no-op); App must not skip that copy")
+		"remote.Runtime delivers elicitations ONLY via RunStream (its OnElicitationRequest sink is a no-op); App must not skip that copy")
 }
 
 // elicitationEntryPoint names one of App's three RunStream-forwarding entry

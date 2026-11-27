@@ -63,7 +63,7 @@ func New(ar *animation.Runtime, state service.SessionStateReader, opts ...Option
 // Append adds a message and returns the new view's Init command (spinner
 // and running-tool views use it to start the animation tick stream).
 func (t *Transcript) Append(msg *types.Message) tea.Cmd {
-	v := t.newView(msg, t.lastMsg())
+	v := t.newView(msg)
 	t.msgs = append(t.msgs, msg)
 	t.views = append(t.views, v)
 	return v.Init()
@@ -71,22 +71,15 @@ func (t *Transcript) Append(msg *types.Message) tea.Cmd {
 
 // newView creates the right view for a message, like the message list's
 // createToolCallView / createMessageView helpers.
-func (t *Transcript) newView(msg, prev *types.Message) layout.Model {
+func (t *Transcript) newView(msg *types.Message) layout.Model {
 	var v layout.Model
 	if msg.Type == types.MessageTypeToolCall {
 		v = t.toolRenderers.New(t.ar, msg, t.state)
 	} else {
-		v = message.New(t.ar, msg, prev)
+		v = message.New(t.ar, msg)
 	}
 	_ = v.SetSize(t.width, 0)
 	return v
-}
-
-func (t *Transcript) lastMsg() *types.Message {
-	if n := len(t.msgs); n > 0 {
-		return t.msgs[n-1]
-	}
-	return nil
 }
 
 // AppendToLastMessage grows the most recent message with streamed reply
@@ -170,11 +163,7 @@ func (t *Transcript) refreshToolView(i int, status types.ToolStatus) tea.Cmd {
 	msg := t.msgs[i]
 	msg.SetToolStatus(status)
 	animation.StopView(t.views[i])
-	var prev *types.Message
-	if i > 0 {
-		prev = t.msgs[i-1]
-	}
-	t.views[i] = t.newView(msg, prev)
+	t.views[i] = t.newView(msg)
 	return t.views[i].Init()
 }
 
@@ -257,14 +246,12 @@ func (t *Transcript) setWidth(width int) {
 func (t *Transcript) Rebuild() tea.Cmd {
 	t.StopAnimations()
 	var cmds []tea.Cmd
-	var prev *types.Message
 	for i, msg := range t.msgs {
-		v := t.newView(msg, prev)
+		v := t.newView(msg)
 		t.views[i] = v
 		if cmd := v.Init(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		prev = msg
 	}
 	return tea.Batch(cmds...)
 }

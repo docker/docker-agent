@@ -619,7 +619,7 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 	// toolsets without either skip the span entirely.
 	//
 	// Unwrap once so the kind attribute names the underlying toolset
-	// (e.g. *mcp.Toolset, *builtin.ShellTool) instead of the
+	// (e.g. *mcp.Toolset, *shell.ToolSet) instead of the
 	// *tools.namedToolSet wrapper that every toolset gets in the
 	// registry — same pattern DescribeToolSet uses.
 	inner := s.ToolSet

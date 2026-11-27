@@ -551,6 +551,9 @@
           "type": "string",
           "format": "date-time"
         },
+        "session_id": {
+          "type": "string"
+        },
         "type": {
           "const": "agent_info"
         },
@@ -955,6 +958,32 @@
         "timestamp",
         "type",
         "confirmation"
+      ]
+    },
+    "AuxiliaryUsage": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "cost": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/session/auxiliary.go AuxiliaryUsage",
+      "required": [
+        "id",
+        "purpose",
+        "model"
       ]
     },
     "BackgroundAgentStatusEvent": {
@@ -3492,6 +3521,9 @@
         },
         "evaluation": {
           "$ref": "#/$defs/Evaluation"
+        },
+        "auxiliary_usage": {
+          "$ref": "#/$defs/AuxiliaryUsage"
         },
         "routing_decision": {
           "$ref": "#/$defs/RoutingDecision"

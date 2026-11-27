@@ -3,12 +3,12 @@ package editor
 import (
 	"testing"
 
-	"charm.land/bubbles/v2/textarea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -63,7 +63,7 @@ var _ completions.ArgumentCompleter = (*dynamicArgumentCompletion)(nil)
 // completion sources, mirroring newTestEditor but without pre-seeding any
 // active completion session.
 func newArgumentTestEditor(value string, comps ...completions.Completion) *editor {
-	ta := textarea.New()
+	ta := input.NewArea()
 	ta.SetWidth(80)
 	ta.SetHeight(10)
 	ta.Focus()

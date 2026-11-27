@@ -107,6 +107,64 @@ func TestDiffWords_SegmentsReconstructInputs(t *testing.T) {
 	}
 }
 
+func TestDiffWordsForDisplay_SuppressesUnrelatedLines(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		old, new string
+	}{
+		{"brace vs statement", "        }", "        self.pos += 1;"},
+		{"comment vs if", "    // Skip Verilog attributes (* ... *)", "    if b == b'(' && lexer.pos + 1 < lexer.bytes.len() {"},
+		{"blank vs code", "    ", "    let x = 1;"},
+		{"unrelated match arm", "            b'n' => s.push('\\n'),", "            self.pos += 1;"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			oldSegs, newSegs := diffWordsForDisplay(tc.old, tc.new)
+			assert.Nil(t, oldSegs)
+			assert.Nil(t, newSegs)
+		})
+	}
+}
+
+func TestDiffWordsForDisplay_HighlightsSimilarLines(t *testing.T) {
+	t.Parallel()
+	oldSegs, newSegs := diffWordsForDisplay("        i += 1;", "        lexer.pos += 1;")
+	assert.NotNil(t, oldSegs)
+	assert.NotNil(t, newSegs)
+	assert.Equal(t, "        i += 1;", concat(oldSegs))
+	assert.Equal(t, "        lexer.pos += 1;", concat(newSegs))
+	assert.True(t, hasChange(oldSegs, "i"))
+	assert.True(t, hasChange(newSegs, "lexer.pos"))
+}
+
+func TestDiffWordsForDisplay_DoesNotEmphasizeLeadingIndentation(t *testing.T) {
+	t.Parallel()
+	oldSegs, newSegs := diffWordsForDisplay("    return value", "        return value")
+	assert.NotNil(t, oldSegs)
+	assert.NotNil(t, newSegs)
+	assert.False(t, oldSegs[0].Changed)
+	assert.False(t, newSegs[0].Changed)
+}
+
+func TestDiffWordsForDisplay_MergesWhitespaceGapsBetweenChanges(t *testing.T) {
+	t.Parallel()
+	oldSegs, newSegs := diffWordsForDisplay("keep alpha beta keep", "keep gamma delta keep")
+	assert.True(t, hasChange(oldSegs, "alpha beta"))
+	assert.True(t, hasChange(newSegs, "gamma delta"))
+}
+
+func TestDiffWordsForDisplay_SuppressesFragmentedLines(t *testing.T) {
+	t.Parallel()
+	oldSegs, newSegs := diffWordsForDisplay(
+		"a1, b1, c1, d1, e1, f1, g1",
+		"a2, b2, c2, d2, e2, f2, g2",
+	)
+	assert.Nil(t, oldSegs)
+	assert.Nil(t, newSegs)
+}
+
 func concat(segs []wordSegment) string {
 	var b strings.Builder
 	for _, seg := range segs {

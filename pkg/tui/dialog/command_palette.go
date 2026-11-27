@@ -7,13 +7,13 @@ import (
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -65,8 +65,6 @@ func IsCommandPalette(d Dialog) bool {
 	return ok
 }
 
-func (d *commandPaletteDialog) Init() tea.Cmd { return textinput.Blink }
-
 func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end
 	if handled, cmd := d.scrollview.Update(msg); handled {
@@ -77,6 +75,10 @@ func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
+
+	case messages.ThemeChangedMsg:
+		d.refreshInputStyles()
+		return d, nil
 
 	case tea.PasteMsg:
 		cmd := d.updateInput(msg, d.filterCommands)

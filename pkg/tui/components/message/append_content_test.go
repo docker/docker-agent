@@ -31,7 +31,7 @@ func testImageURI(t *testing.T, colorValue color.RGBA) string {
 
 func TestAppendContentPreservesSplitImageOpenerAndExactContent(t *testing.T) {
 	msg := types.Agent(types.MessageTypeAssistant, "root", "prefix ")
-	m := New(animation.NewRuntime(), msg, nil)
+	m := New(animation.NewRuntime(), msg)
 	for _, chunk := range []string{"!", "[alt]", "(https://example.com/image.png)", " suffix"} {
 		_ = m.AppendContent(chunk)
 	}
@@ -42,7 +42,7 @@ func TestAppendContentPreservesSplitImageOpenerAndExactContent(t *testing.T) {
 func TestAppendContentSplitImageSchedulesAndRendersInline(t *testing.T) {
 	tuiimage.SetRenderingEnabled(true)
 	uri := testImageURI(t, color.RGBA{G: 255, A: 255})
-	m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""), nil)
+	m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""))
 	m.SetSize(80, 0)
 	chunks := []string{"!", "[alt]", "(" + uri + ")"}
 	for _, chunk := range chunks[:2] {
@@ -69,7 +69,7 @@ func TestAppendContentCompletesInitialImageAcrossPartitions(t *testing.T) {
 			continue
 		}
 		t.Run(strconv.Itoa(split), func(t *testing.T) {
-			m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", initial), nil)
+			m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", initial))
 			_ = m.Init()
 			require.GreaterOrEqual(t, m.imageScanOffset, 0)
 			cmd := m.AppendContent(appended)
@@ -90,7 +90,7 @@ func TestAppendContentInitialUnresolvedImageForms(t *testing.T) {
 		{"prefix ![界", "](" + uri + ")"},
 		{"![alt](", uri + ")"},
 	} {
-		m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", tc.initial), nil)
+		m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", tc.initial))
 		_ = m.Init()
 		require.GreaterOrEqual(t, m.imageScanOffset, 0)
 		cmd := m.AppendContent(tc.appended)
@@ -103,7 +103,7 @@ func TestAppendContentInitialUnresolvedImageForms(t *testing.T) {
 func TestAppendContentSchedulesSecondImageSplitAfterFirstCompletion(t *testing.T) {
 	first := testImageURI(t, color.RGBA{R: 255, A: 255})
 	second := testImageURI(t, color.RGBA{B: 255, A: 255})
-	m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""), nil)
+	m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""))
 
 	cmd := m.AppendContent("![one](" + first + ") ![two")
 	require.NotNil(t, cmd)
@@ -123,7 +123,7 @@ func TestAppendContentSplitImageSyntaxInCodeDoesNotFetch(t *testing.T) {
 		{"`!", "[inline]", "(https://example.com/inline.png)`"},
 		{"```md\n!", "[fenced]", "(https://example.com/fenced.png)\n```"},
 	} {
-		m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""), nil)
+		m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""))
 		for _, chunk := range chunks {
 			require.Nil(t, m.AppendContent(chunk))
 		}
@@ -132,7 +132,7 @@ func TestAppendContentSplitImageSyntaxInCodeDoesNotFetch(t *testing.T) {
 }
 
 func TestAppendContentImageScanStateIsBoundedAndCleared(t *testing.T) {
-	m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""), nil)
+	m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""))
 	long := "![abandoned" + strings.Repeat("界", 100_000)
 	require.Nil(t, m.AppendContent(long))
 	require.Equal(t, 0, m.imageScanOffset)
@@ -145,7 +145,7 @@ func TestAppendContentImageScanStateIsBoundedAndCleared(t *testing.T) {
 }
 
 func TestAppendContentImageScanOffsetIsUTF8Safe(t *testing.T) {
-	m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""), nil)
+	m := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", ""))
 	require.Nil(t, m.AppendContent("界!"))
 	require.Equal(t, -1, m.imageScanOffset)
 	require.Nil(t, m.AppendContent("[界"))
@@ -157,7 +157,7 @@ func TestImageLabelsAreSanitized(t *testing.T) {
 	tuiimage.SetRenderingEnabled(true)
 	uri := testImageURI(t, color.RGBA{G: 255, A: 255})
 	msg := types.Agent(types.MessageTypeAssistant, "root", "![\x1bDlabel\x07]("+uri+")")
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(80, 0)
 	cmd := mv.Init()
 	require.NotNil(t, cmd)

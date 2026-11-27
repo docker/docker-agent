@@ -45,7 +45,7 @@ short-circuit. We want this benchmark to reflect real assistant traffic.
 // be roughly half the cost of two uncached renders.
 func BenchmarkRenderRepeated(b *testing.B) {
 	msg := types.Agent(types.MessageTypeAssistant, "agent", streamingMarkdownContent)
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(100, 0)
 
 	b.ReportAllocs()
@@ -61,7 +61,7 @@ func BenchmarkRenderRepeated(b *testing.B) {
 // same content.
 func BenchmarkRenderRepeatedUncached(b *testing.B) {
 	msg := types.Agent(types.MessageTypeAssistant, "agent", streamingMarkdownContent)
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(100, 0)
 
 	b.ReportAllocs()
@@ -78,7 +78,7 @@ func BenchmarkRenderRepeatedUncached(b *testing.B) {
 // rendered twice (e.g. View() then Height()), which is the common case.
 func BenchmarkStreamingChunks(b *testing.B) {
 	msg := types.Agent(types.MessageTypeAssistant, "agent", "")
-	mv := New(animation.NewRuntime(), msg, nil)
+	mv := New(animation.NewRuntime(), msg)
 	mv.SetSize(100, 0)
 
 	const chunkCount = 64

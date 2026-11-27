@@ -7,9 +7,8 @@ const path = require("node:path");
 const { before, it } = require("node:test");
 const { bootDockerAgent } = require("./boot.js");
 
-// The packed binary is 35.7 MiB. Linking a second provider SDK, or an engine
-// that defeats the linker's method pruning, costs far more than the headroom.
-const sizeBudget = 38 * 1024 * 1024;
+// With either dependency optimization missing, the build exceeds 32 MiB.
+const sizeBudget = 32 * 1024 * 1024;
 
 const yaml = `
 agents:
@@ -27,8 +26,18 @@ it("stays within the size budget", () => {
   assert.ok(size <= sizeBudget, `docker-agent.wasm is ${(size / 2 ** 20).toFixed(2)} MiB, over the ${sizeBudget / 2 ** 20} MiB budget`);
 });
 
-it("creates a session", async () => {
+it("creates an OpenAI session", async () => {
   const session = await dockerAgent.createSession({ yaml, env: { OPENAI_API_KEY: "k" } });
+  await session.close();
+});
+
+it("creates an Anthropic session", async () => {
+  const anthropicYaml = `
+agents:
+  root:
+    model: anthropic/claude-sonnet-4-6
+`;
+  const session = await dockerAgent.createSession({ yaml: anthropicYaml, env: { ANTHROPIC_API_KEY: "k" } });
   await session.close();
 });
 

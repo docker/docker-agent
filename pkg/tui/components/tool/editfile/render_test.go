@@ -193,3 +193,73 @@ func TestEditFileViewShowsDiffWhenPostEditCommandFails(t *testing.T) {
 	assert.Contains(t, output, "new")
 	assert.NotContains(t, output, "Edit #")
 }
+
+func TestRenderDiffGutterSignsAndHunkHeaders(t *testing.T) {
+	t.Parallel()
+	var lines []string
+	for i := 1; i <= 25; i++ {
+		lines = append(lines, "line")
+	}
+	before := strings.Join(lines, "\n") + "\n"
+	lines[1] = "changed top"
+	lines[23] = "changed bottom"
+	after := strings.Join(lines, "\n") + "\n"
+
+	meta, err := filesystem.NewEditFileMeta("sample.txt", before, after)
+	require.NoError(t, err)
+	require.Greater(t, len(meta.Hunks), 1)
+
+	msg := &types.Message{
+		ToolCall:   tools.ToolCall{ID: t.Name()},
+		ToolStatus: types.ToolStatusCompleted,
+		ToolResult: &tools.ToolCallResult{Meta: meta},
+	}
+
+	for _, split := range []bool{false, true} {
+		out := ansi.Strip(renderEditFile(msg, 120, split))
+		assert.Contains(t, out, "- line")
+		assert.Contains(t, out, "+ changed top")
+		assert.Contains(t, out, "+ changed bottom")
+		assert.Contains(t, out, "@@ -")
+	}
+
+	narrowHeader := ansi.Strip(renderHunkHeader(meta.Hunks[1], 12))
+	assert.LessOrEqual(t, len([]rune(narrowHeader)), 12)
+	assert.Empty(t, renderHunkHeader(meta.Hunks[1], 0))
+}
+
+func TestRenderDiffFiveDigitLineNumbersKeepRowWidth(t *testing.T) {
+	t.Parallel()
+	hunks := []*udiff.Hunk{{
+		FromLine: 10000,
+		ToLine:   9999,
+		Lines: []udiff.Line{
+			{Kind: udiff.Equal, Content: strings.Repeat("a", 150) + "\n"},
+			{Kind: udiff.Delete, Content: "old line\n"},
+			{Kind: udiff.Insert, Content: "new line\n"},
+		},
+	}}
+
+	for _, tc := range []struct {
+		name  string
+		split bool
+		width int
+	}{
+		{"unified dual", false, 80},
+		{"unified narrow", false, 40},
+		{"split", true, 120},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out string
+			if tc.split {
+				out = renderSplitDiffWithSyntaxHighlight(hunks, "file.txt", tc.width)
+			} else {
+				out = renderDiffWithSyntaxHighlight(hunks, "file.txt", tc.width)
+			}
+			for line := range strings.SplitSeq(out, "\n") {
+				assert.Len(t, []rune(ansi.Strip(line)), tc.width, "line=%q", ansi.Strip(line))
+			}
+		})
+	}
+}

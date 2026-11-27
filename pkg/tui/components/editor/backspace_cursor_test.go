@@ -4,9 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/docker/docker-agent/pkg/tui/core/input"
 )
 
 func splitLines(s string) []string {
@@ -19,7 +20,7 @@ func TestBackspaceCursorPosition(t *testing.T) {
 	t.Run("backspace on middle line keeps cursor on same line", func(t *testing.T) {
 		t.Parallel()
 
-		ta := textarea.New()
+		ta := input.NewArea()
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()
@@ -64,7 +65,7 @@ func TestBackspaceCursorPosition(t *testing.T) {
 	t.Run("multiple backspaces then type", func(t *testing.T) {
 		t.Parallel()
 
-		ta := textarea.New()
+		ta := input.NewArea()
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()
@@ -108,7 +109,7 @@ func TestBackspaceOnSoftWrappedLine(t *testing.T) {
 	t.Run("backspace after newline on soft-wrapped text", func(t *testing.T) {
 		t.Parallel()
 
-		ta := textarea.New()
+		ta := input.NewArea()
 		ta.SetWidth(20) // Small width to force wrapping
 		ta.SetHeight(10)
 		ta.Focus()

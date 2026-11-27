@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
@@ -841,6 +842,37 @@ func (s *headerCaptureMCPServer) valuesSince(from int, header string) []string {
 	return out
 }
 
+func TestNewRemoteToolsetFromConfig(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemoryTokenStore()
+	ctx := WithOAuthTokenStore(t.Context(), store)
+	env := &mutableEnvProvider{vals: map[string]string{"URL": "https://example.com/mcp", "TOKEN": "initial"}}
+	cfg := latest.Toolset{
+		Remote: latest.Remote{
+			URL:           "${env.URL}",
+			TransportType: "streamable",
+			Headers:       map[string]string{"X-Token": "${env.TOKEN}"},
+			OAuth:         &latest.RemoteOAuthConfig{ClientID: "demo"},
+			StandaloneSSE: true,
+		},
+		AllowPrivateIPs: new(true),
+		Lifecycle:       &latest.LifecycleConfig{CallTimeout: latest.Duration{Duration: time.Minute}},
+	}
+	ts := NewRemoteToolsetFromConfig(ctx, cfg, env)
+	assert.False(t, ts.IsStarted())
+	assert.Equal(t, time.Minute, ts.callTimeout)
+	client := ts.mcpClient.(*remoteMCPClient)
+	assert.Same(t, store, client.tokenStore)
+	assert.Equal(t, cfg.Remote.OAuth, client.oauthConfig)
+	assert.True(t, client.standaloneSSE)
+	assert.True(t, client.allowPrivateIPs)
+
+	env.set("TOKEN", "rotated")
+	assert.Equal(t, "https://example.com/mcp", client.url)
+	assert.Equal(t, "rotated", client.expandHeaders(ctx, client.headers)["X-Token"])
+}
+
 // TestRemoteClient_ExpandsEnvHeadersPerRequest is the stale-token regression
 // test: a configured header referencing ${env.X} must be re-expanded on every
 // HTTP request of a live connection (same long-lived http.Client/transport),
@@ -1163,8 +1195,6 @@ func TestRemoteToolset_SurvivesSubscriptionsListenRejection(t *testing.T) {
 	}
 	assert.LessOrEqual(t, srv.handshakes(), int64(1),
 		"handshake must run at most once (discover=%d initialize=%d)", srv.discovers.Load(), srv.initializes.Load())
-	// The pinned go-sdk (with go-sdk#1193) sends exactly one
-	// subscriptions/listen probe and tolerates its rejection.
 	assert.Equal(t, int64(1), srv.listens.Load(),
 		"subscriptions/listen probe must run exactly once, not be retried in a loop")
 	assert.Equal(t, lifecycle.StateReady, ts.State().State, "toolset must stay Ready through the observation window")

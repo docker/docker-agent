@@ -131,9 +131,9 @@ func TestBuildDMRChoices(t *testing.T) {
 		t.Parallel()
 
 		r := dmrRuntime(func(context.Context) ([]string, error) {
-			return []string{"ai/qwen3:latest", "ai/gemma3:latest"}, nil
+			return []string{"ai/qwen3:latest", "ai/alias", "ai/gemma3:latest", "ai/gemma3:latest"}, nil
 		}, nil, map[string]latest.ModelConfig{
-			"local": {Provider: "dmr", Model: "ai/qwen3:latest"},
+			"dmr/ai/alias": {Provider: "dmr", Model: "ai/qwen3:latest"},
 		})
 
 		assert.Equal(t, []string{"dmr/ai/gemma3:latest"}, refsOf(r.buildDMRChoices(t.Context())))

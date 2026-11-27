@@ -31,18 +31,19 @@ type contentRenderer func(contentWidth, maxHeight int) []string
 type readOnlyScrollDialog struct {
 	BaseDialog
 
-	scrollview *scrollview.Model
-	closeKey   key.Binding
-	size       readOnlyScrollDialogSize
-	render     contentRenderer
-	helpKeys   []string // pairs of [key, description] for the footer
+	scrollview  *scrollview.Model
+	closeKey    key.Binding
+	size        readOnlyScrollDialogSize
+	headerLines int
+	render      contentRenderer
+	helpKeys    []string // pairs of [key, description] for the footer
 }
 
 // Dialog chrome: border (top+bottom=2) + padding (top+bottom=2).
 const dialogChrome = 4
 
-// Fixed lines outside the scrollable region: header (title + separator + space) + footer (space + help).
-const fixedLines = 5
+// The footer contains a blank line and the help keys.
+const footerLines = 2
 
 // newReadOnlyScrollDialog creates a new read-only scrollable dialog.
 func newReadOnlyScrollDialog(
@@ -54,10 +55,11 @@ func newReadOnlyScrollDialog(
 			scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
 			scrollview.WithReserveScrollbarSpace(true),
 		),
-		closeKey: key.NewBinding(key.WithKeys("esc", "enter", "q"), key.WithHelp("Esc", "close")),
-		size:     size,
-		render:   render,
-		helpKeys: []string{"↑↓", "scroll", "Esc", "close"},
+		closeKey:    key.NewBinding(key.WithKeys("esc", "enter", "q"), key.WithHelp("Esc", "close")),
+		size:        size,
+		headerLines: 3,
+		render:      render,
+		helpKeys:    []string{"↑↓", "scroll", "Esc", "close"},
 	}
 }
 
@@ -94,14 +96,14 @@ func (d *readOnlyScrollDialog) dialogWidth() (dialogWidth, contentWidth int) {
 func (d *readOnlyScrollDialog) maxViewport() int {
 	s := d.size
 	maxHeight := min(d.Height()*s.heightPercent/100, s.heightMax)
-	return max(1, maxHeight-fixedLines-dialogChrome)
+	return max(1, maxHeight-d.headerLines-footerLines-dialogChrome)
 }
 
 // dialogHeight computes the actual dialog height based on content and viewport.
 func (d *readOnlyScrollDialog) dialogHeight(contentLineCount int) int {
 	s := d.size
 	maxHeight := min(d.Height()*s.heightPercent/100, s.heightMax)
-	needed := contentLineCount + fixedLines + dialogChrome
+	needed := contentLineCount + d.headerLines + footerLines + dialogChrome
 	return min(needed, maxHeight)
 }
 
@@ -118,8 +120,7 @@ func (d *readOnlyScrollDialog) View() string {
 	maxViewport := d.maxViewport()
 	allLines := d.render(contentWidth, maxViewport)
 
-	const headerLines = 3 // title + separator + space
-	contentLines := allLines[headerLines:]
+	contentLines := allLines[d.headerLines:]
 
 	// Viewport: show all content if it fits, otherwise cap at maxViewport.
 	viewport := min(len(contentLines), maxViewport)
@@ -128,7 +129,7 @@ func (d *readOnlyScrollDialog) View() string {
 	d.scrollview.SetSize(regionWidth, viewport)
 
 	dialogRow, dialogCol := d.Position()
-	d.scrollview.SetPosition(dialogCol+3, dialogRow+2+headerLines)
+	d.scrollview.SetPosition(dialogCol+3, dialogRow+2+d.headerLines)
 	d.scrollview.SetContent(contentLines, len(contentLines))
 
 	// Use ViewWithLines to guarantee exactly `viewport` lines of output.
@@ -139,8 +140,8 @@ func (d *readOnlyScrollDialog) View() string {
 	}
 	scrollOutLines = scrollOutLines[:viewport]
 
-	parts := make([]string, 0, headerLines+viewport+2)
-	parts = append(parts, allLines[:headerLines]...)
+	parts := make([]string, 0, d.headerLines+viewport+footerLines)
+	parts = append(parts, allLines[:d.headerLines]...)
 	parts = append(parts, scrollOutLines...)
 	parts = append(parts, "", RenderHelpKeys(regionWidth, d.helpKeys...))
 

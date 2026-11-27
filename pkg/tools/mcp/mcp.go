@@ -19,6 +19,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -31,10 +32,29 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 	"github.com/docker/docker-agent/pkg/tools/workingdir"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // CreateToolSet is used by the tools registry.
 func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	ts, err := createToolSet(ctx, toolset, runConfig)
+	if err != nil {
+		return nil, err
+	}
+	userSettings := userconfig.Get()
+	if setter, ok := ts.(interface{ SetExperimentalEvents(enabled bool) }); ok {
+		setter.SetExperimentalEvents(userSettings.MCPEventsEnabled())
+	}
+	if setter, ok := ts.(interface{ SetExperimentalSkills(enabled bool) }); ok {
+		setter.SetExperimentalSkills(userSettings.MCPSkillsEnabled())
+	}
+	if setter, ok := ts.(interface{ SetExperimentalTasks(enabled bool) }); ok {
+		setter.SetExperimentalTasks(userSettings.MCPTasksEnabled())
+	}
+	return ts, nil
+}
+
+func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
 	envProvider := runConfig.EnvProvider()
 	cwd := workingdir.Resolve(toolset.WorkingDir, runConfig.WorkingDir)
 
@@ -113,30 +133,40 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		return NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, cwd, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
 
 	case toolset.Remote.URL != "":
-		// The URL is expanded once: it identifies the connection for the
-		// toolset's lifetime. Headers are deliberately NOT expanded here —
-		// they may reference ${env.X} values backed by dynamic providers
-		// (e.g. rotating tokens), so the remote client re-expands them on
-		// every HTTP request (see remoteMCPClient.expandHeaders).
-		remoteURL := js.NewJsExpander(envProvider).Expand(ctx, toolset.Remote.URL, nil)
-
-		ts := newRemoteToolset(
-			toolset.Name,
-			remoteURL,
-			toolset.Remote.TransportType,
-			toolset.Remote.Headers,
-			toolset.Remote.OAuth,
-			toolset.AllowPrivateIPsEnabled(),
-			envProvider,
-			oauthTokenStoreFromContext(ctx),
-			lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
-		)
-		ts.SetStandaloneSSE(toolset.Remote.StandaloneSSE)
-		return ts, nil
+		return remoteToolsetFromConfig(ctx, toolset, envProvider), nil
 
 	default:
 		return nil, errors.New("mcp toolset requires either ref, command, or remote configuration")
 	}
+}
+
+// NewRemoteToolsetFromConfig builds an unstarted toolset for a validated remote.url declaration.
+func NewRemoteToolsetFromConfig(ctx context.Context, toolset latest.Toolset, envProvider environment.Provider) *Toolset {
+	ts := remoteToolsetFromConfig(ctx, toolset, envProvider)
+	userSettings := userconfig.Get()
+	ts.SetExperimentalEvents(userSettings.MCPEventsEnabled())
+	ts.SetExperimentalSkills(userSettings.MCPSkillsEnabled())
+	ts.SetExperimentalTasks(userSettings.MCPTasksEnabled())
+	return ts
+}
+
+func remoteToolsetFromConfig(ctx context.Context, toolset latest.Toolset, envProvider environment.Provider) *Toolset {
+	// The URL identifies the connection; headers may rotate between requests.
+	remoteURL := js.NewJsExpander(envProvider).Expand(ctx, toolset.Remote.URL, nil)
+
+	ts := newRemoteToolset(
+		toolset.Name,
+		remoteURL,
+		toolset.Remote.TransportType,
+		toolset.Remote.Headers,
+		toolset.Remote.OAuth,
+		toolset.AllowPrivateIPsEnabled(),
+		envProvider,
+		oauthTokenStoreFromContext(ctx),
+		lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
+	)
+	ts.SetStandaloneSSE(toolset.Remote.StandaloneSSE)
+	return ts
 }
 
 type mcpClient interface {
@@ -718,11 +748,36 @@ func (ts *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 
 	slog.DebugContext(ctx, "Listing MCP tools (cache miss)", "server", ts.logID)
 
+	var eventToolsList []tools.Tool
+	if client, ok := ts.mcpClient.(interface {
+		eventTools(prefix string) []tools.Tool
+	}); ok {
+		eventToolsList = client.eventTools(ts.name)
+		if ts.callTimeout > 0 {
+			for i := range eventToolsList {
+				h := eventToolsList[i].Handler
+				eventToolsList[i].Handler = func(ctx context.Context, call tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
+					callCtx, cancel := context.WithTimeout(ctx, ts.callTimeout)
+					defer cancel()
+					res, err := h(callCtx, call, rt)
+					if err != nil && ctx.Err() == nil && errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+						return nil, fmt.Errorf("%w after %s", tools.ErrCallTimeout, ts.callTimeout)
+					}
+					return res, err
+				}
+			}
+		}
+	}
+
 	resp := ts.mcpClient.ListTools(ctx, &mcp.ListToolsParams{})
 
 	var toolsList []tools.Tool
 	for t, err := range resp {
 		if err != nil {
+			var rpcErr *jsonrpc.Error
+			if (len(eventToolsList) > 0 || ts.SupportsMCPSkills()) && errors.As(err, &rpcErr) && rpcErr.Code == jsonrpc.CodeMethodNotFound {
+				break
+			}
 			return nil, err
 		}
 
@@ -746,6 +801,8 @@ func (ts *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 
 		slog.DebugContext(ctx, "Added MCP tool", "tool", name)
 	}
+
+	toolsList = append(toolsList, eventToolsList...)
 
 	slog.DebugContext(ctx, "Listed MCP tools", "count", len(toolsList), "server", ts.logID)
 
@@ -833,8 +890,9 @@ func (ts *Toolset) callTool(ctx context.Context, toolCall tools.ToolCall, _ tool
 
 	// If the call failed with a connection or session error (e.g. the
 	// server restarted), trigger or wait for a reconnection and retry
-	// the call once.
-	if err != nil && !ts.sessionOwned && isConnectionError(err) && callCtx.Err() == nil {
+	// the call once. Skip retry if a task was already created so we never
+	// duplicate a non-idempotent async tool call.
+	if err != nil && !ts.sessionOwned && !isTaskExecutionError(err) && isConnectionError(err) && callCtx.Err() == nil {
 		slog.WarnContext(ctx, "MCP call failed, forcing reconnect and retrying", "tool", toolCall.Function.Name, "server", ts.logID, "error", err)
 		if waitErr := ts.supervisor.RestartAndWait(callCtx, sessionMissingRetryTimeout); waitErr != nil {
 			return nil, ts.classifyCallToolError(ctx, callCtx, toolCall, start, fmt.Errorf("failed to reconnect after call failure: %w", waitErr))

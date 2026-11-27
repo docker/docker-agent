@@ -171,6 +171,17 @@ func builtInSessionCommands() []commands.Item {
 			},
 		},
 		{
+			ID:           "session.btw",
+			Label:        "By the way",
+			SlashCommand: "/btw",
+			Description:  "Ask a side question without affecting the conversation (usage: /btw [question])",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(arg string) tea.Cmd {
+				return core.CmdHandler(messages.AskSideQuestionMsg{Question: strings.TrimSpace(arg)})
+			},
+		},
+		{
 			ID:           "session.exit",
 			Label:        "Exit",
 			SlashCommand: "/exit",
@@ -749,7 +760,7 @@ func BuildCommandCategories(ctx context.Context, application *app.App) []command
 	}
 
 	// Add skill commands if skills are enabled for the current agent
-	skillsList := application.CurrentAgentSkills()
+	skillsList := application.CurrentAgentSkills(ctx)
 	if len(skillsList) > 0 {
 		skillCommands := make([]commands.Item, 0, len(skillsList))
 		for _, skill := range skillsList {

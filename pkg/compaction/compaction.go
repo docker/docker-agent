@@ -70,7 +70,7 @@ func ShouldCompact(inputTokens, outputTokens, addedTokens, contextLimit int64, t
 	if contextLimit <= 0 {
 		return false
 	}
-	if threshold <= 0 || threshold > 1 {
+	if !(threshold > 0 && threshold <= 1) {
 		threshold = DefaultThreshold
 	}
 	return (inputTokens + outputTokens + addedTokens) > int64(float64(contextLimit)*threshold)
