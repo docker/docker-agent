@@ -9,7 +9,6 @@ import (
 	"github.com/docker/portcullis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/internal/portcullistest"
 	"github.com/docker/docker-agent/pkg/modelerrors"
@@ -17,7 +16,7 @@ import (
 
 // TestWrapGeminiError_ValueTypeAPIError is the regression for the pointer-vs-
 // value bug: google.golang.org/genai returns APIError by value (its Error()
-// method has a value receiver), so a type assertion for *genai.APIError never
+// method has a value receiver), so a type assertion for *APIError never
 // matches and every Gemini API error previously passed through unwrapped,
 // with no *modelerrors.StatusError and no category. This reproduces the
 // exact shape observed for a Gemini 400 with an empty body (empty Message,
@@ -25,7 +24,7 @@ import (
 func TestWrapGeminiError_ValueTypeAPIError(t *testing.T) {
 	t.Parallel()
 
-	apiErr := genai.APIError{Code: http.StatusBadRequest, Status: "400 Bad Request"}
+	apiErr := APIError{Code: http.StatusBadRequest, Status: "400 Bad Request"}
 
 	wrapped := wrapGeminiError(apiErr)
 
@@ -46,7 +45,7 @@ func TestWrapGeminiError_ValueTypeAPIError(t *testing.T) {
 func TestWrapGeminiError_NonBadRequestPassesThroughRawMessage(t *testing.T) {
 	t.Parallel()
 
-	apiErr := genai.APIError{Code: http.StatusTooManyRequests, Status: "429 Too Many Requests", Message: "rate limit exceeded"}
+	apiErr := APIError{Code: http.StatusTooManyRequests, Status: "429 Too Many Requests", Message: "rate limit exceeded"}
 
 	wrapped := wrapGeminiError(apiErr)
 
@@ -86,7 +85,7 @@ func TestAPIRejectionError_RedactsSecretsAndNeverLeaksDetails(t *testing.T) {
 
 	secret := portcullistest.FakeGitHubPAT("1234567890abcdefghijklmnopqrst")
 
-	apiErr := genai.APIError{
+	apiErr := APIError{
 		Code:    http.StatusBadRequest,
 		Status:  "400 Bad Request",
 		Message: "invalid argument: token " + secret + " is not authorized",
@@ -117,7 +116,7 @@ func TestWrapGeminiError_FormatErrorIsActionableAndSafe(t *testing.T) {
 
 	secret := portcullistest.FakeGitHubPAT("abcdefghijklmnopqrstuvwxyz0123")
 
-	apiErr := genai.APIError{
+	apiErr := APIError{
 		Code:    http.StatusBadRequest,
 		Status:  "400 Bad Request",
 		Message: "response_modalities: token " + secret + " rejected",
@@ -142,7 +141,7 @@ func TestWrapGeminiError_FormatErrorIsActionableAndSafe(t *testing.T) {
 func TestWrapGeminiError_ContextOverflowClassificationSurvivesWrapping(t *testing.T) {
 	t.Parallel()
 
-	apiErr := genai.APIError{
+	apiErr := APIError{
 		Code:    http.StatusBadRequest,
 		Status:  "400 Bad Request",
 		Message: "The input token count (123456) exceeds the maximum number of tokens allowed (100000) for this model.",
@@ -166,7 +165,7 @@ func TestWrapGeminiError_ContextOverflowClassificationSurvivesWrapping(t *testin
 func TestWrapGeminiError_TransientFunctionResponseIsRetryable(t *testing.T) {
 	t.Parallel()
 
-	apiErr := genai.APIError{
+	apiErr := APIError{
 		Code:   http.StatusBadRequest,
 		Status: "400 Bad Request",
 		Message: "Please ensure that the number of function response parts is equal to the number of " +
@@ -193,7 +192,7 @@ func TestWrapGeminiError_TransientFunctionResponseIsRetryable(t *testing.T) {
 func TestWrapGeminiError_AuthMessageStaysInformative(t *testing.T) {
 	t.Parallel()
 
-	apiErr := genai.APIError{
+	apiErr := APIError{
 		Code:    http.StatusBadRequest,
 		Status:  "400 Bad Request",
 		Message: "API key not valid. Please pass a valid API key.",
@@ -269,7 +268,7 @@ func TestWrapGeminiError_JSONShapedMessageEnvelopeStaysInertAndSafe(t *testing.T
 	t.Parallel()
 
 	secret := portcullistest.FakeGitHubPAT("0123456789abcdefghijklmnopqrst")
-	apiErr := genai.APIError{
+	apiErr := APIError{
 		Code:   http.StatusBadRequest,
 		Status: "400 Bad Request",
 		Message: `Upstream gateway returned {"error":{"message":"token ` + secret +

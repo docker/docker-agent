@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -41,44 +40,33 @@ func rootExtras(t *testing.T, schema any) map[string]any {
 	return m
 }
 
-func makeTools(t *testing.T, reqTools ...tools.Tool) []anthropic.ToolUnionParam {
+func makeTools(t *testing.T, reqTools ...tools.Tool) []ToolParam {
 	t.Helper()
 	params, err := convertTools(reqTools)
 	require.NoError(t, err)
 	for i, tool := range reqTools {
-		params[i].OfTool.InputSchema.ExtraFields = rootExtras(t, tool.Parameters)
+		params[i].InputSchema.ExtraFields = rootExtras(t, tool.Parameters)
 	}
 	return params
 }
 
-func makeBetaTools(t *testing.T, reqTools ...tools.Tool) []anthropic.BetaToolUnionParam {
+func makeBetaTools(t *testing.T, reqTools ...tools.Tool) []ToolParam {
 	t.Helper()
-	params, err := convertBetaTools(reqTools)
-	require.NoError(t, err)
-	for i, tool := range reqTools {
-		params[i].OfTool.InputSchema.ExtraFields = rootExtras(t, tool.Parameters)
-	}
-	return params
+	return makeTools(t, reqTools...)
 }
 
-func toolStrictFlags(t *testing.T, params []anthropic.ToolUnionParam) map[string]bool {
+func toolStrictFlags(t *testing.T, params []ToolParam) map[string]bool {
 	t.Helper()
 	flags := map[string]bool{}
 	for _, p := range params {
-		require.NotNil(t, p.OfTool)
-		flags[p.OfTool.Name] = p.OfTool.Strict.Valid() && p.OfTool.Strict.Value
+		flags[p.Name] = p.Strict != nil && *p.Strict
 	}
 	return flags
 }
 
-func betaStrictFlags(t *testing.T, params []anthropic.BetaToolUnionParam) map[string]bool {
+func betaStrictFlags(t *testing.T, params []ToolParam) map[string]bool {
 	t.Helper()
-	flags := map[string]bool{}
-	for _, p := range params {
-		require.NotNil(t, p.OfTool)
-		flags[p.OfTool.Name] = p.OfTool.Strict.Valid() && p.OfTool.Strict.Value
-	}
-	return flags
+	return toolStrictFlags(t, params)
 }
 
 func TestStrictToolsOpt(t *testing.T) {
@@ -125,16 +113,16 @@ func TestStrictTools_OptionalPropertiesStayOptional(t *testing.T) {
 		"units": map[string]any{"type": "string", "enum": []any{"c", "f"}},
 	}, "city")
 	params := makeTools(t, strictTool("weather", schema))
-	before, err := json.Marshal(params[0].OfTool.InputSchema)
+	before, err := json.Marshal(params[0].InputSchema)
 	require.NoError(t, err)
 
 	require.NoError(t, strictToolsSelection{all: true}.apply(params))
 
 	assert.Equal(t, map[string]bool{"weather": true}, toolStrictFlags(t, params))
-	after, err := json.Marshal(params[0].OfTool.InputSchema)
+	after, err := json.Marshal(params[0].InputSchema)
 	require.NoError(t, err)
 	assert.JSONEq(t, string(before), string(after), "input_schema must be untouched")
-	assert.Equal(t, []string{"city"}, params[0].OfTool.InputSchema.Required)
+	assert.Equal(t, []string{"city"}, params[0].InputSchema.Required)
 }
 
 func TestStrictTools_DoesNotMutateCallerSchema(t *testing.T) {
@@ -152,7 +140,7 @@ func TestStrictTools_DoesNotMutateCallerSchema(t *testing.T) {
 	current, err := json.Marshal(schema)
 	require.NoError(t, err)
 	assert.JSONEq(t, string(snapshot), string(current))
-	assert.True(t, params[0].OfTool.Strict.Value)
+	assert.True(t, params[0].Strict != nil && *params[0].Strict)
 }
 
 func TestStrictTools_Eligibility(t *testing.T) {
@@ -276,12 +264,12 @@ func TestStrictTools_Eligibility(t *testing.T) {
 			err := strictToolsSelection{names: []string{"t"}}.apply(params)
 			if tt.wantErr == "" {
 				require.NoError(t, err)
-				assert.True(t, params[0].OfTool.Strict.Value)
+				assert.True(t, params[0].Strict != nil && *params[0].Strict)
 				return
 			}
 			require.ErrorContains(t, err, `strict_tools: tool "t": `)
 			require.ErrorContains(t, err, tt.wantErr)
-			assert.False(t, params[0].OfTool.Strict.Valid(), "ineligible tool must be left untouched")
+			assert.Nil(t, params[0].Strict, "ineligible tool must be left untouched")
 		})
 	}
 }
@@ -315,13 +303,13 @@ func TestStrictTools_ExplicitNames(t *testing.T) {
 		params := makeTools(t, strictTool("a", good), strictTool("b", open))
 		err := strictToolsSelection{names: []string{"a", "b"}}.apply(params)
 		require.ErrorContains(t, err, `strict_tools: tool "b"`)
-		assert.True(t, params[0].OfTool.Strict.Value)
+		assert.True(t, params[0].Strict != nil && *params[0].Strict)
 	})
 
 	t.Run("missing named tool is tolerated", func(t *testing.T) {
 		params := makeTools(t, strictTool("a", good))
 		require.NoError(t, strictToolsSelection{names: []string{"a", "not_here"}}.apply(params))
-		assert.True(t, params[0].OfTool.Strict.Value)
+		assert.True(t, params[0].Strict != nil && *params[0].Strict)
 	})
 }
 
@@ -392,24 +380,14 @@ func TestStrictTools_StandardBetaParity(t *testing.T) {
 
 	sel := strictToolsSelection{all: true}
 	require.NoError(t, sel.apply(std))
-	require.NoError(t, sel.applyBeta(beta))
+	require.NoError(t, sel.apply(beta))
 	assert.Equal(t, toolStrictFlags(t, std), betaStrictFlags(t, beta))
 	assert.Equal(t, map[string]bool{"good": true, "open": false, "bad_kw": false}, betaStrictFlags(t, beta))
 
 	named := strictToolsSelection{names: []string{"bad_kw"}}
 	stdErr := named.apply(std)
-	betaErr := named.applyBeta(beta)
+	betaErr := named.apply(beta)
 	require.Error(t, stdErr)
 	require.Error(t, betaErr)
 	assert.Equal(t, stdErr.Error(), betaErr.Error())
-}
-
-func TestStrictTools_IgnoresNonCustomTools(t *testing.T) {
-	t.Parallel()
-
-	params := []anthropic.ToolUnionParam{
-		{OfWebSearchTool20250305: &anthropic.WebSearchTool20250305Param{}},
-	}
-	require.NoError(t, strictToolsSelection{all: true}.apply(params))
-	require.NoError(t, strictToolsSelection{names: []string{"web_search"}}.apply(params))
 }

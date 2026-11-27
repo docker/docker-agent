@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
 )
 
 const (
@@ -68,7 +66,7 @@ func newWSPool(wsURL string, headerFn func(ctx context.Context) (http.Header, er
 // message, and returns a responseEventStream that yields server events.
 func (p *wsPool) Stream(
 	ctx context.Context,
-	params responses.ResponseNewParams,
+	params ResponseRequest,
 ) (responseEventStream, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -79,8 +77,8 @@ func (p *wsPool) Stream(
 	// Inject previous_response_id for server-side context caching when the
 	// caller hasn't already set one and we have a response from an earlier
 	// exchange on this pool.
-	if p.lastResponseID != "" && param.IsOmitted(params.PreviousResponseID) {
-		params.PreviousResponseID = param.NewOpt(p.lastResponseID)
+	if p.lastResponseID != "" && !params.PreviousResponseID.Set {
+		params.PreviousResponseID = NullableString{Set: true, Value: p.lastResponseID}
 	}
 
 	conn := p.conn
@@ -105,7 +103,7 @@ func (p *wsPool) Stream(
 }
 
 // dialLocked creates a privately owned connection. Caller must hold p.mu.
-func (p *wsPool) dialLocked(ctx context.Context, params responses.ResponseNewParams) (*pooledStream, error) {
+func (p *wsPool) dialLocked(ctx context.Context, params ResponseRequest) (*pooledStream, error) {
 	headers, err := p.headerFn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("websocket pool: headers: %w", err)
@@ -155,7 +153,7 @@ func (p *wsPool) Close() {
 
 // sendOnExisting sends a response.create on an already-open connection and
 // returns a wsStream that reads events from it.
-func sendOnExisting(conn *websocket.Conn, params responses.ResponseNewParams) (*wsStream, error) {
+func sendOnExisting(conn *websocket.Conn, params ResponseRequest) (*wsStream, error) {
 	if err := sendResponseCreate(conn, params); err != nil {
 		return nil, err
 	}
@@ -202,7 +200,7 @@ func (s *pooledStream) Next() bool {
 	return true
 }
 
-func (s *pooledStream) Current() responses.ResponseStreamEventUnion {
+func (s *pooledStream) Current() ResponseStreamEvent {
 	return s.inner.Current()
 }
 

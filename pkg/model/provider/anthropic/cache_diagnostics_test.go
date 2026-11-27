@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -52,7 +51,7 @@ func TestCacheDiagnostics_FirstTurnNullThenPreviousMessageID(t *testing.T) {
 
 	a1 := chatTurn(t, client, []chat.Message{user("u1")}, nil)
 	first := srv.request(t, 0)
-	assert.Contains(t, first.betas, anthropic.AnthropicBetaCacheDiagnosis2026_04_07)
+	assert.Contains(t, first.betas, AnthropicBetaCacheDiagnosis2026_04_07)
 	id, present := previousMessageID(t, first)
 	assert.True(t, present, "opt in with an explicit null: %s", first.raw)
 	assert.Nil(t, id)
@@ -132,7 +131,7 @@ func TestCacheDiagnostics_OffByDefault(t *testing.T) {
 	a1 := chatTurn(t, client, []chat.Message{user("u0"), prior, user("u1")}, nil)
 
 	req := srv.request(t, 0)
-	assert.NotContains(t, req.betas, anthropic.AnthropicBetaCacheDiagnosis2026_04_07)
+	assert.NotContains(t, req.betas, AnthropicBetaCacheDiagnosis2026_04_07)
 	assert.NotContains(t, req.body, "diagnostics")
 	require.NotNil(t, a1.ProviderState)
 	assert.Equal(t, &chat.CacheDiagnostics{Reason: "tools_changed", MissedInputTokens: 9}, a1.ProviderState.CacheDiagnostics,

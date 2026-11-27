@@ -13,7 +13,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -85,8 +84,8 @@ func TestNewRequestShape_ToolsAndBuiltIns(t *testing.T) {
 	allTools, err := convertToolsToGemini(requestTools)
 	require.NoError(t, err)
 	config.Tools = append(config.Tools, allTools...)
-	config.ToolConfig = &genai.ToolConfig{
-		FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAuto},
+	config.ToolConfig = &ToolConfig{
+		FunctionCallingConfig: &FunctionCallingConfig{Mode: FunctionCallingConfigModeAuto},
 	}
 	if len(config.Tools) > len(allTools) {
 		config.ToolConfig.IncludeServerSideToolInvocations = new(true)
@@ -98,7 +97,7 @@ func TestNewRequestShape_ToolsAndBuiltIns(t *testing.T) {
 	assert.ElementsMatch(t, []string{"google_search", "google_maps"}, shape.BuiltInToolKinds)
 	assert.Equal(t, 2, shape.FunctionToolCount)
 	assert.True(t, shape.HasToolConfig)
-	assert.Equal(t, string(genai.FunctionCallingConfigModeAuto), shape.FunctionCallingMode)
+	assert.Equal(t, string(FunctionCallingConfigModeAuto), shape.FunctionCallingMode)
 	assert.True(t, shape.ServerSideToolInvocation, "mixing built-in and function tools must set the server-side invocation flag")
 	assert.Equal(t, apiSurfaceVertexAI, shape.APISurface)
 }

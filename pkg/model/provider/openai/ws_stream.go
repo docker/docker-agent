@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/openai/openai-go/v3/responses"
 )
 
 const (
@@ -55,7 +54,7 @@ func (m wsCreateMessage) MarshalJSON() ([]byte, error) {
 // delivered via Current(), the next call to Next() returns false.
 type wsStream struct {
 	conn      *websocket.Conn
-	current   responses.ResponseStreamEventUnion
+	current   ResponseStreamEvent
 	err       error
 	done      atomic.Bool
 	closeOnce sync.Once
@@ -67,7 +66,7 @@ var _ responseEventStream = (*wsStream)(nil)
 
 // sendResponseCreate marshals params and writes a response.create message
 // on the given WebSocket connection.
-func sendResponseCreate(conn *websocket.Conn, params responses.ResponseNewParams) error {
+func sendResponseCreate(conn *websocket.Conn, params ResponseRequest) error {
 	paramsJSON, err := json.Marshal(params)
 	if err != nil {
 		return fmt.Errorf("websocket: marshal params: %w", err)
@@ -91,7 +90,7 @@ func dialWebSocket(
 	ctx context.Context,
 	wsURL string,
 	headers http.Header,
-	params responses.ResponseNewParams,
+	params ResponseRequest,
 ) (*wsStream, error) {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: wsHandshakeTimeout,
@@ -150,7 +149,7 @@ func (s *wsStream) Next() bool {
 			continue
 		}
 
-		var event responses.ResponseStreamEventUnion
+		var event ResponseStreamEvent
 		if err := json.Unmarshal(data, &event); err != nil {
 			s.err = fmt.Errorf("websocket unmarshal event: %w", err)
 			s.done.Store(true)
@@ -183,7 +182,7 @@ func (s *wsStream) Next() bool {
 }
 
 // Current returns the most recently decoded event.
-func (s *wsStream) Current() responses.ResponseStreamEventUnion {
+func (s *wsStream) Current() ResponseStreamEvent {
 	return s.current
 }
 

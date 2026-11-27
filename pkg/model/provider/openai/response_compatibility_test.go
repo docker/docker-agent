@@ -8,15 +8,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 )
 
 func TestResponseFeaturesAreOptIn(t *testing.T) {
@@ -37,11 +34,11 @@ func TestResponseFeaturesAreOptIn(t *testing.T) {
 			t.Parallel()
 			client := responseStateClient()
 			client.ModelConfig.ProviderOpts = tc.opts
-			var params responses.ResponseNewParams
+			var params ResponseRequest
 			ctx := httpclient.ContextWithSessionID(t.Context(), "session_1")
 			client.configureResponseState(ctx, &params, []chat.Message{responseStateMessage()})
 			assert.Equal(t, tc.output, len(params.Include) > 0)
-			assert.True(t, param.IsOmitted(params.PreviousResponseID), "SSE parameters must not acquire state chaining")
+			assert.False(t, params.PreviousResponseID.Set, "SSE parameters must not acquire state chaining")
 			assert.Equal(t, tc.output, len(client.replayResponse(responseStateMessage())) > 0)
 			events := decodeEvents(t, []map[string]any{{"type": "response.completed", "response": map[string]any{"id": "resp_2", "output": responseStateOutput()}}})
 			adapter := client.responseAdapter(ctx, &fakeEventStream{events: events})
@@ -73,10 +70,10 @@ func TestDefaultResponsesWireIgnoresStoredReplayMetadata(t *testing.T) {
 		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_new\",\"output\":[]}}\n\n")
 	}))
 	t.Cleanup(server.Close)
-	sdk := openai.NewClient(option.WithBaseURL(server.URL), option.WithAPIKey("test"))
+	sdk := oaistream.NewClient(oaistream.ClientConfig{BaseURL: server.URL, APIKey: "test"})
 	client := responseStateClient()
 	client.ModelConfig.ProviderOpts = nil
-	client.clientFn = func(context.Context) (*openai.Client, error) { return &sdk, nil }
+	client.clientFn = func(context.Context) (*oaistream.Client, error) { return sdk, nil }
 	stream, err := client.CreateResponseStream(t.Context(), []chat.Message{responseStateMessage(), {Role: chat.MessageRoleTool, ToolCallID: "call_1", Content: "ok"}}, nil)
 	require.NoError(t, err)
 	defer stream.Close()
@@ -123,7 +120,7 @@ func TestIncompleteResponseRetainsLegacyFinishReason(t *testing.T) {
 			message := chat.Message{Role: chat.MessageRoleAssistant, Content: "Partial", OpenAIResponse: state}
 			replay := client.replayResponse(message)
 			require.Len(t, replay, 1)
-			assert.Equal(t, responses.ResponseOutputMessageStatusInProgress, replay[0].OfOutputMessage.Status)
+			assert.Equal(t, "in_progress", replay[0].Status)
 		})
 	}
 }

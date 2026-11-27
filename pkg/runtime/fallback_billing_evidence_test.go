@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	sdk "github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -84,8 +82,8 @@ func TestFallbackBillingRuntimeEvidence(t *testing.T) {
 				Cost:         &latest.CostConfig{Input: 1, Output: 2, CacheRead: 3, CacheWrite: 4},
 				ProviderOpts: map[string]any{"fallbacks": []any{fallback}},
 			}
-			model, err := anthropic.NewClientFromFactory(t.Context(), &cfg, environment.NewMapEnvProvider(nil), func(context.Context) (sdk.Client, error) {
-				return sdk.NewClient(option.WithAPIKey("test-key"), option.WithBaseURL(server.URL())), nil
+			model, err := anthropic.NewClientFromFactory(t.Context(), &cfg, environment.NewMapEnvProvider(nil), func(context.Context) (*anthropic.APIClient, error) {
+				return anthropic.NewAPIClient(anthropic.APIClientConfig{APIKey: "test-key", BaseURL: server.URL()}), nil
 			})
 			require.NoError(t, err)
 			root := agent.New("root", "test", agent.WithModel(model),

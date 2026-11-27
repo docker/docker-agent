@@ -13,9 +13,6 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/responses"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -25,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -63,7 +61,7 @@ func TestResponseStateReplay(t *testing.T) {
 		require.NoError(t, err)
 		assert.JSONEq(t, string(want), string(got))
 	}
-	assert.Equal(t, "call_1", items[5].OfFunctionCallOutput.CallID.Value)
+	assert.Equal(t, "call_1", items[5].CallID)
 }
 
 func TestResponseStateDoesNotBypassEdits(t *testing.T) {
@@ -156,9 +154,13 @@ func TestCacheDiagnosticsScopedToHistory(t *testing.T) {
 				client.ModelConfig.Provider = tc.provider
 			}
 			client.ModelConfig.BaseURL = tc.baseURL
-			var params responses.ResponseNewParams
+			var params ResponseRequest
 			client.configureResponseState(httpclient.ContextWithSessionID(t.Context(), tc.sessionID), &params, []chat.Message{responseStateMessage()})
-			assert.Equal(t, tc.want, params.PromptCacheOptions.ComparisonResponseID.Value)
+			var got string
+			if params.PromptCacheOptions != nil {
+				got = params.PromptCacheOptions.ComparisonResponseID
+			}
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }
@@ -171,8 +173,8 @@ func TestToolSearchReplayHonorsCurrentCatalog(t *testing.T) {
 	require.Len(t, items, 5)
 	filtered := client.filterToolSearchHistory(items, nil)
 	for _, item := range filtered {
-		assert.Nil(t, item.OfToolSearchCall)
-		assert.Nil(t, item.OfToolSearchOutput)
+		assert.NotEqual(t, "tool_search_call", item.Type)
+		assert.NotEqual(t, "tool_search_output", item.Type)
 	}
 	items = client.replayResponse(responseStateMessage())
 	assert.Len(t, client.filterToolSearchHistory(items, []tools.Tool{{Name: "read"}}), 5)
@@ -196,9 +198,9 @@ func TestResponsesShortlistWire(t *testing.T) {
 		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"output\":[]}}\n\n")
 	}))
 	t.Cleanup(server.Close)
-	sdk := openai.NewClient(option.WithBaseURL(server.URL), option.WithAPIKey("test"))
+	sdk := oaistream.NewClient(oaistream.ClientConfig{BaseURL: server.URL, APIKey: "test"})
 	client := responseStateClient()
-	client.clientFn = func(context.Context) (*openai.Client, error) { return &sdk, nil }
+	client.clientFn = func(context.Context) (*oaistream.Client, error) { return sdk, nil }
 	client.ModelConfig.ProviderOpts = map[string]any{"cache_diagnostics": true, "native_tool_search": true}
 	messages := []chat.Message{responseStateMessage(), {Role: chat.MessageRoleTool, ToolCallID: "call_1", Content: "ok"}}
 	requestTools := []tools.Tool{{Name: "read", InCatalog: true, SearchOnly: true, Parameters: map[string]any{"type": "object"}}}
@@ -232,7 +234,7 @@ func TestCacheDiagnosticsLogging(t *testing.T) {
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(previous) })
-	var response responses.Response
+	var response ResponseObject
 	require.NoError(t, json.Unmarshal([]byte(`{"id":"resp_2","prompt_cache_diagnostics":{"type":"cache_miss","reason":"tools_changed","cache_missed_tokens":2048,"comparison_reusable_tokens":4096}}`), &response))
 	logCacheDiagnostics(httpclient.ContextWithSessionID(t.Context(), "session_1"), response)
 	assert.Contains(t, log.String(), `"reason":"tools_changed"`)
@@ -270,16 +272,17 @@ func TestResponseStatePreservesMultipleAssistantPhases(t *testing.T) {
 	message.OpenAIResponse.Output = append(message.OpenAIResponse.Output[:2], json.RawMessage(`{"type":"message","id":"msg_2","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Done.","annotations":[]}]}`))
 	items := responseStateClient().replayResponse(message)
 	require.Len(t, items, 3)
-	assert.Equal(t, responses.ResponseOutputMessagePhaseCommentary, items[1].OfOutputMessage.Phase)
-	assert.Equal(t, responses.ResponseOutputMessagePhaseFinalAnswer, items[2].OfOutputMessage.Phase)
+	assert.Contains(t, string(items[1].Raw), `"phase":"commentary"`)
+	assert.Contains(t, string(items[2].Raw), `"phase":"final_answer"`)
 }
 
 func TestResponseStateOrphanFunctionCall(t *testing.T) {
 	t.Parallel()
 	items := responseStateClient().convertMessagesToResponseInput(t.Context(), []chat.Message{responseStateMessage()})
 	require.Len(t, items, 6)
-	assert.Equal(t, "call_1", items[5].OfFunctionCallOutput.CallID.Value)
-	assert.Contains(t, items[5].OfFunctionCallOutput.Output.OfString.Value, "not executed")
+	assert.Equal(t, "call_1", items[5].CallID)
+	require.NotNil(t, items[5].Output)
+	assert.Contains(t, *items[5].Output, "not executed")
 }
 
 func TestResponseStateKeepsCompletedReasoningItem(t *testing.T) {

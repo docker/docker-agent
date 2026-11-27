@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
@@ -22,13 +22,13 @@ var minPNG = []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
 
 // countParts counts content parts across all converted user messages for which
 // pred returns true.
-func countParts(msgs []openai.ChatCompletionMessageParamUnion, pred func(openai.ChatCompletionContentPartUnionParam) bool) int {
+func countParts(msgs []oaistream.ChatMessage, pred func(oaistream.ContentPart) bool) int {
 	n := 0
 	for _, m := range msgs {
-		if m.OfUser == nil {
+		if m.Role != "user" {
 			continue
 		}
-		for _, p := range m.OfUser.Content.OfArrayOfContentParts {
+		for _, p := range m.ContentParts {
 			if pred(p) {
 				n++
 			}
@@ -37,12 +37,12 @@ func countParts(msgs []openai.ChatCompletionMessageParamUnion, pred func(openai.
 	return n
 }
 
-func countImageParts(msgs []openai.ChatCompletionMessageParamUnion) int {
-	return countParts(msgs, func(p openai.ChatCompletionContentPartUnionParam) bool { return p.OfImageURL != nil })
+func countImageParts(msgs []oaistream.ChatMessage) int {
+	return countParts(msgs, func(p oaistream.ContentPart) bool { return p.ImageURL != nil })
 }
 
-func countFileParts(msgs []openai.ChatCompletionMessageParamUnion) int {
-	return countParts(msgs, func(p openai.ChatCompletionContentPartUnionParam) bool { return p.OfFile != nil })
+func countFileParts(msgs []oaistream.ChatMessage) int {
+	return countParts(msgs, func(p oaistream.ContentPart) bool { return p.File != nil })
 }
 
 // docMessage returns a single user message carrying one inline document attachment.

@@ -31,11 +31,11 @@ func TestConvertDocumentResponseInput_StrategyB64_Image(t *testing.T) {
 	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, visionCaps)
 	require.NoError(t, err)
 	require.Len(t, parts, 1, "expected exactly one image part")
-	require.NotNil(t, parts[0].OfInputImage, "expected OfInputImage, not text")
-	assert.Nil(t, parts[0].OfInputText, "expected no text part for B64 image")
+	assert.Equal(t, "input_image", parts[0].Type, "expected OfInputImage, not text")
+	assert.Empty(t, parts[0].Text, "expected no text part for B64 image")
 
 	wantB64 := base64.StdEncoding.EncodeToString(minJPEG)
-	imageURL := parts[0].OfInputImage.ImageURL.Value
+	imageURL := parts[0].ImageURL
 	assert.Equal(t, "data:image/jpeg;base64,"+wantB64, imageURL)
 }
 
@@ -52,9 +52,9 @@ func TestConvertDocumentResponseInput_StrategyB64_PDF(t *testing.T) {
 	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, modelinfo.CapsWith(false, true))
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
-	require.NotNil(t, parts[0].OfInputFile)
-	assert.Equal(t, "report.pdf", parts[0].OfInputFile.Filename.Value)
-	assert.Equal(t, "data:application/pdf;base64,JVBERg==", parts[0].OfInputFile.FileData.Value)
+	assert.Equal(t, "input_file", parts[0].Type)
+	assert.Equal(t, "report.pdf", parts[0].Filename)
+	assert.Equal(t, "data:application/pdf;base64,JVBERg==", parts[0].FileData)
 }
 
 func TestConvertDocumentResponseInput_StrategyB64_ImageDropped(t *testing.T) {
@@ -82,8 +82,8 @@ func TestConvertDocumentResponseInput_StrategyTXT(t *testing.T) {
 	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
-	require.NotNil(t, parts[0].OfInputText)
-	text := parts[0].OfInputText.Text
+	assert.Equal(t, "input_text", parts[0].Type)
+	text := parts[0].Text
 	assert.Contains(t, text, "spec-md")
 	assert.Contains(t, text, "text-markdown")
 	assert.Contains(t, text, "## API Spec")
@@ -100,8 +100,8 @@ func TestConvertDocumentResponseInput_StrategyTXT_Envelope(t *testing.T) {
 	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
-	require.NotNil(t, parts[0].OfInputText)
-	text := parts[0].OfInputText.Text
+	assert.Equal(t, "input_text", parts[0].Type)
+	text := parts[0].Text
 	assert.True(t, strings.HasPrefix(text, "<document"), "should be wrapped in envelope")
 }
 
@@ -132,11 +132,11 @@ func TestConvertDocumentResponseInput_StrategyB64_PreservesMIMEType(t *testing.T
 			require.NoError(t, err)
 			require.Len(t, parts, 1)
 			if mimeType == "image/PNG" {
-				require.NotNil(t, parts[0].OfInputImage)
-				assert.Equal(t, "data:image/PNG;base64,/w==", parts[0].OfInputImage.ImageURL.Value)
+				assert.Equal(t, "input_image", parts[0].Type)
+				assert.Equal(t, "data:image/PNG;base64,/w==", parts[0].ImageURL)
 			} else {
-				require.NotNil(t, parts[0].OfInputFile)
-				assert.Equal(t, "data:application/PDF;base64,/w==", parts[0].OfInputFile.FileData.Value)
+				assert.Equal(t, "input_file", parts[0].Type)
+				assert.Equal(t, "data:application/PDF;base64,/w==", parts[0].FileData)
 			}
 		})
 	}
@@ -168,8 +168,8 @@ func TestConvertDocumentResponseInput_JSONText(t *testing.T) {
 	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
-	require.NotNil(t, parts[0].OfInputText)
-	assert.Contains(t, parts[0].OfInputText.Text, doc.Source.InlineText)
+	assert.Equal(t, "input_text", parts[0].Type)
+	assert.Contains(t, parts[0].Text, doc.Source.InlineText)
 }
 
 func TestResponseInputDoesNotEncodeAudioAsFile(t *testing.T) {

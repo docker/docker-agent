@@ -9,9 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/param"
-
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -52,25 +49,11 @@ func strictToolsOpt(opts map[string]any) (strictToolsSelection, bool) {
 	return strictToolsSelection{names: names}, true
 }
 
-// apply sets strict=true on the selected standard tools. Only custom tools
-// (OfTool) are considered; input schemas are never modified.
-func (s strictToolsSelection) apply(toolParams []anthropic.ToolUnionParam) error {
+// apply sets strict=true on the selected tools. Input schemas are never modified.
+func (s strictToolsSelection) apply(toolParams []ToolParam, outputSchema ...any) error {
 	candidates := make([]strictCandidate, 0, len(toolParams))
-	for _, t := range toolParams {
-		if t.OfTool != nil {
-			candidates = append(candidates, strictCandidate{t.OfTool.Name, t.OfTool.InputSchema, &t.OfTool.Strict})
-		}
-	}
-	return s.mark(candidates)
-}
-
-// applyBeta is apply for the Beta API tool union.
-func (s strictToolsSelection) applyBeta(toolParams []anthropic.BetaToolUnionParam, outputSchema ...any) error {
-	candidates := make([]strictCandidate, 0, len(toolParams))
-	for _, t := range toolParams {
-		if t.OfTool != nil {
-			candidates = append(candidates, strictCandidate{t.OfTool.Name, t.OfTool.InputSchema, &t.OfTool.Strict})
-		}
+	for i := range toolParams {
+		candidates = append(candidates, strictCandidate{toolParams[i].Name, toolParams[i].InputSchema, &toolParams[i].Strict})
 	}
 	return s.mark(candidates, outputSchema...)
 }
@@ -78,7 +61,7 @@ func (s strictToolsSelection) applyBeta(toolParams []anthropic.BetaToolUnionPara
 type strictCandidate struct {
 	name   string
 	schema any
-	strict *param.Opt[bool]
+	strict **bool
 }
 
 func (s strictToolsSelection) mark(candidates []strictCandidate, outputSchema ...any) error {
@@ -119,7 +102,7 @@ func (s strictToolsSelection) mark(candidates []strictCandidate, outputSchema ..
 			}
 			continue
 		}
-		*c.strict = param.NewOpt(true)
+		*c.strict = new(true)
 	}
 
 	for _, name := range s.names {
@@ -384,20 +367,9 @@ func strictSchemaExtras(requestTools []tools.Tool) map[string]map[string]any {
 	return extras
 }
 
-func restoreStrictToolSchemas(converted []anthropic.ToolUnionParam, requestTools []tools.Tool) {
+func restoreStrictToolSchemas(converted []ToolParam, requestTools []tools.Tool) {
 	extras := strictSchemaExtras(requestTools)
-	for _, tool := range converted {
-		if tool.OfTool != nil {
-			tool.OfTool.InputSchema.ExtraFields = extras[tool.OfTool.Name]
-		}
-	}
-}
-
-func restoreBetaStrictToolSchemas(converted []anthropic.BetaToolUnionParam, requestTools []tools.Tool) {
-	extras := strictSchemaExtras(requestTools)
-	for _, tool := range converted {
-		if tool.OfTool != nil {
-			tool.OfTool.InputSchema.ExtraFields = extras[tool.OfTool.Name]
-		}
+	for i := range converted {
+		converted[i].InputSchema.ExtraFields = extras[converted[i].Name]
 	}
 }

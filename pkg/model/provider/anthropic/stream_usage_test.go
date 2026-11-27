@@ -6,12 +6,11 @@ import (
 	"io"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/model/provider/internal/httpx"
 )
 
 func TestStreamUsagePreservesCumulativeCounts(t *testing.T) {
@@ -66,14 +65,14 @@ func TestStreamUsagePreservesCumulativeCounts(t *testing.T) {
 
 	for _, adapter := range []struct {
 		name string
-		new  func([]ssestream.Event, bool) chat.MessageStream
+		new  func([]httpx.SSEEvent, bool) chat.MessageStream
 	}{
-		{"standard", func(events []ssestream.Event, trackUsage bool) chat.MessageStream {
-			stream := ssestream.NewStream[anthropic.MessageStreamEventUnion](&fakeDecoder{events: events}, nil)
+		{"standard", func(events []httpx.SSEEvent, trackUsage bool) chat.MessageStream {
+			stream := &EventStream{sse: &fakeDecoder{events: events}}
 			return (&Client{}).newStreamAdapter(stream, trackUsage)
 		}},
-		{"beta", func(events []ssestream.Event, trackUsage bool) chat.MessageStream {
-			stream := ssestream.NewStream[anthropic.BetaRawMessageStreamEventUnion](&fakeDecoder{events: events}, nil)
+		{"beta", func(events []httpx.SSEEvent, trackUsage bool) chat.MessageStream {
+			stream := &EventStream{sse: &fakeDecoder{events: events}}
 			return (&Client{}).newBetaStreamAdapter(stream, trackUsage)
 		}},
 	} {
@@ -93,7 +92,7 @@ func TestStreamUsagePreservesCumulativeCounts(t *testing.T) {
 					for _, tt := range tests {
 						t.Run(tt.name, func(t *testing.T) {
 							t.Parallel()
-							var events []ssestream.Event
+							var events []httpx.SSEEvent
 							if tt.start != "" {
 								events = append(events, sseEvent("message_start", map[string]any{
 									"type": "message_start",

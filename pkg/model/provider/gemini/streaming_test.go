@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -104,31 +103,31 @@ func TestCreateChatCompletionStream_ToolCallReplay(t *testing.T) {
 				t.Parallel()
 
 				signature := []byte("tool-call-signature")
-				calls := []*genai.Part{
-					genai.NewPartFromFunctionCall("lookup", map[string]any{"city": "Paris"}),
-					genai.NewPartFromFunctionCall("lookup", map[string]any{"city": "London"}),
+				calls := []*Part{
+					NewPartFromFunctionCall("lookup", map[string]any{"city": "Paris"}),
+					NewPartFromFunctionCall("lookup", map[string]any{"city": "London"}),
 				}
 				calls[0].ThoughtSignature = signature
 				if nativeIDs {
 					calls[0].FunctionCall.ID = "provider-1"
 					calls[1].FunctionCall.ID = "provider-2"
 				}
-				requests := make(chan []*genai.Content, 2)
+				requests := make(chan []*Content, 2)
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					var request struct {
-						Contents []*genai.Content `json:"contents"`
+						Contents []*Content `json:"contents"`
 					}
 					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
 					requests <- request.Contents
-					parts := []*genai.Part{genai.NewPartFromText("done")}
+					parts := []*Part{NewPartFromText("done")}
 					if len(request.Contents) == 1 {
-						parts = append([]*genai.Part{genai.NewPartFromText("Looking up both cities.")}, calls...)
+						parts = append([]*Part{NewPartFromText("Looking up both cities.")}, calls...)
 					}
-					response := &genai.GenerateContentResponse{
-						Candidates: []*genai.Candidate{{Content: genai.NewContentFromParts(parts, genai.RoleModel)}},
+					response := &GenerateContentResponse{
+						Candidates: []*Candidate{{Content: NewContentFromParts(parts, RoleModel)}},
 					}
 					w.Header().Set("Content-Type", "text/event-stream")
 					_, _ = io.WriteString(w, "data: ")
@@ -188,12 +187,12 @@ func TestCreateChatCompletionStream_ToolCallReplay(t *testing.T) {
 				require.NoError(t, err)
 				replayed := <-requests
 				require.Len(t, replayed, 3)
-				assert.Equal(t, genai.RoleModel, replayed[1].Role)
-				assert.Equal(t, append([]*genai.Part{genai.NewPartFromText(delta.Content)}, calls...), replayed[1].Parts)
-				assert.Equal(t, genai.RoleUser, replayed[2].Role)
+				assert.Equal(t, RoleModel, replayed[1].Role)
+				assert.Equal(t, append([]*Part{NewPartFromText(delta.Content)}, calls...), replayed[1].Parts)
+				assert.Equal(t, RoleUser, replayed[2].Role)
 				require.Len(t, replayed[2].Parts, 2)
 				for i, result := range []string{"Paris result", "London result"} {
-					assert.Equal(t, &genai.FunctionResponse{
+					assert.Equal(t, &FunctionResponse{
 						ID: calls[i].FunctionCall.ID, Name: "lookup", Response: map[string]any{"result": result},
 					}, replayed[2].Parts[i].FunctionResponse)
 				}

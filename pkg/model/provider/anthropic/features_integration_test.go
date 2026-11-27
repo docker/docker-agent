@@ -14,9 +14,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -24,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/internal/httpx"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -111,21 +109,22 @@ func (r capturedRequest) outputConfig() map[string]any {
 func newScriptedClient(srv *scriptedServer, cfg latest.ModelConfig, opts ...options.Opt) *Client {
 	return &Client{
 		Config: base.Config{ModelConfig: cfg, ModelOptions: options.Apply(opts...)},
-		clientFn: func(context.Context) (anthropic.Client, error) {
-			return anthropic.NewClient(option.WithAPIKey("test-key"), option.WithBaseURL(srv.URL), option.WithMaxRetries(0)), nil
+		clientFn: func(context.Context) (*APIClient, error) {
+			zero := 0
+			return NewAPIClient(APIClientConfig{APIKey: "test-key", BaseURL: srv.URL, MaxRetries: &zero}), nil
 		},
 	}
 }
 
-func sseBody(events ...ssestream.Event) string {
+func sseBody(events ...httpx.SSEEvent) string {
 	var sb strings.Builder
 	for _, e := range events {
-		fmt.Fprintf(&sb, "event: %s\ndata: %s\n\n", e.Type, e.Data)
+		fmt.Fprintf(&sb, "event: %s\ndata: %s\n\n", e.Event, e.Data)
 	}
 	return sb.String()
 }
 
-func messageStart(id string, extra map[string]any) ssestream.Event {
+func messageStart(id string, extra map[string]any) httpx.SSEEvent {
 	msg := map[string]any{
 		"id": id, "type": "message", "role": "assistant", "model": "claude-test", "content": []any{},
 		"usage": map[string]any{"input_tokens": 10, "output_tokens": 0},
@@ -134,19 +133,19 @@ func messageStart(id string, extra map[string]any) ssestream.Event {
 	return sseEvent("message_start", map[string]any{"type": "message_start", "message": msg})
 }
 
-func blockStart(index int, block map[string]any) ssestream.Event {
+func blockStart(index int, block map[string]any) httpx.SSEEvent {
 	return sseEvent("content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": block})
 }
 
-func blockDelta(index int, delta map[string]any) ssestream.Event {
+func blockDelta(index int, delta map[string]any) httpx.SSEEvent {
 	return sseEvent("content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": delta})
 }
 
-func blockStop(index int) ssestream.Event {
+func blockStop(index int) httpx.SSEEvent {
 	return sseEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
 }
 
-func messageDelta(stopReason string, usage map[string]any) ssestream.Event {
+func messageDelta(stopReason string, usage map[string]any) httpx.SSEEvent {
 	if usage == nil {
 		usage = map[string]any{"output_tokens": 7}
 	}
@@ -217,8 +216,8 @@ func TestFable51_DefaultsToAdaptiveThinkingWithDropBlockBinding(t *testing.T) {
 
 	req := srv.request(t, 0)
 	assert.Equal(t, "/v1/messages", req.path)
-	assert.Contains(t, req.betas, anthropic.AnthropicBetaThinkingBindingControls2026_08_01)
-	assert.Contains(t, req.betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14, "routed through the Beta API")
+	assert.Contains(t, req.betas, AnthropicBetaThinkingBindingControls2026_08_01)
+	assert.Contains(t, req.betas, AnthropicBetaInterleavedThinking2025_05_14, "routed through the Beta API")
 	assert.Equal(t, map[string]any{
 		"type":          "adaptive",
 		"display":       "summarized",
@@ -245,7 +244,7 @@ func TestThinkingPrefixMismatch_ExplicitOption(t *testing.T) {
 		chatTurn(t, client, []chat.Message{user("hello")}, nil)
 
 		req := srv.request(t, 0)
-		assert.Contains(t, req.betas, anthropic.AnthropicBetaThinkingBindingControls2026_08_01)
+		assert.Contains(t, req.betas, AnthropicBetaThinkingBindingControls2026_08_01)
 		assert.Equal(t, map[string]any{"prefix_mismatch_behavior": "error"}, req.thinking()["block_binding"])
 		assert.Equal(t, "adaptive", req.thinking()["type"])
 		assert.Equal(t, "medium", req.outputConfig()["effort"])
@@ -273,7 +272,7 @@ func TestThinkingPrefixMismatch_ExplicitOption(t *testing.T) {
 		chatTurn(t, client, []chat.Message{user("hello")}, nil)
 
 		req := srv.request(t, 0)
-		assert.Contains(t, req.betas, anthropic.AnthropicBetaThinkingBindingControls2026_08_01)
+		assert.Contains(t, req.betas, AnthropicBetaThinkingBindingControls2026_08_01)
 		assert.Contains(t, req.betas, serverSideFallbackBeta)
 		assert.Equal(t, map[string]any{
 			"type":          "enabled",
@@ -293,7 +292,7 @@ func TestThinkingPrefixMismatch_ExplicitOption(t *testing.T) {
 		chatTurn(t, client, []chat.Message{user("hello")}, nil)
 
 		req := srv.request(t, 0)
-		assert.NotContains(t, req.betas, anthropic.AnthropicBetaThinkingBindingControls2026_08_01)
+		assert.NotContains(t, req.betas, AnthropicBetaThinkingBindingControls2026_08_01)
 		assert.NotContains(t, req.thinking(), "block_binding")
 	})
 
@@ -409,7 +408,7 @@ func TestThinkingDisplayUpdates(t *testing.T) {
 		assert.Equal(t, "progress", msg.ReasoningContent)
 
 		req := srv.request(t, 0)
-		assert.Contains(t, req.betas, anthropic.AnthropicBetaThinkingDisplayUpdates2026_08_18)
+		assert.Contains(t, req.betas, AnthropicBetaThinkingDisplayUpdates2026_08_18)
 		assert.Equal(t, map[string]any{"type": "adaptive", "display": "updates"}, req.thinking())
 		assert.NotContains(t, req.outputConfig(), "effort")
 	})
@@ -425,7 +424,7 @@ func TestThinkingDisplayUpdates(t *testing.T) {
 		chatTurn(t, client, []chat.Message{user("hello")}, nil)
 
 		req := srv.request(t, 0)
-		assert.Contains(t, req.betas, anthropic.AnthropicBetaThinkingDisplayUpdates2026_08_18)
+		assert.Contains(t, req.betas, AnthropicBetaThinkingDisplayUpdates2026_08_18)
 		assert.Equal(t, "updates", req.thinking()["display"])
 		assert.Equal(t, "low", req.outputConfig()["effort"])
 	})
@@ -668,7 +667,7 @@ func TestCachePreservingUpdates_RawReplayThenCompaction(t *testing.T) {
 	assert.Equal(t, true, second.tools()[1]["defer_loading"], "a tool declared after the baseline is deferred")
 	assert.Equal(t, []string{"user", "assistant", "user", "system"}, roles(second.body))
 	assert.Equal(t, []string{"text:B", "add:write"}, blockSummary(second.messages()[3]))
-	assert.Contains(t, second.betas, anthropic.AnthropicBetaMidConversationToolChanges2026_07_01)
+	assert.Contains(t, second.betas, AnthropicBetaMidConversationToolChanges2026_07_01)
 	assert.JSONEq(t, `[{"type":"thinking","thinking":"think one","signature":"sig-msg_1"},{"type":"text","text":"a1"}]`,
 		rawJSON(t, withoutCacheControl(second.messages()[1]["content"])), "assistant turn replayed from its raw response")
 	update := decodeContext(t, a2.ProviderState.RequestContext).Update
@@ -685,7 +684,7 @@ func TestCachePreservingUpdates_RawReplayThenCompaction(t *testing.T) {
 	assert.Equal(t, before, rawJSON(t, hist), "compaction leaves the history untouched")
 	compact := srv.request(t, 2)
 	assert.Contains(t, compact.betas, nativeCompactionBeta)
-	assert.Contains(t, compact.betas, anthropic.AnthropicBetaMidConversationToolChanges2026_07_01)
+	assert.Contains(t, compact.betas, AnthropicBetaMidConversationToolChanges2026_07_01)
 	assert.Equal(t, map[string]any{"type": "summarize"}, compact.body["compaction"])
 	assert.Equal(t, []string{"A"}, systemTexts(compact.body))
 	assert.Equal(t, []string{"user", "assistant", "user", "system", "assistant"}, roles(compact.body))
@@ -707,7 +706,7 @@ func TestCachePreservingUpdates_RawReplayThenCompaction(t *testing.T) {
 	assert.Equal(t, "a3", a3.Content)
 	cont := srv.request(t, 3)
 	assert.Contains(t, cont.betas, nativeCompactionBeta)
-	assert.NotContains(t, cont.betas, anthropic.AnthropicBetaMidConversationToolChanges2026_07_01)
+	assert.NotContains(t, cont.betas, AnthropicBetaMidConversationToolChanges2026_07_01)
 	assert.Equal(t, []string{"A", "B"}, systemTexts(cont.body), "the folded baseline is the new prefix")
 	assert.Equal(t, []string{"read", "write"}, toolNames(cont.body))
 	assert.NotContains(t, cont.tools()[1], "defer_loading")
@@ -723,7 +722,7 @@ func TestProgressUpdatesNormalizedOption(t *testing.T) {
 	client := newScriptedClient(srv, latest.ModelConfig{Provider: "anthropic", Model: "claude-fable-5", ProviderOpts: map[string]any{"thinking_display": " UPDATES "}})
 	chatTurn(t, client, []chat.Message{user("hello")}, nil)
 	request := srv.request(t, 0)
-	assert.Contains(t, request.betas, anthropic.AnthropicBetaThinkingDisplayUpdates2026_08_18)
+	assert.Contains(t, request.betas, AnthropicBetaThinkingDisplayUpdates2026_08_18)
 	assert.Equal(t, "updates", request.thinking()["display"])
 }
 

@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -31,7 +29,7 @@ func TestConfigureTaskBudget_NoBudget(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			params := anthropic.BetaMessageNewParams{}
+			params := MessageRequest{}
 			configureTaskBudget(&params, tb)
 
 			assert.Empty(t, params.Betas)
@@ -48,14 +46,14 @@ func TestConfigureTaskBudget_NoBudget(t *testing.T) {
 func TestConfigureTaskBudget_AttachesPayloadAndBeta(t *testing.T) {
 	t.Parallel()
 
-	params := anthropic.BetaMessageNewParams{
-		Betas:        []anthropic.AnthropicBeta{"existing"},
-		OutputConfig: anthropic.BetaOutputConfigParam{Effort: anthropic.BetaOutputConfigEffortHigh},
+	params := MessageRequest{
+		Betas:        []AnthropicBeta{"existing"},
+		OutputConfig: &OutputConfigParam{Effort: "high"},
 	}
 	configureTaskBudget(&params, &latest.TaskBudget{Total: 128000})
 
 	assert.Equal(t,
-		[]anthropic.AnthropicBeta{"existing", taskBudgetBeta},
+		[]AnthropicBeta{"existing", taskBudgetBeta},
 		params.Betas)
 
 	var out map[string]any
@@ -98,11 +96,11 @@ func drain(stream chat.MessageStream) {
 func newTestClient(srv *httptest.Server, cfg latest.ModelConfig) *Client {
 	return &Client{
 		Config: base.Config{ModelConfig: cfg},
-		clientFn: func(_ context.Context) (anthropic.Client, error) {
-			return anthropic.NewClient(
-				option.WithAPIKey("test-key"),
-				option.WithBaseURL(srv.URL),
-			), nil
+		clientFn: func(_ context.Context) (*APIClient, error) {
+			return NewAPIClient(APIClientConfig{
+				APIKey:  "test-key",
+				BaseURL: srv.URL,
+			}), nil
 		},
 	}
 }

@@ -6,11 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/model/provider/anthropic"
 	"github.com/docker/docker-agent/pkg/model/provider/anthropic/anthropictest"
 )
 
@@ -51,18 +50,18 @@ func TestFallbackRepliesAccumulate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			srv := anthropictest.NewServer(t, tc.reply)
-			client := anthropic.NewClient(option.WithBaseURL(srv.URL()), option.WithAPIKey("k"))
-			stream := client.Beta.Messages.NewStreaming(t.Context(), anthropic.BetaMessageNewParams{
+			client := anthropic.NewAPIClient(anthropic.APIClientConfig{BaseURL: srv.URL(), APIKey: "k"})
+			stream := client.NewMessageStream(t.Context(), anthropic.MessageRequest{
 				Model: "claude-a", MaxTokens: 16,
-				Messages: []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock("q"))},
+				Messages: []anthropic.MessageParam{{Role: "user", Content: []anthropic.ContentBlockParam{{Type: "text", Text: "q"}}}},
 			})
-			var msg anthropic.BetaMessage
+			var msg anthropic.Message
 			for stream.Next() {
 				require.NoError(t, msg.Accumulate(stream.Current()))
 			}
 			require.NoError(t, stream.Err())
 
-			assert.Equal(t, anthropic.Model("claude-b"), msg.Model)
+			assert.Equal(t, "claude-b", msg.Model)
 			markers := 0
 			for _, block := range msg.Content {
 				if block.Type == "fallback" {

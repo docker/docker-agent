@@ -33,12 +33,12 @@ func TestConvertDocument_StrategyB64_Image(t *testing.T) {
 	parts, err := convertDocumentWithCaps(t.Context(), doc, visionCaps)
 	require.NoError(t, err)
 	require.Len(t, parts, 1, "expected exactly one image part")
-	require.NotNil(t, parts[0].OfImageURL, "expected image part, got non-image")
-	assert.Nil(t, parts[0].OfText, "expected no text part for B64 image")
+	assert.Equal(t, "image_url", parts[0].Type, "expected image part, got non-image")
+	assert.Empty(t, parts[0].Text, "expected no text part for B64 image")
 
 	// Data URI must embed the base64-encoded payload.
 	wantB64 := base64.StdEncoding.EncodeToString(minJPEG)
-	assert.Equal(t, "data:image/jpeg;base64,"+wantB64, parts[0].OfImageURL.ImageURL.URL)
+	assert.Equal(t, "data:image/jpeg;base64,"+wantB64, parts[0].ImageURL.URL)
 }
 
 // TestConvertDocument_StrategyB64_PDF verifies that a PDF document with
@@ -57,12 +57,12 @@ func TestConvertDocument_StrategyB64_PDF(t *testing.T) {
 	parts, err := convertDocumentWithCaps(t.Context(), doc, pdfCaps)
 	require.NoError(t, err)
 	require.Len(t, parts, 1, "expected exactly one file part")
-	require.NotNil(t, parts[0].OfFile, "expected file part for PDF, got non-file")
-	assert.Nil(t, parts[0].OfImageURL, "PDF must not be an image part")
+	assert.Equal(t, "file", parts[0].Type, "expected file part for PDF, got non-file")
+	assert.Nil(t, parts[0].ImageURL, "PDF must not be an image part")
 
 	wantB64 := base64.StdEncoding.EncodeToString(pdf)
-	assert.Equal(t, "spec.pdf", parts[0].OfFile.File.Filename.Value)
-	assert.Equal(t, "data:application/pdf;base64,"+wantB64, parts[0].OfFile.File.FileData.Value)
+	assert.Equal(t, "spec.pdf", parts[0].File.Filename)
+	assert.Equal(t, "data:application/pdf;base64,"+wantB64, parts[0].File.FileData)
 }
 
 // TestConvertDocument_StrategyB64_PDFDropped verifies that a PDF is dropped when
@@ -99,14 +99,14 @@ func TestConvertMessagesWithCaps(t *testing.T) {
 
 	withVision := ConvertMessagesWithCaps(t.Context(), messages, modelinfo.CapsWith(true, false, false, false))
 	require.Len(t, withVision, 1)
-	require.NotNil(t, withVision[0].OfUser)
-	require.Len(t, withVision[0].OfUser.Content.OfArrayOfContentParts, 1)
-	assert.NotNil(t, withVision[0].OfUser.Content.OfArrayOfContentParts[0].OfImageURL)
+	assert.Equal(t, "user", withVision[0].Role)
+	require.Len(t, withVision[0].ContentParts, 1)
+	assert.NotNil(t, withVision[0].ContentParts[0].ImageURL)
 
 	textOnly := ConvertMessagesWithCaps(t.Context(), messages, modelinfo.ModelCapabilities{})
 	require.Len(t, textOnly, 1)
-	require.NotNil(t, textOnly[0].OfUser)
-	assert.Empty(t, textOnly[0].OfUser.Content.OfArrayOfContentParts, "image should be dropped for text-only caps")
+	assert.Equal(t, "user", textOnly[0].Role)
+	assert.Empty(t, textOnly[0].ContentParts, "image should be dropped for text-only caps")
 
 	// Symmetric PDF case: a PDF is forwarded as a file part when PDF caps are
 	// injected, and dropped otherwise.
@@ -124,14 +124,14 @@ func TestConvertMessagesWithCaps(t *testing.T) {
 
 	withPDF := ConvertMessagesWithCaps(t.Context(), pdfMessages, modelinfo.CapsWith(false, true, false, false))
 	require.Len(t, withPDF, 1)
-	require.NotNil(t, withPDF[0].OfUser)
-	require.Len(t, withPDF[0].OfUser.Content.OfArrayOfContentParts, 1)
-	assert.NotNil(t, withPDF[0].OfUser.Content.OfArrayOfContentParts[0].OfFile)
+	assert.Equal(t, "user", withPDF[0].Role)
+	require.Len(t, withPDF[0].ContentParts, 1)
+	assert.NotNil(t, withPDF[0].ContentParts[0].File)
 
 	pdfDropped := ConvertMessagesWithCaps(t.Context(), pdfMessages, modelinfo.ModelCapabilities{})
 	require.Len(t, pdfDropped, 1)
-	require.NotNil(t, pdfDropped[0].OfUser)
-	assert.Empty(t, pdfDropped[0].OfUser.Content.OfArrayOfContentParts, "pdf should be dropped for text-only caps")
+	assert.Equal(t, "user", pdfDropped[0].Role)
+	assert.Empty(t, pdfDropped[0].ContentParts, "pdf should be dropped for text-only caps")
 }
 
 // TestConvertDocument_StrategyB64_ImageDropped verifies that an image is
@@ -188,7 +188,7 @@ func TestConvertDocument_QualifiedIDRequired(t *testing.T) {
 	// Qualified ID (the fix, matching what c.ID() returns): image must be preserved.
 	partsQualified := ConvertMultiContent(t.Context(), msgParts, modelsdev.NewID("openai", "gpt-4o"), store, nil)
 	require.Len(t, partsQualified, 1, "qualified ID must resolve caps: image should be present")
-	assert.NotNil(t, partsQualified[0].OfImageURL, "expected image URL part for qualified model ID")
+	assert.NotNil(t, partsQualified[0].ImageURL, "expected image URL part for qualified model ID")
 }
 
 func TestConvertDocument_StrategyTXT(t *testing.T) {
@@ -202,10 +202,10 @@ func TestConvertDocument_StrategyTXT(t *testing.T) {
 	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
-	require.NotNil(t, parts[0].OfText)
-	assert.Contains(t, parts[0].OfText.Text, "readme-md")
-	assert.Contains(t, parts[0].OfText.Text, "text-markdown")
-	assert.Contains(t, parts[0].OfText.Text, "# Hello World")
+	assert.Equal(t, "text", parts[0].Type)
+	assert.Contains(t, parts[0].Text, "readme-md")
+	assert.Contains(t, parts[0].Text, "text-markdown")
+	assert.Contains(t, parts[0].Text, "# Hello World")
 }
 
 func TestConvertDocument_StrategyTXT_Envelope(t *testing.T) {
@@ -219,8 +219,8 @@ func TestConvertDocument_StrategyTXT_Envelope(t *testing.T) {
 	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
-	require.NotNil(t, parts[0].OfText)
-	text := parts[0].OfText.Text
+	assert.Equal(t, "text", parts[0].Type)
+	text := parts[0].Text
 	assert.True(t, strings.HasPrefix(text, "<document"), "should be wrapped in document envelope")
 }
 
@@ -305,9 +305,9 @@ func TestConvertDocumentAudio(t *testing.T) {
 				return
 			}
 			require.Len(t, parts, 1)
-			require.NotNil(t, parts[0].OfInputAudio)
-			assert.Equal(t, tc.format, parts[0].OfInputAudio.InputAudio.Format)
-			assert.Equal(t, base64.StdEncoding.EncodeToString(payload), parts[0].OfInputAudio.InputAudio.Data)
+			require.NotNil(t, parts[0].InputAudio)
+			assert.Equal(t, tc.format, parts[0].InputAudio.Format)
+			assert.Equal(t, base64.StdEncoding.EncodeToString(payload), parts[0].InputAudio.Data)
 			wire, err := json.Marshal(parts)
 			require.NoError(t, err)
 			assert.Contains(t, string(wire), `"type":"input_audio"`)

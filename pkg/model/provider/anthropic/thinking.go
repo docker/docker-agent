@@ -5,8 +5,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/modelinfo"
@@ -306,28 +304,31 @@ func defaultAdaptiveDisplay(display string) string {
 	return display
 }
 
-// applyThinkingConfig configures extended thinking on a standard MessageNewParams
+// applyThinkingConfig configures extended thinking on a MessageRequest
 // based on the model's ThinkingBudget and provider_opts.thinking_display.
 // Returns true when thinking is enabled (i.e., temperature/top_p must not be set).
-func (c *Client) applyThinkingConfig(params *anthropic.MessageNewParams, maxTokens int64) bool {
+func (c *Client) applyThinkingConfig(params *MessageRequest, maxTokens int64) bool {
 	budget := c.resolveThinkingBudget()
 	if budget == nil {
 		return usesDefaultThinking(c.ModelConfig.Model)
 	}
 	if budget.IsDisabled() {
-		params.Thinking = anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}}
+		params.Thinking = &ThinkingConfigParam{Type: "disabled"}
 		return false
 	}
 	display, _ := anthropicThinkingDisplay(c.ModelConfig.ProviderOpts)
 
 	if effortStr, ok := anthropicThinkingEffort(budget); ok {
 		display = defaultAdaptiveDisplay(display)
-		adaptive := &anthropic.ThinkingConfigAdaptiveParam{
-			Display: anthropic.ThinkingConfigAdaptiveDisplay(display),
+		params.Thinking = &ThinkingConfigParam{
+			Type:    "adaptive",
+			Display: display,
 		}
-		params.Thinking = anthropic.ThinkingConfigParamUnion{OfAdaptive: adaptive}
-		if c.sendsEffort() {
-			params.OutputConfig.Effort = anthropic.OutputConfigEffort(effortStr)
+		if c.sendsEffort() && effortStr != "" {
+			if params.OutputConfig == nil {
+				params.OutputConfig = &OutputConfigParam{}
+			}
+			params.OutputConfig.Effort = effortStr
 		}
 		slog.Debug("Anthropic API using adaptive thinking", "effort", effortStr, "display", display)
 		return true
@@ -337,38 +338,42 @@ func (c *Client) applyThinkingConfig(params *anthropic.MessageNewParams, maxToke
 	if !ok {
 		return false
 	}
-	params.Thinking = anthropic.ThinkingConfigParamOfEnabled(tokens)
-	if display != "" && params.Thinking.OfEnabled != nil {
-		params.Thinking.OfEnabled.Display = anthropic.ThinkingConfigEnabledDisplay(display)
+	params.Thinking = &ThinkingConfigParam{
+		Type:         "enabled",
+		BudgetTokens: tokens,
+		Display:      display,
 	}
 	slog.Debug("Anthropic API using thinking_budget", "budget_tokens", tokens, "display", display)
 	return true
 }
 
-// applyBetaThinkingConfig configures extended thinking on a BetaMessageNewParams
+// applyBetaThinkingConfig configures extended thinking on a Beta MessageRequest
 // based on the model's ThinkingBudget and provider_opts.thinking_display.
-func (c *Client) applyBetaThinkingConfig(params *anthropic.BetaMessageNewParams, maxTokens int64) {
+func (c *Client) applyBetaThinkingConfig(params *MessageRequest, maxTokens int64) {
 	budget := c.resolveThinkingBudget()
 	if budget == nil {
 		return
 	}
 	if budget.IsDisabled() {
-		params.Thinking = anthropic.BetaThinkingConfigParamUnion{OfDisabled: &anthropic.BetaThinkingConfigDisabledParam{}}
+		params.Thinking = &ThinkingConfigParam{Type: "disabled"}
 		return
 	}
 	display, _ := anthropicThinkingDisplay(c.ModelConfig.ProviderOpts)
 	if display == thinkingDisplayUpdates {
-		params.Betas = append(params.Betas, anthropic.AnthropicBetaThinkingDisplayUpdates2026_08_18)
+		params.Betas = append(params.Betas, AnthropicBetaThinkingDisplayUpdates2026_08_18)
 	}
 
 	if effortStr, ok := anthropicThinkingEffort(budget); ok {
 		display = defaultAdaptiveDisplay(display)
-		adaptive := &anthropic.BetaThinkingConfigAdaptiveParam{
-			Display: anthropic.BetaThinkingConfigAdaptiveDisplay(display),
+		params.Thinking = &ThinkingConfigParam{
+			Type:    "adaptive",
+			Display: display,
 		}
-		params.Thinking = anthropic.BetaThinkingConfigParamUnion{OfAdaptive: adaptive}
-		if c.sendsEffort() {
-			params.OutputConfig.Effort = anthropic.BetaOutputConfigEffort(effortStr)
+		if c.sendsEffort() && effortStr != "" {
+			if params.OutputConfig == nil {
+				params.OutputConfig = &OutputConfigParam{}
+			}
+			params.OutputConfig.Effort = effortStr
 		}
 		slog.Debug("Anthropic Beta API using adaptive thinking", "effort", effortStr, "display", display)
 		return
@@ -378,9 +383,10 @@ func (c *Client) applyBetaThinkingConfig(params *anthropic.BetaMessageNewParams,
 	if !ok {
 		return
 	}
-	params.Thinking = anthropic.BetaThinkingConfigParamOfEnabled(tokens)
-	if display != "" && params.Thinking.OfEnabled != nil {
-		params.Thinking.OfEnabled.Display = anthropic.BetaThinkingConfigEnabledDisplay(display)
+	params.Thinking = &ThinkingConfigParam{
+		Type:         "enabled",
+		BudgetTokens: tokens,
+		Display:      display,
 	}
 	slog.Debug("Anthropic Beta API using thinking_budget", "budget_tokens", tokens, "display", display)
 }

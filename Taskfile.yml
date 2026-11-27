@@ -176,7 +176,7 @@ tasks:
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - GOOS=js GOARCH=wasm go test -tags docker_agent_wasm_rag -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - go run ./scripts/wasmsmall bin/wasm-small/test
-      - go test -mod=readonly -modfile=bin/wasm-small/test/small.mod github.com/anthropics/anthropic-sdk-go/internal/apijson github.com/pb33f/ordered-map/v2
+      - go test -mod=readonly -modfile=bin/wasm-small/test/small.mod github.com/pb33f/ordered-map/v2
       - GOOS=js GOARCH=wasm go test -mod=readonly -modfile=bin/wasm-small/test/small.mod -tags {{.WASM_SMALL_TAGS}} -run '^Test(SmallProfile|DemoProviders)' -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" pkg/model/provider/factory_js_openai_vendor_test.go
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run '^TestLimitLargeToolResults|^TestEnvironmentInfo' ./pkg/hooks/builtins

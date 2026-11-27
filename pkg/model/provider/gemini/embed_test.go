@@ -13,7 +13,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
@@ -188,7 +187,7 @@ func TestCreateBatchEmbedding_InvalidOutputDimensionality(t *testing.T) {
 
 			client := &Client{
 				Config: base.Config{ModelConfig: latest.ModelConfig{ProviderOpts: map[string]any{"output_dimensionality": value}}},
-				clientFn: func(context.Context) (*genai.Client, error) {
+				clientFn: func(context.Context) (*apiClient, error) {
 					panic("invalid config must fail before SDK construction")
 				},
 			}
@@ -230,7 +229,7 @@ func TestCreateEmbedding_ReturnsFirstVector(t *testing.T) {
 func TestCreateBatchEmbedding_EmptyInputSkipsRequest(t *testing.T) {
 	t.Parallel()
 
-	client := &Client{clientFn: func(context.Context) (*genai.Client, error) {
+	client := &Client{clientFn: func(context.Context) (*apiClient, error) {
 		panic("empty input must return before SDK construction")
 	}}
 
@@ -422,11 +421,11 @@ func TestEmbedEach_OneVectorPerResponse(t *testing.T) {
 	genaiClient, err := client.clientFn(t.Context())
 	require.NoError(t, err)
 
-	embeddings, err := client.embedEach(t.Context(), genaiClient, []*genai.Content{
-		genai.NewContentFromText("a", genai.RoleUser),
-		genai.NewContentFromText("bb", genai.RoleUser),
-		genai.NewContentFromText("ccc", genai.RoleUser),
-	}, &genai.EmbedContentConfig{})
+	embeddings, err := client.embedEach(t.Context(), genaiClient, []*Content{
+		NewContentFromText("a", RoleUser),
+		NewContentFromText("bb", RoleUser),
+		NewContentFromText("ccc", RoleUser),
+	}, &EmbedContentConfig{})
 	require.NoError(t, err)
 	assert.Equal(t, int32(3), calls.Load())
 	require.Len(t, embeddings, 3)
@@ -447,10 +446,10 @@ func TestEmbedEach_RejectsMisalignedResponses(t *testing.T) {
 	genaiClient, err := client.clientFn(t.Context())
 	require.NoError(t, err)
 
-	_, err = client.embedEach(t.Context(), genaiClient, []*genai.Content{
-		genai.NewContentFromText("a", genai.RoleUser),
-		genai.NewContentFromText("b", genai.RoleUser),
-	}, &genai.EmbedContentConfig{})
+	_, err = client.embedEach(t.Context(), genaiClient, []*Content{
+		NewContentFromText("a", RoleUser),
+		NewContentFromText("b", RoleUser),
+	}, &EmbedContentConfig{})
 	require.ErrorContains(t, err, "expected 1 embedding for input 0, got 2")
 	assert.Len(t, *paths, 1, "must fail at the offending response")
 }

@@ -5,7 +5,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -51,7 +50,7 @@ func TestConvertMessagesToGemini_GeneratedMediaPlaceholder_MediaOnly(t *testing.
 
 	require.Len(t, contents, 2, "the media-only placeholder turn must not be dropped")
 	assistant := contents[1]
-	assert.Equal(t, genai.RoleModel, assistant.Role)
+	assert.Equal(t, RoleModel, assistant.Role)
 	require.Len(t, assistant.Parts, 1)
 	assert.Equal(t, generatedMediaPlaceholderText, assistant.Parts[0].Text)
 }

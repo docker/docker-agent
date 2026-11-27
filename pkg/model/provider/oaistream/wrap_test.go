@@ -8,16 +8,13 @@ import (
 	"testing"
 	"time"
 
-	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/modelerrors"
 )
 
-// makeTestOpenAIError creates an *openai.Error with the given status code and
-// optional Retry-After header value for testing.
-func makeTestOpenAIError(t *testing.T, statusCode int, retryAfterValue string) *openaisdk.Error {
+func makeTestOpenAIError(t *testing.T, statusCode int, retryAfterValue string) *APIError {
 	t.Helper()
 	header := http.Header{}
 	if retryAfterValue != "" {
@@ -26,12 +23,11 @@ func makeTestOpenAIError(t *testing.T, statusCode int, retryAfterValue string) *
 	resp := httptest.NewRecorder().Result()
 	resp.StatusCode = statusCode
 	resp.Header = header
-	// openai.Error.Error() dereferences Request, so we must provide a non-nil one.
-	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://api.openai.com/v1/chat/completions", http.NoBody)
-	return &openaisdk.Error{
+	return &APIError{
+		Method:     http.MethodPost,
+		URL:        "https://api.openai.com/v1/chat/completions",
 		StatusCode: statusCode,
 		Response:   resp,
-		Request:    req,
 	}
 }
 

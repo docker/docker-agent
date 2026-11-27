@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"testing"
 
-	oai "github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 )
 
 func TestApplySamplingProviderOpts(t *testing.T) {
@@ -52,7 +53,7 @@ func TestApplySamplingProviderOpts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params := oai.ChatCompletionNewParams{
+			params := oaistream.ChatCompletionRequest{
 				Model: "test-model",
 			}
 			require.NoError(t, applyChatProviderOpts(&params, tt.opts))

@@ -85,7 +85,7 @@ func TestWrapErrorBody(t *testing.T) {
 func TestErrorBodyMiddleware(t *testing.T) {
 	t.Parallel()
 
-	middleware := ErrorBodyMiddleware()
+	middleware := ErrorBodyMiddleware() //nolint:bodyclose // returns middleware func, not an http.Response
 
 	t.Run("passes through successful responses", func(t *testing.T) {
 		t.Parallel()

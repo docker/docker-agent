@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -30,7 +28,7 @@ func TestNewClientFromFactory_RequiresArguments(t *testing.T) {
 	t.Parallel()
 	cfg := &latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-4-6"}
 	env := environment.NewMapEnvProvider(nil)
-	factory := func(context.Context) (anthropic.Client, error) { return anthropic.Client{}, nil }
+	factory := func(context.Context) (*APIClient, error) { return &APIClient{}, nil }
 
 	_, err := NewClientFromFactory(t.Context(), nil, env, factory)
 	require.ErrorContains(t, err, "model configuration is required")
@@ -54,10 +52,10 @@ func TestNewClientFromFactoryWithOptions_AppliesOptionsOnce(t *testing.T) {
 
 	applied := 0
 	var seen options.ModelOptions
-	client, err := NewClientFromFactoryWithOptions(t.Context(), cfg, env, func(_ context.Context, m options.ModelOptions) (anthropic.Client, error) {
+	client, err := NewClientFromFactoryWithOptions(t.Context(), cfg, env, func(_ context.Context, m options.ModelOptions) (*APIClient, error) {
 		assert.Equal(t, 1, applied, "options are applied before the factory runs")
 		seen = m
-		return anthropic.Client{}, nil
+		return &APIClient{}, nil
 	}, func(*options.ModelOptions) { applied++ }, options.WithMaxTokens(42))
 	require.NoError(t, err)
 
@@ -81,11 +79,11 @@ func TestCreateChatCompletionStream_ErrorOnEmptyMessages(t *testing.T) {
 				Model:    "claude-sonnet-4-5-20250929",
 			},
 		},
-		clientFn: func(_ context.Context) (anthropic.Client, error) {
-			return anthropic.NewClient(
-				option.WithAPIKey("test-key"),
-				option.WithBaseURL(server.URL),
-			), nil
+		clientFn: func(_ context.Context) (*APIClient, error) {
+			return NewAPIClient(APIClientConfig{
+				APIKey:  "test-key",
+				BaseURL: server.URL,
+			}), nil
 		},
 	}
 
@@ -358,22 +356,20 @@ func TestCountAnthropicTokens_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	messages := []anthropic.MessageParam{
+	messages := []MessageParam{
 		{
-			Role: anthropic.MessageParamRoleUser,
-			Content: []anthropic.ContentBlockParamUnion{
-				{OfText: &anthropic.TextBlockParam{Text: "Hello"}},
-			},
+			Role:    "user",
+			Content: []ContentBlockParam{newTextBlock("Hello")},
 		},
 	}
-	system := []anthropic.TextBlockParam{
+	system := []TextBlockParam{
 		{Text: "You are helpful"},
 	}
 
-	client := anthropic.NewClient(
-		option.WithAPIKey("test-key"),
-		option.WithBaseURL(server.URL),
-	)
+	client := NewAPIClient(APIClientConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
 
 	tokens, err := countAnthropicTokens(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, nil)
 
@@ -381,24 +377,22 @@ func TestCountAnthropicTokens_Success(t *testing.T) {
 	assert.Equal(t, int64(150), tokens)
 }
 
-// TestCountAnthropicTokens_NoAPIKey tests error when API key is missing
 func TestCountAnthropicTokens_NoAPIKey(t *testing.T) {
 	t.Parallel()
-	// Use a test server that returns 401 Unauthorized
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error": {"message": "invalid api key"}}`))
 	}))
 	defer server.Close()
 
-	var messages []anthropic.MessageParam
-	var system []anthropic.TextBlockParam
-
-	client := anthropic.NewClient(
-		option.WithAPIKey("invalid-key"),
-		option.WithBaseURL(server.URL),
-		option.WithMaxRetries(0), // Disable retries to speed up test
-	)
+	var messages []MessageParam
+	var system []TextBlockParam
+	zero := 0
+	client := NewAPIClient(APIClientConfig{
+		APIKey:     "invalid-key",
+		BaseURL:    server.URL,
+		MaxRetries: &zero,
+	})
 
 	tokens, err := countAnthropicTokens(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, nil)
 
@@ -406,7 +400,6 @@ func TestCountAnthropicTokens_NoAPIKey(t *testing.T) {
 	assert.Equal(t, int64(0), tokens)
 }
 
-// TestCountAnthropicTokens_ServerError tests error handling for server errors
 func TestCountAnthropicTokens_ServerError(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -414,14 +407,14 @@ func TestCountAnthropicTokens_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var messages []anthropic.MessageParam
-	var system []anthropic.TextBlockParam
-
-	client := anthropic.NewClient(
-		option.WithAPIKey("test-key"),
-		option.WithBaseURL(server.URL),
-		option.WithMaxRetries(0), // Disable retries to speed up test
-	)
+	var messages []MessageParam
+	var system []TextBlockParam
+	zero := 0
+	client := NewAPIClient(APIClientConfig{
+		APIKey:     "test-key",
+		BaseURL:    server.URL,
+		MaxRetries: &zero,
+	})
 
 	tokens, err := countAnthropicTokens(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, nil)
 
@@ -429,7 +422,6 @@ func TestCountAnthropicTokens_ServerError(t *testing.T) {
 	assert.Equal(t, int64(0), tokens)
 }
 
-// TestCountAnthropicTokens_WithTools tests token counting includes tools
 func TestCountAnthropicTokens_WithTools(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -448,19 +440,19 @@ func TestCountAnthropicTokens_WithTools(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var messages []anthropic.MessageParam
-	var system []anthropic.TextBlockParam
-	aiTools := []anthropic.ToolUnionParam{
-		{OfTool: &anthropic.ToolParam{
+	var messages []MessageParam
+	var system []TextBlockParam
+	aiTools := []ToolParam{
+		{
 			Name:        "test_tool",
-			Description: anthropic.String("A test tool"),
-		}},
+			Description: new("A test tool"),
+		},
 	}
 
-	client := anthropic.NewClient(
-		option.WithAPIKey("test-key"),
-		option.WithBaseURL(server.URL),
-	)
+	client := NewAPIClient(APIClientConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
 
 	tokens, err := countAnthropicTokens(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, aiTools)
 
@@ -578,20 +570,20 @@ func TestExtractSystemBlocksCacheControl(t *testing.T) {
 
 	require.Len(t, blocks, 4)
 	assert.Equal(t, "instructions", blocks[0].Text)
-	assert.Empty(t, string(blocks[0].CacheControl.Type))
-	assert.Empty(t, string(blocks[0].CacheControl.TTL))
+	assert.Empty(t, blocks[0].CacheControl.Type)
+	assert.Empty(t, blocks[0].CacheControl.TTL)
 
 	assert.Equal(t, "tools", blocks[1].Text)
-	assert.Equal(t, "ephemeral", string(blocks[1].CacheControl.Type))
-	assert.Empty(t, string(blocks[1].CacheControl.TTL))
+	assert.Equal(t, "ephemeral", blocks[1].CacheControl.Type)
+	assert.Empty(t, blocks[1].CacheControl.TTL)
 
 	assert.Equal(t, "date", blocks[2].Text)
-	assert.Empty(t, string(blocks[2].CacheControl.Type))
-	assert.Empty(t, string(blocks[2].CacheControl.TTL))
+	assert.Empty(t, blocks[2].CacheControl.Type)
+	assert.Empty(t, blocks[2].CacheControl.TTL)
 
 	assert.Equal(t, "last", blocks[3].Text)
-	assert.Equal(t, "ephemeral", string(blocks[3].CacheControl.Type))
-	assert.Empty(t, string(blocks[3].CacheControl.TTL))
+	assert.Equal(t, "ephemeral", blocks[3].CacheControl.Type)
+	assert.Empty(t, blocks[3].CacheControl.TTL)
 }
 
 func TestExtractSystemBlocks_CapsCacheBreakpoints(t *testing.T) {
@@ -609,9 +601,9 @@ func TestExtractSystemBlocks_CapsCacheBreakpoints(t *testing.T) {
 	blocks := extractSystemBlocks(msgs)
 
 	require.Len(t, blocks, 3)
-	assert.Equal(t, "ephemeral", string(blocks[0].CacheControl.Type))
-	assert.Equal(t, "ephemeral", string(blocks[1].CacheControl.Type))
-	assert.Empty(t, string(blocks[2].CacheControl.Type))
+	assert.Equal(t, "ephemeral", blocks[0].CacheControl.Type)
+	assert.Equal(t, "ephemeral", blocks[1].CacheControl.Type)
+	assert.Empty(t, blocks[2].CacheControl.Type)
 }
 
 func TestExtractSystemBlocks_EmptyContentWithCacheControl(t *testing.T) {

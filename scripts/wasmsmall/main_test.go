@@ -27,8 +27,9 @@ func TestSmallProfileDependencies(t *testing.T) {
 	deps, err := goCommand(t.Context(), "list", "-deps", "-mod=readonly", "-modfile="+modfile, "-tags", tags, "./cmd/wasm")
 	require.NoError(t, err)
 	imports := strings.Fields(string(deps))
-	assert.Contains(t, imports, "github.com/anthropics/anthropic-sdk-go")
-	assert.Contains(t, imports, "github.com/pb33f/ordered-map/v2")
+	assert.NotContains(t, imports, "github.com/anthropics/anthropic-sdk-go")
+	assert.NotContains(t, imports, "github.com/openai/openai-go/v3")
+	assert.NotContains(t, imports, "google.golang.org/genai")
 	assert.Contains(t, imports, "github.com/goccy/go-yaml")
 	for _, name := range imports {
 		assert.False(t, name == "github.com/pb33f/go-yaml" || strings.HasPrefix(name, "github.com/pb33f/go-yaml/"), "unexpected YAML dependency: %s", name)

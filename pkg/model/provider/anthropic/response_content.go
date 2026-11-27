@@ -9,8 +9,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -50,65 +48,72 @@ func newProviderState[T interface{ RawJSON() string }](messageID, model string, 
 // blocks that no longer describe the flattened message (see describes).
 // Callers then fall back to the flattened fields. A non-nil error means the
 // state is ours but malformed.
-func replayContent(msg *chat.Message) ([]anthropic.ContentBlockParamUnion, bool, error) {
-	state := msg.ReplayableProviderState(providerStateName)
-	if state == nil {
-		return nil, false, nil
-	}
-	var blocks []anthropic.ContentBlockUnion
-	if err := json.Unmarshal(projectServerFallback(state.Content, false), &blocks); err != nil {
-		return nil, false, fmt.Errorf("anthropic: decoding raw response content: %w", err)
-	}
-	views := make([]rawBlock, len(blocks))
-	for i, b := range blocks {
-		views[i] = rawBlock{Type: b.Type, Text: b.Text, Thinking: b.Thinking, Signature: b.Signature, ID: b.ID, Name: b.Name, Input: b.Input}
-	}
-	if !describes(msg, views) {
-		return nil, false, nil
-	}
-	params := make([]anthropic.ContentBlockParamUnion, 0, len(blocks))
-	for i, b := range blocks {
-		if views[i].skip() {
-			continue
-		}
-		if b.AsAny() == nil {
-			return nil, false, fmt.Errorf("anthropic: unsupported content block type %q", b.Type)
-		}
-		params = append(params, b.ToParam())
-	}
-	if len(params) == 0 {
-		return nil, false, nil
-	}
-	return params, true, nil
+var knownReplayBlockTypes = map[string]bool{
+	"text":                   true,
+	"thinking":               true,
+	"redacted_thinking":      true,
+	"tool_use":               true,
+	"server_tool_use":        true,
+	"web_search_tool_result": true,
+	"fallback":               true,
+	"compaction":             true,
 }
 
-// betaReplayContent is replayContent for the Beta Messages API, which keeps
-// server fallback markers.
-func betaReplayContent(msg *chat.Message) ([]anthropic.BetaContentBlockParamUnion, bool, error) {
+func decodeReplayBlocks(rawContent json.RawMessage, keepMarkers bool) ([]ContentBlockParam, []rawBlock, error) {
+	projected := projectServerFallback(rawContent, keepMarkers)
+	var rawElems []json.RawMessage
+	if err := json.Unmarshal(projected, &rawElems); err != nil {
+		return nil, nil, err
+	}
+	views := make([]rawBlock, len(rawElems))
+	for i, elem := range rawElems {
+		if err := json.Unmarshal(elem, &views[i]); err != nil {
+			return nil, nil, err
+		}
+	}
+	params := make([]ContentBlockParam, 0, len(rawElems))
+	for i, b := range views {
+		if b.skip() {
+			continue
+		}
+		if !knownReplayBlockTypes[b.Type] {
+			return nil, nil, fmt.Errorf("anthropic: unsupported content block type %q", b.Type)
+		}
+		if b.Type == "fallback" && !keepMarkers {
+			return nil, nil, fmt.Errorf("anthropic: unsupported content block type %q", b.Type)
+		}
+		params = append(params, ContentBlockParam{
+			Raw:       rawElems[i],
+			Type:      b.Type,
+			Text:      b.Text,
+			Thinking:  b.Thinking,
+			Signature: b.Signature,
+			ID:        b.ID,
+			Name:      b.Name,
+		})
+	}
+	return params, views, nil
+}
+
+func replayContent(msg *chat.Message) ([]ContentBlockParam, bool, error) {
+	return replayContentWithMarkers(msg, false)
+}
+
+func betaReplayContent(msg *chat.Message) ([]ContentBlockParam, bool, error) {
+	return replayContentWithMarkers(msg, true)
+}
+
+func replayContentWithMarkers(msg *chat.Message, keepMarkers bool) ([]ContentBlockParam, bool, error) {
 	state := msg.ReplayableProviderState(providerStateName)
 	if state == nil {
 		return nil, false, nil
 	}
-	var blocks []anthropic.BetaContentBlockUnion
-	if err := json.Unmarshal(projectServerFallback(state.Content, true), &blocks); err != nil {
+	params, views, err := decodeReplayBlocks(state.Content, keepMarkers)
+	if err != nil {
 		return nil, false, fmt.Errorf("anthropic: decoding raw response content: %w", err)
-	}
-	views := make([]rawBlock, len(blocks))
-	for i, b := range blocks {
-		views[i] = rawBlock{Type: b.Type, Text: b.Text, Thinking: b.Thinking, Signature: b.Signature, ID: b.ID, Name: b.Name, Input: b.Input}
 	}
 	if !describes(msg, views) {
 		return nil, false, nil
-	}
-	params := make([]anthropic.BetaContentBlockParamUnion, 0, len(blocks))
-	for i, b := range blocks {
-		if views[i].skip() {
-			continue
-		}
-		if b.AsAny() == nil {
-			return nil, false, fmt.Errorf("anthropic: unsupported content block type %q", b.Type)
-		}
-		params = append(params, b.ToParam())
 	}
 	if len(params) == 0 {
 		return nil, false, nil
@@ -249,47 +254,23 @@ func recoveredContent(msg *chat.Message, keepMarkers bool) (json.RawMessage, boo
 }
 
 // recoveredParams is recoveredContent decoded for the Messages API.
-func recoveredParams(msg *chat.Message) ([]anthropic.ContentBlockParamUnion, bool) {
-	raw, ok := recoveredContent(msg, false)
-	if !ok {
-		return nil, false
-	}
-	var blocks []anthropic.ContentBlockUnion
-	if json.Unmarshal(raw, &blocks) != nil {
-		return nil, false
-	}
-	params := make([]anthropic.ContentBlockParamUnion, 0, len(blocks))
-	for _, b := range blocks {
-		if (rawBlock{Type: b.Type, Text: b.Text, Signature: b.Signature}).skip() {
-			continue
-		}
-		if b.AsAny() == nil {
-			return nil, false
-		}
-		params = append(params, b.ToParam())
-	}
-	return params, len(params) > 0
+func recoveredParams(msg *chat.Message) ([]ContentBlockParam, bool) {
+	return recoveredParamsWithMarkers(msg, false)
 }
 
 // betaRecoveredParams is recoveredContent decoded for the Beta Messages API.
-func betaRecoveredParams(msg *chat.Message) ([]anthropic.BetaContentBlockParamUnion, bool) {
-	raw, ok := recoveredContent(msg, true)
+func betaRecoveredParams(msg *chat.Message) ([]ContentBlockParam, bool) {
+	return recoveredParamsWithMarkers(msg, true)
+}
+
+func recoveredParamsWithMarkers(msg *chat.Message, keepMarkers bool) ([]ContentBlockParam, bool) {
+	raw, ok := recoveredContent(msg, keepMarkers)
 	if !ok {
 		return nil, false
 	}
-	var blocks []anthropic.BetaContentBlockUnion
-	if json.Unmarshal(raw, &blocks) != nil {
+	params, _, err := decodeReplayBlocks(raw, keepMarkers)
+	if err != nil {
 		return nil, false
-	}
-	params := make([]anthropic.BetaContentBlockParamUnion, 0, len(blocks))
-	for _, b := range blocks {
-		if (rawBlock{Type: b.Type, Text: b.Text, Signature: b.Signature}).skip() {
-			continue
-		}
-		if b.AsAny() == nil {
-			return nil, false
-		}
-		params = append(params, b.ToParam())
 	}
 	return params, len(params) > 0
 }

@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -36,7 +35,7 @@ func TestCheckImageOutputRequestCompatibility_GateConditions(t *testing.T) {
 		name            string
 		apiSurface      string
 		declared        *latest.OutputCapabilitiesConfig
-		builtInTools    []*genai.Tool
+		builtInTools    []*Tool
 		requestTools    int
 		structured      bool
 		generatingTitle bool
@@ -57,7 +56,7 @@ func TestCheckImageOutputRequestCompatibility_GateConditions(t *testing.T) {
 		},
 		{
 			name:       "gateway declared true + built-in tool: allowed",
-			apiSurface: apiSurfaceGateway, declared: declaredTrue, builtInTools: []*genai.Tool{{GoogleSearch: &genai.GoogleSearch{}}},
+			apiSurface: apiSurfaceGateway, declared: declaredTrue, builtInTools: []*Tool{{GoogleSearch: &GoogleSearch{}}},
 		},
 		{
 			name:       "gateway declared true + structured output: rejected",
@@ -91,7 +90,7 @@ func TestCheckImageOutputRequestCompatibility_GateConditions(t *testing.T) {
 			if tt.compacting {
 				client.ModelOptions = options.Apply(options.WithCompacting())
 			}
-			config := &genai.GenerateContentConfig{}
+			config := &GenerateContentConfig{}
 			if tt.structured {
 				config.ResponseMIMEType = "application/json"
 			}
@@ -186,7 +185,7 @@ func TestCheckImageOutputRequestCompatibility_ToolCallSupport(t *testing.T) {
 				ModelConfig:  latest.ModelConfig{Provider: "google", Model: tt.model},
 				ModelOptions: options.Apply(options.WithModelsDevStore(store)),
 			}}
-			err := client.checkImageOutputRequestCompatibility(t.Context(), true, &genai.GenerateContentConfig{}, 1)
+			err := client.checkImageOutputRequestCompatibility(t.Context(), true, &GenerateContentConfig{}, 1)
 
 			var incompatible *ImageOutputRequestIncompatibleError
 			require.ErrorAs(t, err, &incompatible)

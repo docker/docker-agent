@@ -81,7 +81,7 @@ func TestReproIssue2741_CustomProviderAttachmentDegradesToTextOnly(t *testing.T)
 		t.Helper()
 		parts := ConvertMultiContent(t.Context(), imageDoc, id, store, override)
 		require.Len(t, parts, 1, "expected the image to be preserved for %q", id.String())
-		assert.NotNil(t, parts[0].OfImageURL, "expected a native image part for %q", id.String())
+		assert.Equal(t, "image_url", parts[0].Type, "expected a native image part for %q", id.String())
 	}
 
 	t.Run("ollama/llava: provider absent from models.dev → image dropped", func(t *testing.T) {

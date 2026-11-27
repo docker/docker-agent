@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
-	"github.com/openai/openai-go/v3/responses"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -685,8 +684,8 @@ func TestWSStream_EndToEnd_WithClient(t *testing.T) {
 	assert.ErrorIs(t, err, io.EOF)
 }
 
-func defaultTestParams() responses.ResponseNewParams {
-	return responses.ResponseNewParams{
+func defaultTestParams() ResponseRequest {
+	return ResponseRequest{
 		Model: "gpt-4.1",
 	}
 }

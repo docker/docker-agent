@@ -223,25 +223,25 @@ func TestTruncateForError(t *testing.T) {
 	assert.Equal(t, strings.Repeat("你", 256)+"…", got)
 }
 
-func TestRequestOptions_RejectsNilConfig(t *testing.T) {
+func TestNewAuthenticator_RejectsNilConfig(t *testing.T) {
 	t.Parallel()
-	_, err := RequestOptions(nil, environment.NewMapEnvProvider(nil))
+	_, err := NewAuthenticator(nil, environment.NewMapEnvProvider(nil))
 	require.Error(t, err)
 }
 
-func TestRequestOptions_BuildsForFileSource(t *testing.T) {
+func TestNewAuthenticator_BuildsForFileSource(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tok")
 	require.NoError(t, os.WriteFile(path, []byte("jwt"), 0o600))
 
-	opts, err := RequestOptions(&latest.FederationAuthConfig{
+	auth, err := NewAuthenticator(&latest.FederationAuthConfig{
 		FederationRuleID: "fdrl_abc",
 		OrganizationID:   "org",
 		IdentityToken:    &latest.IdentityTokenSourceConfig{File: path},
 	}, environment.NewMapEnvProvider(nil))
 	require.NoError(t, err)
-	require.Len(t, opts, 1)
+	require.NotNil(t, auth)
 }
 
 // TestTokenSource_WrapsFailureMessage exercises the wrapping path that

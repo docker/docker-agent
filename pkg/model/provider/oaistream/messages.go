@@ -11,57 +11,39 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/packages/param"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 // JSONSchema is a helper type that implements json.Marshaler for map[string]any.
-// This allows us to pass schema maps to the OpenAI library which expects json.Marshaler.
 type JSONSchema map[string]any
 
-// MarshalJSON implements json.Marshaler for JSONSchema.
 func (j JSONSchema) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]any(j))
 }
 
-// ConvertMultiContent converts chat.MessagePart slices to OpenAI content
-// parts, resolving attachment capabilities from the provided modelsdev.Store.
-// A non-nil override declares the model's attachment capabilities explicitly,
-// bypassing the models.dev lookup (issue #2741).
-func ConvertMultiContent(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []openai.ChatCompletionContentPartUnionParam {
+func ConvertMultiContent(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []ContentPart {
 	return convertMultiContentWithCaps(ctx, multiContent, modelinfo.ResolveCaps(ctx, store, id, override))
 }
 
-// ConvertMessages converts chat.Message slices to OpenAI message params,
-// resolving attachment capabilities from the provided modelsdev.Store. A
-// non-nil override declares the model's attachment capabilities explicitly,
-// bypassing the models.dev lookup (issue #2741).
-func ConvertMessages(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []openai.ChatCompletionMessageParamUnion {
+func ConvertMessages(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []ChatMessage {
 	return ConvertMessagesWithTransform(ctx, messages, modelinfo.ResolveCaps(ctx, store, id, override), nil)
 }
 
-// ConvertMessagesWithCaps is the caps-injectable variant of [ConvertMessages].
-// It is used by providers whose models are not in the models.dev catalog (e.g.
-// Docker Model Runner), which must supply attachment capabilities explicitly
-// rather than resolving them from a store.
-func ConvertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities) []openai.ChatCompletionMessageParamUnion {
+func ConvertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities) []ChatMessage {
 	return ConvertMessagesWithTransform(ctx, messages, mc, nil)
 }
 
-func convertMultiContentWithCaps(ctx context.Context, multiContent []chat.MessagePart, mc modelinfo.ModelCapabilities) []openai.ChatCompletionContentPartUnionParam {
-	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(multiContent))
+func convertMultiContentWithCaps(ctx context.Context, multiContent []chat.MessagePart, mc modelinfo.ModelCapabilities) []ContentPart {
+	parts := make([]ContentPart, 0, len(multiContent))
 	for _, part := range multiContent {
 		switch part.Type {
 		case chat.MessagePartTypeText:
-			parts = append(parts, openai.TextContentPart(part.Text))
+			parts = append(parts, TextContentPart(part.Text))
 		case chat.MessagePartTypeImageURL:
-			// Note: superseded by MessagePartTypeDocument.
 			if part.ImageURL != nil {
-				parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+				parts = append(parts, ImageContentPart(ImageURLParam{
 					URL:    part.ImageURL.URL,
 					Detail: string(part.ImageURL.Detail),
 				}))
@@ -80,16 +62,12 @@ func convertMultiContentWithCaps(ctx context.Context, multiContent []chat.Messag
 	return parts
 }
 
-// ConvertMessagesWithTransform decorates each source message's converted items
-// before deferring tool attachments. The transform receives the source index,
-// keeping provider-specific metadata attached to its original content.
-func ConvertMessagesWithTransform(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities, transform func(int, []openai.ChatCompletionMessageParamUnion)) []openai.ChatCompletionMessageParamUnion {
-	openaiMessages := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
-	var deferred []openai.ChatCompletionMessageParamUnion
+func ConvertMessagesWithTransform(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities, transform func(int, []ChatMessage)) []ChatMessage {
+	openaiMessages := make([]ChatMessage, 0, len(messages))
+	var deferred []ChatMessage
 	for i := range messages {
 		msg := &messages[i]
 
-		// Skip invalid assistant messages upfront. This can happen if the model is out of tokens (max_tokens reached)
 		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" && strings.TrimSpace(msg.ReasoningContent) == "" {
 			continue
 		}
@@ -98,130 +76,103 @@ func ConvertMessagesWithTransform(ctx context.Context, messages []chat.Message, 
 			deferred = nil
 		}
 
-		var openaiMessage openai.ChatCompletionMessageParamUnion
-		var attachmentParts []openai.ChatCompletionContentPartUnionParam
+		var openaiMessage ChatMessage
+		var attachmentParts []ContentPart
 
 		switch msg.Role {
 		case chat.MessageRoleSystem:
 			if len(msg.MultiContent) == 0 {
-				openaiMessage = openai.SystemMessage(msg.Content)
+				openaiMessage = SystemMessage(msg.Content)
 			} else {
-				// Convert multi-content for system messages
-				textParts := make([]openai.ChatCompletionContentPartTextParam, 0)
+				textParts := make([]ContentPart, 0)
 				for _, part := range msg.MultiContent {
 					if part.Type == chat.MessagePartTypeText {
-						textParts = append(textParts, openai.ChatCompletionContentPartTextParam{
-							Text: part.Text,
-						})
+						textParts = append(textParts, TextContentPart(part.Text))
 					}
 				}
-				openaiMessage = openai.SystemMessage(textParts)
+				openaiMessage = SystemMultiMessage(textParts)
 			}
 
 		case chat.MessageRoleUser:
 			if len(msg.MultiContent) == 0 {
-				openaiMessage = openai.UserMessage(msg.Content)
+				openaiMessage = UserMessage(msg.Content)
 			} else {
-				openaiMessage = openai.UserMessage(convertMultiContentWithCaps(ctx, msg.MultiContent, mc))
+				openaiMessage = UserMultiMessage(convertMultiContentWithCaps(ctx, msg.MultiContent, mc))
 			}
 
 		case chat.MessageRoleAssistant:
-			assistantParam := openai.ChatCompletionAssistantMessageParam{}
+			assistant := ChatMessage{Role: "assistant"}
 			hasContent := false
 
 			if len(msg.MultiContent) == 0 {
 				if msg.Content != "" {
-					assistantParam.Content.OfString = param.NewOpt(msg.Content)
+					assistant.Content = new(msg.Content)
 					hasContent = true
 				}
 			} else {
-				// Convert multi-content for assistant messages
-				contentParts := make([]openai.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion, 0)
+				contentParts := make([]ContentPart, 0)
 				for _, part := range msg.MultiContent {
 					if part.Type == chat.MessagePartTypeText {
-						contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion{
-							OfText: &openai.ChatCompletionContentPartTextParam{
-								Text: part.Text,
-							},
-						})
+						contentParts = append(contentParts, TextContentPart(part.Text))
 					}
 				}
 				if len(contentParts) > 0 {
-					assistantParam.Content.OfArrayOfContentParts = contentParts
+					assistant.ContentParts = contentParts
 					hasContent = true
 				}
 			}
 
-			// Replay stored reasoning so a reasoning model can see its own previous
-			// reasoning instead of re-deriving it (#4363). openai-go has no
-			// reasoning_content field on the assistant param -- it is a non-standard
-			// extension (openai/openai-go#558) -- so it can only go through
-			// SetExtraFields.
-			//
-			// Scope: this replays reasoning carried by a turn that is retained in
-			// session history, i.e. one that also has content or tool calls. A turn
-			// whose only payload is reasoning is dropped earlier, by the history
-			// filters (session.isUsageOnlyMessage and session.normalizeMessageContent
-			// both key on content and tool calls), so it never reaches this
-			// converter. Retaining such turns is a separate change with context-size
-			// consequences.
-			//
-			// Whether reasoning reaches this converter at all is the caller's policy;
-			// provider clients clear it when replay_reasoning is disabled. See
-			// [ReplayReasoning].
 			if strings.TrimSpace(msg.ReasoningContent) != "" {
-				assistantParam.SetExtraFields(map[string]any{
-					"reasoning_content": msg.ReasoningContent,
-				})
+				assistant.ReasoningContent = msg.ReasoningContent
 			}
 
 			if msg.FunctionCall != nil {
-				assistantParam.FunctionCall.Name = msg.FunctionCall.Name
-				assistantParam.FunctionCall.Arguments = msg.FunctionCall.Arguments
+				assistant.FunctionCall = &FunctionCallParam{
+					Name:      msg.FunctionCall.Name,
+					Arguments: msg.FunctionCall.Arguments,
+				}
 			}
 
 			if len(msg.ToolCalls) > 0 {
-				toolCalls := make([]openai.ChatCompletionMessageToolCallUnionParam, len(msg.ToolCalls))
+				toolCalls := make([]ToolCallParam, len(msg.ToolCalls))
 				for j, toolCall := range msg.ToolCalls {
-					toolCalls[j] = openai.ChatCompletionMessageToolCallUnionParam{
-						OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
-							ID: toolCall.ID,
-							Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
-								Name:      toolCall.Function.Name,
-								Arguments: toolCall.Function.Arguments,
-							},
+					toolCalls[j] = ToolCallParam{
+						ID:   toolCall.ID,
+						Type: "function",
+						Function: FunctionCallParam{
+							Name:      toolCall.Function.Name,
+							Arguments: toolCall.Function.Arguments,
 						},
 					}
 				}
-				assistantParam.ToolCalls = toolCalls
+				assistant.ToolCalls = toolCalls
 			}
 
-			// content is only optional when tool_calls are present, and llama.cpp rejects
-			// an assistant message carrying neither, so a reasoning-only turn must still
-			// send content: "". See issue #4363.
-			if !hasContent && len(assistantParam.ToolCalls) == 0 {
-				assistantParam.Content.OfString = param.NewOpt("")
+			if !hasContent && len(assistant.ToolCalls) == 0 {
+				assistant.Content = new("")
 			}
 
-			openaiMessage.OfAssistant = &assistantParam
+			openaiMessage = assistant
 
 		case chat.MessageRoleTool:
-			toolParam := openai.ChatCompletionToolMessageParam{
+			toolMsg := ChatMessage{
+				Role:       "tool",
 				ToolCallID: msg.ToolCallID,
 			}
 
 			if len(msg.MultiContent) == 0 {
-				toolParam.Content.OfString = param.NewOpt(msg.Content)
+				toolMsg.Content = new(msg.Content)
 			} else {
-				textParts := make([]openai.ChatCompletionContentPartTextParam, 0)
+				textParts := make([]ContentPart, 0)
 				for _, part := range msg.MultiContent {
 					switch part.Type {
 					case chat.MessagePartTypeText:
-						textParts = append(textParts, openai.ChatCompletionContentPartTextParam{Text: part.Text})
+						textParts = append(textParts, TextContentPart(part.Text))
 					case chat.MessagePartTypeImageURL:
 						if part.ImageURL != nil {
-							attachmentParts = append(attachmentParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
-								URL: part.ImageURL.URL, Detail: string(part.ImageURL.Detail),
+							attachmentParts = append(attachmentParts, ImageContentPart(ImageURLParam{
+								URL:    part.ImageURL.URL,
+								Detail: string(part.ImageURL.Detail),
 							}))
 						}
 					case chat.MessagePartTypeDocument:
@@ -236,90 +187,37 @@ func ConvertMessagesWithTransform(ctx context.Context, messages []chat.Message, 
 					}
 				}
 				if len(textParts) == 0 {
-					toolParam.Content.OfString = param.NewOpt(msg.Content)
+					toolMsg.Content = new(msg.Content)
 				} else {
-					toolParam.Content.OfArrayOfContentParts = textParts
+					toolMsg.ContentParts = textParts
 				}
 			}
 
-			openaiMessage.OfTool = &toolParam
+			openaiMessage = toolMsg
 		}
 
-		converted := []openai.ChatCompletionMessageParamUnion{openaiMessage}
+		converted := []ChatMessage{openaiMessage}
 		if len(attachmentParts) > 0 {
-			label := openai.TextContentPart("Attached content from tool result (tool_call_id=" + msg.ToolCallID + "):")
-			allParts := append([]openai.ChatCompletionContentPartUnionParam{label}, attachmentParts...)
-			converted = append(converted, openai.UserMessage(allParts))
+			label := TextContentPart("Attached content from tool result (tool_call_id=" + msg.ToolCallID + "):")
+			allParts := append([]ContentPart{label}, attachmentParts...)
+			converted = append(converted, UserMultiMessage(allParts))
 		}
 		if transform != nil {
 			transform(i, converted)
 		}
 		openaiMessages = append(openaiMessages, converted[0])
-		// Every tool reply must precede the generated user attachment messages.
 		deferred = append(deferred, converted[1:]...)
 	}
 	openaiMessages = append(openaiMessages, deferred...)
 	return openaiMessages
 }
 
-// getMessageRole returns the role of a message as a string.
-// Returns empty string if role cannot be determined.
-func getMessageRole(msg openai.ChatCompletionMessageParamUnion) string {
-	if msg.OfSystem != nil {
-		return "system"
-	}
-	if msg.OfUser != nil {
-		return "user"
-	}
-	if msg.OfAssistant != nil {
-		return "assistant"
-	}
-	if msg.OfTool != nil {
-		return "tool"
-	}
-	return ""
-}
-
-// getStringContent extracts string content from a message, if available.
-// Returns empty string if content is multi-part or not a string.
-func getStringContent(msg openai.ChatCompletionMessageParamUnion) (string, bool) {
-	if msg.OfSystem != nil {
-		if str := msg.OfSystem.Content.OfString.Value; str != "" {
-			return str, true
-		}
-	}
-	if msg.OfUser != nil {
-		if str := msg.OfUser.Content.OfString.Value; str != "" {
-			return str, true
-		}
-	}
-	return "", false
-}
-
-// getMultiContent extracts multi-part content from a message, if available.
-func getMultiContent(msg openai.ChatCompletionMessageParamUnion) []openai.ChatCompletionContentPartUnionParam {
-	if msg.OfUser != nil && len(msg.OfUser.Content.OfArrayOfContentParts) > 0 {
-		return msg.OfUser.Content.OfArrayOfContentParts
-	}
-	return nil
-}
-
-// getSystemTextParts extracts text parts from a system message.
-func getSystemTextParts(msg openai.ChatCompletionMessageParamUnion) []openai.ChatCompletionContentPartTextParam {
-	if msg.OfSystem != nil && len(msg.OfSystem.Content.OfArrayOfContentParts) > 0 {
-		return msg.OfSystem.Content.OfArrayOfContentParts
-	}
-	return nil
-}
-
 // MergeConsecutiveMessages merges consecutive system or user messages into single messages.
-// This is needed by some local models (like those run by DMR) that don't handle
-// consecutive same-role messages well.
-func MergeConsecutiveMessages(openaiMessages []openai.ChatCompletionMessageParamUnion) []openai.ChatCompletionMessageParamUnion {
-	mergedMessages := make([]openai.ChatCompletionMessageParamUnion, 0, len(openaiMessages))
+func MergeConsecutiveMessages(openaiMessages []ChatMessage) []ChatMessage {
+	mergedMessages := make([]ChatMessage, 0, len(openaiMessages))
 
 	for i := 0; i < len(openaiMessages); {
-		currentRole := getMessageRole(openaiMessages[i])
+		currentRole := openaiMessages[i].Role
 		if currentRole != "system" && currentRole != "user" {
 			mergedMessages = append(mergedMessages, openaiMessages[i])
 			i++
@@ -327,14 +225,10 @@ func MergeConsecutiveMessages(openaiMessages []openai.ChatCompletionMessageParam
 		}
 
 		j := i + 1
-		for j < len(openaiMessages) && getMessageRole(openaiMessages[j]) == currentRole {
+		for j < len(openaiMessages) && openaiMessages[j].Role == currentRole {
 			j++
 		}
 
-		// Rebuilding a singleton would drop message-level fields (name, extra
-		// fields, part metadata) for no benefit. Metadata on any member of a
-		// run is treated as a barrier: merging would silently discard fields
-		// whose meaning this package cannot preserve.
 		if j == i+1 || hasMergeBarrier(openaiMessages[i:j]) {
 			mergedMessages = append(mergedMessages, openaiMessages[i:j]...)
 			i = j
@@ -348,97 +242,56 @@ func MergeConsecutiveMessages(openaiMessages []openai.ChatCompletionMessageParam
 	return mergedMessages
 }
 
-// hasMergeBarrier reports whether a same-role run carries metadata that a
-// rebuilt message would lose.
-func hasMergeBarrier(messages []openai.ChatCompletionMessageParamUnion) bool {
+func hasMergeBarrier(messages []ChatMessage) bool {
 	for _, msg := range messages {
-		switch {
-		case msg.OfSystem != nil:
-			if msg.OfSystem.Name.Valid() || len(msg.OfSystem.ExtraFields()) > 0 {
-				return true
-			}
-			for _, part := range msg.OfSystem.Content.OfArrayOfContentParts {
-				if len(part.ExtraFields()) > 0 {
-					return true
-				}
-			}
-		case msg.OfUser != nil:
-			if msg.OfUser.Name.Valid() || len(msg.OfUser.ExtraFields()) > 0 {
-				return true
-			}
-			if slices.ContainsFunc(msg.OfUser.Content.OfArrayOfContentParts, contentPartHasMetadata) {
-				return true
-			}
+		if msg.Name != "" || len(msg.ExtraFields) > 0 {
+			return true
+		}
+		if slices.ContainsFunc(msg.ContentParts, func(p ContentPart) bool {
+			return len(p.ExtraFields) > 0
+		}) {
+			return true
 		}
 	}
 	return false
 }
 
-func contentPartHasMetadata(part openai.ChatCompletionContentPartUnionParam) bool {
-	if len(part.ExtraFields()) > 0 {
-		return true
-	}
-	switch {
-	case part.OfText != nil:
-		return len(part.OfText.ExtraFields()) > 0
-	case part.OfImageURL != nil:
-		return len(part.OfImageURL.ExtraFields()) > 0
-	case part.OfInputAudio != nil:
-		return len(part.OfInputAudio.ExtraFields()) > 0
-	case part.OfFile != nil:
-		return len(part.OfFile.ExtraFields()) > 0
-	}
-	return false
-}
-
-func mergeMessageRun(messages []openai.ChatCompletionMessageParamUnion, role string) openai.ChatCompletionMessageParamUnion {
+func mergeMessageRun(messages []ChatMessage, role string) ChatMessage {
 	var mergedContent strings.Builder
-	var mergedMultiContent []openai.ChatCompletionContentPartUnionParam
+	var mergedMultiContent []ContentPart
 
 	for _, msg := range messages {
-		if str, ok := getStringContent(msg); ok {
+		if len(msg.ContentParts) > 0 {
+			if mergedContent.Len() > 0 {
+				mergedMultiContent = append(mergedMultiContent, TextContentPart(mergedContent.String()))
+				mergedContent.Reset()
+			}
+			mergedMultiContent = append(mergedMultiContent, msg.ContentParts...)
+		} else if msg.Content != nil && *msg.Content != "" {
 			if mergedContent.Len() > 0 {
 				mergedContent.WriteString("\n")
 			}
-			mergedContent.WriteString(str)
-		} else if parts := getMultiContent(msg); parts != nil {
-			if mergedContent.Len() > 0 {
-				mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
-				mergedContent.Reset()
-			}
-			mergedMultiContent = append(mergedMultiContent, parts...)
-		} else if textParts := getSystemTextParts(msg); textParts != nil {
-			if mergedContent.Len() > 0 {
-				mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
-				mergedContent.Reset()
-			}
-			for _, textPart := range textParts {
-				mergedMultiContent = append(mergedMultiContent, openai.ChatCompletionContentPartUnionParam{
-					OfText: &openai.ChatCompletionContentPartTextParam{
-						Text: textPart.Text,
-					},
-				})
-			}
+			mergedContent.WriteString(*msg.Content)
 		}
 	}
 	if len(mergedMultiContent) > 0 && mergedContent.Len() > 0 {
-		mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
+		mergedMultiContent = append(mergedMultiContent, TextContentPart(mergedContent.String()))
 	}
 
 	if role == "system" {
 		if len(mergedMultiContent) == 0 {
-			return openai.SystemMessage(mergedContent.String())
+			return SystemMessage(mergedContent.String())
 		}
-		textParts := make([]openai.ChatCompletionContentPartTextParam, 0, len(mergedMultiContent))
+		textParts := make([]ContentPart, 0, len(mergedMultiContent))
 		for _, part := range mergedMultiContent {
-			if part.OfText != nil {
-				textParts = append(textParts, *part.OfText)
+			if part.Type == "text" {
+				textParts = append(textParts, part)
 			}
 		}
-		return openai.SystemMessage(textParts)
+		return SystemMultiMessage(textParts)
 	}
 	if len(mergedMultiContent) == 0 {
-		return openai.UserMessage(mergedContent.String())
+		return UserMessage(mergedContent.String())
 	}
-	return openai.UserMessage(mergedMultiContent)
+	return UserMultiMessage(mergedMultiContent)
 }

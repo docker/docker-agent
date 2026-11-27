@@ -1,7 +1,5 @@
 package gemini
 
-import "google.golang.org/genai"
-
 // imageOutputMediaFileInstruction is appended as a system instruction on
 // declared image-output chat requests (see wantsImageResponseModalities) so
 // generated images arrive with a machine-readable filename: the runtime
@@ -22,10 +20,10 @@ Rules:
 // instruction to the request's system instruction, preserving any parts
 // already present. Callers gate it on wantsImageResponseModalities so only
 // declared image-output chat requests carry it.
-func applyImageOutputMediaFileInstruction(config *genai.GenerateContentConfig) {
+func applyImageOutputMediaFileInstruction(config *GenerateContentConfig) {
 	if config.SystemInstruction == nil {
-		config.SystemInstruction = &genai.Content{}
+		config.SystemInstruction = &Content{}
 	}
 	config.SystemInstruction.Parts = append(config.SystemInstruction.Parts,
-		genai.NewPartFromText(imageOutputMediaFileInstruction))
+		NewPartFromText(imageOutputMediaFileInstruction))
 }

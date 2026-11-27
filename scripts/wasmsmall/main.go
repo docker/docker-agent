@@ -16,7 +16,6 @@ type modulePatch struct {
 }
 
 var patches = []modulePatch{
-	{"github.com/anthropics/anthropic-sdk-go", "v1.84.0", ".anthropic-sdk", makeUnionsLazy},
 	{"github.com/pb33f/ordered-map/v2", "v2.3.2", ".ordered-map", omitOrderedMapYAML},
 }
 

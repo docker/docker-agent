@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -28,7 +26,7 @@ type cuHarness struct {
 }
 
 type cuTurn struct {
-	params anthropic.BetaMessageNewParams
+	params MessageRequest
 	result *conversationUpdateResult
 	body   map[string]any
 }
@@ -54,33 +52,35 @@ func cuTools(names ...string) []tools.Tool {
 	return out
 }
 
-func (h *cuHarness) buildParams(system []string, requestTools []tools.Tool, effort string) anthropic.BetaMessageNewParams {
+func (h *cuHarness) buildParams(system []string, requestTools []tools.Tool, effort string) MessageRequest {
 	h.t.Helper()
 	converted, err := testClient().convertBetaMessages(h.t.Context(), h.hist)
 	require.NoError(h.t, err)
-	betaTools, err := convertBetaTools(requestTools)
+	betaTools, err := convertTools(requestTools)
 	require.NoError(h.t, err)
-	var sys []anthropic.BetaTextBlockParam
+	var sys []TextBlockParam
 	for i, text := range system {
-		block := anthropic.BetaTextBlockParam{Text: text}
+		block := TextBlockParam{Text: text}
 		if i == len(system)-1 {
-			block.CacheControl = anthropic.NewBetaCacheControlEphemeralParam()
+			block.CacheControl = *newEphemeralCacheControl()
 		}
 		sys = append(sys, block)
 	}
-	params := anthropic.BetaMessageNewParams{
+	params := MessageRequest{
 		Model:     h.model,
 		MaxTokens: 1024,
 		System:    sys,
 		Messages:  converted,
 		Tools:     betaTools,
-		Betas:     []anthropic.AnthropicBeta{anthropic.AnthropicBetaInterleavedThinking2025_05_14},
+		Betas:     []AnthropicBeta{AnthropicBetaInterleavedThinking2025_05_14},
 	}
-	params.OutputConfig.Effort = anthropic.BetaOutputConfigEffort(effort)
+	if effort != "" {
+		params.OutputConfig = &OutputConfigParam{Effort: effort}
+	}
 	return params
 }
 
-func (h *cuHarness) apply(params anthropic.BetaMessageNewParams, transient ...string) (cuTurn, error) {
+func (h *cuHarness) apply(params MessageRequest, transient ...string) (cuTurn, error) {
 	h.t.Helper()
 	res, err := applyConversationUpdates(h.t.Context(), h.model, &params, h.hist, transient)
 	if err != nil {
@@ -126,18 +126,18 @@ func toolCall(id, name string) tools.ToolCall {
 	return tools.ToolCall{ID: id, Type: "function", Function: tools.FunctionCall{Name: name, Arguments: `{"path":"a"}`}}
 }
 
-func wire(t *testing.T, params anthropic.BetaMessageNewParams) map[string]any {
+func wire(t *testing.T, params MessageRequest) map[string]any {
 	t.Helper()
-	data, err := params.MarshalJSON()
+	data, err := json.Marshal(params)
 	require.NoError(t, err)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(data, &body))
 	return body
 }
 
-func wireBytes(t *testing.T, params anthropic.BetaMessageNewParams) string {
+func wireBytes(t *testing.T, params MessageRequest) string {
 	t.Helper()
-	data, err := params.MarshalJSON()
+	data, err := json.Marshal(params)
 	require.NoError(t, err)
 	return string(data)
 }
@@ -225,7 +225,7 @@ func TestConversationUpdates_FirstTurnKeepsBaseline(t *testing.T) {
 	assert.Equal(t, []string{"read", "write"}, toolNames(turn.body))
 	assert.Equal(t, "high", turn.body["output_config"].(map[string]any)["effort"])
 	assert.Equal(t, []string{"user"}, roles(turn.body))
-	assert.Equal(t, []anthropic.AnthropicBeta{anthropic.AnthropicBetaInterleavedThinking2025_05_14}, turn.params.Betas, "no conditional beta without updates")
+	assert.Equal(t, []AnthropicBeta{AnthropicBetaInterleavedThinking2025_05_14}, turn.params.Betas, "no conditional beta without updates")
 
 	cc := decodeContext(t, turn.result.RequestContext)
 	require.NotNil(t, cc.Baseline)
@@ -277,7 +277,7 @@ func TestConversationUpdates_AppendedSystem(t *testing.T) {
 	assert.Equal(t, []string{"text:C"}, blockSummary(systemMessages(t2.body)[0]))
 	assert.NotContains(t, systemMessages(t2.body)[0], "clear_at")
 	assert.Equal(t, []string{"C"}, decodeContext(t, t2.result.RequestContext).Update.Texts)
-	assert.Equal(t, []anthropic.AnthropicBeta{anthropic.AnthropicBetaInterleavedThinking2025_05_14}, t2.params.Betas, "plain text needs no beta")
+	assert.Equal(t, []AnthropicBeta{AnthropicBetaInterleavedThinking2025_05_14}, t2.params.Betas, "plain text needs no beta")
 	h.reply(t2, "a2")
 	h.user("u3")
 
@@ -336,7 +336,7 @@ func TestConversationUpdates_ToolAddRemove(t *testing.T) {
 	assert.False(t, t2.result.Reset)
 	assert.Equal(t, t1.body["tools"], t2.body["tools"], "the tools array never changes for a removal")
 	assert.Equal(t, []string{"remove:write"}, blockSummary(systemMessages(t2.body)[0]))
-	assert.Contains(t, t2.params.Betas, anthropic.AnthropicBetaMidConversationToolChanges2026_07_01)
+	assert.Contains(t, t2.params.Betas, AnthropicBetaMidConversationToolChanges2026_07_01)
 	assert.Equal(t, []string{"write"}, decodeContext(t, t2.result.RequestContext).Update.RemoveTools)
 	h.reply(t2, "a2")
 	h.user("u3")
@@ -476,8 +476,8 @@ func TestConversationUpdates_EffortChange(t *testing.T) {
 		require.Len(t, msgs, 1)
 		assert.Equal(t, []any{}, msgs[0]["content"], "effort-only messages carry empty content")
 		assert.Equal(t, map[string]any{"effort": "low"}, msgs[0]["output_config"])
-		assert.Contains(t, t2.params.Betas, anthropic.AnthropicBetaMidConversationOutputConfig2026_07_01)
-		assert.NotContains(t, t2.params.Betas, anthropic.AnthropicBetaMidConversationToolChanges2026_07_01)
+		assert.Contains(t, t2.params.Betas, AnthropicBetaMidConversationOutputConfig2026_07_01)
+		assert.NotContains(t, t2.params.Betas, AnthropicBetaMidConversationToolChanges2026_07_01)
 		h.reply(t2, "a2")
 		h.user("u3")
 
@@ -582,7 +582,7 @@ func TestConversationUpdates_TransientMessages(t *testing.T) {
 	assert.Equal(t, "next_user_message", msg["clear_at"])
 	assert.Equal(t, []string{"text:batch your reads"}, blockSummary(msg))
 	assert.NotContains(t, msg, "output_config")
-	assert.Contains(t, t1.params.Betas, anthropic.AnthropicBetaMidConversationSystemClearAt2026_08_21)
+	assert.Contains(t, t1.params.Betas, AnthropicBetaMidConversationSystemClearAt2026_08_21)
 	cc := decodeContext(t, t1.result.RequestContext)
 	require.NotNil(t, cc.Baseline)
 	assert.Equal(t, []string{"batch your reads"}, cc.Update.Transient)
@@ -768,10 +768,10 @@ func TestConversationUpdates_AlignsRawReplayedTurns(t *testing.T) {
 
 	params := h.buildParams([]string{"A", "B"}, cuTools("read", "write"), "")
 	first := params.Messages[1]
-	require.Equal(t, anthropic.BetaMessageParamRoleAssistant, first.Role)
+	require.Equal(t, "assistant", first.Role)
 	require.Len(t, first.Content, 3, "thinking + two tool_use blocks replayed raw")
-	require.NotNil(t, first.Content[0].OfThinking)
-	require.NotNil(t, first.Content[1].OfToolUse)
+	assert.Equal(t, "thinking", first.Content[0].Type)
+	assert.Equal(t, "tool_use", first.Content[1].Type)
 
 	t3, err := h.apply(params)
 	require.NoError(t, err)
@@ -796,15 +796,15 @@ func TestConversationUpdates_IgnoresInvisibleAssistantTurns(t *testing.T) {
 	h.user("u3")
 
 	params := h.buildParams([]string{"A", "C"}, cuTools("read"), "")
-	compaction := anthropic.BetaMessageParam{
-		Role:    anthropic.BetaMessageParamRoleAssistant,
-		Content: []anthropic.BetaContentBlockParamUnion{param.Override[anthropic.BetaContentBlockParamUnion](json.RawMessage(`{"type":"compaction","content":"..."}`))},
+	compaction := MessageParam{
+		Role:    "assistant",
+		Content: []ContentBlockParam{{Raw: json.RawMessage(`{"type":"compaction","content":"..."}`), Type: "compaction"}},
 	}
-	thinkingOnly := anthropic.BetaMessageParam{
-		Role:    anthropic.BetaMessageParamRoleAssistant,
-		Content: []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaThinkingBlock("sig", "hmm")},
+	thinkingOnly := MessageParam{
+		Role:    "assistant",
+		Content: []ContentBlockParam{newThinkingBlock("sig", "hmm")},
 	}
-	params.Messages = slices.Concat([]anthropic.BetaMessageParam{compaction}, params.Messages[:1], []anthropic.BetaMessageParam{thinkingOnly}, params.Messages[1:])
+	params.Messages = slices.Concat([]MessageParam{compaction}, params.Messages[:1], []MessageParam{thinkingOnly}, params.Messages[1:])
 
 	turn, err := h.apply(params)
 	require.NoError(t, err)
@@ -912,12 +912,12 @@ func TestConversationUpdates_BetasNotDuplicated(t *testing.T) {
 	h.user("u2")
 
 	params := h.buildParams(nil, cuTools("read"), "")
-	params.Betas = append(params.Betas, anthropic.AnthropicBetaMidConversationToolChanges2026_07_01)
+	params.Betas = append(params.Betas, AnthropicBetaMidConversationToolChanges2026_07_01)
 	turn, err := h.apply(params)
 	require.NoError(t, err)
-	assert.Equal(t, []anthropic.AnthropicBeta{
-		anthropic.AnthropicBetaInterleavedThinking2025_05_14,
-		anthropic.AnthropicBetaMidConversationToolChanges2026_07_01,
+	assert.Equal(t, []AnthropicBeta{
+		AnthropicBetaInterleavedThinking2025_05_14,
+		AnthropicBetaMidConversationToolChanges2026_07_01,
 	}, turn.params.Betas)
 }
 
@@ -938,7 +938,7 @@ func TestConversationUpdates_DoesNotMutateInputs(t *testing.T) {
 	_, err = h.apply(params)
 	require.NoError(t, err)
 
-	after := wireBytes(t, anthropic.BetaMessageNewParams{Model: params.Model, MaxTokens: params.MaxTokens, Messages: converted, System: sys, Tools: betaTools, Betas: params.Betas, OutputConfig: params.OutputConfig})
+	after := wireBytes(t, MessageRequest{Model: params.Model, MaxTokens: params.MaxTokens, Messages: converted, System: sys, Tools: betaTools, Betas: params.Betas, OutputConfig: params.OutputConfig})
 	assert.Equal(t, before, after, "the caller's slices are left untouched")
 	histAfter, err := json.Marshal(h.hist)
 	require.NoError(t, err)

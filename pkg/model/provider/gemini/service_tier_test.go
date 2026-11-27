@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -25,13 +24,13 @@ func TestBuildConfig_ServiceTier(t *testing.T) {
 	tests := []struct {
 		name string
 		opts map[string]any
-		want genai.ServiceTier
+		want ServiceTier
 	}{
 		{name: "omitted"},
 		{name: "empty", opts: map[string]any{"service_tier": ""}},
-		{name: "flex", opts: map[string]any{"service_tier": "flex"}, want: genai.ServiceTierFlex},
-		{name: "standard", opts: map[string]any{"service_tier": "standard"}, want: genai.ServiceTierStandard},
-		{name: "priority", opts: map[string]any{"service_tier": "priority"}, want: genai.ServiceTierPriority},
+		{name: "flex", opts: map[string]any{"service_tier": "flex"}, want: ServiceTierFlex},
+		{name: "standard", opts: map[string]any{"service_tier": "standard"}, want: ServiceTierStandard},
+		{name: "priority", opts: map[string]any{"service_tier": "priority"}, want: ServiceTierPriority},
 		{name: "future tier passes through", opts: map[string]any{"service_tier": "turbo"}, want: "turbo"},
 		{name: "int ignored", opts: map[string]any{"service_tier": 1}},
 		{name: "bool ignored", opts: map[string]any{"service_tier": true}},
@@ -68,7 +67,7 @@ func TestBuildConfig_ServiceTier_NoThinkingTitle(t *testing.T) {
 		require.NotNil(t, config.ThinkingConfig.ThinkingBudget)
 		assert.Zero(t, *config.ThinkingConfig.ThinkingBudget)
 		assert.Equal(t, int32(128), config.MaxOutputTokens)
-		assert.Equal(t, genai.ServiceTierFlex, config.ServiceTier)
+		assert.Equal(t, ServiceTierFlex, config.ServiceTier)
 	})
 
 	t.Run("gemini-3-flash uses low thinking level and floors max tokens", func(t *testing.T) {
@@ -81,9 +80,9 @@ func TestBuildConfig_ServiceTier_NoThinkingTitle(t *testing.T) {
 		config := client.buildConfig(t.Context())
 		require.NotNil(t, config.ThinkingConfig)
 		assert.False(t, config.ThinkingConfig.IncludeThoughts)
-		assert.Equal(t, genai.ThinkingLevelLow, config.ThinkingConfig.ThinkingLevel)
+		assert.Equal(t, ThinkingLevelLow, config.ThinkingConfig.ThinkingLevel)
 		assert.Equal(t, int32(512), config.MaxOutputTokens)
-		assert.Equal(t, genai.ServiceTierFlex, config.ServiceTier)
+		assert.Equal(t, ServiceTierFlex, config.ServiceTier)
 	})
 }
 

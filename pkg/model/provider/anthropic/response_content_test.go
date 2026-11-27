@@ -7,34 +7,29 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/model/provider/internal/httpx"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// interleavedThinkingEvents is a tool_use turn exercising every shape the
-// flattened chat.Message cannot express: two signed thinking blocks (one
-// with the signature split across deltas), a redacted block, an omitted
-// block (signature but no text), and text/tool_use interleaving.
-func interleavedThinkingEvents(withMessageStart bool) []ssestream.Event {
-	var events []ssestream.Event
+func interleavedThinkingEvents(withMessageStart bool) []httpx.SSEEvent {
+	var events []httpx.SSEEvent
 	if withMessageStart {
 		events = append(events, sseEvent("message_start", map[string]any{
 			"type":    "message_start",
 			"message": map[string]any{"id": "msg_raw", "model": "claude-test", "role": "assistant", "type": "message", "content": []any{}},
 		}))
 	}
-	start := func(index int, block map[string]any) ssestream.Event {
+	start := func(index int, block map[string]any) httpx.SSEEvent {
 		return sseEvent("content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": block})
 	}
-	delta := func(index int, d map[string]any) ssestream.Event {
+	delta := func(index int, d map[string]any) httpx.SSEEvent {
 		return sseEvent("content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": d})
 	}
-	stop := func(index int) ssestream.Event {
+	stop := func(index int) httpx.SSEEvent {
 		return sseEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
 	}
 	events = append(events,
@@ -123,15 +118,15 @@ func drainStream(t *testing.T, stream chat.MessageStream) chat.Message {
 	return msg
 }
 
-func drainStandard(t *testing.T, events []ssestream.Event) chat.Message {
+func drainStandard(t *testing.T, events []httpx.SSEEvent) chat.Message {
 	t.Helper()
-	stream := ssestream.NewStream[anthropic.MessageStreamEventUnion](&fakeDecoder{events: events}, nil)
+	stream := &EventStream{sse: &fakeDecoder{events: events}}
 	return drainStream(t, (&Client{}).newStreamAdapter(stream, true))
 }
 
-func drainBeta(t *testing.T, events []ssestream.Event) chat.Message {
+func drainBeta(t *testing.T, events []httpx.SSEEvent) chat.Message {
 	t.Helper()
-	stream := ssestream.NewStream[anthropic.BetaRawMessageStreamEventUnion](&fakeDecoder{events: events}, nil)
+	stream := &EventStream{sse: &fakeDecoder{events: events}}
 	return drainStream(t, (&Client{}).newBetaStreamAdapter(stream, true))
 }
 
@@ -140,7 +135,7 @@ func TestStreamAdapter_RecordsRawContentOnMessageStop(t *testing.T) {
 
 	for _, tc := range []struct {
 		name  string
-		drain func(*testing.T, []ssestream.Event) chat.Message
+		drain func(*testing.T, []httpx.SSEEvent) chat.Message
 	}{
 		{"standard", drainStandard},
 		{"beta", drainBeta},
@@ -182,7 +177,7 @@ func TestStreamAdapter_RawContentWithoutMessageStart(t *testing.T) {
 func TestStreamAdapter_NoRawContentForEmptyResponse(t *testing.T) {
 	t.Parallel()
 
-	events := []ssestream.Event{
+	events := []httpx.SSEEvent{
 		sseEvent("message_start", map[string]any{"type": "message_start", "message": map[string]any{"id": "msg_e", "role": "assistant", "type": "message", "content": []any{}}}),
 		sseEvent("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"}, "usage": map[string]any{"output_tokens": 1}}),
 		sseEvent("message_stop", map[string]any{"type": "message_stop"}),
@@ -194,9 +189,9 @@ func TestStreamAdapter_NoRawContentForEmptyResponse(t *testing.T) {
 func TestStreamAdapter_AccumulateFailureKeepsStreaming(t *testing.T) {
 	t.Parallel()
 
-	// Block index 1 with nothing at index 0 makes the SDK accumulator fail;
+	// Block index 1 with nothing at index 0 makes the accumulator fail;
 	// the flattened stream must be unaffected and no raw state recorded.
-	events := []ssestream.Event{
+	events := []httpx.SSEEvent{
 		sseEvent("content_block_start", map[string]any{"type": "content_block_start", "index": 1, "content_block": map[string]any{"type": "text", "text": ""}}),
 		sseEvent("content_block_delta", map[string]any{"type": "content_block_delta", "index": 1, "delta": map[string]any{"type": "text_delta", "text": "hi"}}),
 		sseEvent("message_stop", map[string]any{"type": "message_stop"}),
@@ -338,7 +333,7 @@ func TestReplayContent_ArgumentsCompareAsJSON(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, blocks, 1)
-	assert.Equal(t, "toolu_C", blocks[0].OfToolUse.ID)
+	assert.Equal(t, "toolu_C", blocks[0].ID)
 }
 
 func TestReplayContent_RejectsMalformedState(t *testing.T) {
@@ -408,8 +403,7 @@ func TestReplayContent_OmittedThinkingStaysThinking(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, blocks, 2)
-	require.NotNil(t, blocks[0].OfThinking)
-	assert.Equal(t, "sig-omitted", blocks[0].OfThinking.Signature)
-	assert.Empty(t, blocks[0].OfThinking.Thinking)
-	assert.Nil(t, blocks[0].OfRedactedThinking)
+	assert.Equal(t, "thinking", blocks[0].Type)
+	assert.Equal(t, "sig-omitted", blocks[0].Signature)
+	assert.Empty(t, blocks[0].Thinking)
 }

@@ -8,16 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/modelerrors"
 )
 
-// makeTestAnthropicError creates an *anthropic.Error with the given status code and
-// optional Retry-After header value for testing.
-func makeTestAnthropicError(t *testing.T, statusCode int, retryAfterValue string) *anthropic.Error {
+func makeTestAnthropicError(t *testing.T, statusCode int, retryAfterValue string) *APIError {
 	t.Helper()
 	header := http.Header{}
 	if retryAfterValue != "" {
@@ -26,34 +23,20 @@ func makeTestAnthropicError(t *testing.T, statusCode int, retryAfterValue string
 	resp := httptest.NewRecorder().Result()
 	resp.StatusCode = statusCode
 	resp.Header = header
-	// anthropic.Error.Error() dereferences Request, so we must provide a non-nil one.
-	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://api.anthropic.com/v1/messages", http.NoBody)
-	return &anthropic.Error{
+	return &APIError{
 		StatusCode: statusCode,
 		Response:   resp,
-		Request:    req,
+		Method:     http.MethodPost,
+		URL:        "https://api.anthropic.com/v1/messages",
 	}
 }
 
-// makeTestSSEAnthropicError simulates the in-band SSE error path: the HTTP
-// response was 200 OK but a `type:error` event arrived in the stream, so the
-// SDK populated an *anthropic.Error with StatusCode == 200 and a body whose
-// `error.type` indicates the actual failure (e.g. "api_error",
-// "overloaded_error"). See https://github.com/docker/docker-agent/issues/2870.
-func makeTestSSEAnthropicError(t *testing.T, errorType, message string) *anthropic.Error {
+func makeTestSSEAnthropicError(t *testing.T, errorType, message string) *APIError {
 	t.Helper()
 	resp := httptest.NewRecorder().Result()
 	resp.StatusCode = http.StatusOK
-	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://api.anthropic.com/v1/messages", http.NoBody)
 	body := fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":%q},"request_id":"req_test"}`, errorType, message)
-	apiErr := &anthropic.Error{
-		StatusCode: http.StatusOK,
-		Response:   resp,
-		Request:    req,
-		RequestID:  "req_test",
-	}
-	require.NoError(t, apiErr.UnmarshalJSON([]byte(body)))
-	return apiErr
+	return parseInBandSSEError([]byte(body), resp)
 }
 
 func TestWrapAnthropicError(t *testing.T) {

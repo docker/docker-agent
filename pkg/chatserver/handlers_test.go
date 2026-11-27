@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
-	"github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -49,7 +48,7 @@ func TestHandleModels(t *testing.T) {
 		assert.Equal(t, "docker-agent", m.OwnedBy)
 		// openai.Model carries a typed `Object constant.Model` field that
 		// always serialises to "model". Ensure the wire shape is stable.
-		assert.Equal(t, openai.Model{}.Object.Default(), m.Object)
+		assert.Equal(t, "model", m.Object)
 	}
 }
 

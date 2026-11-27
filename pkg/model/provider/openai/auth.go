@@ -1,20 +1,19 @@
 package openai
 
 import (
+	"context"
 	"net/http"
-
-	"github.com/openai/openai-go/v3/option"
 
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
-func tokenAuthMiddleware(source options.TokenSource) option.Middleware {
-	return func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
-		token, err := source(req.Context())
+func tokenAuthHeaderFunc(source options.TokenSource) func(context.Context, http.Header) error {
+	return func(ctx context.Context, h http.Header) error {
+		token, err := source(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		return next(req)
+		h.Set("Authorization", "Bearer "+token)
+		return nil
 	}
 }

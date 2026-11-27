@@ -7,6 +7,7 @@
 package federation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,14 +18,169 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 )
+
+const (
+	tokenEndpoint        = "/v1/oauth/token"
+	grantTypeJWTBearer   = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+	oauthAPIBetaHeader   = "oauth-2025-04-20"
+	federationBetaHeader = "oidc-federation-2026-04-01"
+	maxAssertionSize     = 16384
+)
+
+// IdentityTokenFunc fetches a fresh OIDC identity token.
+type IdentityTokenFunc func(ctx context.Context) (string, error)
+
+// Authenticator exchanges an OIDC identity token for a short-lived Anthropic
+// access token and caches it until it nears expiration.
+type Authenticator struct {
+	provider         IdentityTokenFunc
+	federationRuleID string
+	organizationID   string
+	serviceAccountID string
+
+	mu          sync.Mutex
+	accessToken string
+	expiresAt   time.Time
+}
+
+// NewAuthenticator builds a workload identity federation authenticator from cfg.
+func NewAuthenticator(cfg *latest.FederationAuthConfig, env environment.Provider) (*Authenticator, error) {
+	if cfg == nil {
+		return nil, errors.New("federation: nil config")
+	}
+	src, kind, err := tokenSource(cfg.IdentityToken, env)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.FederationRuleID == "" {
+		return nil, errors.New("federation: federation_rule_id is required")
+	}
+	if cfg.OrganizationID == "" {
+		return nil, errors.New("federation: organization_id is required")
+	}
+
+	provider := func(ctx context.Context) (string, error) {
+		token, err := src(ctx)
+		if err != nil {
+			return "", fmt.Errorf(
+				"anthropic workload identity federation: failed to refresh identity token from %s source (federation_rule=%s): %w",
+				kind, cfg.FederationRuleID, err,
+			)
+		}
+		return token, nil
+	}
+
+	return &Authenticator{
+		provider:         provider,
+		federationRuleID: cfg.FederationRuleID,
+		organizationID:   cfg.OrganizationID,
+		serviceAccountID: cfg.ServiceAccountID,
+	}, nil
+}
+
+// Authenticate injects the federated Bearer token and required OAuth beta header
+// onto req, exchanging a fresh access token against baseURL when needed.
+func (a *Authenticator) Authenticate(ctx context.Context, req *http.Request, baseURL string, client *http.Client) error {
+	token, err := a.token(ctx, baseURL, client)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	existing := req.Header.Get("anthropic-beta")
+	switch {
+	case existing == "":
+		req.Header.Set("anthropic-beta", oauthAPIBetaHeader)
+	case !strings.Contains(existing, oauthAPIBetaHeader):
+		req.Header.Set("anthropic-beta", existing+","+oauthAPIBetaHeader)
+	}
+	return nil
+}
+
+func (a *Authenticator) token(ctx context.Context, baseURL string, client *http.Client) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.accessToken != "" && time.Now().Add(60*time.Second).Before(a.expiresAt) {
+		return a.accessToken, nil
+	}
+
+	jwt, err := a.provider(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(jwt) > maxAssertionSize {
+		return "", fmt.Errorf("identity token exceeds %d-byte limit (got %d bytes)", maxAssertionSize, len(jwt))
+	}
+
+	payload := struct {
+		GrantType        string `json:"grant_type"`
+		Assertion        string `json:"assertion"`
+		FederationRuleID string `json:"federation_rule_id"`
+		OrganizationID   string `json:"organization_id"`
+		ServiceAccountID string `json:"service_account_id,omitempty"`
+	}{
+		GrantType:        grantTypeJWTBearer,
+		Assertion:        jwt,
+		FederationRuleID: a.federationRuleID,
+		OrganizationID:   a.organizationID,
+		ServiceAccountID: a.serviceAccountID,
+	}
+	bodyJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal token exchange request: %w", err)
+	}
+
+	endpoint := strings.TrimRight(baseURL, "/") + tokenEndpoint
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyJSON))
+	if err != nil {
+		return "", fmt.Errorf("failed to create token exchange request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-beta", oauthAPIBetaHeader+","+federationBetaHeader)
+
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("token exchange request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseBytes))
+	if err != nil {
+		return "", fmt.Errorf("failed to read token exchange response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("token exchange failed with HTTP %d: %s", resp.StatusCode, truncateForError(respBody))
+	}
+
+	var result struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   *int   `json:"expires_in,omitempty"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("failed to parse token exchange response: %w", err)
+	}
+	if result.AccessToken == "" {
+		return "", errors.New("token exchange response missing access_token")
+	}
+
+	ttl := 5 * time.Minute
+	if result.ExpiresIn != nil && *result.ExpiresIn > 0 {
+		ttl = time.Duration(*result.ExpiresIn) * time.Second
+	}
+	a.accessToken = result.AccessToken
+	a.expiresAt = time.Now().Add(ttl)
+	return a.accessToken, nil
+}
 
 // Tunables for the network-bound and process-bound token sources. Identity
 // tokens are tiny (a few KB at most) and the endpoints serving them — cloud
@@ -57,47 +213,11 @@ var noRedirectClient = &http.Client{ //rubocop:disable Lint/HTTPClientTransport 
 	},
 }
 
-// RequestOptions builds the anthropic-sdk-go RequestOption that
-// authenticates the client using OIDC Workload Identity Federation.
-// It replaces option.WithAPIKey rather than augmenting it.
-//
-// Token-source errors are wrapped with a message that names the source
-// kind and federation rule, so refresh failures show up actionable in the
-// runtime's standard ErrorEvent path (and therefore in the TUI).
-func RequestOptions(cfg *latest.FederationAuthConfig, env environment.Provider) ([]option.RequestOption, error) {
-	if cfg == nil {
-		return nil, errors.New("federation: nil config")
-	}
-	src, kind, err := tokenSource(cfg.IdentityToken, env)
-	if err != nil {
-		return nil, err
-	}
-
-	provider := func(ctx context.Context) (string, error) {
-		token, err := src(ctx)
-		if err != nil {
-			return "", fmt.Errorf(
-				"anthropic workload identity federation: failed to refresh identity token from %s source (federation_rule=%s): %w",
-				kind, cfg.FederationRuleID, err,
-			)
-		}
-		return token, nil
-	}
-
-	return []option.RequestOption{
-		option.WithFederationTokenProvider(provider, option.FederationOptions{
-			FederationRuleID: cfg.FederationRuleID,
-			OrganizationID:   cfg.OrganizationID,
-			ServiceAccountID: cfg.ServiceAccountID,
-		}),
-	}, nil
-}
-
-// tokenSource turns the typed config into an option.IdentityTokenFunc plus
+// tokenSource turns the typed config into an IdentityTokenFunc plus
 // a short kind name used in error messages. Validation has already ensured
 // exactly one source is set; we re-check defensively for callers that
 // construct the type programmatically.
-func tokenSource(s *latest.IdentityTokenSourceConfig, env environment.Provider) (option.IdentityTokenFunc, string, error) {
+func tokenSource(s *latest.IdentityTokenSourceConfig, env environment.Provider) (IdentityTokenFunc, string, error) {
 	switch {
 	case s == nil:
 		return nil, "", errors.New("federation: identity_token is required")
@@ -116,7 +236,7 @@ func tokenSource(s *latest.IdentityTokenSourceConfig, env environment.Provider) 
 // fileSource reads the token from path on every invocation. Suitable for
 // rotating-on-disk credentials (K8s projected SA tokens, SPIFFE helpers,
 // Vault sidecars, ...).
-func fileSource(path string) option.IdentityTokenFunc {
+func fileSource(path string) IdentityTokenFunc {
 	return func(_ context.Context) (string, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -133,7 +253,7 @@ func fileSource(path string) option.IdentityTokenFunc {
 // envSource reads the token through the runtime [environment.Provider], so
 // docker-agent's secret-provider chain (run secrets, credential helpers,
 // Docker Desktop, ...) all work out of the box.
-func envSource(name string, env environment.Provider) option.IdentityTokenFunc {
+func envSource(name string, env environment.Provider) IdentityTokenFunc {
 	return func(ctx context.Context) (string, error) {
 		v, _ := env.Get(ctx, name)
 		v = strings.TrimSpace(v)
@@ -153,7 +273,7 @@ func envSource(name string, env environment.Provider) option.IdentityTokenFunc {
 // cmd.Env). This is intentional: tools like `gcloud auth print-identity-
 // token` and `az account get-access-token` rely on ambient credentials
 // (ADC paths, Azure CLI cache, ...) discovered via the environment.
-func commandSource(argv []string) option.IdentityTokenFunc {
+func commandSource(argv []string) IdentityTokenFunc {
 	return func(ctx context.Context) (string, error) {
 		if len(argv) == 0 {
 			return "", errors.New("identity_token.command is empty")
@@ -199,7 +319,7 @@ func commandSource(argv []string) option.IdentityTokenFunc {
 // the named top-level field is read (GitHub Actions returns
 // {"value": "<jwt>"}); otherwise the trimmed body is used verbatim (GCP /
 // Azure metadata servers return the raw JWT).
-func urlSource(rawURL string, headers map[string]string, responseField string, env environment.Provider) option.IdentityTokenFunc {
+func urlSource(rawURL string, headers map[string]string, responseField string, env environment.Provider) IdentityTokenFunc {
 	return func(ctx context.Context) (string, error) {
 		expandedURL, err := environment.Expand(ctx, rawURL, env)
 		if err != nil {

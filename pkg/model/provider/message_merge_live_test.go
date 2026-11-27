@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -157,7 +156,7 @@ func messageMergeProbeScenarios() []mergeProbeScenario {
 
 type mergeProbeVariant struct {
 	Name     string
-	Messages []openai.ChatCompletionMessageParamUnion
+	Messages []oaistream.ChatMessage
 }
 
 // messageMergeProbeVariants builds both wire candidates from the production
@@ -808,7 +807,7 @@ func consumeMergeProbeStream(stream chat.MessageStream) (string, chat.FinishReas
 
 type mergeProbeTransport struct {
 	base     http.RoundTripper
-	messages []openai.ChatCompletionMessageParamUnion
+	messages []oaistream.ChatMessage
 
 	mu           sync.Mutex
 	attempts     int
@@ -820,7 +819,7 @@ type mergeProbeTransport struct {
 	responseBody mergeProbeResponseBody
 }
 
-func newMergeProbeTransport(messages []openai.ChatCompletionMessageParamUnion) *mergeProbeTransport {
+func newMergeProbeTransport(messages []oaistream.ChatMessage) *mergeProbeTransport {
 	return &mergeProbeTransport{messages: messages}
 }
 
@@ -1011,26 +1010,19 @@ func validateMergeProbeCommit(commit string) error {
 	return nil
 }
 
-func messageRoles(messages []openai.ChatCompletionMessageParamUnion) []string {
+func messageRoles(messages []oaistream.ChatMessage) []string {
 	roles := make([]string, 0, len(messages))
 	for _, msg := range messages {
-		switch {
-		case msg.OfSystem != nil:
-			roles = append(roles, "system")
-		case msg.OfUser != nil:
-			roles = append(roles, "user")
-		case msg.OfAssistant != nil:
-			roles = append(roles, "assistant")
-		case msg.OfTool != nil:
-			roles = append(roles, "tool")
-		default:
+		if msg.Role == "" {
 			roles = append(roles, "unknown")
+		} else {
+			roles = append(roles, msg.Role)
 		}
 	}
 	return roles
 }
 
-func mustMarshalOpenAIMessages(t *testing.T, messages []openai.ChatCompletionMessageParamUnion) string {
+func mustMarshalOpenAIMessages(t *testing.T, messages []oaistream.ChatMessage) string {
 	t.Helper()
 	data, err := json.Marshal(messages)
 	require.NoError(t, err)
@@ -1245,7 +1237,7 @@ func TestMergeProbeTransportRejectsNonChatCompletions(t *testing.T) {
 func TestMergeProbeTransportEnforcesRequestBudget(t *testing.T) {
 	t.Parallel()
 
-	transport := newMergeProbeTransport([]openai.ChatCompletionMessageParamUnion{openai.UserMessage("probe")})
+	transport := newMergeProbeTransport([]oaistream.ChatMessage{oaistream.UserMessage("probe")})
 	transport.base = mergeProbeRoundTripper(func(req *http.Request) (*http.Response, error) {
 		return messageMergeSSEResponse(req), nil
 	})
@@ -1281,8 +1273,8 @@ func TestMergeProbeTransportReplacesOnlyMessages(t *testing.T) {
 	t.Parallel()
 
 	var captured []byte
-	transport := newMergeProbeTransport([]openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage("replacement"),
+	transport := newMergeProbeTransport([]oaistream.ChatMessage{
+		oaistream.SystemMessage("replacement"),
 	})
 	transport.base = mergeProbeRoundTripper(func(req *http.Request) (*http.Response, error) {
 		var err error

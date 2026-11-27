@@ -2,10 +2,10 @@ package anthropic
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -48,48 +48,50 @@ func TestThinkingBindingBehavior(t *testing.T) {
 
 func TestApplyThinkingBinding(t *testing.T) {
 	t.Parallel()
-	drop := anthropic.BetaThinkingBlockBindingParam{PrefixMismatchBehavior: anthropic.BetaThinkingPrefixMismatchBehaviorDropBlock}
+	drop := &ThinkingBlockBindingRef{PrefixMismatchBehavior: "drop_block"}
 
 	t.Run("adaptive", func(t *testing.T) {
 		t.Parallel()
 		c := clientWithModel("claude-fable-5-1", &latest.ThinkingBudget{Effort: "high"}, nil)
-		params := anthropic.BetaMessageNewParams{Betas: []anthropic.AnthropicBeta{"existing"}}
+		params := MessageRequest{Betas: []AnthropicBeta{"existing"}}
 		c.applyBetaThinkingConfig(&params, 8192)
 		c.applyThinkingBinding(&params)
-		require.NotNil(t, params.Thinking.OfAdaptive)
-		assert.Equal(t, drop, params.Thinking.OfAdaptive.BlockBinding)
-		assert.Equal(t, []anthropic.AnthropicBeta{"existing", anthropic.AnthropicBetaThinkingBindingControls2026_08_01}, params.Betas)
+		require.NotNil(t, params.Thinking)
+		assert.Equal(t, "adaptive", params.Thinking.Type)
+		assert.Equal(t, drop, params.Thinking.BlockBinding)
+		assert.Equal(t, []AnthropicBeta{"existing", AnthropicBetaThinkingBindingControls2026_08_01}, params.Betas)
 	})
 
 	t.Run("enabled", func(t *testing.T) {
 		t.Parallel()
 		c := clientWithModel("claude-sonnet-4-5", &latest.ThinkingBudget{Tokens: 2048}, map[string]any{"thinking_prefix_mismatch": "drop_block"})
-		params := anthropic.BetaMessageNewParams{}
+		params := MessageRequest{}
 		c.applyBetaThinkingConfig(&params, 8192)
 		c.applyThinkingBinding(&params)
-		require.NotNil(t, params.Thinking.OfEnabled)
-		assert.Equal(t, drop, params.Thinking.OfEnabled.BlockBinding)
-		assert.Contains(t, params.Betas, anthropic.AnthropicBetaThinkingBindingControls2026_08_01)
+		require.NotNil(t, params.Thinking)
+		assert.Equal(t, "enabled", params.Thinking.Type)
+		assert.Equal(t, drop, params.Thinking.BlockBinding)
+		assert.Contains(t, params.Betas, AnthropicBetaThinkingBindingControls2026_08_01)
 	})
 
 	t.Run("thinking omitted is not turned on", func(t *testing.T) {
 		t.Parallel()
 		c := clientWithModel("claude-sonnet-4-6", nil, map[string]any{"fallbacks": []any{"claude-fable-5-2"}})
-		params := anthropic.BetaMessageNewParams{}
+		params := MessageRequest{}
 		c.applyBetaThinkingConfig(&params, 8192)
 		c.applyThinkingBinding(&params)
-		assert.Nil(t, params.Thinking.OfAdaptive)
-		assert.Nil(t, params.Thinking.OfEnabled)
-		assert.Contains(t, params.Betas, anthropic.AnthropicBetaThinkingBindingControls2026_08_01)
+		assert.Nil(t, params.Thinking)
+		assert.Contains(t, params.Betas, AnthropicBetaThinkingBindingControls2026_08_01)
 	})
 
 	t.Run("thinking disabled", func(t *testing.T) {
 		t.Parallel()
 		c := clientWithModel("claude-sonnet-4-6", &latest.ThinkingBudget{Effort: "none"}, map[string]any{"thinking_prefix_mismatch": "error"})
-		params := anthropic.BetaMessageNewParams{}
+		params := MessageRequest{}
 		c.applyBetaThinkingConfig(&params, 8192)
 		c.applyThinkingBinding(&params)
-		require.NotNil(t, params.Thinking.OfDisabled)
+		require.NotNil(t, params.Thinking)
+		assert.Equal(t, "disabled", params.Thinking.Type)
 		body := wire(t, params)
 		assert.Equal(t, map[string]any{"type": "disabled"}, body["thinking"])
 	})
@@ -97,7 +99,7 @@ func TestApplyThinkingBinding(t *testing.T) {
 	t.Run("no behavior leaves params alone", func(t *testing.T) {
 		t.Parallel()
 		c := clientWithModel("claude-opus-4-7", &latest.ThinkingBudget{Effort: "high"}, nil)
-		params := anthropic.BetaMessageNewParams{}
+		params := MessageRequest{}
 		c.applyBetaThinkingConfig(&params, 8192)
 		before := wireBytes(t, params)
 		c.applyThinkingBinding(&params)
@@ -108,12 +110,12 @@ func TestApplyThinkingBinding(t *testing.T) {
 
 func TestThinkingTransformations(t *testing.T) {
 	t.Parallel()
-	var msg anthropic.BetaMessage
-	require.NoError(t, msg.UnmarshalJSON([]byte(`{"id":"m","type":"message","role":"assistant","content":[],"input_transformations":[
+	var msg Message
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"m","type":"message","role":"assistant","content":[],"input_transformations":[
 		{"type":"thinking_dropped","path":"messages.1.content.0","reason":"prefix_mismatch"},
 		{"type":"thinking_mismatch_allowed","path":"messages.3.content.0","reason":"prefix_mismatch"},
 		{"type":"thinking_dropped","path":"messages.5.content.1","reason":"conversation_mismatch"}
-	]}`)))
+	]}`), &msg))
 	assert.Equal(t, []string{
 		"messages.1.content.0: prefix_mismatch",
 		"messages.5.content.1: conversation_mismatch",

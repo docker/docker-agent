@@ -8,16 +8,10 @@ import (
 	"log/slog"
 	"slices"
 
-	"github.com/openai/openai-go/v3/packages/ssestream"
-	"github.com/openai/openai-go/v3/responses"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/tools"
 )
-
-// Compile-time check: ssestream.Stream satisfies responseEventStream.
-var _ responseEventStream = (*ssestream.Stream[responses.ResponseStreamEventUnion])(nil)
 
 // ResponseStreamAdapter adapts the OpenAI responses stream to our interface.
 // It works with any responseEventStream implementation (SSE or WebSocket).
@@ -28,7 +22,7 @@ type ResponseStreamAdapter struct {
 	responseState  *chat.OpenAIResponse
 	preserveOutput bool
 	responseItems  map[int64]json.RawMessage
-	onResponseDone func(responses.Response)
+	onResponseDone func(ResponseObject)
 	itemCallIDMap  map[string]string
 	itemHasContent map[string]bool
 	// outputIndexHasContent mirrors itemHasContent keyed by output_index.
@@ -73,18 +67,16 @@ func isTextContentPart(partType string) bool {
 
 // markContentEmitted records that text was emitted for this output, keyed by
 // item ID and, when the event carries one, by output_index.
-func (a *ResponseStreamAdapter) markContentEmitted(event responses.ResponseStreamEventUnion, itemID string) {
+func (a *ResponseStreamAdapter) markContentEmitted(event ResponseStreamEvent, itemID string) {
 	a.itemHasContent[itemID] = true
-	if event.JSON.OutputIndex.Valid() {
-		a.outputIndexHasContent[event.OutputIndex] = true
+	if event.OutputIndex != nil {
+		a.outputIndexHasContent[*event.OutputIndex] = true
 	}
 }
 
-// hasEmittedContent reports whether text for this output was already emitted,
-// matching by item ID or by output_index when the event carries one.
-func (a *ResponseStreamAdapter) hasEmittedContent(event responses.ResponseStreamEventUnion, itemID string) bool {
+func (a *ResponseStreamAdapter) hasEmittedContent(event ResponseStreamEvent, itemID string) bool {
 	return a.itemHasContent[itemID] ||
-		(event.JSON.OutputIndex.Valid() && a.outputIndexHasContent[event.OutputIndex])
+		(event.OutputIndex != nil && a.outputIndexHasContent[*event.OutputIndex])
 }
 
 // Recv gets the next completion chunk
@@ -97,8 +89,8 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	}
 
 	event := a.stream.Current()
-	if event.Response.JSON.ServiceTier.Valid() {
-		a.serviceTier = string(event.Response.ServiceTier)
+	if event.Response.ServiceTier != nil && *event.Response.ServiceTier != "" {
+		a.serviceTier = *event.Response.ServiceTier
 	}
 	slog.Debug("Stream event received", "type", event.Type)
 	response := chat.MessageStreamResponse{}
@@ -157,14 +149,7 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			}
 			a.itemCallIDMap[itemID] = callID
 
-			// Preserve top-level names from compatible providers; the SDK only models Item.Name.
-			var top struct {
-				Name string `json:"name"`
-			}
-			funcName := event.Item.Name
-			if err := json.Unmarshal([]byte(event.RawJSON()), &top); err == nil && top.Name != "" {
-				funcName = top.Name
-			}
+			funcName := cmp.Or(event.NameString(), event.Item.Name)
 
 			// Only emit the tool call with name. Arguments normally arrive in
 			// delta events, but some transports/models can deliver an arguments
@@ -313,11 +298,11 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		slog.Debug("Reasoning summary part event", "type", event.Type, "item_id", event.ItemID)
 
 	case "response.output_item.done":
-		if a.preserveOutput && replayableResponseItem(event.Item) && event.JSON.OutputIndex.Valid() {
+		if a.preserveOutput && replayableResponseItem(event.Item) && event.OutputIndex != nil {
 			if a.responseItems == nil {
 				a.responseItems = make(map[int64]json.RawMessage)
 			}
-			a.responseItems[event.OutputIndex] = responseItemJSON(event.Item)
+			a.responseItems[*event.OutputIndex] = responseItemJSON(event.Item)
 		}
 		// Tool call or message item is complete
 		itemID := cmp.Or(event.ItemID, event.Item.ID)
@@ -345,7 +330,7 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// streamed via deltas nor delivered by function_call_arguments.done:
 		// recover them from the completed item snapshot.
 		if event.Item.Type == "function_call" && !a.itemHasArgs[itemID] {
-			if args := event.Item.Arguments.OfString; args != "" {
+			if args := event.Item.ArgumentsString(); args != "" {
 				callID := cmp.Or(a.itemCallIDMap[itemID], event.Item.CallID, itemID)
 				slog.Debug("Emitting final arguments from output item snapshot", "item_id", itemID, "call_id", callID, "args_length", len(args))
 				a.itemHasArgs[itemID] = true
@@ -415,7 +400,7 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			"output_items", len(event.Response.Output),
 			"output_tokens", event.Response.Usage.OutputTokens,
 			"reasoning_tokens", event.Response.Usage.OutputTokensDetails.ReasoningTokens,
-			"response_raw", redactEncryptedContent([]byte(event.Response.RawJSON())),
+			"response_raw", redactEncryptedContent(event.Response.Raw),
 		)
 		u := event.Response.Usage
 		if u.TotalTokens > 0 {
@@ -444,7 +429,7 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 	default:
 		slog.Info("Unhandled stream event type", "type", event.Type)
-		slog.Debug("Unhandled stream event payload", "type", event.Type, "raw", redactEncryptedContent([]byte(event.RawJSON())))
+		slog.Debug("Unhandled stream event payload", "type", event.Type, "raw", redactEncryptedContent(event.Raw))
 	}
 
 	if a.responseState != nil && (event.Type == "response.completed" || event.Type == "response.done" || event.Type == "response.incomplete") {

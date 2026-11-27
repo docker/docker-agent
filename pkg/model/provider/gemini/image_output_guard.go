@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/genai"
-
 	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
@@ -56,7 +54,7 @@ func (e *ImageOutputRequestIncompatibleError) Error() string {
 // checkImageOutputRequestCompatibility rejects, before any provider dispatch,
 // an incompatible request when image output is enabled by configuration or the
 // models.dev catalogue.
-func (c *Client) checkImageOutputRequestCompatibility(ctx context.Context, imageOutputEnabled bool, config *genai.GenerateContentConfig, requestTools int) error {
+func (c *Client) checkImageOutputRequestCompatibility(ctx context.Context, imageOutputEnabled bool, config *GenerateContentConfig, requestTools int) error {
 	if !imageOutputEnabled || c.ModelOptions.GeneratingTitle() || c.ModelOptions.Compacting() || c.ModelOptions.TextOnly() {
 		return nil
 	}
@@ -65,7 +63,7 @@ func (c *Client) checkImageOutputRequestCompatibility(ctx context.Context, image
 	if requestTools > 0 {
 		incompatibilities = append(incompatibilities, imageOutputIncompatibleTools)
 	}
-	if config.ResponseMIMEType != "" || config.ResponseJsonSchema != nil {
+	if config.ResponseMIMEType != "" || config.ResponseJSONSchema != nil {
 		incompatibilities = append(incompatibilities, imageOutputIncompatibleStructuredOutput)
 	}
 	if len(incompatibilities) == 0 {

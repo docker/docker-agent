@@ -10,15 +10,13 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/model/provider/internal/httpx"
 )
 
-// The decoder uses channels so Close can race with a blocked Next without I/O.
 type retryTestDecoder struct {
 	entered chan struct{}
 	closed  chan struct{}
@@ -36,8 +34,8 @@ func (d *retryTestDecoder) Next() bool {
 	return false
 }
 
-func (*retryTestDecoder) Event() ssestream.Event { return ssestream.Event{} }
-func (*retryTestDecoder) Err() error             { return nil }
+func (*retryTestDecoder) Event() httpx.SSEEvent { return httpx.SSEEvent{} }
+func (*retryTestDecoder) Err() error            { return nil }
 func (d *retryTestDecoder) Close() error {
 	d.closes.Add(1)
 	d.once.Do(func() { close(d.closed) })
@@ -46,14 +44,15 @@ func (d *retryTestDecoder) Close() error {
 
 func retryContextError(t *testing.T) error {
 	t.Helper()
-	var err anthropic.Error
-	require.NoError(t, err.UnmarshalJSON([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}}`)))
-	err.StatusCode = http.StatusBadRequest
-	require.True(t, isContextLengthError(&err))
-	return &err
+	err := &APIError{
+		StatusCode: http.StatusBadRequest,
+		Body:       []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}}`),
+	}
+	require.True(t, isContextLengthError(err))
+	return err
 }
 
-func testRetryClose[T any](t *testing.T, wrap func(*ssestream.Stream[T], func() *ssestream.Stream[T]) chat.MessageStream) {
+func testRetryClose(t *testing.T, wrap func(*EventStream, func() *EventStream) chat.MessageStream) {
 	t.Helper()
 	for _, duringRetry := range []bool{false, true} {
 		name := "after replacement"
@@ -64,14 +63,14 @@ func testRetryClose[T any](t *testing.T, wrap func(*ssestream.Stream[T], func() 
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				decoder := newRetryTestDecoder()
-				replacement := ssestream.NewStream[T](decoder, nil)
+				replacement := &EventStream{sse: decoder}
 				t.Cleanup(func() { _ = replacement.Close() })
 				retrying := make(chan struct{})
 				release := make(chan struct{})
 				var releaseOnce sync.Once
 				unblock := func() { releaseOnce.Do(func() { close(release) }) }
 				t.Cleanup(unblock)
-				stream := wrap(ssestream.NewStream[T](nil, retryContextError(t)), func() *ssestream.Stream[T] {
+				stream := wrap(&EventStream{err: retryContextError(t)}, func() *EventStream {
 					close(retrying)
 					<-release
 					return replacement
@@ -108,31 +107,30 @@ func testRetryClose[T any](t *testing.T, wrap func(*ssestream.Stream[T], func() 
 
 func TestStreamAdapterCloseDuringRetry(t *testing.T) {
 	t.Parallel()
-	testRetryClose(t, func(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], retry func() *ssestream.Stream[anthropic.MessageStreamEventUnion]) chat.MessageStream {
-		return &streamAdapter{retryableStream: retryableStream[anthropic.MessageStreamEventUnion]{stream: stream, retryFn: retry}}
+	testRetryClose(t, func(stream *EventStream, retry func() *EventStream) chat.MessageStream {
+		return &streamAdapter{retryableStream: retryableStream{stream: stream, retryFn: retry}}
 	})
 }
 
 func TestBetaStreamAdapterCloseDuringRetry(t *testing.T) {
 	t.Parallel()
-	testRetryClose(t, func(stream *ssestream.Stream[anthropic.BetaRawMessageStreamEventUnion], retry func() *ssestream.Stream[anthropic.BetaRawMessageStreamEventUnion]) chat.MessageStream {
-		return &betaStreamAdapter{retryableStream: retryableStream[anthropic.BetaRawMessageStreamEventUnion]{stream: stream, retryFn: retry}}
+	testRetryClose(t, func(stream *EventStream, retry func() *EventStream) chat.MessageStream {
+		return &betaStreamAdapter{retryableStream: retryableStream{stream: stream, retryFn: retry}}
 	})
 }
 
 func TestRetryableStreamSuccessfulRetry(t *testing.T) {
 	t.Parallel()
-	decoder := ssestream.NewDecoder(&http.Response{Body: io.NopCloser(strings.NewReader("event: completion\ndata: 42\n\n"))})
-	replacement := ssestream.NewStream[int](decoder, nil)
+	replacement := &EventStream{sse: httpx.NewSSEReader(io.NopCloser(strings.NewReader("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")))}
 	t.Cleanup(func() { _ = replacement.Close() })
-	r := retryableStream[int]{
-		stream:  ssestream.NewStream[int](nil, retryContextError(t)),
-		retryFn: func() *ssestream.Stream[int] { return replacement },
+	r := retryableStream{
+		stream:  &EventStream{err: retryContextError(t)},
+		retryFn: func() *EventStream { return replacement },
 	}
 	ok, err := r.next()
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, 42, r.stream.Current())
+	assert.Equal(t, "message_stop", r.stream.Current().Type)
 	ok, err = r.next()
 	assert.False(t, ok)
 	assert.ErrorIs(t, err, io.EOF)

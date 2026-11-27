@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -54,9 +53,9 @@ func TestNewClient_RejectsInvalidSpeed(t *testing.T) {
 	require.ErrorContains(t, err, "speed must be fast or standard")
 
 	factoryCalled := false
-	_, err = NewClientFromFactoryWithOptions(t.Context(), cfg, env, func(context.Context, options.ModelOptions) (anthropic.Client, error) {
+	_, err = NewClientFromFactoryWithOptions(t.Context(), cfg, env, func(context.Context, options.ModelOptions) (*APIClient, error) {
 		factoryCalled = true
-		return anthropic.Client{}, nil
+		return &APIClient{}, nil
 	})
 	require.ErrorContains(t, err, "speed must be fast or standard")
 	assert.False(t, factoryCalled)
@@ -67,11 +66,11 @@ func TestApplySpeed(t *testing.T) {
 
 	t.Run("fast sets the parameter and appends the beta", func(t *testing.T) {
 		t.Parallel()
-		params := anthropic.BetaMessageNewParams{Betas: []anthropic.AnthropicBeta{"existing"}}
+		params := MessageRequest{Betas: []AnthropicBeta{"existing"}}
 		applySpeed(&params, map[string]any{"speed": "fast"})
 
-		assert.Equal(t, anthropic.BetaMessageNewParamsSpeedFast, params.Speed)
-		assert.Equal(t, []anthropic.AnthropicBeta{"existing", anthropic.AnthropicBetaFastMode2026_02_01}, params.Betas)
+		assert.Equal(t, speedFast, params.Speed)
+		assert.Equal(t, []AnthropicBeta{"existing", AnthropicBetaFastMode2026_02_01}, params.Betas)
 	})
 
 	for name, opts := range map[string]map[string]any{
@@ -81,11 +80,11 @@ func TestApplySpeed(t *testing.T) {
 	} {
 		t.Run(name+" leaves the request untouched", func(t *testing.T) {
 			t.Parallel()
-			params := anthropic.BetaMessageNewParams{Betas: []anthropic.AnthropicBeta{"existing"}}
+			params := MessageRequest{Betas: []AnthropicBeta{"existing"}}
 			applySpeed(&params, opts)
 
 			assert.Empty(t, params.Speed)
-			assert.Equal(t, []anthropic.AnthropicBeta{"existing"}, params.Betas)
+			assert.Equal(t, []AnthropicBeta{"existing"}, params.Betas)
 			raw, err := json.Marshal(params)
 			require.NoError(t, err)
 			assert.NotContains(t, string(raw), `"speed"`)
@@ -96,11 +95,11 @@ func TestApplySpeed(t *testing.T) {
 func TestServedTier(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "fast", servedTier(anthropic.BetaUsageSpeedFast))
-	assert.Empty(t, servedTier(anthropic.BetaUsageSpeedStandard))
+	assert.Equal(t, "fast", servedTier(speedFast))
+	assert.Empty(t, servedTier(speedStandard))
 	assert.Empty(t, servedTier(""))
-	assert.Equal(t, "fast", betaUsageFromMessage(anthropic.BetaUsage{Speed: anthropic.BetaUsageSpeedFast}).ServiceTier)
-	assert.Empty(t, betaUsageFromMessage(anthropic.BetaUsage{Speed: anthropic.BetaUsageSpeedStandard}).ServiceTier)
+	assert.Equal(t, "fast", betaUsageFromMessage(Usage{Speed: speedFast}).ServiceTier)
+	assert.Empty(t, betaUsageFromMessage(Usage{Speed: speedStandard}).ServiceTier)
 }
 
 func TestFastMode_Requests(t *testing.T) {
@@ -116,7 +115,7 @@ func TestFastMode_Requests(t *testing.T) {
 
 		req := srv.request(t, 0)
 		assert.Equal(t, "fast", req.body["speed"])
-		assert.Equal(t, 1, countOf(req.betas, anthropic.AnthropicBetaFastMode2026_02_01))
+		assert.Equal(t, 1, countOf(req.betas, AnthropicBetaFastMode2026_02_01))
 	})
 
 	t.Run("rerank carries speed and the beta once", func(t *testing.T) {
@@ -132,7 +131,7 @@ func TestFastMode_Requests(t *testing.T) {
 
 		req := srv.request(t, 0)
 		assert.Equal(t, "fast", req.body["speed"])
-		assert.Equal(t, 1, countOf(req.betas, anthropic.AnthropicBetaFastMode2026_02_01))
+		assert.Equal(t, 1, countOf(req.betas, AnthropicBetaFastMode2026_02_01))
 		assert.Contains(t, req.betas, "structured-outputs-2025-11-13")
 	})
 
@@ -180,12 +179,12 @@ func testCompactionServedSpeed(t *testing.T, served, wantTier string) {
 
 	req := srv.request(t, 0)
 	assert.Equal(t, "fast", req.body["speed"])
-	assert.Contains(t, req.betas, anthropic.AnthropicBetaFastMode2026_02_01)
+	assert.Contains(t, req.betas, AnthropicBetaFastMode2026_02_01)
 	require.Len(t, result.Iterations, 1)
 	assert.Equal(t, wantTier, result.Iterations[0].ServiceTier)
 }
 
-func countOf(betas []string, beta anthropic.AnthropicBeta) int {
+func countOf(betas []string, beta AnthropicBeta) int {
 	count := 0
 	for _, b := range betas {
 		if b == beta {

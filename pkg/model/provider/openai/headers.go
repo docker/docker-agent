@@ -5,37 +5,19 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/openai/openai-go/v3/option"
-
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
-// buildHeaderOptions returns OpenAI client options for every custom
-// HTTP header configured for the model, including provider-specific
-// defaults.
-//
-// Users can set headers via provider_opts.http_headers:
-//
-//	models:
-//	  copilot:
-//	    provider: github-copilot
-//	    model: gpt-4o
-//	    provider_opts:
-//	      http_headers:
-//	        Copilot-Integration-Id: vscode-chat # override default
-//
-// For the github-copilot provider a default Copilot-Integration-Id is
-// injected when the user has not set one. Header names are compared
-// case-insensitively, so any user-provided header always overrides the
-// default.
-func buildHeaderOptions(cfg *latest.ModelConfig) []option.RequestOption {
+// buildHTTPHeaders returns an http.Header containing every custom HTTP header
+// configured for the model, including provider-specific defaults.
+func buildHTTPHeaders(cfg *latest.ModelConfig) http.Header {
 	headers := buildHeaderMap(cfg)
-	opts := make([]option.RequestOption, 0, len(headers))
+	out := make(http.Header, len(headers))
 	for name, value := range headers {
-		opts = append(opts, option.WithHeader(name, value))
+		out.Set(name, value)
 	}
-	return opts
+	return out
 }
 
 // buildHeaderMap returns a map of HTTP headers to send with requests,
@@ -43,8 +25,6 @@ func buildHeaderOptions(cfg *latest.ModelConfig) []option.RequestOption {
 // provider_opts.http_headers. Header names are canonicalized for
 // case-insensitive deduplication.
 func buildHeaderMap(cfg *latest.ModelConfig) map[string]string {
-	// Canonicalizing keys de-duplicates headers case-insensitively:
-	// defaults are applied first, then user config clobbers conflicts.
 	headers := map[string]string{}
 	if cfg != nil {
 		for name, value := range catalog.Lookup(cfg.Provider).Headers {
@@ -57,9 +37,6 @@ func buildHeaderMap(cfg *latest.ModelConfig) map[string]string {
 	return headers
 }
 
-// userHeaders parses provider_opts.http_headers into a simple string
-// map. Malformed entries are logged and skipped so a typo doesn't
-// silently reach the wire.
 func userHeaders(cfg *latest.ModelConfig) map[string]string {
 	if cfg == nil || cfg.ProviderOpts == nil {
 		return nil
@@ -85,14 +62,8 @@ func userHeaders(cfg *latest.ModelConfig) map[string]string {
 	return headers
 }
 
-// sanitizeHeaderValue removes CR and LF characters from header values to
-// prevent header injection attacks. HTTP header values must not contain
-// newlines (RFC 7230 section 3.2).
 func sanitizeHeaderValue(value string) string {
-	// Remove all CR and LF characters
 	value = strings.ReplaceAll(value, "\r", "")
 	value = strings.ReplaceAll(value, "\n", "")
-	// Also strip leading/trailing whitespace for cleanliness
-	value = strings.TrimSpace(value)
-	return value
+	return strings.TrimSpace(value)
 }

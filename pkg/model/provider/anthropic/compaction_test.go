@@ -6,13 +6,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/internal/httpx"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -50,7 +49,7 @@ func TestCompactConversation_EmitsSignedBlock(t *testing.T) {
 	req := srv.request(t, 0)
 	assert.Equal(t, "/v1/messages", req.path)
 	assert.Contains(t, req.betas, nativeCompactionBeta)
-	assert.Contains(t, req.betas, anthropic.AnthropicBetaThinkingBindingControls2026_08_01)
+	assert.Contains(t, req.betas, AnthropicBetaThinkingBindingControls2026_08_01)
 	assert.Equal(t, map[string]any{"type": "summarize", "instructions": "Keep file paths."}, req.body["compaction"])
 	assert.InDelta(t, 16000, req.body["max_tokens"], 0)
 	assert.Equal(t, "claude-fable-5-1", req.body["model"])
@@ -115,7 +114,7 @@ func TestCompactConversation_UsageAccounting(t *testing.T) {
 
 func TestCompactConversation_Safeguards(t *testing.T) {
 	t.Parallel()
-	compactionBlock := func(content, signature any) ssestream.Event {
+	compactionBlock := func(content, signature any) httpx.SSEEvent {
 		return blockStart(0, map[string]any{"type": "compaction", "content": content, "encrypted_content": "e", "signature": signature})
 	}
 	for name, tc := range map[string]struct {

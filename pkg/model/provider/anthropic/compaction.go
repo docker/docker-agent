@@ -8,19 +8,13 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/param"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-const nativeCompactionBeta anthropic.AnthropicBeta = "compact-2026-09-04"
+const nativeCompactionBeta AnthropicBeta = "compact-2026-09-04"
 
-// nativeCompactionEnabled reports whether this client may send compaction
-// blocks. Vertex rejects the option, so it never replays a block recorded on
-// the Claude API and sends the summary text instead.
 func nativeCompactionEnabled(opts map[string]any) bool {
 	enabled, _ := providerutil.GetProviderOptBool(opts, "native_compaction")
 	return enabled
@@ -31,25 +25,24 @@ func (c *Client) hasNativeCompaction(messages []chat.Message) bool {
 		slices.ContainsFunc(messages, func(m chat.Message) bool { return m.ReplayableCompaction(providerStateName) != nil })
 }
 
-func (c *Client) compactionMessage(msg *chat.Message) (anthropic.BetaMessageParam, bool, error) {
+func (c *Client) compactionMessage(msg *chat.Message) (MessageParam, bool, error) {
 	if !nativeCompactionEnabled(c.ModelConfig.ProviderOpts) {
-		return anthropic.BetaMessageParam{}, false, nil
+		return MessageParam{}, false, nil
 	}
 	compact := msg.ReplayableCompaction(providerStateName)
 	if compact == nil {
-		return anthropic.BetaMessageParam{}, false, nil
+		return MessageParam{}, false, nil
 	}
-	var block anthropic.BetaCompactionBlock
+	var block ContentBlock
 	if err := json.Unmarshal(compact.Block, &block); err != nil {
-		return anthropic.BetaMessageParam{}, false, fmt.Errorf("anthropic: invalid compaction block: %w", err)
+		return MessageParam{}, false, fmt.Errorf("anthropic: invalid compaction block: %w", err)
 	}
 	if block.Type != "compaction" || strings.TrimSpace(block.Content) == "" || block.Signature == "" {
-		return anthropic.BetaMessageParam{}, false, errors.New("anthropic: compaction block requires content and signature")
+		return MessageParam{}, false, errors.New("anthropic: compaction block requires content and signature")
 	}
-	// The beta accepts either role; user also permits a summary-only prompt.
-	return anthropic.BetaMessageParam{
-		Role:    anthropic.BetaMessageParamRoleUser,
-		Content: []anthropic.BetaContentBlockParamUnion{param.Override[anthropic.BetaContentBlockParamUnion](compact.Block)},
+	return MessageParam{
+		Role:    "user",
+		Content: []ContentBlockParam{{Raw: compact.Block}},
 	}, true, nil
 }
 
@@ -64,13 +57,13 @@ func (c *Client) CompactConversation(ctx context.Context, messages []chat.Messag
 		return nil, err
 	}
 	requestTools = c.toolsWithSupportedDeferral(ctx, requestTools, messages)
-	allTools, err := convertBetaTools(requestTools)
+	allTools, err := convertTools(requestTools)
 	if err != nil {
 		return nil, err
 	}
 	if selection, ok := strictToolsOpt(c.ModelConfig.ProviderOpts); ok {
-		restoreBetaStrictToolSchemas(allTools, requestTools)
-		if err := selection.applyBeta(allTools); err != nil {
+		restoreStrictToolSchemas(allTools, requestTools)
+		if err := selection.apply(allTools); err != nil {
 			return nil, err
 		}
 	}
@@ -81,14 +74,19 @@ func (c *Client) CompactConversation(ctx context.Context, messages []chat.Messag
 	if len(converted) == 0 {
 		return nil, nil
 	}
-	params := anthropic.BetaMessageNewParams{
-		Model: c.ModelConfig.Model, MaxTokens: 16000,
-		Messages: converted, System: extractBetaSystemBlocks(messages), Tools: allTools,
-		Betas:      []anthropic.AnthropicBeta{nativeCompactionBeta},
-		Compaction: anthropic.BetaCompactionConfigUnionParam{OfSummarize: &anthropic.BetaSummarizeCompactionParam{}},
-	}
+	compaction := &CompactionConfigParam{Type: "summarize"}
 	if strings.TrimSpace(instructions) != "" {
-		params.Compaction.OfSummarize.Instructions = anthropic.String(instructions)
+		compaction.Instructions = new(instructions)
+	}
+	params := MessageRequest{
+		Model:      c.ModelConfig.Model,
+		MaxTokens:  16000,
+		Messages:   converted,
+		System:     extractSystemBlocks(messages),
+		Tools:      allTools,
+		Betas:      []AnthropicBeta{nativeCompactionBeta},
+		Beta:       true,
+		Compaction: compaction,
 	}
 	adjusted, err := c.adjustMaxTokensForThinking(params.MaxTokens)
 	if err != nil {
@@ -106,9 +104,9 @@ func (c *Client) CompactConversation(ctx context.Context, messages []chat.Messag
 		}
 		requestContext = updates.CompactionContext
 	}
-	stream := client.Beta.Messages.NewStreaming(ctx, params)
+	stream := client.NewMessageStream(ctx, params)
 	defer stream.Close()
-	var response anthropic.BetaMessage
+	var response Message
 	complete := false
 	for stream.Next() {
 		event := stream.Current()
@@ -123,13 +121,13 @@ func (c *Client) CompactConversation(ctx context.Context, messages []chat.Messag
 	if !complete {
 		return nil, errors.New("anthropic: incomplete compaction response")
 	}
-	if response.StopReason != "compaction" {
+	if response.StopReason != StopReasonCompaction {
 		return nil, fmt.Errorf("anthropic: unexpected compaction stop reason %q", response.StopReason)
 	}
 	if len(response.Content) != 1 || response.Content[0].Type != "compaction" {
 		return nil, errors.New("anthropic: expected one compaction block")
 	}
-	block := response.Content[0].AsCompaction()
+	block := response.Content[0]
 	if strings.TrimSpace(block.Content) == "" {
 		return nil, nil
 	}

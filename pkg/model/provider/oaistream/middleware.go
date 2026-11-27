@@ -5,20 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-
-	"github.com/openai/openai-go/v3/option"
 )
 
-// ErrorBodyMiddleware returns an OpenAI SDK middleware that preserves full
-// error details in HTTP error responses.
-//
-// The OpenAI SDK extracts only the "error" field from error response bodies
-// (via gjson). When a provider returns a body without an "error" object
-// (e.g. a string "error" field, plain text, or a different JSON structure),
-// the details are silently lost. This middleware rewrites such responses into
-// {"error": <original body>} so the SDK preserves the full content.
-func ErrorBodyMiddleware() option.Middleware {
-	return func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+// ErrorBodyMiddleware wraps non-standard HTTP error response bodies into
+// {"error": <original body>} so full error details are preserved.
+func ErrorBodyMiddleware() func(*http.Request, func(*http.Request) (*http.Response, error)) (*http.Response, error) {
+	return func(req *http.Request, next func(*http.Request) (*http.Response, error)) (*http.Response, error) {
 		resp, err := next(req)
 		if err != nil || resp == nil || resp.StatusCode < 400 {
 			return resp, err
@@ -39,7 +31,7 @@ func ErrorBodyMiddleware() option.Middleware {
 }
 
 // hasErrorObject reports whether body is a JSON object with an "error" key
-// whose value is itself a JSON object — the format the OpenAI SDK expects.
+// whose value is itself a JSON object.
 func hasErrorObject(body []byte) bool {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -49,12 +41,13 @@ func hasErrorObject(body []byte) bool {
 	if !ok {
 		return false
 	}
-	return len(bytes.TrimLeft(errVal, " \t\n\r")) > 0 && bytes.TrimLeft(errVal, " \t\n\r")[0] == '{'
+	trimmed := bytes.TrimLeft(errVal, " \t\n\r")
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 // wrapErrorBody produces {"error": <body>} when body is valid JSON, or
-// {"error": {"message": "<body>"}} otherwise, so the SDK's gjson extraction
-// always finds useful content.
+// {"error": {"message": "<body>"}} otherwise, so downstream error formatting
+// always preserves full details.
 func wrapErrorBody(body []byte, statusCode int) []byte {
 	if len(body) == 0 {
 		body = []byte(http.StatusText(statusCode))

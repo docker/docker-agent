@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -47,55 +45,50 @@ func TestCountAnthropicTokensBeta_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	messages := []anthropic.BetaMessageParam{
+	messages := []MessageParam{
 		{
-			Role: anthropic.BetaMessageParamRoleUser,
-			Content: []anthropic.BetaContentBlockParamUnion{
-				{OfText: &anthropic.BetaTextBlockParam{Text: "Hello"}},
-			},
+			Role:    "user",
+			Content: []ContentBlockParam{newTextBlock("Hello")},
 		},
 	}
-	system := []anthropic.BetaTextBlockParam{
+	system := []TextBlockParam{
 		{Text: "You are helpful"},
 	}
 
-	client := anthropic.NewClient(
-		option.WithAPIKey("test-key"),
-		option.WithBaseURL(server.URL),
-	)
+	client := NewAPIClient(APIClientConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
 
-	tokens, err := countAnthropicTokensBeta(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, nil)
+	tokens, err := countAnthropicTokens(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, int64(150), tokens)
 }
 
-// TestCountAnthropicTokensBeta_NoAPIKey tests error when API key is missing
 func TestCountAnthropicTokensBeta_NoAPIKey(t *testing.T) {
 	t.Parallel()
-	// Use a test server that returns 401 Unauthorized
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error": {"message": "invalid api key"}}`))
 	}))
 	defer server.Close()
 
-	var messages []anthropic.BetaMessageParam
-	var system []anthropic.BetaTextBlockParam
+	var messages []MessageParam
+	var system []TextBlockParam
+	zero := 0
+	client := NewAPIClient(APIClientConfig{
+		APIKey:     "invalid-key",
+		BaseURL:    server.URL,
+		MaxRetries: &zero,
+	})
 
-	client := anthropic.NewClient(
-		option.WithAPIKey("invalid-key"),
-		option.WithBaseURL(server.URL),
-		option.WithMaxRetries(0), // Disable retries to speed up test
-	)
-
-	tokens, err := countAnthropicTokensBeta(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, nil)
+	tokens, err := countAnthropicTokens(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, nil)
 
 	require.Error(t, err)
 	assert.Equal(t, int64(0), tokens)
 }
 
-// TestCountAnthropicTokensBeta_ServerError tests error handling for server errors
 func TestCountAnthropicTokensBeta_ServerError(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,21 +96,20 @@ func TestCountAnthropicTokensBeta_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var messages []anthropic.BetaMessageParam
-	var system []anthropic.BetaTextBlockParam
+	var messages []MessageParam
+	var system []TextBlockParam
+	zero := 0
+	client := NewAPIClient(APIClientConfig{
+		APIKey:     "test-key",
+		BaseURL:    server.URL,
+		MaxRetries: &zero,
+	})
 
-	client := anthropic.NewClient(
-		option.WithAPIKey("test-key"),
-		option.WithBaseURL(server.URL),
-		option.WithMaxRetries(0), // Disable retries to speed up test
-	)
-
-	tokens, err := countAnthropicTokensBeta(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, nil)
+	tokens, err := countAnthropicTokens(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, nil)
 	require.Error(t, err)
 	assert.Equal(t, int64(0), tokens)
 }
 
-// TestCountAnthropicTokensBeta_WithTools tests token counting includes tools
 func TestCountAnthropicTokensBeta_WithTools(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,21 +128,21 @@ func TestCountAnthropicTokensBeta_WithTools(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var messages []anthropic.BetaMessageParam
-	var system []anthropic.BetaTextBlockParam
-	tools := []anthropic.BetaToolUnionParam{
-		{OfTool: &anthropic.BetaToolParam{
+	var messages []MessageParam
+	var system []TextBlockParam
+	tools := []ToolParam{
+		{
 			Name:        "test_tool",
-			Description: anthropic.String("A test tool"),
-		}},
+			Description: new("A test tool"),
+		},
 	}
 
-	client := anthropic.NewClient(
-		option.WithAPIKey("test-key"),
-		option.WithBaseURL(server.URL),
-	)
+	client := NewAPIClient(APIClientConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
 
-	tokens, err := countAnthropicTokensBeta(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, tools)
+	tokens, err := countAnthropicTokens(t.Context(), client, "claude-3-5-sonnet-20241022", messages, system, tools)
 
 	require.NoError(t, err)
 	assert.Equal(t, int64(200), tokens)
@@ -244,7 +236,7 @@ func TestExtractBetaSystemBlocks_SingleSystemMessage(t *testing.T) {
 		},
 	}
 
-	blocks := extractBetaSystemBlocks(msgs)
+	blocks := extractSystemBlocks(msgs)
 
 	require.Len(t, blocks, 1)
 	assert.Equal(t, "You are a helpful assistant", blocks[0].Text)
@@ -268,7 +260,7 @@ func TestExtractBetaSystemBlocks_MultipleSystemMessages(t *testing.T) {
 		},
 	}
 
-	blocks := extractBetaSystemBlocks(msgs)
+	blocks := extractSystemBlocks(msgs)
 
 	require.Len(t, blocks, 2)
 	assert.Equal(t, "You are helpful", blocks[0].Text)
@@ -290,7 +282,7 @@ func TestExtractBetaSystemBlocks_SkipsEmptyText(t *testing.T) {
 		},
 	}
 
-	blocks := extractBetaSystemBlocks(msgs)
+	blocks := extractSystemBlocks(msgs)
 
 	require.Len(t, blocks, 1)
 	assert.Equal(t, "Valid system prompt", blocks[0].Text)
@@ -309,7 +301,7 @@ func TestExtractBetaSystemBlocks_MultiContent(t *testing.T) {
 		},
 	}
 
-	blocks := extractBetaSystemBlocks(msgs)
+	blocks := extractSystemBlocks(msgs)
 
 	require.Len(t, blocks, 2)
 	assert.Equal(t, "Part 1", blocks[0].Text)
@@ -330,7 +322,7 @@ func TestConvertBetaMessages_UserMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, converted, 1)
-	assert.Equal(t, anthropic.BetaMessageParamRoleUser, converted[0].Role)
+	assert.Equal(t, "user", converted[0].Role)
 	require.Len(t, converted[0].Content, 1)
 }
 
@@ -352,7 +344,7 @@ func TestConvertBetaMessages_SkipsSystemMessages(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, converted, 1)
-	assert.Equal(t, anthropic.BetaMessageParamRoleUser, converted[0].Role)
+	assert.Equal(t, "user", converted[0].Role)
 }
 
 // TestConvertBetaMessages_AssistantMessage tests converting assistant messages
@@ -369,5 +361,5 @@ func TestConvertBetaMessages_AssistantMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, converted, 1)
-	assert.Equal(t, anthropic.BetaMessageParamRoleAssistant, converted[0].Role)
+	assert.Equal(t, "assistant", converted[0].Role)
 }

@@ -14,8 +14,6 @@ import (
 	"strings"
 	"sync"
 
-	"google.golang.org/genai"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/effort"
@@ -37,7 +35,7 @@ import (
 type Client struct {
 	base.Config
 
-	clientFn func(context.Context) (*genai.Client, error)
+	clientFn func(context.Context) (*apiClient, error)
 
 	// apiSurface classifies which backend/transport this client talks to
 	// (see the apiSurface* constants in diagnostics.go), for safe
@@ -61,21 +59,20 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 	globalOptions := options.Apply(opts...)
 
-	var clientFn func(context.Context) (*genai.Client, error)
+	var clientFn func(context.Context) (*apiClient, error)
 	var apiSurface string
 	if gateway := globalOptions.Gateway(); gateway == "" {
 		var (
 			httpClient *http.Client
-			backend    genai.Backend
+			backend    Backend
 			apiKey     string
 			project    string
 			location   string
 		)
 		// Determine whether Vertex AI would normally be used, then check whether
 		// an HTTP transport wrapper forces a fallback to BackendGeminiAPI.
-		// The Vertex AI backend relies on ADC-managed HTTP clients that bypass
-		// http.RoundTripper, so the wrapper cannot be applied there. With an
-		// explicit token source we own the HTTP client and the wrapper applies.
+		// Without an explicit token source, Vertex AI uses ADC-managed credentials;
+		// when a transport wrapper is set without a token source, fall back to GeminiAPI.
 		value, _ := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI")
 		useVertexAIEnv, _ := strconv.ParseBool(value)
 		wantVertexAI := cfg.ProviderOpts["project"] != nil || cfg.ProviderOpts["location"] != nil || useVertexAIEnv
@@ -106,11 +103,11 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 				return nil, errors.New("location must be set")
 			}
 
-			backend = genai.BackendVertexAI
+			backend = BackendVertexAI
 		case useVertexAI:
 			project, _ = env.Get(ctx, "GOOGLE_CLOUD_PROJECT")
 			location, _ = env.Get(ctx, "GOOGLE_CLOUD_LOCATION")
-			backend = genai.BackendVertexAI
+			backend = BackendVertexAI
 		default:
 			var err error
 			apiKey, err = directAPIKey(ctx, cfg, env)
@@ -118,15 +115,12 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 				return nil, err
 			}
 
-			backend = genai.BackendGeminiAPI
+			backend = BackendGeminiAPI
 			httpClient = httpclient.NewHTTPClient(ctx)
 		}
 
-		if backend == genai.BackendVertexAI {
+		if backend == BackendVertexAI {
 			apiSurface = apiSurfaceVertexAI
-			// A nil httpClient means the SDK's ADC-managed client. With an explicit
-			// token source we supply our own, authenticated per request below, so
-			// no ADC lookup runs.
 			switch {
 			case tokenSource != nil:
 				if _, err := tokenSource(ctx); err != nil {
@@ -135,6 +129,13 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 				httpClient = httpclient.NewHTTPClient(ctx)
 			case !adcSupported:
 				return nil, errors.New("vertex AI requires an explicit token source on this platform: application default credentials are unavailable")
+			default:
+				var err error
+				tokenSource, err = defaultADCTokenSource(ctx)
+				if err != nil {
+					return nil, err
+				}
+				httpClient = httpclient.NewHTTPClient(ctx)
 			}
 		} else {
 			apiSurface = apiSurfaceGeminiAPI
@@ -142,27 +143,25 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 		globalOptions.WrapTransport(ctx, httpClient)
 		base.WrapOpenCodeSession(cfg, httpClient)
-		if backend == genai.BackendVertexAI && tokenSource != nil {
+		if backend == BackendVertexAI && tokenSource != nil {
 			// Outermost so the wrapper sees the same authenticated request the
-			// other providers' SDK middlewares produce.
+			// other providers' middlewares produce.
 			httpClient.Transport = &bearerTokenTransport{source: tokenSource, base: httpClient.Transport}
 		}
 
-		client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		client, err := newAPIClient(apiClientConfig{
 			APIKey:     apiKey,
 			Project:    project,
 			Location:   location,
 			Backend:    backend,
+			BaseURL:    cfg.BaseURL,
 			HTTPClient: httpClient,
-			HTTPOptions: genai.HTTPOptions{
-				BaseURL: cfg.BaseURL,
-			},
 		})
 		if err != nil {
 			return nil, err
 		}
 
-		clientFn = func(context.Context) (*genai.Client, error) {
+		clientFn = func(context.Context) (*apiClient, error) {
 			return client, nil
 		}
 	} else {
@@ -176,25 +175,25 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		}
 
 		// When using a Gateway, tokens are short-lived.
-		clientFn = func(ctx context.Context) (*genai.Client, error) {
-			// Only the gateway emits keepalive frames that the GenAI SDK rejects.
+		clientFn = func(ctx context.Context) (*apiClient, error) {
 			connection, err := base.NewGatewayClient(ctx, env, gateway, "https://generativelanguage.googleapis.com/", "/", cfg, &globalOptions, httpclient.WithSSEKeepaliveFilter())
 			if err != nil {
 				return nil, err
 			}
 
-			httpOpts := genai.HTTPOptions{BaseURL: connection.BaseURL}
+			var headers http.Header
 			if connection.AuthToken != "" {
-				httpOpts.Headers = http.Header{
+				headers = http.Header{
 					"Authorization": []string{"Bearer " + connection.AuthToken},
 				}
 			}
 
-			return genai.NewClient(ctx, &genai.ClientConfig{
-				APIKey:      connection.AuthToken,
-				Backend:     genai.BackendGeminiAPI,
-				HTTPClient:  connection.HTTPClient,
-				HTTPOptions: httpOpts,
+			return newAPIClient(apiClientConfig{
+				APIKey:     connection.AuthToken,
+				Backend:    BackendGeminiAPI,
+				BaseURL:    connection.BaseURL,
+				Headers:    headers,
+				HTTPClient: connection.HTTPClient,
 			})
 		}
 	}
@@ -268,29 +267,29 @@ func thoughtSignatureOrDefault(sig []byte) []byte {
 }
 
 // convertMessagesToGemini converts chat.Messages into Gemini Contents
-func convertMessagesToGemini(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []*genai.Content {
-	contents := make([]*genai.Content, 0, len(messages))
+func convertMessagesToGemini(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []*Content {
+	contents := make([]*Content, 0, len(messages))
 
 	// Vertex Gemini rejects a request unless the turn answering an N-function-call turn
 	// carries exactly N function-response parts, so consecutive tool responses are
 	// coalesced into a single Content instead of one Content per response.
 	type toolResponse struct {
-		part  *genai.Part
+		part  *Part
 		index int
 	}
 	var pendingToolParts []toolResponse
-	var pendingToolRole genai.Role
+	var pendingToolRole Role
 	var toolCalls []tools.ToolCall
 	toolCallIndex := make(map[string]int)
 	flushToolParts := func() {
 		if len(pendingToolParts) > 0 {
 			// Parallel tools finish out of order; Gemini matches responses to call order.
 			slices.SortStableFunc(pendingToolParts, func(a, b toolResponse) int { return cmp.Compare(a.index, b.index) })
-			parts := make([]*genai.Part, 0, len(pendingToolParts))
+			parts := make([]*Part, 0, len(pendingToolParts))
 			for _, response := range pendingToolParts {
 				parts = append(parts, response.part)
 			}
-			contents = append(contents, genai.NewContentFromParts(parts, pendingToolRole))
+			contents = append(contents, NewContentFromParts(parts, pendingToolRole))
 			pendingToolParts = nil
 		}
 	}
@@ -317,11 +316,11 @@ func convertMessagesToGemini(ctx context.Context, messages []chat.Message, id mo
 				name, providerID = toolCalls[callIndex].Function.Name, toolCalls[callIndex].ProviderID
 				index = callIndex
 			}
-			var part *genai.Part
+			var part *Part
 			if len(attachmentParts) > 0 {
-				part = genai.NewPartFromFunctionResponseWithParts(name, response, attachmentParts)
+				part = NewPartFromFunctionResponseWithParts(name, response, attachmentParts)
 			} else {
-				part = genai.NewPartFromFunctionResponse(name, response)
+				part = NewPartFromFunctionResponse(name, response)
 			}
 			part.FunctionResponse.ID = providerID
 			pendingToolParts = append(pendingToolParts, toolResponse{part: part, index: index})
@@ -335,11 +334,11 @@ func convertMessagesToGemini(ctx context.Context, messages []chat.Message, id mo
 
 		// Handle assistant messages with tool calls
 		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) > 0 {
-			parts := make([]*genai.Part, 0, len(msg.ToolCalls)+1)
+			parts := make([]*Part, 0, len(msg.ToolCalls)+1)
 			toolCalls = msg.ToolCalls
 
 			if msg.Content != "" {
-				parts = append(parts, genai.NewPartFromText(msg.Content))
+				parts = append(parts, NewPartFromText(msg.Content))
 			}
 			for callIndex, tc := range toolCalls {
 				toolCallIndex[tc.ID] = callIndex
@@ -347,7 +346,7 @@ func convertMessagesToGemini(ctx context.Context, messages []chat.Message, id mo
 				if tc.Function.Arguments != "" {
 					_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 				}
-				fc := genai.NewPartFromFunctionCall(tc.Function.Name, args)
+				fc := NewPartFromFunctionCall(tc.Function.Name, args)
 				fc.FunctionCall.ID = tc.ProviderID
 				// Gemini signs the first call, not the accompanying text or parallel calls.
 				if callIndex == 0 {
@@ -356,7 +355,7 @@ func convertMessagesToGemini(ctx context.Context, messages []chat.Message, id mo
 				parts = append(parts, fc)
 			}
 
-			contents = append(contents, genai.NewContentFromParts(parts, role))
+			contents = append(contents, NewContentFromParts(parts, role))
 			continue
 		}
 
@@ -364,11 +363,11 @@ func convertMessagesToGemini(ctx context.Context, messages []chat.Message, id mo
 		if len(msg.MultiContent) > 0 {
 			parts := convertMultiContent(ctx, msg.MultiContent, msg.ThoughtSignature, id, store, override)
 			if len(parts) > 0 {
-				contents = append(contents, genai.NewContentFromParts(parts, role))
+				contents = append(contents, NewContentFromParts(parts, role))
 			}
 		} else if msg.Content != "" {
 			part := newTextPartWithSignature(msg.Content, msg.ThoughtSignature)
-			contents = append(contents, genai.NewContentFromParts([]*genai.Part{part}, role))
+			contents = append(contents, NewContentFromParts([]*Part{part}, role))
 		}
 	}
 
@@ -377,8 +376,8 @@ func convertMessagesToGemini(ctx context.Context, messages []chat.Message, id mo
 	return contents
 }
 
-func functionResponsePartsFromMultiContent(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []*genai.FunctionResponsePart {
-	var parts []*genai.FunctionResponsePart
+func functionResponsePartsFromMultiContent(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []*FunctionResponsePart {
+	var parts []*FunctionResponsePart
 	for _, part := range multiContent {
 		switch part.Type {
 		case chat.MessagePartTypeImageURL:
@@ -392,7 +391,7 @@ func functionResponsePartsFromMultiContent(ctx context.Context, multiContent []c
 			mimeType := extractMimeType(urlParts[0])
 			data, err := base64.StdEncoding.DecodeString(urlParts[1])
 			if err == nil {
-				parts = append(parts, genai.NewFunctionResponsePartFromBytes(data, mimeType))
+				parts = append(parts, NewFunctionResponsePartFromBytes(data, mimeType))
 			}
 		case chat.MessagePartTypeDocument:
 			if part.Document == nil {
@@ -407,26 +406,26 @@ func functionResponsePartsFromMultiContent(ctx context.Context, multiContent []c
 				continue
 			}
 			if docPart.InlineData != nil {
-				parts = append(parts, genai.NewFunctionResponsePartFromBytes(docPart.InlineData.Data, docPart.InlineData.MIMEType))
+				parts = append(parts, NewFunctionResponsePartFromBytes(docPart.InlineData.Data, docPart.InlineData.MIMEType))
 			} else if docPart.Text != "" {
-				parts = append(parts, genai.NewFunctionResponsePartFromBytes([]byte(docPart.Text), part.Document.MimeType))
+				parts = append(parts, NewFunctionResponsePartFromBytes([]byte(docPart.Text), part.Document.MimeType))
 			}
 		}
 	}
 	return parts
 }
 
-// messageRoleToGemini converts chat.MessageRole to genai.Role
-func messageRoleToGemini(role chat.MessageRole) genai.Role {
+// messageRoleToGemini converts chat.MessageRole to Role
+func messageRoleToGemini(role chat.MessageRole) Role {
 	if role == chat.MessageRoleAssistant {
-		return genai.RoleModel
+		return RoleModel
 	}
-	return genai.RoleUser
+	return RoleUser
 }
 
 // newTextPartWithSignature creates a text part with optional thought signature
-func newTextPartWithSignature(text string, signature []byte) *genai.Part {
-	part := genai.NewPartFromText(text)
+func newTextPartWithSignature(text string, signature []byte) *Part {
+	part := NewPartFromText(text)
 	if len(signature) > 0 {
 		part.ThoughtSignature = signature
 	}
@@ -434,8 +433,8 @@ func newTextPartWithSignature(text string, signature []byte) *genai.Part {
 }
 
 // convertMultiContent converts multi-part content to Gemini parts
-func convertMultiContent(ctx context.Context, multiContent []chat.MessagePart, thoughtSignature []byte, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []*genai.Part {
-	parts := make([]*genai.Part, 0, len(multiContent))
+func convertMultiContent(ctx context.Context, multiContent []chat.MessagePart, thoughtSignature []byte, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []*Part {
+	parts := make([]*Part, 0, len(multiContent))
 	for _, part := range multiContent {
 		switch part.Type {
 		case chat.MessagePartTypeText:
@@ -463,7 +462,7 @@ func convertMultiContent(ctx context.Context, multiContent []chat.MessagePart, t
 
 // convertImageURLToPart converts an image URL to a Gemini Part
 // Supports data URLs with base64-encoded image data
-func convertImageURLToPart(imageURL *chat.MessageImageURL) *genai.Part {
+func convertImageURLToPart(imageURL *chat.MessageImageURL) *Part {
 	if imageURL == nil || !strings.HasPrefix(imageURL.URL, "data:") {
 		return nil
 	}
@@ -480,7 +479,7 @@ func convertImageURLToPart(imageURL *chat.MessageImageURL) *genai.Part {
 	}
 
 	mimeType := extractMimeType(urlParts[0])
-	return genai.NewPartFromBytes(imageData, mimeType)
+	return NewPartFromBytes(imageData, mimeType)
 }
 
 // extractMimeType extracts the MIME type from a data URL prefix
@@ -494,11 +493,11 @@ func extractMimeType(dataURLPrefix string) string {
 }
 
 // BuildConfig creates GenerateContentConfig from model config.
-func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
+func (c *Client) buildConfig(ctx context.Context) *GenerateContentConfig {
 	// Set before the NoThinking early return so every request (chat, rerank,
 	// title, compaction) is billed on the same tier.
-	config := &genai.GenerateContentConfig{
-		ServiceTier: genai.ServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
+	config := &GenerateContentConfig{
+		ServiceTier: ServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
 	}
 	if c.ModelConfig.MaxTokens != nil {
 		config.MaxOutputTokens = int32(*c.ModelConfig.MaxTokens) //nolint:gosec // user-configured token count; realistic values fit in int32
@@ -532,23 +531,23 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 			// starve visible output. Gemini 2.5 and older can fully disable
 			// thinking with ThinkingBudget=0.
 			if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
-				config.ThinkingConfig = &genai.ThinkingConfig{
+				config.ThinkingConfig = &ThinkingConfig{
 					IncludeThoughts: false,
-					ThinkingLevel:   genai.ThinkingLevelLow,
+					ThinkingLevel:   ThinkingLevelLow,
 				}
 				const minOutputTokens int32 = 512
 				if config.MaxOutputTokens > 0 && config.MaxOutputTokens < minOutputTokens {
 					config.MaxOutputTokens = minOutputTokens
 				}
 			} else {
-				config.ThinkingConfig = &genai.ThinkingConfig{
+				config.ThinkingConfig = &ThinkingConfig{
 					IncludeThoughts: false,
 					ThinkingBudget:  new(int32(0)),
 				}
 			}
 		}
 	} else if c.ModelConfig.ThinkingBudget != nil {
-		config.ThinkingConfig = &genai.ThinkingConfig{IncludeThoughts: true}
+		config.ThinkingConfig = &ThinkingConfig{IncludeThoughts: true}
 		if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
 			c.applyGemini3ThinkingLevel(ctx, config)
 		} else {
@@ -558,7 +557,7 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 
 	if structuredOutput := c.ModelOptions.StructuredOutput(); structuredOutput != nil {
 		config.ResponseMIMEType = "application/json"
-		config.ResponseJsonSchema = structuredOutput.Schema
+		config.ResponseJSONSchema = structuredOutput.Schema
 	}
 
 	return config
@@ -569,7 +568,7 @@ func (c *Client) supportsThinking(ctx context.Context) bool {
 }
 
 // applyGemini3ThinkingLevel applies level-based thinking for Gemini 3+ models.
-func (c *Client) applyGemini3ThinkingLevel(ctx context.Context, config *genai.GenerateContentConfig) {
+func (c *Client) applyGemini3ThinkingLevel(ctx context.Context, config *GenerateContentConfig) {
 	b := c.ModelConfig.ThinkingBudget
 	if b.IsAdaptive() {
 		norm := strings.ToLower(strings.TrimSpace(b.Effort))
@@ -605,7 +604,7 @@ func (c *Client) applyGemini3ThinkingLevel(ctx context.Context, config *genai.Ge
 			c.applyGemini25ThinkingBudget(config)
 			return
 		}
-		level = genai.ThinkingLevelHigh // default
+		level = ThinkingLevelHigh // default
 	}
 
 	config.ThinkingConfig.ThinkingLevel = level
@@ -616,7 +615,7 @@ func (c *Client) applyGemini3ThinkingLevel(ctx context.Context, config *genai.Ge
 }
 
 // gemini3ThinkingLevel maps an effort string to a model-supported Gemini ThinkingLevel.
-func (c *Client) gemini3ThinkingLevel(ctx context.Context, effortStr string) (genai.ThinkingLevel, bool) {
+func (c *Client) gemini3ThinkingLevel(ctx context.Context, effortStr string) (ThinkingLevel, bool) {
 	l, ok := effort.Parse(effortStr)
 	if !ok || l == effort.None {
 		return "", false
@@ -635,7 +634,7 @@ func (c *Client) gemini3ThinkingLevel(ctx context.Context, effortStr string) (ge
 	if !ok {
 		return "", false
 	}
-	return genai.ThinkingLevel(strings.ToUpper(s)), true
+	return ThinkingLevel(strings.ToUpper(s)), true
 }
 
 func gemini25Tokens(l effort.Level) (int32, bool) {
@@ -657,7 +656,7 @@ func gemini25Tokens(l effort.Level) (int32, bool) {
 }
 
 // applyGemini25ThinkingBudget applies token-based thinking for Gemini 2.5 and other models.
-func (c *Client) applyGemini25ThinkingBudget(config *genai.GenerateContentConfig) {
+func (c *Client) applyGemini25ThinkingBudget(config *GenerateContentConfig) {
 	b := c.ModelConfig.ThinkingBudget
 	if b.Effort != "" {
 		if b.IsAdaptive() {
@@ -689,18 +688,18 @@ func (c *Client) applyGemini25ThinkingBudget(config *genai.GenerateContentConfig
 }
 
 // builtInTools returns Gemini built-in tools enabled via provider_opts.
-func (c *Client) builtInTools() []*genai.Tool {
+func (c *Client) builtInTools() []*Tool {
 	entries := []struct {
 		key  string
-		tool *genai.Tool
+		tool *Tool
 	}{
-		{"google_search", &genai.Tool{GoogleSearch: &genai.GoogleSearch{}}},
-		{"google_maps", &genai.Tool{GoogleMaps: &genai.GoogleMaps{}}},
-		{"code_execution", &genai.Tool{CodeExecution: &genai.ToolCodeExecution{}}},
-		{"url_context", &genai.Tool{URLContext: &genai.URLContext{}}},
+		{"google_search", &Tool{GoogleSearch: &GoogleSearch{}}},
+		{"google_maps", &Tool{GoogleMaps: &GoogleMaps{}}},
+		{"code_execution", &Tool{CodeExecution: &ToolCodeExecution{}}},
+		{"url_context", &Tool{URLContext: &URLContext{}}},
 	}
 
-	var builtIn []*genai.Tool
+	var builtIn []*Tool
 	for _, e := range entries {
 		if enabled, ok := providerutil.GetProviderOptBool(c.ModelConfig.ProviderOpts, e.key); ok && enabled {
 			builtIn = append(builtIn, e.tool)
@@ -711,32 +710,32 @@ func (c *Client) builtInTools() []*genai.Tool {
 }
 
 // convertToolsToGemini converts tools to Gemini format
-func convertToolsToGemini(requestTools []tools.Tool) ([]*genai.Tool, error) {
+func convertToolsToGemini(requestTools []tools.Tool) ([]*Tool, error) {
 	if len(requestTools) == 0 {
 		return nil, nil
 	}
 
-	funcs := make([]*genai.FunctionDeclaration, 0, len(requestTools))
+	funcs := make([]*FunctionDeclaration, 0, len(requestTools))
 	for _, tool := range requestTools {
 		parameters, err := ConvertParametersToSchema(tool.Parameters)
 		if err != nil {
 			return nil, err
 		}
 
-		funcs = append(funcs, &genai.FunctionDeclaration{
+		funcs = append(funcs, &FunctionDeclaration{
 			Name:        tool.Name,
 			Description: tool.Description,
 			Parameters:  parameters,
 		})
 	}
 
-	return []*genai.Tool{{
+	return []*Tool{{
 		FunctionDeclarations: funcs,
 	}}, nil
 }
 
 // ConvertParametersToSchema converts parameters to Gemini Schema format
-func ConvertParametersToSchema(params any) (*genai.Schema, error) {
+func ConvertParametersToSchema(params any) (*Schema, error) {
 	m, err := tools.SchemaToMap(params)
 	if err != nil {
 		return nil, err
@@ -746,7 +745,7 @@ func ConvertParametersToSchema(params any) (*genai.Schema, error) {
 	normalizeTypeFields(m)
 	normalizeEnumValues(m)
 
-	var schema *genai.Schema
+	var schema *Schema
 	if err := tools.ConvertSchema(m, &schema); err != nil {
 		return nil, err
 	}
@@ -755,7 +754,7 @@ func ConvertParametersToSchema(params any) (*genai.Schema, error) {
 	return schema, nil
 }
 
-func applyPropertyOrdering(schema *genai.Schema, source map[string]any) {
+func applyPropertyOrdering(schema *Schema, source map[string]any) {
 	if schema == nil {
 		return
 	}
@@ -934,7 +933,7 @@ func (c *Client) CreateChatCompletionStream(
 	imageOutputEnabled := c.ImageOutputEnabled(ctx)
 
 	if c.wantsImageResponseModalities(imageOutputEnabled) {
-		config.ResponseModalities = []string{string(genai.ModalityText), string(genai.ModalityImage)}
+		config.ResponseModalities = []string{string(ModalityText), string(ModalityImage)}
 		applyImageOutputMediaFileInstruction(config)
 	}
 
@@ -953,9 +952,9 @@ func (c *Client) CreateChatCompletionStream(
 		config.Tools = append(config.Tools, allTools...)
 
 		// Enable function calling
-		config.ToolConfig = &genai.ToolConfig{
-			FunctionCallingConfig: &genai.FunctionCallingConfig{
-				Mode: genai.FunctionCallingConfigModeAuto,
+		config.ToolConfig = &ToolConfig{
+			FunctionCallingConfig: &FunctionCallingConfig{
+				Mode: FunctionCallingConfigModeAuto,
 			},
 		}
 
@@ -987,7 +986,7 @@ func (c *Client) CreateChatCompletionStream(
 	}
 
 	// Build a fresh client per request when using the gateway
-	iter := client.Models.GenerateContentStream(ctx, c.ModelConfig.Model, contents, config)
+	iter := client.generateContentStream(ctx, c.ModelConfig.Model, contents, config)
 	trackUsage := c.TrackUsageEnabled()
 	return NewStreamAdapter(iter, c.ModelConfig.Model, trackUsage), nil
 }
@@ -1022,12 +1021,12 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 	systemPrompt := prompts.BuildRerankSystemPrompt(documents, criteria, c.ModelConfig.ProviderOpts, jsonFormatInstruction)
 
 	// Create a single user turn that includes both system-like instruction and data.
-	content := genai.NewContentFromParts(
-		[]*genai.Part{
-			genai.NewPartFromText(systemPrompt),
-			genai.NewPartFromText(userPrompt),
+	content := NewContentFromParts(
+		[]*Part{
+			NewPartFromText(systemPrompt),
+			NewPartFromText(userPrompt),
 		},
-		genai.RoleUser,
+		RoleUser,
 	)
 
 	// Use Gemini's structured output feature to enforce the JSON schema.
@@ -1047,7 +1046,7 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 
 	cfg := c.buildRerankConfig(ctx, schema)
 
-	resp, err := client.Models.GenerateContent(ctx, c.ModelConfig.Model, []*genai.Content{content}, cfg)
+	resp, err := client.generateContent(ctx, c.ModelConfig.Model, []*Content{content}, cfg)
 	if err != nil {
 		slog.ErrorContext(ctx, "Gemini rerank request failed", "error", err)
 		return nil, fmt.Errorf("gemini rerank request failed: %w", err)
@@ -1077,10 +1076,10 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 	return scores, nil
 }
 
-func (c *Client) buildRerankConfig(ctx context.Context, schema map[string]any) *genai.GenerateContentConfig {
+func (c *Client) buildRerankConfig(ctx context.Context, schema map[string]any) *GenerateContentConfig {
 	cfg := c.buildConfig(ctx)
 	cfg.ResponseMIMEType = "application/json"
-	cfg.ResponseJsonSchema = schema
+	cfg.ResponseJSONSchema = schema
 
 	if !c.supportsThinking(ctx) {
 		cfg.ThinkingConfig = nil
@@ -1092,9 +1091,9 @@ func (c *Client) buildRerankConfig(ctx context.Context, schema map[string]any) *
 
 	if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
 		// Gemini 3+ always think and are tuned for default temperature 1.0; keep it unset unless configured.
-		cfg.ThinkingConfig = &genai.ThinkingConfig{
+		cfg.ThinkingConfig = &ThinkingConfig{
 			IncludeThoughts: false,
-			ThinkingLevel:   genai.ThinkingLevelLow,
+			ThinkingLevel:   ThinkingLevelLow,
 		}
 		return cfg
 	}
@@ -1102,7 +1101,7 @@ func (c *Client) buildRerankConfig(ctx context.Context, schema map[string]any) *
 	if c.ModelConfig.Temperature == nil {
 		cfg.Temperature = new(float32(0.0))
 	}
-	cfg.ThinkingConfig = &genai.ThinkingConfig{
+	cfg.ThinkingConfig = &ThinkingConfig{
 		IncludeThoughts: false,
 	}
 	if strings.HasPrefix(strings.ToLower(c.ModelConfig.Model), "gemini-2.5-flash") {
@@ -1113,7 +1112,7 @@ func (c *Client) buildRerankConfig(ctx context.Context, schema map[string]any) *
 
 // extractGeminiStructuredJSON extracts the JSON string from a
 // GenerateContentResponse with structured output enabled.
-func extractGeminiStructuredJSON(resp *genai.GenerateContentResponse) (string, error) {
+func extractGeminiStructuredJSON(resp *GenerateContentResponse) (string, error) {
 	if resp == nil {
 		return "", errors.New("gemini response is nil")
 	}

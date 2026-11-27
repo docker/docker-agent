@@ -5,13 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+	"github.com/docker/docker-agent/pkg/model/provider/internal/httpx"
 )
 
-// fakeDecoder feeds a fixed sequence of SSE events to ssestream.Stream.
+// fakeDecoder feeds a fixed sequence of SSE events to EventStream.
 type fakeDecoder struct {
-	events []ssestream.Event
+	events []httpx.SSEEvent
 	i      int
 	closed bool
 }
@@ -24,13 +23,13 @@ func (d *fakeDecoder) Next() bool {
 	return true
 }
 
-func (d *fakeDecoder) Event() ssestream.Event { return d.events[d.i-1] }
-func (d *fakeDecoder) Close() error           { d.closed = true; return nil }
-func (d *fakeDecoder) Err() error             { return nil }
+func (d *fakeDecoder) Event() httpx.SSEEvent { return d.events[d.i-1] }
+func (d *fakeDecoder) Close() error          { d.closed = true; return nil }
+func (d *fakeDecoder) Err() error            { return nil }
 
-func sseEvent(t string, payload any) ssestream.Event {
+func sseEvent(t string, payload any) httpx.SSEEvent {
 	data, _ := json.Marshal(payload)
-	return ssestream.Event{Type: t, Data: data}
+	return httpx.SSEEvent{Event: t, Data: data}
 }
 
 // TestParallelToolCallIDsAreNotCrossWired reproduces a bug where the Anthropic
@@ -55,7 +54,7 @@ func TestParallelToolCallIDsAreNotCrossWired(t *testing.T) {
 	// Event sequence: two parallel tool_use blocks with interleaved
 	// input_json_delta events. This mirrors what Anthropic emits when the
 	// model issues parallel tool calls.
-	events := []ssestream.Event{
+	events := []httpx.SSEEvent{
 		// message_start (minimal — we only care about content blocks below)
 		sseEvent("message_start", map[string]any{
 			"type":    "message_start",
@@ -119,7 +118,7 @@ func TestParallelToolCallIDsAreNotCrossWired(t *testing.T) {
 		sseEvent("message_stop", map[string]any{"type": "message_stop"}),
 	}
 
-	stream := ssestream.NewStream[anthropic.MessageStreamEventUnion](&fakeDecoder{events: events}, nil)
+	stream := &EventStream{sse: &fakeDecoder{events: events}}
 	adapter := (&Client{}).newStreamAdapter(stream, false)
 
 	// Replicate the runtime's tool-call accumulator (pkg/runtime/streaming.go).
@@ -183,7 +182,7 @@ func TestParallelToolCallIDsAreNotCrossWired(t *testing.T) {
 // the Beta stream adapter. The bug and fix are identical.
 func TestBetaParallelToolCallIDsAreNotCrossWired(t *testing.T) {
 	t.Parallel()
-	events := []ssestream.Event{
+	events := []httpx.SSEEvent{
 		sseEvent("message_start", map[string]any{
 			"type":    "message_start",
 			"message": map[string]any{"id": "msg_test", "model": "claude-test", "role": "assistant", "type": "message"},
@@ -237,7 +236,7 @@ func TestBetaParallelToolCallIDsAreNotCrossWired(t *testing.T) {
 		sseEvent("message_stop", map[string]any{"type": "message_stop"}),
 	}
 
-	stream := ssestream.NewStream[anthropic.BetaRawMessageStreamEventUnion](&fakeDecoder{events: events}, nil)
+	stream := &EventStream{sse: &fakeDecoder{events: events}}
 	adapter := (&Client{}).newBetaStreamAdapter(stream, false)
 
 	argsByID := map[string]*strings.Builder{}

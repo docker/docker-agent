@@ -445,8 +445,27 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 		normalizedCassette = toolChoiceRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = promptFileRegex.ReplaceAllString(normalizedCassette, "Instructions from: FILE")
 
-		return normalizedReq == normalizedCassette
+		if normalizedReq == normalizedCassette {
+			return true
+		}
+		return jsonBodiesEqual(normalizedReq, normalizedCassette)
 	}
+}
+
+func jsonBodiesEqual(a, b string) bool {
+	var va, vb any
+	if json.Unmarshal([]byte(a), &va) != nil || json.Unmarshal([]byte(b), &vb) != nil {
+		return false
+	}
+	ba, err := json.Marshal(va)
+	if err != nil {
+		return false
+	}
+	bb, err := json.Marshal(vb)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(ba, bb)
 }
 
 func canonicalEvaluatorBody(body []byte) ([]byte, error) {

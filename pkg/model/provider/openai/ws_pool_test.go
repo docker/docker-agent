@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
-	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -151,7 +150,7 @@ func TestWSPool_CallerPreviousResponseIDNotOverwritten(t *testing.T) {
 
 	// Second request with caller-provided previous_response_id.
 	params := defaultTestParams()
-	params.PreviousResponseID = param.NewOpt("caller_resp_999")
+	params.PreviousResponseID = NullableString{Set: true, Value: "caller_resp_999"}
 
 	stream2, err := pool.Stream(ctx, params)
 	require.NoError(t, err)
@@ -243,7 +242,7 @@ func TestWSPool_ExplicitNullPreventsHistoryChaining(t *testing.T) {
 	require.NoError(t, err)
 	drainStream(t, stream)
 	params := defaultTestParams()
-	params.PreviousResponseID = param.Null[string]()
+	params.PreviousResponseID = NullableString{Set: true, Null: true}
 	stream, err = pool.Stream(t.Context(), params)
 	require.NoError(t, err)
 	drainStream(t, stream)

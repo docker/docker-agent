@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,7 +16,7 @@ func TestWriteFileWireSchemaPathFirst(t *testing.T) {
 	t.Parallel()
 	schema, err := ConvertParametersToSchema(tools.MustSchemaFor[filesystem.WriteFileArgs]())
 	require.NoError(t, err)
-	wire, err := json.Marshal(anthropic.ToolParam{Name: "write_file", InputSchema: schema})
+	wire, err := json.Marshal(ToolParam{Name: "write_file", InputSchema: schema})
 	require.NoError(t, err)
 	assert.Less(t, bytes.Index(wire, []byte(`"path":`)), bytes.Index(wire, []byte(`"content":`)))
 }
@@ -32,7 +31,7 @@ func TestBetaToolsRetainNestedDeclarationOrder(t *testing.T) {
 		Zulu  string  `json:"zulu,omitempty"`
 		Alpha []child `json:"alpha"`
 	}
-	converted, err := convertBetaTools([]tools.Tool{{Name: "ordered", Parameters: tools.MustSchemaFor[args]()}})
+	converted, err := convertTools([]tools.Tool{{Name: "ordered", Parameters: tools.MustSchemaFor[args]()}})
 	require.NoError(t, err)
 	data, err := json.Marshal(converted)
 	require.NoError(t, err)
@@ -91,7 +90,7 @@ func TestConvertTools_PreservesRootDefsNonStrict(t *testing.T) {
 
 	t.Run("beta", func(t *testing.T) {
 		t.Parallel()
-		converted, err := convertBetaTools(reqTools)
+		converted, err := convertTools(reqTools)
 		require.NoError(t, err)
 		wire, err := json.Marshal(converted)
 		require.NoError(t, err)

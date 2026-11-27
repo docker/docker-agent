@@ -161,8 +161,8 @@ func TestConvertBetaMessages_GeneratedMediaPlaceholder_MediaOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out, 1, "the media-only placeholder turn must not be dropped")
 	require.Len(t, out[0].Content, 1)
-	require.NotNil(t, out[0].Content[0].OfText)
-	assert.Equal(t, generatedMediaPlaceholderText, out[0].Content[0].OfText.Text)
+	assert.Equal(t, "text", out[0].Content[0].Type)
+	assert.Equal(t, generatedMediaPlaceholderText, out[0].Content[0].Text)
 }
 
 // TestConvertBetaMessages_GeneratedMediaPlaceholder_Mixed is the beta
@@ -176,8 +176,8 @@ func TestConvertBetaMessages_GeneratedMediaPlaceholder_Mixed(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	require.Len(t, out[0].Content, 1)
-	require.NotNil(t, out[0].Content[0].OfText)
-	text := out[0].Content[0].OfText.Text
+	assert.Equal(t, "text", out[0].Content[0].Type)
+	text := out[0].Content[0].Text
 	assert.Contains(t, text, "here you go")
 	assert.Contains(t, text, generatedMediaPlaceholderText)
 }

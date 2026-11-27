@@ -4,30 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strings"
-
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/param"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// convertBetaMessages converts chat messages to Anthropic Beta API format
-// Following Anthropic's extended thinking documentation with interleaved thinking enabled:
-// - Thinking blocks can appear anywhere in the conversation (not required to be first)
-// - Always include the complete, unmodified thinking block from previous assistant turns
-// - interleaved parameter is kept for API compatibility but always true
-//
-// Important: Anthropic API requires that all tool_result blocks corresponding to tool_use
-// blocks from the same assistant message MUST be grouped into a single user message.
-func (c *Client) convertBetaMessages(ctx context.Context, messages []chat.Message) ([]anthropic.BetaMessageParam, error) {
+func (c *Client) convertBetaMessages(ctx context.Context, messages []chat.Message) ([]MessageParam, error) {
 	return c.convertBetaMessagesWithDeferred(ctx, messages, nil)
 }
 
-func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages []chat.Message, requestTools []tools.Tool) ([]anthropic.BetaMessageParam, error) {
-	var betaMessages []anthropic.BetaMessageParam
+func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages []chat.Message, requestTools []tools.Tool) ([]MessageParam, error) {
+	var betaMessages []MessageParam
 	deferredByCallID := deferredToolNamesByCallID(requestTools)
 	loopStart := chat.ActiveToolLoopStart(messages)
 
@@ -43,28 +30,24 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 			continue
 		}
 		if msg.Role == chat.MessageRoleSystem {
-			// System messages handled separately
 			continue
 		}
 		if msg.Role == chat.MessageRoleUser {
-			// Handle user messages (including images, files, and tool results)
 			if len(msg.MultiContent) > 0 {
-				contentBlocks, err := c.convertBetaUserMultiContent(ctx, msg.MultiContent)
+				contentBlocks, err := c.convertUserMultiContent(ctx, msg.MultiContent)
 				if err != nil {
 					return nil, err
 				}
 				if len(contentBlocks) > 0 {
-					betaMessages = append(betaMessages, anthropic.BetaMessageParam{
-						Role:    anthropic.BetaMessageParamRoleUser,
+					betaMessages = append(betaMessages, MessageParam{
+						Role:    "user",
 						Content: contentBlocks,
 					})
 				}
 			} else {
-				betaMessages = append(betaMessages, anthropic.BetaMessageParam{
-					Role: anthropic.BetaMessageParamRoleUser,
-					Content: []anthropic.BetaContentBlockParamUnion{
-						{OfText: &anthropic.BetaTextBlockParam{Text: msg.Content}},
-					},
+				betaMessages = append(betaMessages, MessageParam{
+					Role:    "user",
+					Content: []ContentBlockParam{newTextBlock(msg.Content)},
 				})
 			}
 			continue
@@ -73,301 +56,88 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 			if blocks, ok, err := betaReplayContent(msg); err != nil {
 				return nil, err
 			} else if ok {
-				betaMessages = append(betaMessages, anthropic.BetaMessageParam{Role: anthropic.BetaMessageParamRoleAssistant, Content: blocks})
+				betaMessages = append(betaMessages, MessageParam{Role: "assistant", Content: blocks})
 				continue
 			}
 			if blocks, ok := betaRecoveredParams(msg); ok {
-				betaMessages = append(betaMessages, anthropic.BetaMessageParam{Role: anthropic.BetaMessageParamRoleAssistant, Content: blocks})
+				betaMessages = append(betaMessages, MessageParam{Role: "assistant", Content: blocks})
 				continue
 			}
-			contentBlocks := make([]anthropic.BetaContentBlockParamUnion, 0)
+			contentBlocks := make([]ContentBlockParam, 0)
 
-			// With interleaved thinking, we can include thinking blocks anywhere
-			// If we have thinking content, include it first (conventional order)
 			if include, err := c.flattenedThinking(i, loopStart, msg); err != nil {
 				return nil, err
 			} else if include {
-				contentBlocks = append(contentBlocks,
-					anthropic.NewBetaThinkingBlock(msg.ThinkingSignature, msg.ReasoningContent))
+				contentBlocks = append(contentBlocks, newThinkingBlock(msg.ThinkingSignature, msg.ReasoningContent))
 			}
 
-			// Add text content if present
 			if msg.Content != "" {
-				contentBlocks = append(contentBlocks, anthropic.BetaContentBlockParamUnion{
-					OfText: &anthropic.BetaTextBlockParam{Text: msg.Content},
-				})
+				contentBlocks = append(contentBlocks, newTextBlock(msg.Content))
 			}
 
-			// Add tool calls
 			if len(msg.ToolCalls) > 0 {
 				for _, toolCall := range msg.ToolCalls {
 					var inpts map[string]any
 					if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &inpts); err != nil {
 						inpts = map[string]any{}
 					}
-					contentBlocks = append(contentBlocks, anthropic.BetaContentBlockParamUnion{
-						OfToolUse: &anthropic.BetaToolUseBlockParam{
-							ID:    toolCall.ID,
-							Input: inpts,
-							Name:  toolCall.Function.Name,
-						},
+					contentBlocks = append(contentBlocks, ContentBlockParam{
+						Type:  "tool_use",
+						ID:    toolCall.ID,
+						Input: inpts,
+						Name:  toolCall.Function.Name,
 					})
 				}
 			}
 
 			if len(contentBlocks) > 0 {
-				betaMessages = append(betaMessages, anthropic.BetaMessageParam{
-					Role:    anthropic.BetaMessageParamRoleAssistant,
+				betaMessages = append(betaMessages, MessageParam{
+					Role:    "assistant",
 					Content: contentBlocks,
 				})
 			}
 			continue
 		}
 		if msg.Role == chat.MessageRoleTool {
-			// Collect consecutive tool messages and merge them into a single user message
-			// This is required by Anthropic API: all tool_result blocks for tool_use blocks
-			// from the same assistant message must be in the same user message
-			firstBlock, err := c.convertBetaToolResultBlockWithDeferred(ctx, msg, deferredByCallID[msg.ToolCallID])
-			if err != nil {
-				return nil, err
-			}
-			toolResultBlocks := []anthropic.BetaContentBlockParamUnion{firstBlock}
-
-			// Look ahead for consecutive tool messages and merge them
-			j := i + 1
+			var toolResultBlocks []ContentBlockParam
+			j := i
 			for j < len(messages) && messages[j].Role == chat.MessageRoleTool {
-				block, err := c.convertBetaToolResultBlockWithDeferred(ctx, &messages[j], deferredByCallID[messages[j].ToolCallID])
+				if names := deferredByCallID[messages[j].ToolCallID]; len(names) > 0 {
+					content := make([]ContentBlockParam, 0, len(names))
+					for _, name := range names {
+						content = append(content, ContentBlockParam{
+							Type:     "tool_reference",
+							ToolName: name,
+						})
+					}
+					toolResultBlocks = append(toolResultBlocks, ContentBlockParam{
+						Type:      "tool_result",
+						ToolUseID: messages[j].ToolCallID,
+						IsError:   new(messages[j].IsError),
+						Content:   content,
+					})
+					j++
+					continue
+				}
+				tr, err := c.convertToolResultBlock(ctx, &messages[j])
 				if err != nil {
 					return nil, err
 				}
-				toolResultBlocks = append(toolResultBlocks, block)
+				toolResultBlocks = append(toolResultBlocks, tr)
 				j++
 			}
-
-			// Add the merged user message with all tool results
-			betaMessages = append(betaMessages, anthropic.BetaMessageParam{
-				Role:    anthropic.BetaMessageParamRoleUser,
-				Content: toolResultBlocks,
-			})
-
-			// Skip the messages we've already processed
+			if len(toolResultBlocks) > 0 {
+				betaMessages = append(betaMessages, MessageParam{
+					Role:    "user",
+					Content: toolResultBlocks,
+				})
+			}
 			i = j - 1
 			continue
 		}
 	}
 
-	applyBetaMessageCacheControl(betaMessages, messageCacheBreakpoints(requestTools))
+	applyMessageCacheControl(betaMessages, messageCacheBreakpoints(requestTools))
 
 	return betaMessages, nil
-}
-
-// convertBetaUserMultiContent converts user message multi-content parts to Beta API content blocks.
-// It handles text, images (base64 and URL), and document attachments.
-// convertBetaToolResultBlock converts a tool message to a Beta API tool_result block,
-// including inline image and document content from MultiContent.
-func (c *Client) convertBetaToolResultBlockWithDeferred(ctx context.Context, msg *chat.Message, names []string) (anthropic.BetaContentBlockParamUnion, error) {
-	if len(names) > 0 {
-		content := make([]anthropic.BetaToolResultBlockParamContentUnion, 0, len(names))
-		for _, name := range names {
-			content = append(content, anthropic.BetaToolResultBlockParamContentUnion{
-				OfToolReference: &anthropic.BetaToolReferenceBlockParam{ToolName: name},
-			})
-		}
-		return anthropic.BetaContentBlockParamUnion{OfToolResult: &anthropic.BetaToolResultBlockParam{
-			ToolUseID: msg.ToolCallID,
-			IsError:   param.NewOpt(msg.IsError),
-			Content:   content,
-		}}, nil
-	}
-	if !hasRichToolResultMultiContent(msg.MultiContent) {
-		return anthropic.BetaContentBlockParamUnion{
-			OfToolResult: &anthropic.BetaToolResultBlockParam{
-				ToolUseID: msg.ToolCallID,
-				IsError:   anthropic.Bool(msg.IsError),
-				Content: []anthropic.BetaToolResultBlockParamContentUnion{
-					{OfText: &anthropic.BetaTextBlockParam{Text: toolResultText(msg.Content)}},
-				},
-			},
-		}, nil
-	}
-
-	var content []anthropic.BetaToolResultBlockParamContentUnion
-	for _, part := range msg.MultiContent {
-		switch part.Type {
-		case chat.MessagePartTypeText:
-			if strings.TrimSpace(part.Text) == "" {
-				continue
-			}
-			content = append(content, anthropic.BetaToolResultBlockParamContentUnion{
-				OfText: &anthropic.BetaTextBlockParam{Text: part.Text},
-			})
-		case chat.MessagePartTypeImageURL:
-			content = append(content, betaToolResultImageContent(part)...)
-		case chat.MessagePartTypeDocument:
-			if part.Document == nil {
-				continue
-			}
-			docBlocks, err := c.convertDoc(ctx, *part.Document)
-			if err != nil {
-				return anthropic.BetaContentBlockParamUnion{}, fmt.Errorf("failed to convert tool result document %q: %w", part.Document.Name, err)
-			}
-			for _, block := range docBlocks {
-				if b, ok := betaDocumentBlock(block); ok {
-					content = append(content, anthropic.BetaToolResultBlockParamContentUnion{
-						OfText: b.OfText, OfImage: b.OfImage, OfDocument: b.OfDocument,
-					})
-				}
-			}
-		}
-	}
-	if len(content) == 0 {
-		content = append(content, anthropic.BetaToolResultBlockParamContentUnion{
-			OfText: &anthropic.BetaTextBlockParam{Text: toolResultText(msg.Content)},
-		})
-	}
-
-	return anthropic.BetaContentBlockParamUnion{
-		OfToolResult: &anthropic.BetaToolResultBlockParam{
-			ToolUseID: msg.ToolCallID,
-			Content:   content,
-			IsError:   anthropic.Bool(msg.IsError),
-		},
-	}, nil
-}
-
-func betaToolResultImageContent(part chat.MessagePart) []anthropic.BetaToolResultBlockParamContentUnion {
-	if part.ImageURL == nil || !strings.HasPrefix(part.ImageURL.URL, "data:") {
-		return nil
-	}
-	urlParts := strings.SplitN(part.ImageURL.URL, ",", 2)
-	if len(urlParts) != 2 {
-		return nil
-	}
-	mediaType := extractMediaType(urlParts[0])
-	return []anthropic.BetaToolResultBlockParamContentUnion{{
-		OfImage: &anthropic.BetaImageBlockParam{
-			Source: anthropic.BetaImageBlockParamSourceUnion{
-				OfBase64: &anthropic.BetaBase64ImageSourceParam{
-					Data:      urlParts[1],
-					MediaType: anthropic.BetaBase64ImageSourceMediaType(mediaType),
-				},
-			},
-		},
-	}}
-}
-
-func (c *Client) convertBetaUserMultiContent(ctx context.Context, parts []chat.MessagePart) ([]anthropic.BetaContentBlockParamUnion, error) {
-	contentBlocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(parts))
-
-	for _, part := range parts {
-		switch part.Type {
-		case chat.MessagePartTypeText:
-			contentBlocks = append(contentBlocks, anthropic.BetaContentBlockParamUnion{
-				OfText: &anthropic.BetaTextBlockParam{Text: part.Text},
-			})
-
-		case chat.MessagePartTypeImageURL:
-			if part.ImageURL == nil {
-				continue
-			}
-			if strings.HasPrefix(part.ImageURL.URL, "data:") {
-				urlParts := strings.SplitN(part.ImageURL.URL, ",", 2)
-				if len(urlParts) == 2 {
-					contentBlocks = append(contentBlocks, anthropic.BetaContentBlockParamUnion{
-						OfImage: &anthropic.BetaImageBlockParam{
-							Source: anthropic.BetaImageBlockParamSourceUnion{
-								OfBase64: &anthropic.BetaBase64ImageSourceParam{
-									Data:      urlParts[1],
-									MediaType: anthropic.BetaBase64ImageSourceMediaType(extractMediaType(urlParts[0])),
-								},
-							},
-						},
-					})
-				}
-			} else if strings.HasPrefix(part.ImageURL.URL, "http://") || strings.HasPrefix(part.ImageURL.URL, "https://") {
-				contentBlocks = append(contentBlocks, anthropic.BetaContentBlockParamUnion{
-					OfImage: &anthropic.BetaImageBlockParam{
-						Source: anthropic.BetaImageBlockParamSourceUnion{
-							OfURL: &anthropic.BetaURLImageSourceParam{
-								URL: part.ImageURL.URL,
-							},
-						},
-					},
-				})
-			}
-
-		case chat.MessagePartTypeFile:
-			continue
-
-		case chat.MessagePartTypeDocument:
-			if part.Document != nil {
-				stdBlocks, err := c.convertDoc(ctx, *part.Document)
-				if err != nil {
-					return nil, fmt.Errorf("failed to convert document attachment %q: %w", part.Document.Name, err)
-				}
-				for _, block := range stdBlocks {
-					if b, ok := betaDocumentBlock(block); ok {
-						contentBlocks = append(contentBlocks, b)
-					}
-				}
-			}
-		}
-	}
-
-	return contentBlocks, nil
-}
-
-// convertBetaTools converts tools to Beta API format
-func convertBetaTools(t []tools.Tool) ([]anthropic.BetaToolUnionParam, error) {
-	hasDeferredTools := containsDeferredTool(t)
-	t, immediateCount := orderToolsForDeferredLoading(t)
-	betaTools := make([]anthropic.BetaToolUnionParam, 0, len(t))
-
-	for _, tool := range t {
-		inputSchema, err := ConvertParametersToSchema(tool.Parameters)
-		if err != nil {
-			return nil, err
-		}
-
-		// Convert to BetaToolInputSchemaParam
-		var betaInputSchema anthropic.BetaToolInputSchemaParam
-		if err := tools.ConvertSchema(inputSchema, &betaInputSchema); err != nil {
-			return nil, err
-		}
-
-		betaInputSchema.Properties = inputSchema.Properties
-		betaInputSchema.ExtraFields = inputSchema.ExtraFields
-		// Create BetaToolParam and wrap it in BetaToolUnionParam
-		betaTool := &anthropic.BetaToolParam{
-			Name:        tool.Name,
-			Description: anthropic.String(tool.Description),
-			InputSchema: betaInputSchema,
-		}
-		if tool.Deferred {
-			betaTool.DeferLoading = param.NewOpt(true)
-		}
-		if hasDeferredTools && len(betaTools) == immediateCount-1 {
-			betaTool.CacheControl = anthropic.NewBetaCacheControlEphemeralParam()
-		}
-		betaTools = append(betaTools, anthropic.BetaToolUnionParam{OfTool: betaTool})
-	}
-
-	return betaTools, nil
-}
-
-// betaDocumentBlock maps the text, image and PDF blocks produced by convertDoc.
-func betaDocumentBlock(b anthropic.ContentBlockParamUnion) (anthropic.BetaContentBlockParamUnion, bool) {
-	switch {
-	case b.OfText != nil:
-		return anthropic.NewBetaTextBlock(b.OfText.Text), true
-	case b.OfImage != nil && b.OfImage.Source.OfBase64 != nil:
-		src := b.OfImage.Source.OfBase64
-		return anthropic.NewBetaImageBlock(anthropic.BetaBase64ImageSourceParam{
-			Data: src.Data, MediaType: anthropic.BetaBase64ImageSourceMediaType(src.MediaType),
-		}), true
-	case b.OfDocument != nil && b.OfDocument.Source.OfBase64 != nil:
-		return anthropic.NewBetaDocumentBlock(anthropic.BetaBase64PDFSourceParam{Data: b.OfDocument.Source.OfBase64.Data}), true
-	default:
-		return anthropic.BetaContentBlockParamUnion{}, false
-	}
 }

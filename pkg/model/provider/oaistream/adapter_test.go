@@ -8,14 +8,14 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/model/provider/internal/httpx"
 )
 
 // newTestStream creates an SSE stream from raw SSE event data served by a test HTTP server.
-func newTestStream(t *testing.T, sseData string) *ssestream.Stream[openai.ChatCompletionChunk] {
+func newTestStream(t *testing.T, sseData string) *ChunkStream {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -27,7 +27,7 @@ func newTestStream(t *testing.T, sseData string) *ssestream.Stream[openai.ChatCo
 	require.NoError(t, err)
 	resp, err := srv.Client().Do(req) //nolint:bodyclose // body is closed by the stream
 	require.NoError(t, err)
-	return ssestream.NewStream[openai.ChatCompletionChunk](ssestream.NewDecoder(resp), nil)
+	return NewChunkStreamFromDecoder(httpx.NewSSEReader(resp.Body), nil)
 }
 
 func TestStreamAdapter_ReasoningContent(t *testing.T) {
@@ -356,7 +356,7 @@ func TestStreamAdapter_HeldFinishReasonNotEmittedOnTransportError(t *testing.T) 
 	require.NoError(t, err)
 	resp, err := srv.Client().Do(req) //nolint:bodyclose // body is closed by the stream
 	require.NoError(t, err)
-	adapter := NewStreamAdapter(ssestream.NewStream[openai.ChatCompletionChunk](ssestream.NewDecoder(resp), nil), true)
+	adapter := NewStreamAdapter(NewChunkStreamFromDecoder(httpx.NewSSEReader(resp.Body), nil), true)
 	defer adapter.Close()
 
 	reasons, _, err := collectFinish(t, adapter)

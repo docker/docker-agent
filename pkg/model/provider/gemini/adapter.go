@@ -10,8 +10,6 @@ import (
 	"sync"
 	"uuid"
 
-	"google.golang.org/genai"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -28,7 +26,7 @@ var ErrInvalidFunctionCall = modelerrors.ErrInvalidFunctionCall
 
 // StreamAdapter adapts the Gemini streaming iterator to chat.MessageStream
 type StreamAdapter struct {
-	iter       func(func(*genai.GenerateContentResponse, error) bool)
+	iter       func(func(*GenerateContentResponse, error) bool)
 	ch         chan result
 	done       chan struct{}
 	startOnce  sync.Once
@@ -38,7 +36,7 @@ type StreamAdapter struct {
 }
 
 type result struct {
-	resp      *genai.GenerateContentResponse
+	resp      *GenerateContentResponse
 	err       error
 	done      bool
 	toolCalls bool
@@ -48,7 +46,7 @@ type result struct {
 }
 
 // NewStreamAdapter constructs a StreamAdapter from Gemini's iterator
-func NewStreamAdapter(iter func(func(*genai.GenerateContentResponse, error) bool), model string, trackUsage bool) *StreamAdapter {
+func NewStreamAdapter(iter func(func(*GenerateContentResponse, error) bool), model string, trackUsage bool) *StreamAdapter {
 	return &StreamAdapter{
 		iter:       iter,
 		ch:         make(chan result),
@@ -71,10 +69,10 @@ func (g *StreamAdapter) run() {
 	hasToolCalls := false
 	continuing := false
 	var terminal chat.FinishReason
-	var lastResponse *genai.GenerateContentResponse
+	var lastResponse *GenerateContentResponse
 
 	// Consume the iterator
-	g.iter(func(resp *genai.GenerateContentResponse, err error) bool {
+	g.iter(func(resp *GenerateContentResponse, err error) bool {
 		// Skip noisy http2 errors
 		if err != nil && err.Error() == http2BodyClosedError {
 			return true
@@ -88,11 +86,11 @@ func (g *StreamAdapter) run() {
 				// Try to extract text content from the error message
 				if textContent := extractTextFromError(errMsg); textContent != "" {
 					// Create a synthetic response with the extracted text
-					if !g.send(result{resp: &genai.GenerateContentResponse{
-						Candidates: []*genai.Candidate{
+					if !g.send(result{resp: &GenerateContentResponse{
+						Candidates: []*Candidate{
 							{
-								Content: &genai.Content{
-									Parts: []*genai.Part{
+								Content: &Content{
+									Parts: []*Part{
 										{Text: textContent},
 									},
 								},
@@ -185,7 +183,7 @@ func (g *StreamAdapter) run() {
 	// Send final message with appropriate stop reason
 	if hasContent || hasToolCalls || terminal != "" {
 		if lastResponse == nil {
-			lastResponse = &genai.GenerateContentResponse{}
+			lastResponse = &GenerateContentResponse{}
 		}
 		if !g.send(result{done: true, resp: lastResponse, toolCalls: hasToolCalls, finish: terminal}) {
 			return
@@ -195,18 +193,18 @@ func (g *StreamAdapter) run() {
 
 // responseTerminalReason maps a truncation or safety stop to its chat finish
 // reason, or "" when the response doesn't carry one.
-func responseTerminalReason(resp *genai.GenerateContentResponse) chat.FinishReason {
-	if resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" && resp.PromptFeedback.BlockReason != genai.BlockedReasonUnspecified {
+func responseTerminalReason(resp *GenerateContentResponse) chat.FinishReason {
+	if resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" && resp.PromptFeedback.BlockReason != BlockedReasonUnspecified {
 		return chat.FinishReasonRefusal
 	}
 	var reason chat.FinishReason
 	for _, candidate := range resp.Candidates {
 		switch candidate.FinishReason {
-		case genai.FinishReasonMaxTokens:
+		case FinishReasonMaxTokens:
 			reason = mergeTerminalReason(reason, chat.FinishReasonLength)
-		case genai.FinishReasonSafety, genai.FinishReasonRecitation, genai.FinishReasonBlocklist,
-			genai.FinishReasonProhibitedContent, genai.FinishReasonSPII, genai.FinishReasonImageSafety,
-			genai.FinishReasonImageProhibitedContent, genai.FinishReasonImageRecitation:
+		case FinishReasonSafety, FinishReasonRecitation, FinishReasonBlocklist,
+			FinishReasonProhibitedContent, FinishReasonSPII, FinishReasonImageSafety,
+			FinishReasonImageProhibitedContent, FinishReasonImageRecitation:
 			reason = mergeTerminalReason(reason, chat.FinishReasonRefusal)
 		}
 	}
@@ -216,12 +214,12 @@ func responseTerminalReason(resp *genai.GenerateContentResponse) chat.FinishReas
 // continuationPending reports whether generation is still waiting on a
 // continuation after resp: a CONTINUATION stop or a continuation token sets
 // it, and any other finish reason clears it.
-func continuationPending(pending bool, resp *genai.GenerateContentResponse) bool {
+func continuationPending(pending bool, resp *GenerateContentResponse) bool {
 	for _, candidate := range resp.Candidates {
 		switch candidate.FinishReason {
-		case genai.FinishReasonContinuation:
+		case FinishReasonContinuation:
 			pending = true
-		case "", genai.FinishReasonUnspecified:
+		case "", FinishReasonUnspecified:
 			pending = pending || len(candidate.ContinuationToken) > 0
 		default:
 			pending = false
@@ -232,10 +230,10 @@ func continuationPending(pending bool, resp *genai.GenerateContentResponse) bool
 
 // invalidFunctionCall returns an error when Gemini ended the response on a
 // function call it could not produce.
-func invalidFunctionCall(resp *genai.GenerateContentResponse) error {
+func invalidFunctionCall(resp *GenerateContentResponse) error {
 	for _, candidate := range resp.Candidates {
 		switch candidate.FinishReason {
-		case genai.FinishReasonMalformedFunctionCall, genai.FinishReasonUnexpectedToolCall:
+		case FinishReasonMalformedFunctionCall, FinishReasonUnexpectedToolCall:
 			if candidate.FinishMessage == "" {
 				return fmt.Errorf("gemini: %w (%s)", ErrInvalidFunctionCall, candidate.FinishReason)
 			}

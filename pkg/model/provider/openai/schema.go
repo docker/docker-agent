@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/openai/openai-go/v3/shared"
-
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -19,7 +17,7 @@ import (
 // still need fully-populated `required` arrays for the Chat Completions API,
 // which has no per-tool strict flag. The strict flag is only consumed by the
 // Responses API caller.
-func ConvertParametersToSchema(params any) (shared.FunctionParameters, bool, error) {
+func ConvertParametersToSchema(params any) (map[string]any, bool, error) {
 	p, err := tools.SchemaToMap(params)
 	if err != nil {
 		return nil, false, err
@@ -207,7 +205,7 @@ func walkSchema(schema map[string]any, fn func(map[string]any)) {
 // newly made nullable or already declared as a ["array", "null"] type pair:
 // strict mode rejects the type-pair form when the object lives behind a
 // $ref/$defs indirection. Scalar properties keep the ["T", "null"] form.
-func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters {
+func makeAllRequired(schema map[string]any) map[string]any {
 	if schema == nil {
 		schema = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
@@ -362,7 +360,7 @@ func isCompositionNode(node map[string]any) bool {
 // enum/const nodes get the type of their values (pydantic emits a typeless
 // enum for a mixed Literal); other nodes default to "object".
 // $ref/anyOf/oneOf/allOf nodes are left as leaves — see isCompositionNode.
-func ensureTypeFields(schema shared.FunctionParameters) shared.FunctionParameters {
+func ensureTypeFields(schema map[string]any) map[string]any {
 	if schema == nil {
 		return nil
 	}
@@ -381,7 +379,7 @@ func ensureTypeFields(schema shared.FunctionParameters) shared.FunctionParameter
 
 // removeFormatFields removes the "format" field from all nodes in the schema.
 // OpenAI does not support the JSON Schema "format" keyword (e.g. "uri", "email", "date").
-func removeFormatFields(schema shared.FunctionParameters) shared.FunctionParameters {
+func removeFormatFields(schema map[string]any) map[string]any {
 	if schema == nil {
 		return nil
 	}
@@ -394,7 +392,7 @@ func removeFormatFields(schema shared.FunctionParameters) shared.FunctionParamet
 }
 
 // In Docker Desktop 4.52, the MCP Gateway produces an invalid tools shema for `mcp-config-set`.
-func fixSchemaArrayItems(schema shared.FunctionParameters) shared.FunctionParameters {
+func fixSchemaArrayItems(schema map[string]any) map[string]any {
 	propertiesValue, ok := schema["properties"]
 	if !ok {
 		return schema

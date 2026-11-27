@@ -34,7 +34,6 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	"github.com/openai/openai-go/v3"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/docker/docker-agent/pkg/config"
@@ -345,9 +344,9 @@ func bearerAuthMiddleware(expected string) echo.MiddlewareFunc {
 }
 
 func (s *server) handleModels(c echo.Context) error {
-	data := make([]openai.Model, 0, len(s.policy.exposed))
+	data := make([]Model, 0, len(s.policy.exposed))
 	for _, name := range s.policy.exposed {
-		data = append(data, openai.Model{ID: name, OwnedBy: "docker-agent"})
+		data = append(data, Model{ID: name, Object: "model", OwnedBy: "docker-agent"})
 	}
 	return c.JSON(http.StatusOK, ModelsResponse{Object: "list", Data: data})
 }

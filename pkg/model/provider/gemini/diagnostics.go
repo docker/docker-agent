@@ -1,10 +1,6 @@
 package gemini
 
-import (
-	"strings"
-
-	"google.golang.org/genai"
-)
+import "strings"
 
 // These transport categories gate response modalities and label diagnostics;
 // they never contain request content.
@@ -64,7 +60,7 @@ type RequestShape struct {
 // newRequestShape captures a [RequestShape] from a fully-built
 // genai.GenerateContentConfig (i.e. after tools/ToolConfig have been
 // attached) and the client that built it.
-func newRequestShape(c *Client, config *genai.GenerateContentConfig, functionToolCount int, imageOutputEnabled bool) RequestShape {
+func newRequestShape(c *Client, config *GenerateContentConfig, functionToolCount int, imageOutputEnabled bool) RequestShape {
 	modalities := normalizeResponseModalities(config.ResponseModalities)
 	kinds := builtInToolKinds(config.Tools)
 
@@ -75,7 +71,7 @@ func newRequestShape(c *Client, config *genai.GenerateContentConfig, functionToo
 		BuiltInToolCount:        len(kinds),
 		FunctionToolCount:       functionToolCount,
 		HasToolConfig:           config.ToolConfig != nil,
-		StructuredOutputPresent: config.ResponseMIMEType != "" || config.ResponseSchema != nil || config.ResponseJsonSchema != nil,
+		StructuredOutputPresent: config.ResponseMIMEType != "" || config.ResponseSchema != nil || config.ResponseJSONSchema != nil,
 		ThinkingConfigSet:       config.ThinkingConfig != nil,
 		NoThinkingRequested:     c.ModelOptions.NoThinking(),
 		APISurface:              c.apiSurface,
@@ -114,7 +110,7 @@ func normalizeResponseModalities(raw []string) []string {
 // toolsList (e.g. "google_search"). The caller-supplied function-declarations
 // tool (added separately by convertToolsToGemini) has none of these fields
 // set, so it is naturally excluded.
-func builtInToolKinds(toolsList []*genai.Tool) []string {
+func builtInToolKinds(toolsList []*Tool) []string {
 	var kinds []string
 	for _, t := range toolsList {
 		switch {

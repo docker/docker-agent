@@ -9,7 +9,7 @@ import (
 // A tool input schema containing a boolean sub-schema — the shape a JSON Schema
 // generator emits for a Go any/interface{} field — must convert without error.
 // Before normalizeBooleanSchemas this failed with
-// "cannot unmarshal bool into Go struct field Schema.properties of type genai.Schema".
+// "cannot unmarshal bool into Go struct field Schema.properties of type Schema".
 func TestConvertParametersToSchema_BooleanSubSchema(t *testing.T) {
 	params := map[string]any{
 		"type": "object",

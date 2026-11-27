@@ -14,12 +14,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
-	"github.com/openai/openai-go/v3/shared"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/effort"
@@ -41,7 +35,7 @@ import (
 type Client struct {
 	base.Config
 
-	clientFn func(context.Context) (*openai.Client, error)
+	clientFn func(context.Context) (*oaistream.Client, error)
 
 	// wsPool is initialized in NewClient when transport=websocket is configured.
 	// It maintains a persistent WebSocket connection across requests.
@@ -66,112 +60,83 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		resolvedBaseURL = cmp.Or(cfg.BaseURL, os.Getenv("OPENAI_BASE_URL"), resolvedBaseURL)
 	}
 
-	var clientFn func(context.Context) (*openai.Client, error)
+	var clientFn func(context.Context) (*oaistream.Client, error)
 	if gateway := globalOptions.Gateway(); gateway == "" {
-		var clientOptions []option.RequestOption
+		var (
+			apiKey         string
+			requestHeaders func(context.Context, http.Header) error
+		)
 
 		switch {
 		case isChatGPTProvider(cfg):
-			// ChatGPT account (subscription) auth: a per-request middleware
-			// owns the Authorization and Codex headers so token refreshes
-			// apply mid-session. Fail fast with sign-in guidance when no
-			// credential is available at construction time.
 			tokenSource := chatgptTokenSource(env, cfg.TokenKey)
 			if _, err := tokenSource(ctx); err != nil {
 				slog.ErrorContext(ctx, "ChatGPT client creation failed", "error", err)
 				return nil, err
 			}
-			// The empty API key disables the SDK's OPENAI_API_KEY fallback.
-			clientOptions = append(clientOptions,
-				option.WithAPIKey(""),
-				option.WithMiddleware(chatgptAuthMiddleware(tokenSource)),
-			)
+			requestHeaders = chatgptAuthHeaderFunc(tokenSource)
 		case globalOptions.TokenSource() != nil:
 			tokenSource := globalOptions.TokenSource()
 			if _, err := tokenSource(ctx); err != nil {
 				return nil, fmt.Errorf("resolving access token: %w", err)
 			}
-			clientOptions = append(clientOptions,
-				option.WithAPIKey(""),
-				option.WithMiddleware(tokenAuthMiddleware(tokenSource)),
-			)
+			requestHeaders = tokenAuthHeaderFunc(tokenSource)
 		case cfg.TokenKey != "":
-			// Explicit token_key configured - use that env var
 			authToken, tokenKey := authTokenForTokenKey(ctx, cfg, env)
 			if authToken == "" {
 				return nil, fmt.Errorf("%s environment variable is required", strings.Join(catalog.TokenKeys(cfg.Provider, tokenKey), " or "))
 			}
-			clientOptions = append(clientOptions, option.WithAPIKey(authToken))
+			apiKey = authToken
 		case isCustomProvider(cfg):
-			// Custom provider (has api_type in ProviderOpts) without token_key - no auth
 			slog.DebugContext(ctx, "Custom provider with no token_key, sending requests without authentication",
 				"provider", cfg.Provider, "base_url", cfg.BaseURL)
-			clientOptions = append(clientOptions, option.WithAPIKey(""))
 		default:
-			// No token_key configured: resolve OPENAI_API_KEY through the
-			// environment provider chain instead of letting the SDK read it
-			// from the OS environment. The chain resolves secret references
-			// (e.g. "op://..." via the 1Password CLI) and consults extra
-			// sources (Docker Desktop, ...); the SDK's os.Getenv
-			// fallback would send the raw reference as the bearer token.
 			if authToken, _ := env.Get(ctx, "OPENAI_API_KEY"); authToken != "" {
-				clientOptions = append(clientOptions, option.WithAPIKey(authToken))
+				apiKey = authToken
+			} else if envToken := os.Getenv("OPENAI_API_KEY"); envToken != "" {
+				apiKey = envToken
 			}
-			// Otherwise let the OpenAI SDK use its default behavior
-			// (OPENAI_API_KEY from the OS env).
 		}
 
-		if cfg.BaseURL != "" {
-			clientOptions = append(clientOptions, option.WithBaseURL(cfg.BaseURL))
-		}
+		queryParams := map[string]string{}
 		for key, name := range catalog.Lookup(cfg.Provider).QueryParams {
 			if value, ok := cfg.ProviderOpts[key].(string); ok {
-				clientOptions = append(clientOptions, option.WithQueryAdd(name, value))
+				queryParams[name] = value
 			}
 		}
-
-		// Apply custom HTTP headers from provider_opts (e.g. github-copilot's
-		// required Copilot-Integration-Id) and any provider-specific defaults.
-		clientOptions = append(clientOptions, buildHeaderOptions(cfg)...)
-
-		// Preserve full error details from non-OpenAI providers (e.g. GitHub
-		// Copilot returns a bare "400 Bad Request" whose body explains the
-		// actual cause); without this the SDK discards it.
-		clientOptions = append(clientOptions, option.WithMiddleware(oaistream.ErrorBodyMiddleware()))
 
 		httpClient := httpclient.NewHTTPClient(ctx)
 		globalOptions.WrapTransport(ctx, httpClient)
 		base.WrapOpenCodeSession(cfg, httpClient)
-		clientOptions = append(clientOptions, option.WithHTTPClient(httpClient))
 
-		client := openai.NewClient(clientOptions...)
-		clientFn = func(context.Context) (*openai.Client, error) {
-			return &client, nil
+		client := oaistream.NewClient(oaistream.ClientConfig{
+			BaseURL:        resolvedBaseURL,
+			APIKey:         apiKey,
+			Headers:        buildHTTPHeaders(cfg),
+			QueryParams:    queryParams,
+			HTTPClient:     httpClient,
+			RequestHeaders: requestHeaders,
+		})
+		clientFn = func(context.Context) (*oaistream.Client, error) {
+			return client, nil
 		}
 	} else {
-		// When using a Gateway targeting a Docker domain, tokens are short-lived.
-		// Only require and inject the Docker JWT if the gateway is a .docker.com URL.
 		if err := base.VerifyDockerGatewayAuth(ctx, env, gateway); err != nil {
 			slog.ErrorContext(ctx, "OpenAI client creation failed", "error", "failed to get Docker Desktop's authentication token")
 			return nil, err
 		}
 
-		// When using a Gateway, tokens are short-lived.
-		clientFn = func(ctx context.Context) (*openai.Client, error) {
+		clientFn = func(ctx context.Context) (*oaistream.Client, error) {
 			connection, err := base.NewGatewayClient(ctx, env, gateway, "https://api.openai.com/v1", "/v1/", cfg, &globalOptions)
 			if err != nil {
 				return nil, err
 			}
 
-			clientOptions := []option.RequestOption{
-				option.WithBaseURL(connection.BaseURL),
-				option.WithHTTPClient(connection.HTTPClient),
-				option.WithMiddleware(oaistream.ErrorBodyMiddleware()),
-			}
-			if connection.AuthToken != "" {
-				clientOptions = append(clientOptions, option.WithAPIKey(connection.AuthToken))
-			}
-			return new(openai.NewClient(clientOptions...)), nil
+			return oaistream.NewClient(oaistream.ClientConfig{
+				BaseURL:    connection.BaseURL,
+				APIKey:     connection.AuthToken,
+				HTTPClient: connection.HTTPClient,
+			}), nil
 		}
 	}
 
@@ -222,7 +187,7 @@ func (c *Client) endpointConfig() *latest.ModelConfig {
 
 // convertMessages converts chat.Message to openai.ChatCompletionMessageParamUnion
 // using the shared oaistream implementation.
-func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
+func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []oaistream.ChatMessage {
 	// Gated here rather than inside the converter so that every path below --
 	// including the prompt-cache breakpoint path, which must keep computing the
 	// same body it will send -- sees the same messages.
@@ -387,42 +352,42 @@ func (c *Client) CreateChatCompletionStream(
 
 	trackUsage := c.TrackUsageEnabled()
 
-	params := openai.ChatCompletionNewParams{
+	params := oaistream.ChatCompletionRequest{
 		Model:       c.ModelConfig.Model,
-		ServiceTier: openai.ChatCompletionNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
+		ServiceTier: serviceTier(c.ModelConfig.ProviderOpts),
 		Messages:    c.convertMessages(ctx, messages),
-		StreamOptions: openai.ChatCompletionStreamOptionsParam{
-			IncludeUsage: openai.Bool(trackUsage),
+		StreamOptions: &oaistream.StreamOptions{
+			IncludeUsage: trackUsage,
 		},
 	}
 
 	if c.ModelConfig.Temperature != nil {
-		params.Temperature = openai.Float(*c.ModelConfig.Temperature)
+		params.Temperature = new(*c.ModelConfig.Temperature)
 	}
 	if c.ModelConfig.TopP != nil {
-		params.TopP = openai.Float(*c.ModelConfig.TopP)
+		params.TopP = new(*c.ModelConfig.TopP)
 	}
 	if c.ModelConfig.FrequencyPenalty != nil {
-		params.FrequencyPenalty = openai.Float(*c.ModelConfig.FrequencyPenalty)
+		params.FrequencyPenalty = new(*c.ModelConfig.FrequencyPenalty)
 	}
 	if c.ModelConfig.PresencePenalty != nil {
-		params.PresencePenalty = openai.Float(*c.ModelConfig.PresencePenalty)
+		params.PresencePenalty = new(*c.ModelConfig.PresencePenalty)
 	}
 
 	if maxToken := c.ModelConfig.MaxTokens; maxToken != nil && *maxToken > 0 {
 		effective := clampMaxTokens(ctx, *maxToken, c.contextLimit(ctx), c.ModelConfig.Model)
 		if !modelinfo.SupportsResponsesAPI(c.ModelConfig.Model) {
-			params.MaxTokens = openai.Int(effective)
+			params.MaxTokens = new(effective)
 			slog.DebugContext(ctx, "OpenAI request configured with max tokens", "max_tokens", effective, "model", c.ModelConfig.Model)
 		} else {
-			params.MaxCompletionTokens = openai.Int(effective)
+			params.MaxCompletionTokens = new(effective)
 			slog.DebugContext(ctx, "using max_completion_tokens instead of max_tokens for Responses-API models", "model", c.ModelConfig.Model)
 		}
 	}
 
 	if len(requestTools) > 0 {
 		slog.DebugContext(ctx, "Adding tools to OpenAI request", "tool_count", len(requestTools))
-		toolsParam := make([]openai.ChatCompletionToolUnionParam, len(requestTools))
+		toolsParam := make([]oaistream.ChatTool, len(requestTools))
 		for i, tool := range requestTools {
 			parameters, _, err := ConvertParametersToSchema(tool.Parameters)
 			if err != nil {
@@ -431,43 +396,25 @@ func (c *Client) CreateChatCompletionStream(
 			}
 			tools.OrderedSchemaProperties(parameters)
 
-			toolsParam[i] = openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-				Name:        tool.Name,
-				Description: openai.String(tool.Description),
-				Parameters:  parameters,
-			})
+			toolsParam[i] = oaistream.ChatTool{
+				Type: "function",
+				Function: oaistream.FunctionDef{
+					Name:        tool.Name,
+					Description: tool.Description,
+					Parameters:  parameters,
+				},
+			}
 
 			slog.DebugContext(ctx, "Added tool to OpenAI request", "tool_name", tool.Name)
 		}
 		params.Tools = toolsParam
-
-		// Explicitly send tool_choice="auto". The OpenAI spec treats omission as
-		// equivalent to "auto", but some strict OpenAI-compatible gateways
-		// (notably LiteLLM) reject requests where tool_choice is missing while
-		// tools are present. Sending the default value explicitly is
-		// spec-compliant and preserves the model's autonomy to call tools.
-		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
-			OfAuto: param.NewOpt("auto"),
-		}
+		params.ToolChoice = "auto"
 
 		if c.ModelConfig.ParallelToolCalls != nil {
-			params.ParallelToolCalls = openai.Bool(*c.ModelConfig.ParallelToolCalls)
+			params.ParallelToolCalls = new(*c.ModelConfig.ParallelToolCalls)
 		}
 	}
 
-	// Apply thinking budget: set reasoning_effort for reasoning models (o-series, gpt-5).
-	// Reasoning models always reason; omitting the param uses the default effort.
-	// When NoThinking is set we still need to send an explicit effort so hidden
-	// reasoning tokens don't exhaust the max_completion_tokens budget: "none" on
-	// a genuine OpenAI vendor endpoint whose model has a real off switch
-	// (see [sendsRealNoneEffort]), "low" otherwise — older models
-	// (o3-mini, o1) only accept low/medium/high, and "low" is the closest thing
-	// to off they have.
-	//
-	// If the caller also supplied a small positive MaxTokens cap, raise it to
-	// noThinkingMinOutputTokens so residual hidden reasoning can't starve
-	// visible output. The guard skips unset or zero MaxTokens so an omitted cap
-	// is not turned into an artificial limit.
 	hasThinkingOverride := c.ModelOptions.NoThinking() || c.ModelConfig.ThinkingBudget != nil
 	usesOpenAI := modelinfo.UsesReasoningEffort(c.ModelConfig.Model)
 	usesGemini := hasThinkingOverride && !usesOpenAI && c.usesGeminiReasoningEffort(ctx)
@@ -478,9 +425,6 @@ func (c *Client) CreateChatCompletionStream(
 			c.warnThinkingBudgetIgnored(ctx)
 		}
 	case len(requestTools) > 0 && modelinfo.OpenAIRejectsToolsWithReasoningEffort(c.ModelConfig.Model) && !c.chatToolsWithNoneEffort():
-		// Sol/Luna accept tools with explicit "none"; other efforts need Responses.
-		// Omitting effort also lets GPT-5.4/5.5 use their implicit default.
-		// Warn only when a configured effort is actually being dropped.
 		if c.ModelOptions.NoThinking() || c.ModelConfig.ThinkingBudget != nil {
 			slog.WarnContext(ctx, "OpenAI: dropping reasoning_effort for a tools request forced onto Chat Completions; use api_type: openai_responses for tool calling on this model", "model", c.ModelConfig.Model)
 		}
@@ -489,14 +433,12 @@ func (c *Client) CreateChatCompletionStream(
 		if sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
 			reasoningEffort = "none"
 		}
-		params.ReasoningEffort = shared.ReasoningEffort(reasoningEffort)
-		// Hidden reasoning tokens count against the output budget even
-		// with low effort. Enforce a floor so visible text isn't starved.
+		params.ReasoningEffort = reasoningEffort
 		if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens > 0 && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
 			if !modelinfo.SupportsResponsesAPI(c.ModelConfig.Model) {
-				params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
+				params.MaxTokens = new(noThinkingMinOutputTokens)
 			} else {
-				params.MaxCompletionTokens = openai.Int(noThinkingMinOutputTokens)
+				params.MaxCompletionTokens = new(noThinkingMinOutputTokens)
 			}
 		}
 		slog.DebugContext(ctx, "OpenAI request using reasoning effort (NoThinking)", "reasoning_effort", reasoningEffort)
@@ -508,7 +450,7 @@ func (c *Client) CreateChatCompletionStream(
 				return nil, err
 			}
 			if send {
-				params.ReasoningEffort = shared.ReasoningEffort(effortStr)
+				params.ReasoningEffort = effortStr
 				slog.DebugContext(ctx, "OpenAI request using Gemini reasoning_effort", "reasoning_effort", effortStr)
 			}
 			break
@@ -518,20 +460,20 @@ func (c *Client) CreateChatCompletionStream(
 			slog.ErrorContext(ctx, "OpenAI request using thinking_budget failed", "error", err)
 			return nil, err
 		}
-		params.ReasoningEffort = shared.ReasoningEffort(effortStr)
+		params.ReasoningEffort = effortStr
 		slog.DebugContext(ctx, "OpenAI request using thinking_budget", "reasoning_effort", effortStr)
 	}
 
-	// Apply structured output configuration
 	if structuredOutput := c.ModelOptions.StructuredOutput(); structuredOutput != nil {
 		slog.DebugContext(ctx, "OpenAI request using structured output", "name", structuredOutput.Name, "strict", structuredOutput.Strict)
 
-		params.ResponseFormat.OfJSONSchema = &openai.ResponseFormatJSONSchemaParam{
-			JSONSchema: openai.ResponseFormatJSONSchemaJSONSchemaParam{
+		params.ResponseFormat = &oaistream.ResponseFormat{
+			Type: "json_schema",
+			JSONSchema: &oaistream.ResponseFormatJSONSchema{
 				Name:        structuredOutput.Name,
-				Description: openai.String(structuredOutput.Description),
+				Description: structuredOutput.Description,
 				Schema:      jsonSchema(structuredOutput.Schema),
-				Strict:      openai.Bool(structuredOutput.Strict),
+				Strict:      new(structuredOutput.Strict),
 			},
 		}
 	}
@@ -540,7 +482,6 @@ func (c *Client) CreateChatCompletionStream(
 		return nil, err
 	}
 
-	// Log the request in JSON format for debugging
 	if requestJSON, err := json.Marshal(params); err == nil {
 		slog.DebugContext(ctx, "OpenAI chat completion request", "request", string(requestJSON))
 	} else {
@@ -553,7 +494,7 @@ func (c *Client) CreateChatCompletionStream(
 		return nil, err
 	}
 
-	stream := client.Chat.Completions.NewStreaming(ctx, params)
+	stream := client.NewChatCompletionStream(ctx, params)
 
 	slog.DebugContext(ctx, "OpenAI chat completion stream created successfully", "model", c.ModelConfig.Model)
 	return oaistream.NewStreamAdapter(stream, trackUsage), nil
@@ -577,7 +518,7 @@ func (c *Client) supportsDeferredTools() bool {
 	return modelinfo.SupportsDeferredTools(c.ModelConfig.Provider, c.ModelConfig.Model)
 }
 
-func injectDeferredToolLoads(input []responses.ResponseInputItemUnionParam, requestTools []tools.Tool) ([]responses.ResponseInputItemUnionParam, error) {
+func injectDeferredToolLoads(input []ResponseInputItem, requestTools []tools.Tool) ([]ResponseInputItem, error) {
 	byCallID := make(map[string][]tools.Tool)
 	for _, tool := range requestTools {
 		if tool.Deferred && tool.DeferredAtToolCallID != "" {
@@ -588,18 +529,18 @@ func injectDeferredToolLoads(input []responses.ResponseInputItemUnionParam, requ
 		return input, nil
 	}
 
-	result := make([]responses.ResponseInputItemUnionParam, 0, len(input)+2*len(byCallID))
+	result := make([]ResponseInputItem, 0, len(input)+2*len(byCallID))
 	for _, item := range input {
 		result = append(result, item)
-		if item.OfFunctionCallOutput == nil {
+		if item.Type != "function_call_output" {
 			continue
 		}
-		deferred := byCallID[item.OfFunctionCallOutput.CallID.Value]
+		deferred := byCallID[item.CallID]
 		if len(deferred) == 0 {
 			continue
 		}
 
-		loaded := make([]responses.ToolUnionParam, 0, len(deferred))
+		loaded := make([]ResponseTool, 0, len(deferred))
 		names := make([]string, 0, len(deferred))
 		for _, tool := range deferred {
 			parameters, strict, err := ConvertParametersToSchema(tool.Parameters)
@@ -607,31 +548,35 @@ func injectDeferredToolLoads(input []responses.ResponseInputItemUnionParam, requ
 				return nil, err
 			}
 			tools.OrderedSchemaProperties(parameters)
-			loaded = append(loaded, responses.ToolUnionParam{OfFunction: &responses.FunctionToolParam{
+			loaded = append(loaded, ResponseTool{
+				Type:         "function",
 				Name:         tool.Name,
-				Description:  param.NewOpt(tool.Description),
+				Description:  tool.Description,
 				Parameters:   parameters,
-				Strict:       param.NewOpt(strict),
-				DeferLoading: param.NewOpt(true),
-			}})
+				Strict:       new(strict),
+				DeferLoading: new(true),
+			})
 			names = append(names, tool.Name)
 		}
 
-		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(item.OfFunctionCallOutput.CallID.Value+":"+strings.Join(names, ","))))
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(item.CallID+":"+strings.Join(names, ","))))
 		callID := "cagent_tool_load_" + digest[:16]
+		argsJSON, _ := json.Marshal(map[string]any{"query": strings.Join(names, " "), "limit": len(names)})
 		result = append(result,
-			responses.ResponseInputItemUnionParam{OfToolSearchCall: &responses.ResponseInputItemToolSearchCallParam{
-				Arguments: map[string]any{"query": strings.Join(names, " "), "limit": len(names)},
-				CallID:    param.NewOpt(callID),
+			ResponseInputItem{
+				Type:      "tool_search_call",
+				Arguments: string(argsJSON),
+				CallID:    callID,
 				Execution: "client",
 				Status:    "completed",
-			}},
-			responses.ResponseInputItemUnionParam{OfToolSearchOutput: &responses.ResponseToolSearchOutputItemParam{
+			},
+			ResponseInputItem{
+				Type:      "tool_search_output",
 				Tools:     loaded,
-				CallID:    param.NewOpt(callID),
-				Execution: responses.ResponseToolSearchOutputItemParamExecutionClient,
-				Status:    responses.ResponseToolSearchOutputItemParamStatusCompleted,
-			}},
+				CallID:    callID,
+				Execution: "client",
+				Status:    "completed",
+			},
 		)
 	}
 	return result, nil
@@ -667,29 +612,29 @@ func (c *Client) CreateResponseStream(
 		input = loadedInput
 	}
 
-	params := responses.ResponseNewParams{
+	params := ResponseRequest{
 		Model:       c.ModelConfig.Model,
-		ServiceTier: responses.ResponseNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
+		ServiceTier: serviceTier(c.ModelConfig.ProviderOpts),
+		Input:       input,
 	}
-	params.Input.OfInputItemList = input
 	c.configureResponseState(ctx, &params, messages)
 
 	if c.ModelConfig.Temperature != nil {
-		params.Temperature = param.NewOpt(*c.ModelConfig.Temperature)
+		params.Temperature = new(*c.ModelConfig.Temperature)
 	}
 	if c.ModelConfig.TopP != nil {
-		params.TopP = param.NewOpt(*c.ModelConfig.TopP)
+		params.TopP = new(*c.ModelConfig.TopP)
 	}
 
 	if maxToken := c.ModelConfig.MaxTokens; maxToken != nil && *maxToken > 0 {
 		maxTokens := clampMaxTokens(ctx, *maxToken, c.contextLimit(ctx), c.ModelConfig.Model)
-		params.MaxOutputTokens = param.NewOpt(maxTokens)
+		params.MaxOutputTokens = new(maxTokens)
 		slog.DebugContext(ctx, "OpenAI responses request configured with max output tokens", "max_output_tokens", maxTokens)
 	}
 
 	if len(requestTools) > 0 || len(hostedTools) > 0 {
 		slog.DebugContext(ctx, "Adding tools to OpenAI responses request", "tool_count", len(requestTools))
-		toolsParam := make([]responses.ToolUnionParam, 0, len(requestTools)+len(hostedTools))
+		toolsParam := make([]ResponseTool, 0, len(requestTools)+len(hostedTools))
 		for _, tool := range requestTools {
 			if deferredToolsEnabled && tool.Deferred {
 				continue
@@ -701,13 +646,13 @@ func (c *Client) CreateResponseStream(
 			}
 			tools.OrderedSchemaProperties(parameters)
 
-			functionTool := &responses.FunctionToolParam{
+			toolsParam = append(toolsParam, ResponseTool{
+				Type:        "function",
 				Name:        tool.Name,
-				Description: param.NewOpt(tool.Description),
+				Description: tool.Description,
 				Parameters:  parameters,
-				Strict:      param.NewOpt(strict),
-			}
-			toolsParam = append(toolsParam, responses.ToolUnionParam{OfFunction: functionTool})
+				Strict:      new(strict),
+			})
 
 			if !strict {
 				slog.DebugContext(ctx, "Tool not compatible with OpenAI strict mode, falling back", "tool_name", tool.Name)
@@ -718,54 +663,30 @@ func (c *Client) CreateResponseStream(
 		toolsParam = append(toolsParam, hostedTools...)
 		if len(toolsParam) > 0 {
 			params.Tools = toolsParam
-
-			// Explicitly send tool_choice="auto". See the matching comment in the
-			// Chat Completions path above for rationale (LiteLLM-style gateways
-			// reject requests where tool_choice is omitted).
-			params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{
-				OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsAuto),
-			}
+			params.ToolChoice = "auto"
 
 			if c.ModelConfig.ParallelToolCalls != nil {
-				params.ParallelToolCalls = param.NewOpt(*c.ModelConfig.ParallelToolCalls)
+				params.ParallelToolCalls = new(*c.ModelConfig.ParallelToolCalls)
 			}
 		}
 	}
 
-	// Configure reasoning for models that support it (o-series, gpt-5).
-	// Reasoning models always reason internally; omitting the reasoning param
-	// does NOT disable reasoning — it just uses the model's default effort.
-	// Those hidden reasoning tokens still count against max_output_tokens,
-	// so with a small budget (e.g. title generation) the model can exhaust
-	// all tokens on reasoning and return empty visible text.
-	//
-	// If the caller also supplied a small positive MaxTokens cap, raise it to
-	// noThinkingMinOutputTokens so residual hidden reasoning can't starve
-	// visible output. The guard skips unset or zero MaxTokens so an omitted cap
-	// is not turned into an artificial limit.
 	if modelinfo.UsesReasoningEffort(c.ModelConfig.Model) {
 		if c.ModelOptions.NoThinking() {
-			// Send an explicit effort so the model spends as few output tokens
-			// as possible on reasoning, leaving room for visible text: "none"
-			// on a genuine OpenAI vendor endpoint whose model has a real off
-			// switch (see [sendsRealNoneEffort]), "low" otherwise —
-			// older models (o3-mini, o1) only accept low/medium/high.
 			reasoningEffort := "low"
 			if sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
 				reasoningEffort = "none"
 			}
-			params.Reasoning = shared.ReasoningParam{
-				Effort: shared.ReasoningEffort(reasoningEffort),
+			params.Reasoning = &ResponseReasoning{
+				Effort: reasoningEffort,
 			}
-			// Hidden reasoning tokens count against max_output_tokens even
-			// with low effort. Enforce a floor so visible text isn't starved.
 			if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens > 0 && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
-				params.MaxOutputTokens = param.NewOpt(noThinkingMinOutputTokens)
+				params.MaxOutputTokens = new(noThinkingMinOutputTokens)
 			}
 			slog.DebugContext(ctx, "OpenAI responses request using reasoning effort (NoThinking)", "reasoning_effort", reasoningEffort)
 		} else {
-			params.Reasoning = shared.ReasoningParam{
-				Summary: shared.ReasoningSummaryDetailed,
+			params.Reasoning = &ResponseReasoning{
+				Summary: "detailed",
 			}
 			if c.ModelConfig.ThinkingBudget != nil {
 				effortStr, err := openAIReasoningEffort(c.ModelConfig.ThinkingBudget)
@@ -773,7 +694,7 @@ func (c *Client) CreateResponseStream(
 					slog.ErrorContext(ctx, "OpenAI responses request using thinking_budget failed", "error", err)
 					return nil, err
 				}
-				params.Reasoning.Effort = shared.ReasoningEffort(effortStr)
+				params.Reasoning.Effort = effortStr
 				slog.DebugContext(ctx, "OpenAI responses request using thinking_budget", "reasoning_effort", effortStr)
 			}
 		}
@@ -781,15 +702,17 @@ func (c *Client) CreateResponseStream(
 		c.warnThinkingBudgetIgnored(ctx)
 	}
 
-	// Apply structured output configuration
 	if structuredOutput := c.ModelOptions.StructuredOutput(); structuredOutput != nil {
 		slog.DebugContext(ctx, "OpenAI responses request using structured output", "name", structuredOutput.Name, "strict", structuredOutput.Strict)
 
-		params.Text.Format.OfJSONSchema = &responses.ResponseFormatTextJSONSchemaConfigParam{
-			Name:        structuredOutput.Name,
-			Description: param.NewOpt(structuredOutput.Description),
-			Schema:      structuredOutput.Schema,
-			Strict:      param.NewOpt(structuredOutput.Strict),
+		params.Text = &ResponseTextConfig{
+			Format: &ResponseTextFormat{
+				Type:        "json_schema",
+				Name:        structuredOutput.Name,
+				Description: structuredOutput.Description,
+				Schema:      structuredOutput.Schema,
+				Strict:      new(structuredOutput.Strict),
+			},
 		}
 	}
 
@@ -797,14 +720,12 @@ func (c *Client) CreateResponseStream(
 		applyChatGPTResponsesPolicy(ctx, &params)
 	}
 
-	// Keep prompt and tool diagnostics without logging opaque reasoning blobs.
 	if requestJSON, err := json.Marshal(params); err == nil {
 		slog.DebugContext(ctx, "OpenAI responses request", "request", redactEncryptedContent(requestJSON))
 	} else {
 		slog.ErrorContext(ctx, "Failed to marshal OpenAI responses request to JSON", "error", err)
 	}
 
-	// Choose transport: WebSocket or SSE (default).
 	transport := getTransport(&c.ModelConfig)
 
 	switch {
@@ -812,7 +733,6 @@ func (c *Client) CreateResponseStream(
 		stream, err := c.createWebSocketStream(ctx, params)
 		if err != nil {
 			slog.WarnContext(ctx, "WebSocket stream failed, falling back to SSE", "error", err)
-			// Fall through to SSE below.
 		} else {
 			slog.DebugContext(ctx, "OpenAI responses WebSocket stream created successfully", "model", c.ModelConfig.Model)
 			return c.responseAdapter(ctx, stream), nil
@@ -834,17 +754,22 @@ func (c *Client) CreateResponseStream(
 		slog.ErrorContext(ctx, "Failed to create OpenAI client", "error", err)
 		return nil, err
 	}
-	stream := client.Responses.NewStreaming(ctx, params)
+	params.Stream = true
+	sse, _, err := client.DoStream(ctx, http.MethodPost, "/responses", params, params.ExtraBody, nil) //nolint:bodyclose // closed by sseResponseStream.Close()
+	var stream responseEventStream
+	if err != nil {
+		stream = &sseResponseStream{err: err}
+	} else {
+		stream = &sseResponseStream{sse: sse}
+	}
 
 	slog.DebugContext(ctx, "OpenAI responses stream created successfully", "model", c.ModelConfig.Model)
 	return c.responseAdapter(ctx, stream), nil
 }
 
-// createWebSocketStream sends a request over the pre-initialized WebSocket
-// pool, returning a responseEventStream.
 func (c *Client) createWebSocketStream(
 	ctx context.Context,
-	params responses.ResponseNewParams,
+	params ResponseRequest,
 ) (responseEventStream, error) {
 	if c.wsPool == nil {
 		return nil, errors.New("websocket pool not initialized")
@@ -852,7 +777,7 @@ func (c *Client) createWebSocketStream(
 
 	// Full-history replay must not also append to connection-local history.
 	if c.preservesResponseState() {
-		params.PreviousResponseID = param.Null[string]()
+		params.PreviousResponseID = NullableString{Set: true, Null: true}
 	}
 	return c.wsPool.Stream(ctx, params)
 }
@@ -929,57 +854,52 @@ func getTransport(cfg *latest.ModelConfig) string {
 	return "sse"
 }
 
-func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []chat.Message) []responses.ResponseInputItemUnionParam {
+func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []chat.Message) []ResponseInputItem {
 	markBreakpoints := sendsExplicitCacheBreakpoints(c.endpointConfig(), c.ModelOptions.OpenAIVendor())
-	var input []responses.ResponseInputItemUnionParam
+	var input []ResponseInputItem
 	for _, msg := range messages {
 		if replay := c.replayResponse(msg); len(replay) > 0 {
 			input = append(input, replay...)
 			continue
 		}
-		// Skip invalid messages
 		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" {
 			continue
 		}
 
 		start := len(input)
-		var item responses.ResponseInputItemUnionParam
+		var item ResponseInputItem
+		hasItem := false
 
 		switch msg.Role {
 		case chat.MessageRoleUser:
 			if len(msg.MultiContent) == 0 {
-				item.OfMessage = &responses.EasyInputMessageParam{
-					Role: responses.EasyInputMessageRoleUser,
-					Content: responses.EasyInputMessageContentUnionParam{
-						OfString: param.NewOpt(msg.Content),
-					},
+				item = ResponseInputItem{
+					Type:    "message",
+					Role:    "user",
+					Content: new(msg.Content),
 				}
 			} else {
-				// Convert multi-content for user messages
-				contentParts := make([]responses.ResponseInputContentUnionParam, 0, len(msg.MultiContent))
+				contentParts := make([]ResponseContentPart, 0, len(msg.MultiContent))
 				for _, part := range msg.MultiContent {
 					switch part.Type {
 					case chat.MessagePartTypeText:
-						contentParts = append(contentParts, responses.ResponseInputContentUnionParam{
-							OfInputText: &responses.ResponseInputTextParam{
-								Text: part.Text,
-							},
+						contentParts = append(contentParts, ResponseContentPart{
+							Type: "input_text",
+							Text: part.Text,
 						})
 					case chat.MessagePartTypeImageURL:
-						// Note: superseded by MessagePartTypeDocument.
 						if part.ImageURL != nil {
-							detail := responses.ResponseInputImageContentDetailAuto
+							detail := "auto"
 							switch part.ImageURL.Detail {
 							case chat.ImageURLDetailHigh:
-								detail = responses.ResponseInputImageContentDetailHigh
+								detail = "high"
 							case chat.ImageURLDetailLow:
-								detail = responses.ResponseInputImageContentDetailLow
+								detail = "low"
 							}
-							contentParts = append(contentParts, responses.ResponseInputContentUnionParam{
-								OfInputImage: &responses.ResponseInputImageParam{
-									ImageURL: param.NewOpt(part.ImageURL.URL),
-									Detail:   responses.ResponseInputImageDetail(detail),
-								},
+							contentParts = append(contentParts, ResponseContentPart{
+								Type:     "input_image",
+								ImageURL: part.ImageURL.URL,
+								Detail:   detail,
 							})
 						}
 					case chat.MessagePartTypeDocument:
@@ -993,119 +913,104 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 						}
 					}
 				}
-				item.OfInputMessage = &responses.ResponseInputItemMessageParam{
-					Role:    "user",
-					Content: contentParts,
+				item = ResponseInputItem{
+					Type:         "message",
+					Role:         "user",
+					ContentParts: contentParts,
 				}
 			}
+			hasItem = true
 
 		case chat.MessageRoleAssistant:
 			if len(msg.ToolCalls) == 0 {
-				// Simple assistant message
-				item.OfMessage = &responses.EasyInputMessageParam{
-					Role: responses.EasyInputMessageRoleAssistant,
-					Content: responses.EasyInputMessageContentUnionParam{
-						OfString: param.NewOpt(msg.Content),
-					},
+				item = ResponseInputItem{
+					Type:    "message",
+					Role:    "assistant",
+					Content: new(msg.Content),
 				}
+				hasItem = true
 			} else {
-				// Assistant message with tool calls - emit text as a separate assistant
-				// message before the function calls so it is not lost.
 				if strings.TrimSpace(msg.Content) != "" {
-					input = append(input, responses.ResponseInputItemUnionParam{
-						OfMessage: &responses.EasyInputMessageParam{
-							Role: responses.EasyInputMessageRoleAssistant,
-							Content: responses.EasyInputMessageContentUnionParam{
-								OfString: param.NewOpt(msg.Content),
-							},
-						},
+					input = append(input, ResponseInputItem{
+						Type:    "message",
+						Role:    "assistant",
+						Content: new(msg.Content),
 					})
 				}
 				for _, toolCall := range msg.ToolCalls {
 					if toolCall.Type == "function" {
-						input = append(input, responses.ResponseInputItemUnionParam{
-							OfFunctionCall: &responses.ResponseFunctionToolCallParam{
-								CallID:    toolCall.ID,
-								Name:      toolCall.Function.Name,
-								Arguments: toolCall.Function.Arguments,
-							},
+						input = append(input, ResponseInputItem{
+							Type:      "function_call",
+							CallID:    toolCall.ID,
+							Name:      toolCall.Function.Name,
+							Arguments: toolCall.Function.Arguments,
 						})
 					}
 				}
-				// item stays unset: everything was appended above, so the
-				// common tail below appends nothing more for this message.
 			}
 
 		case chat.MessageRoleSystem:
 			if len(msg.MultiContent) == 0 {
-				item.OfInputMessage = &responses.ResponseInputItemMessageParam{
+				item = ResponseInputItem{
+					Type: "message",
 					Role: "system",
-					Content: []responses.ResponseInputContentUnionParam{
-						{
-							OfInputText: &responses.ResponseInputTextParam{
-								Text: msg.Content,
-							},
-						},
+					ContentParts: []ResponseContentPart{
+						{Type: "input_text", Text: msg.Content},
 					},
 				}
 			} else {
-				// Convert multi-content for system messages
-				contentParts := make([]responses.ResponseInputContentUnionParam, 0, len(msg.MultiContent))
+				contentParts := make([]ResponseContentPart, 0, len(msg.MultiContent))
 				for _, part := range msg.MultiContent {
 					if part.Type == chat.MessagePartTypeText {
-						contentParts = append(contentParts, responses.ResponseInputContentUnionParam{
-							OfInputText: &responses.ResponseInputTextParam{
-								Text: part.Text,
-							},
+						contentParts = append(contentParts, ResponseContentPart{
+							Type: "input_text",
+							Text: part.Text,
 						})
 					}
 				}
-				item.OfInputMessage = &responses.ResponseInputItemMessageParam{
-					Role:    "system",
-					Content: contentParts,
+				item = ResponseInputItem{
+					Type:         "message",
+					Role:         "system",
+					ContentParts: contentParts,
 				}
 			}
+			hasItem = true
 
 		case chat.MessageRoleTool:
-			item.OfFunctionCallOutput = &responses.ResponseInputItemFunctionCallOutputParam{
-				CallID: param.NewOpt(msg.ToolCallID),
-				Output: c.convertToolResultOutput(ctx, msg),
+			outStr, outArr := c.convertToolResultOutput(ctx, msg)
+			item = ResponseInputItem{
+				Type:      "function_call_output",
+				CallID:    msg.ToolCallID,
+				Output:    outStr,
+				OutputArr: outArr,
 			}
+			hasItem = true
 		}
 
-		if item.OfMessage != nil || item.OfInputMessage != nil || item.OfFunctionCall != nil || item.OfFunctionCallOutput != nil {
+		if hasItem {
 			input = append(input, item)
 		}
 
-		// Translate the CacheControl marker into an explicit prompt-cache
-		// breakpoint on the last supported content block converted from this
-		// message. input[start:] restricts the scan to this message's items so
-		// a filtered or content-less message never marks an unrelated one.
 		if markBreakpoints && msg.CacheControl {
 			markResponseCacheBreakpoint(input[start:])
 		}
 	}
-	// Safety net: ensure every function_call has a matching function_call_output.
-	// The Responses API rejects requests with orphaned function calls.
-	// This can happen if tool execution was interrupted (e.g. user cancellation).
+
 	pendingCalls := make(map[string]bool)
 	for _, item := range input {
-		if item.OfFunctionCall != nil {
-			pendingCalls[item.OfFunctionCall.CallID] = true
+		if item.Type == "function_call" && item.CallID != "" {
+			pendingCalls[item.CallID] = true
 		}
-		if item.OfFunctionCallOutput != nil {
-			delete(pendingCalls, item.OfFunctionCallOutput.CallID.Value)
+		if item.Type == "function_call_output" && item.CallID != "" {
+			delete(pendingCalls, item.CallID)
 		}
 	}
 	for callID := range pendingCalls {
 		slog.WarnContext(ctx, "Injecting placeholder output for orphaned function call", "call_id", callID)
-		input = append(input, responses.ResponseInputItemUnionParam{
-			OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-				CallID: param.NewOpt(callID),
-				Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-					OfString: param.NewOpt("(no output — tool call was not executed)"),
-				},
-			},
+		input = append(input, ResponseInputItem{
+			Type:   "function_call_output",
+			CallID: callID,
+			Output: new("(no output — tool call was not executed)"),
 		})
 	}
 
@@ -1163,14 +1068,10 @@ func (c *Client) CreateBatchEmbedding(ctx context.Context, texts []string) (*bas
 		return nil, err
 	}
 
-	params := openai.EmbeddingNewParams{
-		Input: openai.EmbeddingNewParamsInputUnion{
-			OfArrayOfStrings: texts,
-		},
+	response, err := client.CreateEmbedding(ctx, oaistream.EmbeddingRequest{
+		Input: texts,
 		Model: c.ModelConfig.Model,
-	}
-
-	response, err := client.Embeddings.New(ctx, params)
+	}, nil)
 	if err != nil {
 		slog.ErrorContext(ctx, "OpenAI batch embedding request failed", "error", err)
 		return nil, fmt.Errorf("failed to create batch embeddings: %w", oaistream.WrapOpenAIError(err))
@@ -1241,39 +1142,30 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 {"scores":[s0,s1,...,sN]} where there is exactly one numeric score per document in order.`
 	systemPrompt := prompts.BuildRerankSystemPrompt(documents, criteria, c.ModelConfig.ProviderOpts, jsonFormatInstruction)
 
-	params := openai.ChatCompletionNewParams{
+	params := oaistream.ChatCompletionRequest{
 		Model:       c.ModelConfig.Model,
-		ServiceTier: openai.ChatCompletionNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
-		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.SystemMessage(systemPrompt),
-			openai.UserMessage(userPrompt),
+		ServiceTier: serviceTier(c.ModelConfig.ProviderOpts),
+		Messages: []oaistream.ChatMessage{
+			oaistream.SystemMessage(systemPrompt),
+			oaistream.UserMessage(userPrompt),
 		},
 	}
 
-	// Apply model-level sampling settings consistently with other OpenAI calls.
-	// For reranking, default temperature to 0 for deterministic scoring if not explicitly set.
 	if c.ModelConfig.Temperature != nil {
-		params.Temperature = openai.Float(*c.ModelConfig.Temperature)
+		params.Temperature = new(*c.ModelConfig.Temperature)
 	} else {
-		params.Temperature = openai.Float(0.0)
+		params.Temperature = new(0.0)
 	}
 	if c.ModelConfig.TopP != nil {
-		params.TopP = openai.Float(*c.ModelConfig.TopP)
+		params.TopP = new(*c.ModelConfig.TopP)
 	}
 	if c.ModelConfig.FrequencyPenalty != nil {
-		params.FrequencyPenalty = openai.Float(*c.ModelConfig.FrequencyPenalty)
+		params.FrequencyPenalty = new(*c.ModelConfig.FrequencyPenalty)
 	}
 	if c.ModelConfig.PresencePenalty != nil {
-		params.PresencePenalty = openai.Float(*c.ModelConfig.PresencePenalty)
+		params.PresencePenalty = new(*c.ModelConfig.PresencePenalty)
 	}
 
-	// We intentionally do NOT set max_tokens here because newer OpenAI models
-	// (e.g., gpt-4.1, o-series, gpt-5) may reject max_tokens on the
-	// chat.completions endpoint, preferring max_completion_tokens instead.
-	// The response is a small JSON object, so relying on model defaults is fine.
-
-	// Use OpenAI's structured outputs to enforce a stable JSON shape:
-	// { "scores": [number, ...] }
 	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -1287,12 +1179,13 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		"required":             []string{"scores"},
 		"additionalProperties": false,
 	}
-	params.ResponseFormat.OfJSONSchema = &openai.ResponseFormatJSONSchemaParam{
-		JSONSchema: openai.ResponseFormatJSONSchemaJSONSchemaParam{
+	params.ResponseFormat = &oaistream.ResponseFormat{
+		Type: "json_schema",
+		JSONSchema: &oaistream.ResponseFormatJSONSchema{
 			Name:        "rerank_scores",
-			Description: openai.String("Relevance scores for each document, in input order."),
+			Description: "Relevance scores for each document, in input order.",
 			Schema:      jsonSchema(schema),
-			Strict:      openai.Bool(false),
+			Strict:      new(false),
 		},
 	}
 
@@ -1300,7 +1193,7 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		return nil, err
 	}
 
-	resp, err := client.Chat.Completions.New(ctx, params)
+	resp, err := client.CreateChatCompletion(ctx, params)
 	if err != nil {
 		slog.ErrorContext(ctx, "OpenAI rerank request failed", "error", err)
 		return nil, fmt.Errorf("openai rerank request failed: %w", err)
@@ -1310,10 +1203,9 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		return nil, errors.New("openai rerank response contained no choices")
 	}
 
-	raw, err := extractOpenAIContentAsString(resp.Choices[0].Message)
-	if err != nil {
-		slog.ErrorContext(ctx, "Failed to extract OpenAI rerank content", "error", err)
-		return nil, err
+	raw := resp.Choices[0].Message.Content
+	if raw == "" {
+		return nil, errors.New("openai message has no content")
 	}
 
 	scores, err := providerutil.ParseRerankScores(raw, len(documents))
@@ -1327,48 +1219,6 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		"num_scores", len(scores))
 
 	return scores, nil
-}
-
-// extractOpenAIContentAsString flattens a ChatCompletion message into a single string
-// by inspecting its JSON representation. This avoids depending on internal union types.
-func extractOpenAIContentAsString(msg openai.ChatCompletionMessage) (string, error) {
-	b, err := json.Marshal(msg)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal OpenAI message: %w", err)
-	}
-
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		return "", fmt.Errorf("failed to unmarshal OpenAI message: %w", err)
-	}
-
-	content, ok := m["content"]
-	if !ok || content == nil {
-		return "", errors.New("openai message has no content")
-	}
-
-	// Content may be a simple string or an array of parts.
-	switch v := content.(type) {
-	case string:
-		return v, nil
-	case []any:
-		var out strings.Builder
-		for _, item := range v {
-			part, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			// For text parts, Anthropic-style union uses {"type":"text","text":"..."}
-			if t, _ := part["type"].(string); t == "text" {
-				if txt, _ := part["text"].(string); txt != "" {
-					out.WriteString(txt)
-				}
-			}
-		}
-		return out.String(), nil
-	default:
-		return "", fmt.Errorf("unsupported OpenAI content JSON type %T", v)
-	}
 }
 
 // getAPIType extracts the api_type from ProviderOpts if present.

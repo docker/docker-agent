@@ -55,7 +55,7 @@ func TestAliasQueryParams(t *testing.T) {
 					require.NoError(t, err)
 					sdk, err := client.clientFn(t.Context())
 					require.NoError(t, err)
-					err = sdk.Get(t.Context(), "/models", nil, nil)
+					err = sdk.DoJSON(t.Context(), http.MethodGet, "/models", nil, nil, nil, nil)
 					server.Close()
 					require.NoError(t, err)
 				}

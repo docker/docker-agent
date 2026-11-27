@@ -8,8 +8,6 @@ import (
 	"math"
 	"strings"
 
-	"google.golang.org/genai"
-
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 )
@@ -53,12 +51,12 @@ func (c *Client) CreateBatchEmbedding(ctx context.Context, texts []string) (*bas
 
 	slog.DebugContext(ctx, "Creating Gemini embeddings", "model", c.ModelConfig.Model, "batch_size", len(texts))
 
-	contents := make([]*genai.Content, len(texts))
+	contents := make([]*Content, len(texts))
 	for i, text := range texts {
-		contents[i] = genai.NewContentFromText(text, genai.RoleUser)
+		contents[i] = NewContentFromText(text, RoleUser)
 	}
 
-	var embeddings []*genai.ContentEmbedding
+	var embeddings []*ContentEmbedding
 	if c.vertexEmbedsOneContentPerRequest() {
 		embeddings, err = c.embedEach(ctx, client, contents, config)
 	} else {
@@ -86,7 +84,7 @@ func (c *Client) CreateBatchEmbedding(ctx context.Context, texts []string) (*bas
 		}
 		result.Embeddings[i] = vec
 		if e.Statistics != nil {
-			result.InputTokens += int64(math.Round(float64(e.Statistics.TokenCount)))
+			result.InputTokens += int64(math.Round(float64(e.Statistics.effectiveTokenCount())))
 		}
 	}
 	// Embeddings have no output tokens; Gemini Developer API reports no usage at all.
@@ -101,23 +99,20 @@ func (c *Client) CreateBatchEmbedding(ctx context.Context, texts []string) (*bas
 }
 
 // embed sends all contents in a single request.
-func (c *Client) embed(ctx context.Context, client *genai.Client, contents []*genai.Content, config *genai.EmbedContentConfig) ([]*genai.ContentEmbedding, error) {
-	resp, err := client.Models.EmbedContent(ctx, c.ModelConfig.Model, contents, config)
+func (c *Client) embed(ctx context.Context, client *apiClient, contents []*Content, config *EmbedContentConfig) ([]*ContentEmbedding, error) {
+	embeddings, err := client.embedContent(ctx, c.ModelConfig.Model, contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embeddings: %w", wrapGeminiError(err))
 	}
-	if resp == nil {
-		return nil, errors.New("gemini embedding response is nil")
-	}
-	return resp.Embeddings, nil
+	return embeddings, nil
 }
 
 // embedEach sends one request per content. Each response must carry exactly
 // one vector, otherwise texts and vectors would silently misalign.
-func (c *Client) embedEach(ctx context.Context, client *genai.Client, contents []*genai.Content, config *genai.EmbedContentConfig) ([]*genai.ContentEmbedding, error) {
-	embeddings := make([]*genai.ContentEmbedding, len(contents))
+func (c *Client) embedEach(ctx context.Context, client *apiClient, contents []*Content, config *EmbedContentConfig) ([]*ContentEmbedding, error) {
+	embeddings := make([]*ContentEmbedding, len(contents))
 	for i, content := range contents {
-		batch, err := c.embed(ctx, client, []*genai.Content{content}, config)
+		batch, err := c.embed(ctx, client, []*Content{content}, config)
 		if err != nil {
 			return nil, err
 		}
@@ -129,7 +124,7 @@ func (c *Client) embedEach(ctx context.Context, client *genai.Client, contents [
 	return embeddings, nil
 }
 
-// vertexEmbedsOneContentPerRequest mirrors the genai SDK routing: on Vertex AI,
+// vertexEmbedsOneContentPerRequest mirrors the Gemini REST API routing: on Vertex AI,
 // Gemini embedding models other than gemini-embedding-001 use embedContent,
 // which accepts a single content per request.
 func (c *Client) vertexEmbedsOneContentPerRequest() bool {
@@ -139,8 +134,8 @@ func (c *Client) vertexEmbedsOneContentPerRequest() bool {
 
 // embedConfig builds the embedding request config from provider_opts.
 // task_type is deliberately not sent: Gemini Embedding 2 rejects it.
-func (c *Client) embedConfig() (*genai.EmbedContentConfig, error) {
-	config := &genai.EmbedContentConfig{}
+func (c *Client) embedConfig() (*EmbedContentConfig, error) {
+	config := &EmbedContentConfig{}
 	if _, set := c.ModelConfig.ProviderOpts[outputDimensionalityOpt]; !set {
 		return config, nil
 	}

@@ -10,19 +10,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestSmallProfileDecodesAnthropicRequestUnion(t *testing.T) {
-	var params anthropic.OrganizationComplianceSettingUpdateParams
-	require.NoError(t, json.Unmarshal([]byte(`{"state":{"type":"disabled"}}`), &params))
-	require.NotNil(t, params.State.OfDisabled)
-	assert.Nil(t, params.State.OfEnabled)
-	var union anthropic.ComplianceSettingsStateParamUnion
-	require.ErrorContains(t, json.Unmarshal([]byte(`{"type":"unknown"}`), &union), "was not able to find discriminated union variant")
-}
 
 func TestSmallProfileStreamsAnthropicMessages(t *testing.T) {
 	type request struct {

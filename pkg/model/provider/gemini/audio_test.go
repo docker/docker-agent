@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -23,10 +22,10 @@ func TestAudioInlineDataWire(t *testing.T) {
 	for _, mime := range []string{"audio/wav", "audio/mpeg", "audio/ogg", "audio/pcm; rate=24000"} {
 		t.Run(mime, func(t *testing.T) {
 			t.Parallel()
-			captured := make(chan []*genai.Content, 1)
+			captured := make(chan []*Content, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var body struct {
-					Contents []*genai.Content `json:"contents"`
+					Contents []*Content `json:"contents"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Error(err)

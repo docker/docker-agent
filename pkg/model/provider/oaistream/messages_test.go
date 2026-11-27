@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -162,51 +160,51 @@ func TestMergeConsecutiveMessages(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		messages []openai.ChatCompletionMessageParamUnion
+		messages []ChatMessage
 		want     int
 	}{
 		{
 			name:     "empty",
-			messages: []openai.ChatCompletionMessageParamUnion{},
+			messages: []ChatMessage{},
 			want:     0,
 		},
 		{
 			name: "single message",
-			messages: []openai.ChatCompletionMessageParamUnion{
-				openai.SystemMessage("Hello"),
+			messages: []ChatMessage{
+				SystemMessage("Hello"),
 			},
 			want: 1,
 		},
 		{
 			name: "two consecutive system messages",
-			messages: []openai.ChatCompletionMessageParamUnion{
-				openai.SystemMessage("You are helpful"),
-				openai.SystemMessage("Be concise"),
+			messages: []ChatMessage{
+				SystemMessage("You are helpful"),
+				SystemMessage("Be concise"),
 			},
 			want: 1,
 		},
 		{
 			name: "two consecutive user messages",
-			messages: []openai.ChatCompletionMessageParamUnion{
-				openai.UserMessage("Hello"),
-				openai.UserMessage("World"),
+			messages: []ChatMessage{
+				UserMessage("Hello"),
+				UserMessage("World"),
 			},
 			want: 1,
 		},
 		{
 			name: "alternating roles",
-			messages: []openai.ChatCompletionMessageParamUnion{
-				openai.SystemMessage("System"),
-				openai.UserMessage("User"),
-				openai.UserMessage("User2"),
+			messages: []ChatMessage{
+				SystemMessage("System"),
+				UserMessage("User"),
+				UserMessage("User2"),
 			},
 			want: 2, // System merged alone, two users merged
 		},
 		{
 			name: "no merging needed",
-			messages: []openai.ChatCompletionMessageParamUnion{
-				openai.SystemMessage("System"),
-				openai.UserMessage("User"),
+			messages: []ChatMessage{
+				SystemMessage("System"),
+				UserMessage("User"),
 			},
 			want: 2,
 		},
@@ -226,31 +224,28 @@ func TestMergeMixedContentPreservesOrder(t *testing.T) {
 	for _, role := range []string{"user", "system"} {
 		t.Run(role, func(t *testing.T) {
 			t.Parallel()
-			var messages []openai.ChatCompletionMessageParamUnion
+			var messages []ChatMessage
 			if role == "user" {
-				messages = []openai.ChatCompletionMessageParamUnion{
-					openai.UserMessage("before"),
-					openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{openai.TextContentPart("part one")}),
-					openai.UserMessage("between"),
-					openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{openai.TextContentPart("part two")}),
-					openai.UserMessage("after"),
+				messages = []ChatMessage{
+					UserMessage("before"),
+					UserMultiMessage([]ContentPart{TextContentPart("part one")}),
+					UserMessage("between"),
+					UserMultiMessage([]ContentPart{TextContentPart("part two")}),
+					UserMessage("after"),
 				}
 			} else {
-				messages = []openai.ChatCompletionMessageParamUnion{
-					openai.SystemMessage("before"),
-					openai.SystemMessage([]openai.ChatCompletionContentPartTextParam{{Text: "part one"}}),
-					openai.SystemMessage("between"),
-					openai.SystemMessage([]openai.ChatCompletionContentPartTextParam{{Text: "part two"}}),
-					openai.SystemMessage("after"),
+				messages = []ChatMessage{
+					SystemMessage("before"),
+					SystemMultiMessage([]ContentPart{TextContentPart("part one")}),
+					SystemMessage("between"),
+					SystemMultiMessage([]ContentPart{TextContentPart("part two")}),
+					SystemMessage("after"),
 				}
 			}
 			merged := MergeConsecutiveMessages(messages)
 			require.Len(t, merged, 1)
 			var texts []string
-			for _, part := range getMultiContent(merged[0]) {
-				texts = append(texts, part.OfText.Text)
-			}
-			for _, part := range getSystemTextParts(merged[0]) {
+			for _, part := range merged[0].ContentParts {
 				texts = append(texts, part.Text)
 			}
 			assert.Equal(t, []string{"before", "part one", "between", "part two", "after"}, texts)
@@ -261,44 +256,46 @@ func TestMergeMixedContentPreservesOrder(t *testing.T) {
 func TestMergeConsecutiveMessages_ExactContent(t *testing.T) {
 	t.Parallel()
 
-	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage("first system"),
-		openai.SystemMessage("second system"),
-		openai.UserMessage("first user"),
-		openai.UserMessage("second user"),
+	merged := MergeConsecutiveMessages([]ChatMessage{
+		SystemMessage("first system"),
+		SystemMessage("second system"),
+		UserMessage("first user"),
+		UserMessage("second user"),
 	})
 
 	require.Len(t, merged, 2)
-	require.NotNil(t, merged[0].OfSystem)
-	assert.Equal(t, "first system\nsecond system", merged[0].OfSystem.Content.OfString.Value)
-	require.NotNil(t, merged[1].OfUser)
-	assert.Equal(t, "first user\nsecond user", merged[1].OfUser.Content.OfString.Value)
+	assert.Equal(t, "system", merged[0].Role)
+	assert.Equal(t, "first system\nsecond system", *merged[0].Content)
+	assert.Equal(t, "user", merged[1].Role)
+	assert.Equal(t, "first user\nsecond user", *merged[1].Content)
 }
 
 func TestMergeConsecutiveMessages_KeepsAssistantAndToolTurns(t *testing.T) {
 	t.Parallel()
 
-	assistant := openai.ChatCompletionMessageParamUnion{OfAssistant: &openai.ChatCompletionAssistantMessageParam{
-		Content: openai.ChatCompletionAssistantMessageParamContentUnion{OfString: param.NewOpt("calling tools")},
-		ToolCalls: []openai.ChatCompletionMessageToolCallUnionParam{{
-			OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
-				ID: "call-a",
-				Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
-					Name: "read_file", Arguments: `{"path":"a"}`,
-				},
+	assistant := ChatMessage{
+		Role:    "assistant",
+		Content: new("calling tools"),
+		ToolCalls: []ToolCallParam{{
+			ID:   "call-a",
+			Type: "function",
+			Function: FunctionCallParam{
+				Name: "read_file", Arguments: `{"path":"a"}`,
 			},
 		}},
-	}}
-	toolA := openai.ChatCompletionMessageParamUnion{OfTool: &openai.ChatCompletionToolMessageParam{
+	}
+	toolA := ChatMessage{
+		Role:       "tool",
 		ToolCallID: "call-a",
-		Content:    openai.ChatCompletionToolMessageParamContentUnion{OfString: param.NewOpt("result a")},
-	}}
-	toolB := openai.ChatCompletionMessageParamUnion{OfTool: &openai.ChatCompletionToolMessageParam{
+		Content:    new("result a"),
+	}
+	toolB := ChatMessage{
+		Role:       "tool",
 		ToolCallID: "call-b",
-		Content:    openai.ChatCompletionToolMessageParamContentUnion{OfString: param.NewOpt("result b")},
-	}}
+		Content:    new("result b"),
+	}
 
-	input := []openai.ChatCompletionMessageParamUnion{assistant, toolA, toolB}
+	input := []ChatMessage{assistant, toolA, toolB}
 	merged := MergeConsecutiveMessages(input)
 
 	require.Len(t, merged, len(input))
@@ -310,11 +307,11 @@ func TestMergeConsecutiveMessages_KeepsAssistantAndToolTurns(t *testing.T) {
 func TestMergeConsecutiveMessages_DoesNotHoistLateSystem(t *testing.T) {
 	t.Parallel()
 
-	input := []openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage("leading"),
-		openai.UserMessage("question"),
-		openai.SystemMessage("late"),
-		openai.UserMessage("follow-up"),
+	input := []ChatMessage{
+		SystemMessage("leading"),
+		UserMessage("question"),
+		SystemMessage("late"),
+		UserMessage("follow-up"),
 	}
 	merged := MergeConsecutiveMessages(input)
 
@@ -328,39 +325,39 @@ func TestMergeConsecutiveMessages_PreservesMultimodalOrder(t *testing.T) {
 	t.Parallel()
 
 	const imageURL = "https://example.com/image.png"
-	first := openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{
-		openai.TextContentPart("before"),
-		openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: imageURL, Detail: "high"}),
+	first := UserMultiMessage([]ContentPart{
+		TextContentPart("before"),
+		ImageContentPart(ImageURLParam{URL: imageURL, Detail: "high"}),
 	})
-	second := openai.UserMessage("after")
+	second := UserMessage("after")
 
-	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{first, second})
+	merged := MergeConsecutiveMessages([]ChatMessage{first, second})
 	require.Len(t, merged, 1)
-	require.NotNil(t, merged[0].OfUser)
+	assert.Equal(t, "user", merged[0].Role)
 
-	parts := merged[0].OfUser.Content.OfArrayOfContentParts
+	parts := merged[0].ContentParts
 	require.Len(t, parts, 3)
-	require.NotNil(t, parts[0].OfText)
-	assert.Equal(t, "before", parts[0].OfText.Text)
-	require.NotNil(t, parts[1].OfImageURL)
-	assert.Equal(t, imageURL, parts[1].OfImageURL.ImageURL.URL)
-	require.NotNil(t, parts[2].OfText)
-	assert.Equal(t, "after", parts[2].OfText.Text)
+	assert.Equal(t, "text", parts[0].Type)
+	assert.Equal(t, "before", parts[0].Text)
+	require.NotNil(t, parts[1].ImageURL)
+	assert.Equal(t, imageURL, parts[1].ImageURL.URL)
+	assert.Equal(t, "text", parts[2].Type)
+	assert.Equal(t, "after", parts[2].Text)
 }
 
 func TestMergeConsecutiveMessages_PreservesSingletonMetadata(t *testing.T) {
 	t.Parallel()
 
-	system := openai.SystemMessage("system with metadata")
-	system.OfSystem.SetExtraFields(map[string]any{"scope": "agent"})
-	user := openai.UserMessage("user with name")
-	user.OfUser.Name = param.NewOpt("alice")
+	system := SystemMessage("system with metadata")
+	system.ExtraFields = map[string]any{"scope": "agent"}
+	user := UserMessage("user with name")
+	user.Name = "alice"
 
-	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{system, user})
+	merged := MergeConsecutiveMessages([]ChatMessage{system, user})
 
 	require.Len(t, merged, 2)
-	assert.Equal(t, map[string]any{"scope": "agent"}, merged[0].OfSystem.ExtraFields())
-	assert.Equal(t, "alice", merged[1].OfUser.Name.Value)
+	assert.Equal(t, map[string]any{"scope": "agent"}, merged[0].ExtraFields)
+	assert.Equal(t, "alice", merged[1].Name)
 	assert.JSONEq(t, mustMarshalMessage(t, system), mustMarshalMessage(t, merged[0]))
 	assert.JSONEq(t, mustMarshalMessage(t, user), mustMarshalMessage(t, merged[1]))
 }
@@ -368,42 +365,42 @@ func TestMergeConsecutiveMessages_PreservesSingletonMetadata(t *testing.T) {
 func TestMergeConsecutiveMessages_MetadataIsABarrier(t *testing.T) {
 	t.Parallel()
 
-	withExtra := openai.SystemMessage("first")
-	withExtra.OfSystem.SetExtraFields(map[string]any{"scope": "agent"})
-	plain := openai.SystemMessage("second")
+	withExtra := SystemMessage("first")
+	withExtra.ExtraFields = map[string]any{"scope": "agent"}
+	plain := SystemMessage("second")
 
-	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{withExtra, plain})
+	merged := MergeConsecutiveMessages([]ChatMessage{withExtra, plain})
 
 	require.Len(t, merged, 2)
-	assert.Equal(t, "first", merged[0].OfSystem.Content.OfString.Value)
-	assert.Equal(t, "second", merged[1].OfSystem.Content.OfString.Value)
-	assert.Equal(t, map[string]any{"scope": "agent"}, merged[0].OfSystem.ExtraFields())
+	assert.Equal(t, "first", *merged[0].Content)
+	assert.Equal(t, "second", *merged[1].Content)
+	assert.Equal(t, map[string]any{"scope": "agent"}, merged[0].ExtraFields)
 }
 
 func TestMergeConsecutiveMessages_PartMetadataIsABarrier(t *testing.T) {
 	t.Parallel()
 
-	part := openai.TextContentPart("first")
-	part.OfText.SetExtraFields(map[string]any{"tenant": "a"})
-	withMetadata := openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{part})
-	plain := openai.UserMessage("second")
+	part := TextContentPart("first")
+	part.ExtraFields = map[string]any{"tenant": "a"}
+	withMetadata := UserMultiMessage([]ContentPart{part})
+	plain := UserMessage("second")
 
-	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{withMetadata, plain})
+	merged := MergeConsecutiveMessages([]ChatMessage{withMetadata, plain})
 
 	require.Len(t, merged, 2)
-	require.Len(t, merged[0].OfUser.Content.OfArrayOfContentParts, 1)
-	assert.Equal(t, map[string]any{"tenant": "a"}, merged[0].OfUser.Content.OfArrayOfContentParts[0].OfText.ExtraFields())
-	assert.Equal(t, "second", merged[1].OfUser.Content.OfString.Value)
+	require.Len(t, merged[0].ContentParts, 1)
+	assert.Equal(t, map[string]any{"tenant": "a"}, merged[0].ContentParts[0].ExtraFields)
+	assert.Equal(t, "second", *merged[1].Content)
 }
 
 func TestMergeConsecutiveMessages_Idempotent(t *testing.T) {
 	t.Parallel()
 
-	input := []openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage("system a"),
-		openai.SystemMessage("system b"),
-		openai.UserMessage("user a"),
-		openai.UserMessage("user b"),
+	input := []ChatMessage{
+		SystemMessage("system a"),
+		SystemMessage("system b"),
+		UserMessage("user a"),
+		UserMessage("user b"),
 	}
 	once := MergeConsecutiveMessages(input)
 	twice := MergeConsecutiveMessages(once)
@@ -414,14 +411,14 @@ func TestMergeConsecutiveMessages_Idempotent(t *testing.T) {
 func TestMergeConsecutiveMessages_DoesNotMutateInput(t *testing.T) {
 	t.Parallel()
 
-	input := []openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage("system a"),
-		openai.SystemMessage("system b"),
-		openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{
-			openai.TextContentPart("look"),
-			openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: "https://example.com/i.png"}),
+	input := []ChatMessage{
+		SystemMessage("system a"),
+		SystemMessage("system b"),
+		UserMultiMessage([]ContentPart{
+			TextContentPart("look"),
+			ImageContentPart(ImageURLParam{URL: "https://example.com/i.png"}),
 		}),
-		openai.UserMessage("thanks"),
+		UserMessage("thanks"),
 	}
 	before := mustMarshalMessages(t, input)
 
@@ -430,14 +427,14 @@ func TestMergeConsecutiveMessages_DoesNotMutateInput(t *testing.T) {
 	assert.JSONEq(t, before, mustMarshalMessages(t, input))
 }
 
-func mustMarshalMessage(t *testing.T, msg openai.ChatCompletionMessageParamUnion) string {
+func mustMarshalMessage(t *testing.T, msg ChatMessage) string {
 	t.Helper()
 	data, err := json.Marshal(msg)
 	require.NoError(t, err)
 	return string(data)
 }
 
-func mustMarshalMessages(t *testing.T, messages []openai.ChatCompletionMessageParamUnion) string {
+func mustMarshalMessages(t *testing.T, messages []ChatMessage) string {
 	t.Helper()
 	data, err := json.Marshal(messages)
 	require.NoError(t, err)
@@ -488,19 +485,19 @@ func TestConvertToolImagesAsAttachments(t *testing.T) {
 				require.Len(t, result, 3)
 			} else {
 				require.Len(t, result, 4)
-				parts := result[3].OfUser.Content.OfArrayOfContentParts
+				parts := result[3].ContentParts
 				require.Len(t, parts, 2)
-				assert.Contains(t, parts[0].OfText.Text, "tool_call_id=A")
-				require.NotNil(t, parts[1].OfImageURL)
-				assert.Equal(t, tt.want, parts[1].OfImageURL.ImageURL.URL)
+				assert.Contains(t, parts[0].Text, "tool_call_id=A")
+				require.NotNil(t, parts[1].ImageURL)
+				assert.Equal(t, tt.want, parts[1].ImageURL.URL)
 			}
-			require.NotNil(t, result[1].OfTool)
-			assert.Equal(t, "A", result[1].OfTool.ToolCallID)
-			parts := result[1].OfTool.Content.OfArrayOfContentParts
+			assert.Equal(t, "tool", result[1].Role)
+			assert.Equal(t, "A", result[1].ToolCallID)
+			parts := result[1].ContentParts
 			require.Len(t, parts, 1)
 			assert.Equal(t, "Read image file", parts[0].Text)
-			require.NotNil(t, result[2].OfTool)
-			assert.Equal(t, "B", result[2].OfTool.ToolCallID)
+			assert.Equal(t, "tool", result[2].Role)
+			assert.Equal(t, "B", result[2].ToolCallID)
 		})
 	}
 }
@@ -548,23 +545,23 @@ func TestToolAttachmentsFollowCompleteResults(t *testing.T) {
 			converted := ConvertMessagesWithCaps(t.Context(), tc.messages, modelinfo.CapsWith(true, true, true, false))
 			var roles, origins, calls []string
 			for _, msg := range converted {
-				roles = append(roles, getMessageRole(msg))
-				if msg.OfTool != nil {
-					calls = append(calls, msg.OfTool.ToolCallID)
-					for _, part := range msg.OfTool.Content.OfArrayOfContentParts {
+				roles = append(roles, msg.Role)
+				if msg.Role == "tool" {
+					calls = append(calls, msg.ToolCallID)
+					for _, part := range msg.ContentParts {
 						assert.NotContains(t, part.Text, "data:")
 					}
 				}
-				if msg.OfUser != nil && len(msg.OfUser.Content.OfArrayOfContentParts) > 0 {
-					parts := msg.OfUser.Content.OfArrayOfContentParts
+				if msg.Role == "user" && len(msg.ContentParts) > 0 {
+					parts := msg.ContentParts
 					require.Len(t, parts, 2)
 					require.Less(t, len(origins), len(tc.origins))
 					id := tc.origins[len(origins)]
-					assert.Contains(t, parts[0].OfText.Text, "tool_call_id="+id)
+					assert.Contains(t, parts[0].Text, "tool_call_id="+id)
 					origins = append(origins, id)
-					if parts[1].OfImageURL != nil {
-						assert.Equal(t, imageURL, parts[1].OfImageURL.ImageURL.URL)
-						assert.Equal(t, "high", parts[1].OfImageURL.ImageURL.Detail)
+					if parts[1].ImageURL != nil {
+						assert.Equal(t, imageURL, parts[1].ImageURL.URL)
+						assert.Equal(t, "high", parts[1].ImageURL.Detail)
 					}
 				}
 			}
@@ -694,7 +691,7 @@ func TestConvertMessages_ReasoningContentWireFormat(t *testing.T) {
 
 			result := ConvertMessages(t.Context(), []chat.Message{tt.msg}, modelsdev.ID{}, store, nil)
 			require.Len(t, result, 1)
-			require.NotNil(t, result[0].OfAssistant)
+			assert.Equal(t, "assistant", result[0].Role)
 
 			data, err := json.Marshal(result[0])
 			require.NoError(t, err)

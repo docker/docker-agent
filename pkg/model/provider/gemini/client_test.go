@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -75,7 +74,7 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 		maxTokens     *int64
 		opts          []options.Opt
 		wantThinking  bool
-		wantLevel     genai.ThinkingLevel
+		wantLevel     ThinkingLevel
 		wantMaxTokens int32
 	}{
 		{
@@ -100,7 +99,7 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 			maxTokens:     new(int64(128)),
 			opts:          []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
 			wantThinking:  true,
-			wantLevel:     genai.ThinkingLevelLow,
+			wantLevel:     ThinkingLevelLow,
 			wantMaxTokens: 512,
 		},
 		{
@@ -109,7 +108,7 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 			maxTokens:     new(int64(128)),
 			opts:          []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
 			wantThinking:  true,
-			wantLevel:     genai.ThinkingLevelLow,
+			wantLevel:     ThinkingLevelLow,
 			wantMaxTokens: 512,
 		},
 		{
@@ -126,7 +125,7 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 			maxTokens:     new(int64(128)),
 			opts:          []options.Opt{options.WithNoThinking()},
 			wantThinking:  true,
-			wantLevel:     genai.ThinkingLevelLow,
+			wantLevel:     ThinkingLevelLow,
 			wantMaxTokens: 512,
 		},
 		{
@@ -140,14 +139,14 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 			model:        "gemini-3-flash",
 			opts:         []options.Opt{options.WithNoThinking()},
 			wantThinking: true,
-			wantLevel:    genai.ThinkingLevelLow,
+			wantLevel:    ThinkingLevelLow,
 		},
 		{
 			name:         "NoThinking on gemini-4-neon keeps unset max tokens as 0",
 			model:        "gemini-4-neon",
 			opts:         []options.Opt{options.WithNoThinking()},
 			wantThinking: true,
-			wantLevel:    genai.ThinkingLevelLow,
+			wantLevel:    ThinkingLevelLow,
 		},
 		{
 			name:          "NoThinking on gemini-4-neon floors small explicit max tokens to 512",
@@ -155,7 +154,7 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 			maxTokens:     new(int64(50)),
 			opts:          []options.Opt{options.WithNoThinking()},
 			wantThinking:  true,
-			wantLevel:     genai.ThinkingLevelLow,
+			wantLevel:     ThinkingLevelLow,
 			wantMaxTokens: 512,
 		},
 		{
@@ -229,7 +228,7 @@ func TestBuildConfig_NoThinkingNonReasoningPreservesStructuredOutput(t *testing.
 
 	assert.Nil(t, config.ThinkingConfig)
 	assert.Equal(t, "application/json", config.ResponseMIMEType)
-	assert.Equal(t, schema, config.ResponseJsonSchema)
+	assert.Equal(t, schema, config.ResponseJSONSchema)
 }
 
 func TestBuildConfig_Gemini25_ThinkingBudget(t *testing.T) {
@@ -240,7 +239,7 @@ func TestBuildConfig_Gemini25_ThinkingBudget(t *testing.T) {
 		model                string
 		thinkingBudget       *latest.ThinkingBudget
 		expectThinkingBudget *int32
-		expectThinkingLevel  genai.ThinkingLevel
+		expectThinkingLevel  ThinkingLevel
 	}{
 		{
 			name:                 "gemini-2.5-flash with dynamic thinking (-1)",
@@ -315,127 +314,127 @@ func TestBuildConfig_Gemini3_ThinkingLevel(t *testing.T) {
 		name                string
 		model               string
 		thinkingBudget      *latest.ThinkingBudget
-		expectThinkingLevel genai.ThinkingLevel
+		expectThinkingLevel ThinkingLevel
 	}{
 		{
 			name:                "gemini-3-pro with high thinking level",
 			model:               "gemini-3-pro",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "high"},
-			expectThinkingLevel: genai.ThinkingLevelHigh,
+			expectThinkingLevel: ThinkingLevelHigh,
 		},
 		{
 			name:                "gemini-3-pro with low thinking level",
 			model:               "gemini-3-pro",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "low"},
-			expectThinkingLevel: genai.ThinkingLevelLow,
+			expectThinkingLevel: ThinkingLevelLow,
 		},
 		{
 			name:                "gemini-3-flash with medium thinking level",
 			model:               "gemini-3-flash",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "medium"},
-			expectThinkingLevel: genai.ThinkingLevelMedium,
+			expectThinkingLevel: ThinkingLevelMedium,
 		},
 		{
 			name:                "gemini-3-flash with minimal thinking level",
 			model:               "gemini-3-flash",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "minimal"},
-			expectThinkingLevel: genai.ThinkingLevelMinimal,
+			expectThinkingLevel: ThinkingLevelMinimal,
 		},
 		{
 			name:                "gemini-3-flash with high thinking level",
 			model:               "gemini-3-flash",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "high"},
-			expectThinkingLevel: genai.ThinkingLevelHigh,
+			expectThinkingLevel: ThinkingLevelHigh,
 		},
 		{
 			name:                "gemini-3-pro-preview with high thinking level",
 			model:               "gemini-3-pro-preview",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "high"},
-			expectThinkingLevel: genai.ThinkingLevelHigh,
+			expectThinkingLevel: ThinkingLevelHigh,
 		},
 		{
 			name:                "gemini-3-flash-preview with medium thinking level",
 			model:               "gemini-3-flash-preview",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "medium"},
-			expectThinkingLevel: genai.ThinkingLevelMedium,
+			expectThinkingLevel: ThinkingLevelMedium,
 		},
 		{
 			name:                "gemini-3.1-pro-preview with high thinking level",
 			model:               "gemini-3.1-pro-preview",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "high"},
-			expectThinkingLevel: genai.ThinkingLevelHigh,
+			expectThinkingLevel: ThinkingLevelHigh,
 		},
 		{
 			name:                "gemini-3.1-flash-preview with medium thinking level",
 			model:               "gemini-3.1-flash-preview",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "medium"},
-			expectThinkingLevel: genai.ThinkingLevelMedium,
+			expectThinkingLevel: ThinkingLevelMedium,
 		},
 		{
 			name:                "gemini-4-hydrogen with xhigh thinking level",
 			model:               "gemini-4-hydrogen",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "xhigh"},
-			expectThinkingLevel: genai.ThinkingLevelXhigh,
+			expectThinkingLevel: ThinkingLevelXhigh,
 		},
 		{
 			name:                "gemini-4-neon with xhigh thinking level",
 			model:               "gemini-4-neon",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "xhigh"},
-			expectThinkingLevel: genai.ThinkingLevelXhigh,
+			expectThinkingLevel: ThinkingLevelXhigh,
 		},
 		{
 			name:                "gemini-4-carbon with high thinking level",
 			model:               "gemini-4-carbon",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "high"},
-			expectThinkingLevel: genai.ThinkingLevelHigh,
+			expectThinkingLevel: ThinkingLevelHigh,
 		},
 		{
 			name:                "gemini-4-argon with medium thinking level",
 			model:               "gemini-4-argon",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "medium"},
-			expectThinkingLevel: genai.ThinkingLevelMedium,
+			expectThinkingLevel: ThinkingLevelMedium,
 		},
 		{
 			name:                "gemini-3-pro clamps unsupported xhigh down to high",
 			model:               "gemini-3-pro",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "xhigh"},
-			expectThinkingLevel: genai.ThinkingLevelHigh,
+			expectThinkingLevel: ThinkingLevelHigh,
 		},
 		{
 			name:                "gemini-4-carbon clamps unsupported xhigh down to high",
 			model:               "gemini-4-carbon",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "xhigh"},
-			expectThinkingLevel: genai.ThinkingLevelHigh,
+			expectThinkingLevel: ThinkingLevelHigh,
 		},
 		{
 			name:                "gemini-4-argon clamps unsupported xhigh down to high",
 			model:               "gemini-4-argon",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "xhigh"},
-			expectThinkingLevel: genai.ThinkingLevelHigh,
+			expectThinkingLevel: ThinkingLevelHigh,
 		},
 		{
 			name:                "gemini-4-carbon clamps unsupported minimal up to low",
 			model:               "gemini-4-carbon",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "minimal"},
-			expectThinkingLevel: genai.ThinkingLevelLow,
+			expectThinkingLevel: ThinkingLevelLow,
 		},
 		{
 			name:                "gemini-4-hydrogen clamps unsupported minimal up to low",
 			model:               "gemini-4-hydrogen",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "minimal"},
-			expectThinkingLevel: genai.ThinkingLevelLow,
+			expectThinkingLevel: ThinkingLevelLow,
 		},
 		{
 			name:                "gemini-4-neon clamps unsupported minimal up to low",
 			model:               "gemini-4-neon",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "minimal"},
-			expectThinkingLevel: genai.ThinkingLevelLow,
+			expectThinkingLevel: ThinkingLevelLow,
 		},
 		{
 			name:                "gemini-4-hydrogen clamps max down to xhigh",
 			model:               "gemini-4-hydrogen",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "max"},
-			expectThinkingLevel: genai.ThinkingLevelXhigh,
+			expectThinkingLevel: ThinkingLevelXhigh,
 		},
 	}
 
@@ -527,7 +526,7 @@ func TestBuildConfig_Gemini3_DefaultEffort(t *testing.T) {
 	assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
 
 	// Should default to high level
-	assert.Equal(t, genai.ThinkingLevelHigh, config.ThinkingConfig.ThinkingLevel, "Should default to high thinking level")
+	assert.Equal(t, ThinkingLevelHigh, config.ThinkingConfig.ThinkingLevel, "Should default to high thinking level")
 }
 
 func TestBuildConfig_Gemini4_RejectsTokenBudget(t *testing.T) {
@@ -577,14 +576,14 @@ func TestBuildConfig_AdaptiveThinking(t *testing.T) {
 			name      string
 			model     string
 			effort    string
-			wantLevel genai.ThinkingLevel
+			wantLevel ThinkingLevel
 		}{
 			{name: "adaptive on neon omits level", model: "gemini-4-neon", effort: "adaptive", wantLevel: ""},
 			{name: "adaptive on carbon omits level", model: "gemini-4-carbon", effort: "adaptive", wantLevel: ""},
-			{name: "adaptive/low on neon", model: "gemini-4-neon", effort: "adaptive/low", wantLevel: genai.ThinkingLevelLow},
-			{name: "adaptive/xhigh on neon", model: "gemini-4-neon", effort: "adaptive/xhigh", wantLevel: genai.ThinkingLevelXhigh},
-			{name: "adaptive/max on neon clamps to xhigh", model: "gemini-4-neon", effort: "adaptive/max", wantLevel: genai.ThinkingLevelXhigh},
-			{name: "adaptive/xhigh on carbon clamps to high", model: "gemini-4-carbon", effort: "adaptive/xhigh", wantLevel: genai.ThinkingLevelHigh},
+			{name: "adaptive/low on neon", model: "gemini-4-neon", effort: "adaptive/low", wantLevel: ThinkingLevelLow},
+			{name: "adaptive/xhigh on neon", model: "gemini-4-neon", effort: "adaptive/xhigh", wantLevel: ThinkingLevelXhigh},
+			{name: "adaptive/max on neon clamps to xhigh", model: "gemini-4-neon", effort: "adaptive/max", wantLevel: ThinkingLevelXhigh},
+			{name: "adaptive/xhigh on carbon clamps to high", model: "gemini-4-carbon", effort: "adaptive/xhigh", wantLevel: ThinkingLevelHigh},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -658,7 +657,7 @@ func TestBuildConfig_ClampingWarnsOnce(t *testing.T) {
 	for range 2 {
 		config := client.buildConfig(t.Context())
 		require.NotNil(t, config.ThinkingConfig)
-		assert.Equal(t, genai.ThinkingLevelHigh, config.ThinkingConfig.ThinkingLevel)
+		assert.Equal(t, ThinkingLevelHigh, config.ThinkingConfig.ThinkingLevel)
 	}
 	assert.Equal(t, 1, strings.Count(logs.String(), "clamped unsupported thinking_budget effort"))
 }
@@ -685,7 +684,7 @@ func TestBuildRerankConfig(t *testing.T) {
 		cfg := client.buildRerankConfig(t.Context(), schema)
 		require.NotNil(t, cfg.ThinkingConfig)
 		assert.False(t, cfg.ThinkingConfig.IncludeThoughts)
-		assert.Equal(t, genai.ThinkingLevelLow, cfg.ThinkingConfig.ThinkingLevel)
+		assert.Equal(t, ThinkingLevelLow, cfg.ThinkingConfig.ThinkingLevel)
 		assert.Nil(t, cfg.Temperature)
 		assert.Equal(t, "application/json", cfg.ResponseMIMEType)
 	})
@@ -739,17 +738,17 @@ func TestBuildConfig_CaseInsensitiveModel(t *testing.T) {
 	tests := []struct {
 		name                string
 		model               string
-		expectThinkingLevel genai.ThinkingLevel
+		expectThinkingLevel ThinkingLevel
 	}{
 		{
 			name:                "uppercase GEMINI-3-PRO",
 			model:               "GEMINI-3-PRO",
-			expectThinkingLevel: genai.ThinkingLevelHigh,
+			expectThinkingLevel: ThinkingLevelHigh,
 		},
 		{
 			name:                "mixed case Gemini-3-Flash",
 			model:               "Gemini-3-Flash",
-			expectThinkingLevel: genai.ThinkingLevelMedium,
+			expectThinkingLevel: ThinkingLevelMedium,
 		},
 	}
 
@@ -880,7 +879,7 @@ func TestConvertMessagesToGemini_ThoughtSignature(t *testing.T) {
 
 			require.Len(t, contents, 2)
 			assistant := contents[1]
-			assert.Equal(t, genai.RoleModel, assistant.Role)
+			assert.Equal(t, RoleModel, assistant.Role)
 			require.Len(t, assistant.Parts, tt.wantParts)
 
 			for i, p := range assistant.Parts {
@@ -1001,7 +1000,7 @@ func TestBuildConfig_ThinkingFromBudget(t *testing.T) {
 	// ThinkingConfig should be set from ThinkingBudget
 	require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set from ThinkingBudget")
 	assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
-	assert.Equal(t, genai.ThinkingLevelHigh, config.ThinkingConfig.ThinkingLevel, "ThinkingLevel should match ThinkingBudget")
+	assert.Equal(t, ThinkingLevelHigh, config.ThinkingConfig.ThinkingLevel, "ThinkingLevel should match ThinkingBudget")
 }
 
 func TestConvertMessagesToGemini_ParallelToolResponsesCoalesced(t *testing.T) {
@@ -1031,7 +1030,7 @@ func TestConvertMessagesToGemini_ParallelToolResponsesCoalesced(t *testing.T) {
 	require.Len(t, contents, 3)
 
 	assistant := contents[1]
-	assert.Equal(t, genai.RoleModel, assistant.Role)
+	assert.Equal(t, RoleModel, assistant.Role)
 	require.Len(t, assistant.Parts, 2)
 
 	toolResp := contents[2]

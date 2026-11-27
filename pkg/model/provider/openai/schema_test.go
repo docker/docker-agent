@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/openai/openai-go/v3/shared"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -65,7 +64,7 @@ func TestMakeAllRequired_AnyOf(t *testing.T) {
 	// Reproduces the chrome-devtools-mcp "emulate" tool schema where
 	// viewport has an anyOf with an object variant whose properties
 	// are not all listed in required. OpenAI rejects this.
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"viewport": map[string]any{
@@ -115,7 +114,7 @@ func TestMakeAllRequired_AnyOf(t *testing.T) {
 
 func TestMakeAllRequired_NestedProperties(t *testing.T) {
 	t.Parallel()
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"config": map[string]any{
@@ -146,7 +145,7 @@ func TestMakeAllRequired_NestedProperties(t *testing.T) {
 
 func TestMakeAllRequired_ArrayItems(t *testing.T) {
 	t.Parallel()
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"items": map[string]any{
@@ -181,7 +180,7 @@ func TestMakeAllRequired_AdditionalProperties(t *testing.T) {
 	// model knows what dictionary values look like. The inner schema is still
 	// normalized: all its properties become required, newly-required ones are
 	// nullable, and inner object nodes get additionalProperties: false.
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"children": map[string]any{
@@ -226,7 +225,7 @@ func TestConvertParametersToSchema_JiraEditIssueFields(t *testing.T) {
 	t.Parallel()
 	// Regression for the Atlassian remote MCP `editJiraIssue` tool, whose
 	// `fields` property declared additionalProperties as an object schema.
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"issueIdOrKey": map[string]any{"type": "string"},
@@ -288,7 +287,7 @@ func TestRemoveFormatFields(t *testing.T) {
 
 func TestRemoveFormatFields_NestedObjects(t *testing.T) {
 	t.Parallel()
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"user": map[string]any{
@@ -327,7 +326,7 @@ func TestRemoveFormatFields_NestedObjects(t *testing.T) {
 
 func TestRemoveFormatFields_ArrayItems(t *testing.T) {
 	t.Parallel()
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"urls": map[string]any{
@@ -373,7 +372,7 @@ func TestRemoveFormatFields_NilSchema(t *testing.T) {
 
 func TestRemoveFormatFields_NoProperties(t *testing.T) {
 	t.Parallel()
-	schema := shared.FunctionParameters{"type": "object"}
+	schema := map[string]any{"type": "object"}
 	updated := removeFormatFields(schema)
 	assert.Equal(t, schema, updated)
 }
@@ -383,7 +382,7 @@ func TestMakeAllRequired_TypeArrayWithObject(t *testing.T) {
 	// Reproduces the user_prompt tool schema where a property has
 	// type: ["object", "null"] with nested properties. OpenAI requires
 	// these nested properties to also have additionalProperties: false.
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"schema": map[string]any{
@@ -430,7 +429,7 @@ func TestEnsureTypeFields_AdditionalPropertiesMissingType(t *testing.T) {
 	// Reproduces the Notion MCP notion-search tool schema where
 	// filters.additionalProperties is an object schema without a "type" key.
 	// OpenAI Responses API rejects schemas missing "type".
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"filters": map[string]any{
@@ -916,7 +915,7 @@ func TestConvertParametersToSchema_Issue4106(t *testing.T) {
 // newly-required ones nullable, additionalProperties: false, format removed).
 func TestMakeAllRequired_DefsNormalization(t *testing.T) {
 	t.Parallel()
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"thing": map[string]any{"$ref": "#/$defs/thing"},
@@ -959,7 +958,7 @@ func TestMakeAllRequired_DefsNormalization(t *testing.T) {
 // emit it.
 func TestMakeAllRequired_RefLeaf(t *testing.T) {
 	t.Parallel()
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"required_ref": map[string]any{"$ref": "#/$defs/thing"},
@@ -995,7 +994,7 @@ func TestMakeAllRequired_RefLeaf(t *testing.T) {
 // "type" key into a $ref node.
 func TestEnsureTypeFields_RefLeaf(t *testing.T) {
 	t.Parallel()
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"p": map[string]any{"$ref": "#/$defs/thing"},
@@ -1031,7 +1030,7 @@ func TestEnsureTypeFields_EnumConstTakeValueType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			schema := shared.FunctionParameters{
+			schema := map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"p": tt.node},
 			}
@@ -1052,7 +1051,7 @@ func TestEnsureTypeFields_EnumConstTakeValueType(t *testing.T) {
 // newly-required $ref property (see TestConvertParametersToSchema_OptionalRefIsActuallyNullable).
 func TestEnsureTypeFields_CompositionNodesLeftAsLeaves(t *testing.T) {
 	t.Parallel()
-	schema := shared.FunctionParameters{
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"withAnyOf": map[string]any{

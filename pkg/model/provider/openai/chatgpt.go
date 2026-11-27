@@ -9,39 +9,20 @@ import (
 	"sync"
 	"uuid"
 
-	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
-	"github.com/openai/openai-go/v3/shared"
-
 	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 )
 
-// The ChatGPT Codex backend authenticates with a ChatGPT account OAuth token
-// instead of an API key and requires Codex-specific request headers. See
-// pkg/chatgpt for the login flow and token refresh.
 const (
-	chatgptBetaHeader = "responses=experimental"
-
-	// chatgptDefaultInstructions is sent when the conversation carries no
-	// system message: the Codex backend rejects requests without an
-	// instructions field.
+	chatgptBetaHeader          = "responses=experimental"
 	chatgptDefaultInstructions = "You are a helpful assistant."
 )
 
-// isChatGPTProvider reports whether the model config targets the ChatGPT
-// account (subscription) provider.
 func isChatGPTProvider(cfg *latest.ModelConfig) bool {
 	return cfg != nil && cfg.Provider == chatgpt.ProviderName
 }
 
-// chatgptTokenSource resolves the access token for every request: the
-// configured env var wins (the default chain serves the stored login through
-// it, and an explicit CHATGPT_OAUTH_TOKEN overrides it), with a direct
-// fallback to the stored login for embedders whose environment chain does
-// not include the chatgpt-login source.
 func chatgptTokenSource(env environment.Provider, tokenKey string) func(context.Context) (string, error) {
 	if tokenKey == "" {
 		tokenKey = chatgpt.TokenEnvVar
@@ -58,15 +39,9 @@ func chatgptTokenSource(env environment.Provider, tokenKey string) func(context.
 	}
 }
 
-// chatgptAuthMiddleware injects the Codex backend auth headers on every
-// request, re-resolving the token so a long session survives access-token
-// expiry. Headers already set by the user (provider_opts.http_headers) win,
-// except Authorization, which must always carry a fresh token.
-func chatgptAuthMiddleware(tokenSource func(context.Context) (string, error)) option.Middleware {
+func chatgptAuthHeaderFunc(tokenSource func(context.Context) (string, error)) func(context.Context, http.Header) error {
 	sessionID := uuid.NewV4().String()
 
-	// The account id lives in the JWT and only changes when the token does,
-	// so memoize the parse instead of decoding on every request.
 	var mu sync.Mutex
 	var lastToken, lastAccountID string
 
@@ -79,78 +54,71 @@ func chatgptAuthMiddleware(tokenSource func(context.Context) (string, error)) op
 		return lastAccountID
 	}
 
-	return func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
-		token, err := tokenSource(req.Context())
+	return func(ctx context.Context, h http.Header) error {
+		token, err := tokenSource(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		if id := accountID(token); id != "" && req.Header.Get("chatgpt-account-id") == "" {
-			req.Header.Set("chatgpt-account-id", id)
+		h.Set("Authorization", "Bearer "+token)
+		if id := accountID(token); id != "" && h.Get("chatgpt-account-id") == "" {
+			h.Set("chatgpt-account-id", id)
 		}
-		if req.Header.Get("OpenAI-Beta") == "" {
-			req.Header.Set("OpenAI-Beta", chatgptBetaHeader)
+		if h.Get("OpenAI-Beta") == "" {
+			h.Set("OpenAI-Beta", chatgptBetaHeader)
 		}
-		if req.Header.Get("originator") == "" {
-			req.Header.Set("originator", chatgpt.Originator)
+		if h.Get("originator") == "" {
+			h.Set("originator", chatgpt.Originator)
 		}
-		if req.Header.Get("session_id") == "" {
-			req.Header.Set("session_id", sessionID)
+		if h.Get("session_id") == "" {
+			h.Set("session_id", sessionID)
 		}
-		return next(req)
+		return nil
 	}
 }
 
-// applyChatGPTResponsesPolicy adapts a Responses API request to the ChatGPT
-// Codex backend, which is stricter than the platform API:
-//   - store must be false (the backend is stateless for third-party clients);
-//   - instructions are required, so system messages move into that field;
-//   - client-side sampling and output caps (temperature, top_p,
-//     max_output_tokens) are rejected for the served models and are dropped;
-//   - reasoning summaries must use the "auto" granularity.
-func applyChatGPTResponsesPolicy(ctx context.Context, params *responses.ResponseNewParams) {
-	params.Store = param.NewOpt(false)
+func applyChatGPTResponsesPolicy(ctx context.Context, params *ResponseRequest) {
+	params.Store = new(false)
 
 	if instructions := extractSystemInstructions(params); instructions != "" {
-		params.Instructions = param.NewOpt(instructions)
+		params.Instructions = new(instructions)
 	} else {
-		params.Instructions = param.NewOpt(chatgptDefaultInstructions)
+		params.Instructions = new(chatgptDefaultInstructions)
 	}
 
-	if params.Temperature.Valid() || params.TopP.Valid() || params.MaxOutputTokens.Valid() {
+	if params.Temperature != nil || params.TopP != nil || params.MaxOutputTokens != nil {
 		slog.DebugContext(ctx, "Dropping sampling parameters not supported by the ChatGPT backend",
-			"temperature", params.Temperature.Valid(),
-			"top_p", params.TopP.Valid(),
-			"max_output_tokens", params.MaxOutputTokens.Valid())
-		params.Temperature = param.Opt[float64]{}
-		params.TopP = param.Opt[float64]{}
-		params.MaxOutputTokens = param.Opt[int64]{}
+			"temperature", params.Temperature != nil,
+			"top_p", params.TopP != nil,
+			"max_output_tokens", params.MaxOutputTokens != nil)
+		params.Temperature = nil
+		params.TopP = nil
+		params.MaxOutputTokens = nil
 	}
 
-	if params.Reasoning.Summary != "" {
-		params.Reasoning.Summary = shared.ReasoningSummaryAuto
+	if params.Reasoning != nil && params.Reasoning.Summary != "" {
+		params.Reasoning.Summary = "auto"
 	}
 }
 
-// extractSystemInstructions removes every system message from the request
-// input and returns their concatenated text. docker-agent emits one system
-// message per source (agent instruction plus each toolset's instructions);
-// the Codex backend expects all of them in the top-level instructions field.
-func extractSystemInstructions(params *responses.ResponseNewParams) string {
-	items := params.Input.OfInputItemList
+func extractSystemInstructions(params *ResponseRequest) string {
+	items := params.Input
 	var instructions []string
 	kept := items[:0]
 	for _, item := range items {
-		if item.OfInputMessage != nil && item.OfInputMessage.Role == "system" {
-			for _, part := range item.OfInputMessage.Content {
-				if part.OfInputText != nil && strings.TrimSpace(part.OfInputText.Text) != "" {
-					instructions = append(instructions, part.OfInputText.Text)
+		if (item.Type == "" || item.Type == "message") && item.Role == "system" {
+			if len(item.ContentParts) > 0 {
+				for _, part := range item.ContentParts {
+					if part.Type == "input_text" && strings.TrimSpace(part.Text) != "" {
+						instructions = append(instructions, part.Text)
+					}
 				}
+			} else if item.Content != nil && strings.TrimSpace(*item.Content) != "" {
+				instructions = append(instructions, *item.Content)
 			}
 			continue
 		}
 		kept = append(kept, item)
 	}
-	params.Input.OfInputItemList = kept
+	params.Input = kept
 	return strings.Join(instructions, "\n\n")
 }

@@ -4,8 +4,6 @@ import (
 	"errors"
 	"slices"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
@@ -37,25 +35,18 @@ func (c *Client) thinkingBindingBehavior() string {
 	return ""
 }
 
-func (c *Client) applyThinkingBinding(params *anthropic.BetaMessageNewParams) {
+func (c *Client) applyThinkingBinding(params *MessageRequest) {
 	behavior := c.thinkingBindingBehavior()
 	if behavior == "" {
 		return
 	}
-	binding := anthropic.BetaThinkingBlockBindingParam{PrefixMismatchBehavior: anthropic.BetaThinkingPrefixMismatchBehavior(behavior)}
-	switch {
-	case params.Thinking.OfAdaptive != nil:
-		params.Thinking.OfAdaptive.BlockBinding = binding
-	case params.Thinking.OfEnabled != nil:
-		params.Thinking.OfEnabled.BlockBinding = binding
-	default:
-		// Older models may have thinking omitted while a fallback checks prefixes.
-		// Do not turn thinking on just to send an optional binding control.
+	if params.Thinking != nil && (params.Thinking.Type == "adaptive" || params.Thinking.Type == "enabled") {
+		params.Thinking.BlockBinding = &ThinkingBlockBindingRef{PrefixMismatchBehavior: behavior}
 	}
-	params.Betas = append(params.Betas, anthropic.AnthropicBetaThinkingBindingControls2026_08_01)
+	params.Betas = append(params.Betas, AnthropicBetaThinkingBindingControls2026_08_01)
 }
 
-func thinkingTransformations(entries []anthropic.BetaInputTransformationUnion) []string {
+func thinkingTransformations(entries []InputTransformation) []string {
 	var result []string
 	for _, entry := range entries {
 		if entry.Type == "thinking_dropped" {

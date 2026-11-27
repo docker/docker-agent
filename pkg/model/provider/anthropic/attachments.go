@@ -7,34 +7,21 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"github.com/docker/docker-agent/pkg/attachment"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
-// convertDocument converts a chat.Document to standard Anthropic SDK content blocks
-// using an explicit modelsdev.Store for capability lookup.
-//
-// Routing:
-//   - image/* with InlineData → ImageBlockParam (base64 source)
-//   - application/pdf with InlineData → DocumentBlockParam (base64)
-//   - text with InlineText → TextBlockParam with TXTEnvelope
-//   - unsupported / no content → nil (logged as warning)
-func convertDocument(ctx context.Context, doc chat.Document, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) ([]anthropic.ContentBlockParamUnion, error) {
+func convertDocument(ctx context.Context, doc chat.Document, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) ([]ContentBlockParam, error) {
 	mc := modelinfo.ResolveCaps(ctx, store, id, override)
-	// An explicit config override is authoritative; only fall back to the
-	// "any Claude model supports image+PDF" heuristic when none was declared.
 	if override == nil && !mc.Supports(doc.MimeType) && modelinfo.IsClaude(ctx, store, id) {
 		mc = modelinfo.CapsWith(true, true, false, false)
 	}
 	return convertDocumentWithCaps(ctx, doc, mc)
 }
 
-// convertDocumentWithCaps is the caps-injectable variant used by tests.
-func convertDocumentWithCaps(ctx context.Context, doc chat.Document, mc modelinfo.ModelCapabilities) ([]anthropic.ContentBlockParamUnion, error) {
+func convertDocumentWithCaps(ctx context.Context, doc chat.Document, mc modelinfo.ModelCapabilities) ([]ContentBlockParam, error) {
 	strategy, reason := attachment.Decide(doc, mc)
 
 	switch strategy {
@@ -47,46 +34,41 @@ func convertDocumentWithCaps(ctx context.Context, doc chat.Document, mc modelinf
 		b64Data := base64.StdEncoding.EncodeToString(doc.Source.InlineData)
 
 		if chat.IsImageMimeType(mime) {
-			return []anthropic.ContentBlockParamUnion{
+			return []ContentBlockParam{
 				{
-					OfImage: &anthropic.ImageBlockParam{
-						Source: anthropic.ImageBlockParamSourceUnion{
-							OfBase64: &anthropic.Base64ImageSourceParam{
-								Data:      b64Data,
-								MediaType: anthropic.Base64ImageSourceMediaType(mime),
-							},
-						},
+					Type: "image",
+					Source: &MediaSourceParam{
+						Type:      "base64",
+						Data:      b64Data,
+						MediaType: mime,
 					},
 				},
 			}, nil
 		}
 
 		// Gate PDF block strictly on application/pdf — IsAnthropicDocumentMime also
-		// matches text/plain, which must NOT be sent as a DocumentBlockParam.
+		// matches text/plain, which must NOT be sent as a document block.
 		if mime == "application/pdf" {
-			return []anthropic.ContentBlockParamUnion{
+			return []ContentBlockParam{
 				{
-					OfDocument: &anthropic.DocumentBlockParam{
-						Source: anthropic.DocumentBlockParamSourceUnion{
-							OfBase64: &anthropic.Base64PDFSourceParam{
-								Data:      b64Data,
-								MediaType: "application/pdf",
-							},
-						},
+					Type: "document",
+					Source: &MediaSourceParam{
+						Type:      "base64",
+						Data:      b64Data,
+						MediaType: "application/pdf",
 					},
 				},
 			}, nil
 		}
 
-		// Unexpected binary MIME — defensive drop.
 		slog.WarnContext(ctx, "anthropic: unexpected binary MIME in StrategyB64, dropping",
 			"mime", doc.MimeType, "doc", doc.Name)
 		return nil, nil
 
 	case attachment.StrategyTXT:
 		envelope := attachment.TXTEnvelope(doc.Name, doc.MimeType, doc.Source.InlineText)
-		return []anthropic.ContentBlockParamUnion{
-			{OfText: &anthropic.TextBlockParam{Text: envelope}},
+		return []ContentBlockParam{
+			newTextBlock(envelope),
 		}, nil
 
 	default:

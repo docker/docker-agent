@@ -35,8 +35,8 @@ func TestConvertDocumentAnthropic_StrategyB64_Image(t *testing.T) {
 	blocks, err := convertDocumentWithCaps(t.Context(), doc, visionCaps)
 	require.NoError(t, err)
 	require.Len(t, blocks, 1, "expected exactly one block")
-	require.NotNil(t, blocks[0].OfImage, "expected image block")
-	assert.Nil(t, blocks[0].OfText, "expected no text block for image")
+	assert.Equal(t, "image", blocks[0].Type, "expected image block")
+	assert.Empty(t, blocks[0].Text, "expected no text block for image")
 }
 
 // TestConvertDocumentAnthropic_StrategyB64_PDF verifies that a PDF document
@@ -53,8 +53,8 @@ func TestConvertDocumentAnthropic_StrategyB64_PDF(t *testing.T) {
 	blocks, err := convertDocumentWithCaps(t.Context(), doc, pdfCaps)
 	require.NoError(t, err)
 	require.Len(t, blocks, 1, "expected exactly one block")
-	require.NotNil(t, blocks[0].OfDocument, "expected document block for PDF")
-	assert.Nil(t, blocks[0].OfText, "expected no text block for PDF")
+	assert.Equal(t, "document", blocks[0].Type, "expected document block for PDF")
+	assert.Empty(t, blocks[0].Text, "expected no text block for PDF")
 }
 
 // TestConvertDocumentAnthropic_QualifiedIDRequired is the regression test for
@@ -110,7 +110,7 @@ func TestConvertDocumentAnthropic_QualifiedIDRequired(t *testing.T) {
 	blocks, err := c.convertUserMultiContent(t.Context(), parts)
 	require.NoError(t, err)
 	require.Len(t, blocks, 1, "image must not be dropped when provider+model ID is used for caps lookup")
-	assert.NotNil(t, blocks[0].OfImage, "expected native image block")
+	assert.Equal(t, "image", blocks[0].Type, "expected native image block")
 }
 
 func TestConvertDocumentAnthropic_StrategyTXT(t *testing.T) {
@@ -124,10 +124,10 @@ func TestConvertDocumentAnthropic_StrategyTXT(t *testing.T) {
 	blocks, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	require.Len(t, blocks, 1)
-	require.NotNil(t, blocks[0].OfText)
-	assert.Contains(t, blocks[0].OfText.Text, "spec-md")
-	assert.Contains(t, blocks[0].OfText.Text, "text-markdown")
-	assert.Contains(t, blocks[0].OfText.Text, "## Specification")
+	assert.Equal(t, "text", blocks[0].Type)
+	assert.Contains(t, blocks[0].Text, "spec-md")
+	assert.Contains(t, blocks[0].Text, "text-markdown")
+	assert.Contains(t, blocks[0].Text, "## Specification")
 }
 
 func TestConvertDocumentAnthropic_StrategyTXT_Envelope(t *testing.T) {
@@ -141,8 +141,8 @@ func TestConvertDocumentAnthropic_StrategyTXT_Envelope(t *testing.T) {
 	blocks, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	require.Len(t, blocks, 1)
-	require.NotNil(t, blocks[0].OfText)
-	text := blocks[0].OfText.Text
+	assert.Equal(t, "text", blocks[0].Type)
+	text := blocks[0].Text
 	assert.True(t, strings.HasPrefix(text, "<document"), "should be wrapped in envelope")
 }
 
@@ -179,8 +179,8 @@ func TestConvertDocument_JSONText(t *testing.T) {
 	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
-	require.NotNil(t, parts[0].OfText)
-	assert.Contains(t, parts[0].OfText.Text, doc.Source.InlineText)
+	assert.Equal(t, "text", parts[0].Type)
+	assert.Contains(t, parts[0].Text, doc.Source.InlineText)
 }
 
 func TestConvertDocumentDoesNotEncodeAudioAsDocument(t *testing.T) {

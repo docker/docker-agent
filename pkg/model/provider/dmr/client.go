@@ -14,10 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/shared"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
@@ -47,7 +43,7 @@ var ErrNotInstalled = dmrmodels.ErrNotInstalled
 type Client struct {
 	base.Config
 
-	client     openai.Client
+	client     *oaistream.Client
 	httpClient *http.Client
 	// engine is empty in gateway mode: engine-gated request shaping stays on defaults.
 	engine string
@@ -141,9 +137,6 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 	// the OpenAI adapter, not just the direct HTTP calls. Applying the wrapper
 	// here also covers direct mode, where DMR builds its own client.
 	globalOptions.WrapTransport(ctx, httpClient)
-	clientOptions := []option.RequestOption{option.WithHTTPClient(httpClient)}
-
-	clientOptions = append(clientOptions, option.WithBaseURL(baseURL), option.WithAPIKey("")) // DMR doesn't need auth
 
 	parsed, err := parseDMRProviderOpts(engine, cfg)
 	if err != nil {
@@ -181,7 +174,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 			ModelOptions: globalOptions,
 			BaseURL:      baseURL,
 		},
-		client:         openai.NewClient(clientOptions...),
+		client: oaistream.NewClient(oaistream.ClientConfig{
+			BaseURL:    baseURL,
+			HTTPClient: httpClient,
+		}),
 		httpClient:     httpClient,
 		engine:         engine,
 		attachmentCaps: modelinfo.CapsWith(parsed.supportsImages, parsed.supportsPDF, false, false),
@@ -194,7 +190,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 // Attachment capabilities are injected explicitly from provider_opts rather than
 // resolved from models.dev: DMR is not a models.dev provider, so a store lookup
 // would always miss and silently drop image/PDF attachments.
-func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
+func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []oaistream.ChatMessage {
 	// Attachment capabilities default to those declared in provider_opts; an
 	// explicit config capabilities override, when present, takes precedence
 	// (issue #2741).
@@ -228,35 +224,35 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 
 	trackUsage := c.TrackUsageEnabled()
 
-	params := openai.ChatCompletionNewParams{
+	params := oaistream.ChatCompletionRequest{
 		Model:    c.ModelConfig.Model,
 		Messages: c.convertMessages(ctx, messages),
-		StreamOptions: openai.ChatCompletionStreamOptionsParam{
-			IncludeUsage: openai.Bool(trackUsage),
+		StreamOptions: &oaistream.StreamOptions{
+			IncludeUsage: trackUsage,
 		},
 	}
 
 	if c.ModelConfig.Temperature != nil {
-		params.Temperature = openai.Float(*c.ModelConfig.Temperature)
+		params.Temperature = new(*c.ModelConfig.Temperature)
 	}
 	if c.ModelConfig.TopP != nil {
-		params.TopP = openai.Float(*c.ModelConfig.TopP)
+		params.TopP = new(*c.ModelConfig.TopP)
 	}
 	if c.ModelConfig.FrequencyPenalty != nil {
-		params.FrequencyPenalty = openai.Float(*c.ModelConfig.FrequencyPenalty)
+		params.FrequencyPenalty = new(*c.ModelConfig.FrequencyPenalty)
 	}
 	if c.ModelConfig.PresencePenalty != nil {
-		params.PresencePenalty = openai.Float(*c.ModelConfig.PresencePenalty)
+		params.PresencePenalty = new(*c.ModelConfig.PresencePenalty)
 	}
 
 	if c.ModelConfig.MaxTokens != nil {
-		params.MaxTokens = openai.Int(*c.ModelConfig.MaxTokens)
+		params.MaxTokens = new(*c.ModelConfig.MaxTokens)
 		slog.DebugContext(ctx, "DMR request configured with max tokens", "max_tokens", *c.ModelConfig.MaxTokens)
 	}
 
 	if len(requestTools) > 0 {
 		slog.DebugContext(ctx, "Adding tools to DMR request", "tool_count", len(requestTools))
-		toolsParam := make([]openai.ChatCompletionToolUnionParam, len(requestTools))
+		toolsParam := make([]oaistream.ChatTool, len(requestTools))
 		for i, tool := range requestTools {
 			parameters, err := ConvertParametersToSchema(tool.Parameters)
 			if err != nil {
@@ -270,48 +266,33 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 				return nil, fmt.Errorf("converted parameters is not a map for tool %s", tool.Name)
 			}
 
-			// DMR requires the `description` key to be present; ensure a non-empty value
-			// NOTE(krissetto): workaround, remove when fixed upstream, this shouldn't be necessary
-			toolsParam[i] = openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-				Name:        tool.Name,
-				Description: openai.String(cmp.Or(tool.Description, "Function "+tool.Name)),
-				Parameters:  paramsMap,
-			})
+			toolsParam[i] = oaistream.ChatTool{
+				Type: "function",
+				Function: oaistream.FunctionDef{
+					Name:        tool.Name,
+					Description: cmp.Or(tool.Description, "Function "+tool.Name),
+					Parameters:  paramsMap,
+				},
+			}
 		}
 		params.Tools = toolsParam
 
-		// Only set ParallelToolCalls when tools are present; matches OpenAI provider behavior.
 		if c.ModelConfig.ParallelToolCalls != nil {
-			params.ParallelToolCalls = openai.Bool(*c.ModelConfig.ParallelToolCalls)
+			params.ParallelToolCalls = new(*c.ModelConfig.ParallelToolCalls)
 		}
 	}
 
-	// Collect per-request extra JSON fields. SetExtraFields replaces the map
-	// wholesale, so merge all contributors before a single Set call.
 	extraFields := map[string]any{}
 
-	// NoThinking: disable reasoning at the chat-template level. llama.cpp and
-	// vLLM both honor chat_template_kwargs.enable_thinking=false for Qwen3 /
-	// Hermes / DeepSeek-R1 style templates; other engines ignore unknown keys.
-	//
-	// When the caller has also set a small MaxTokens (e.g. session title
-	// generation sets max_tokens=20), raise it to noThinkingMinOutputTokens
-	// so any residual reasoning tokens the engine/template still emits can't
-	// starve the visible output. The nil-guard is intentional: if MaxTokens
-	// is unset the caller has imposed no cap, so there is nothing to floor
-	// and we leave max_tokens off the request (letting the engine use its
-	// own output budget). Mirrors the OpenAI provider (see
-	// pkg/model/provider/openai/client.go).
 	if c.ModelOptions.NoThinking() {
 		extraFields["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
 		if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
-			params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
+			params.MaxTokens = new(noThinkingMinOutputTokens)
 			slog.DebugContext(ctx, "DMR NoThinking: bumped max_tokens floor",
 				"from", *c.ModelConfig.MaxTokens, "to", noThinkingMinOutputTokens)
 		}
 	}
 
-	// vLLM-specific per-request fields (e.g. thinking_token_budget).
 	if c.engine == engineVLLM {
 		if fields := buildVLLMRequestFields(&c.ModelConfig); fields != nil {
 			maps.Copy(extraFields, fields)
@@ -322,11 +303,10 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 		return nil, err
 	}
 	if len(extraFields) > 0 {
-		params.SetExtraFields(extraFields)
+		params.ExtraBody = extraFields
 		slog.DebugContext(ctx, "DMR extra request fields applied", "fields", extraFields)
 	}
 
-	// Log the request in JSON format for debugging
 	if requestJSON, err := json.Marshal(params); err == nil {
 		slog.DebugContext(ctx, "DMR chat completion request", "request", string(requestJSON))
 	} else {
@@ -336,17 +316,18 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 	if structuredOutput := c.ModelOptions.StructuredOutput(); structuredOutput != nil {
 		slog.DebugContext(ctx, "Adding structured output to DMR request", "name", structuredOutput.Name, "strict", structuredOutput.Strict)
 
-		params.ResponseFormat.OfJSONSchema = &openai.ResponseFormatJSONSchemaParam{
-			JSONSchema: openai.ResponseFormatJSONSchemaJSONSchemaParam{
+		params.ResponseFormat = &oaistream.ResponseFormat{
+			Type: "json_schema",
+			JSONSchema: &oaistream.ResponseFormatJSONSchema{
 				Name:        structuredOutput.Name,
-				Description: openai.String(structuredOutput.Description),
+				Description: structuredOutput.Description,
 				Schema:      jsonSchema(structuredOutput.Schema),
-				Strict:      openai.Bool(structuredOutput.Strict),
+				Strict:      new(structuredOutput.Strict),
 			},
 		}
 	}
 
-	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
+	stream := c.client.NewChatCompletionStream(ctx, params)
 
 	slog.DebugContext(ctx, "DMR chat completion stream created successfully", "model", c.ModelConfig.Model, "base_url", c.BaseURL)
 	return oaistream.NewStreamAdapter(stream, trackUsage), nil

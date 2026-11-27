@@ -5,12 +5,10 @@ import (
 	"encoding/json"
 	"testing"
 
-	sdk "github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/responses"
-	"github.com/openai/openai-go/v3/shared"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/tools"
 	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 )
@@ -23,8 +21,8 @@ func TestWriteFileWireSchemaPathFirst(t *testing.T) {
 	require.True(t, strict)
 	tools.OrderedSchemaProperties(parameters)
 	for _, request := range []any{
-		sdk.ChatCompletionNewParams{Tools: []sdk.ChatCompletionToolUnionParam{sdk.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{Name: tool.Name, Parameters: parameters})}},
-		responses.ResponseNewParams{Tools: []responses.ToolUnionParam{{OfFunction: &responses.FunctionToolParam{Name: tool.Name, Parameters: parameters}}}},
+		oaistream.ChatCompletionRequest{Tools: []oaistream.ChatTool{{Type: "function", Function: oaistream.FunctionDef{Name: tool.Name, Parameters: parameters}}}},
+		ResponseRequest{Tools: []ResponseTool{{Type: "function", Name: tool.Name, Parameters: parameters}}},
 	} {
 		wire, err := json.Marshal(request)
 		require.NoError(t, err)

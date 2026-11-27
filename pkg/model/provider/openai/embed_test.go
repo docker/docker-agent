@@ -5,11 +5,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 )
 
@@ -48,9 +48,9 @@ func TestCreateBatchEmbedding_429SurfacesAsStatusError(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
 
 	// The underlying SDK error must also be reachable.
-	var apiErr *openaisdk.Error
+	var apiErr *oaistream.APIError
 	assert.ErrorAs(t, err, &apiErr,
-		"underlying *openaisdk.Error must be reachable through the chain")
+		"underlying *oaistream.APIError must be reachable through the chain")
 }
 
 // TestCreateBatchEmbedding_5xxSurfacesAsStatusError verifies that 5xx errors
@@ -88,6 +88,6 @@ func TestCreateBatchEmbedding_5xxSurfacesAsStatusError(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, se.StatusCode)
 
 	// Verify the chain is intact.
-	var apiErr *openaisdk.Error
+	var apiErr *oaistream.APIError
 	assert.ErrorAs(t, err, &apiErr)
 }

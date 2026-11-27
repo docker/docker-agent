@@ -32,11 +32,11 @@ func TestConvertMessagesToResponseInput_OrphanedFunctionCall(t *testing.T) {
 	// Count function calls and outputs
 	var callIDs, outputIDs []string
 	for _, item := range input {
-		if item.OfFunctionCall != nil {
-			callIDs = append(callIDs, item.OfFunctionCall.CallID)
+		if item.Type == "function_call" {
+			callIDs = append(callIDs, item.CallID)
 		}
-		if item.OfFunctionCallOutput != nil {
-			outputIDs = append(outputIDs, item.OfFunctionCallOutput.CallID.Value)
+		if item.Type == "function_call_output" {
+			outputIDs = append(outputIDs, item.CallID)
 		}
 	}
 
@@ -69,12 +69,12 @@ func TestConvertMessagesToResponseInput_AssistantTextWithToolCalls(t *testing.T)
 	var foundAssistantText bool
 	var foundFunctionCall bool
 	for _, item := range input {
-		if item.OfMessage != nil && item.OfMessage.Role == "assistant" {
-			if item.OfMessage.Content.OfString.Valid() && item.OfMessage.Content.OfString.Value == "Let me search that for you." {
+		if item.Type == "message" && item.Role == "assistant" {
+			if item.Content != nil && *item.Content == "Let me search that for you." {
 				foundAssistantText = true
 			}
 		}
-		if item.OfFunctionCall != nil && item.OfFunctionCall.CallID == "call_1" {
+		if item.Type == "function_call" && item.CallID == "call_1" {
 			foundFunctionCall = true
 		}
 	}
@@ -101,7 +101,7 @@ func TestConvertMessagesToResponseInput_NoOrphans(t *testing.T) {
 
 	var outputCount int
 	for _, item := range input {
-		if item.OfFunctionCallOutput != nil {
+		if item.Type == "function_call_output" {
 			outputCount++
 		}
 	}

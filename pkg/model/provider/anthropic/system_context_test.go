@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,7 +22,7 @@ func cuClient(opts map[string]any) *Client {
 	return &Client{Config: base.Config{ModelConfig: latest.ModelConfig{Provider: "anthropic", Model: "claude-fable-5-1", ProviderOpts: opts}}}
 }
 
-func betaTexts(blocks []anthropic.BetaTextBlockParam) []string {
+func betaTexts(blocks []TextBlockParam) []string {
 	out := make([]string, 0, len(blocks))
 	for _, b := range blocks {
 		out = append(out, b.Text)
@@ -39,7 +38,7 @@ func TestBetaSystemContext_OptOffKeepsEveryBlockTopLevel(t *testing.T) {
 
 	assert.Equal(t, []string{"A", "remind"}, betaTexts(sys))
 	assert.Nil(t, transient)
-	assert.Equal(t, extractBetaSystemBlocks(messages), sys, "the default path is untouched")
+	assert.Equal(t, extractSystemBlocks(messages), sys, "the default path is untouched")
 }
 
 func TestBetaSystemContext_SplitsTurnScopedSystemMessages(t *testing.T) {
@@ -147,8 +146,8 @@ func TestTurnScopedReminders_HTTP(t *testing.T) {
 	assert.Equal(t, "next_user_message", reminder["clear_at"])
 	assert.Equal(t, []string{"text:env", "text:date: day 1"}, blockSummary(reminder))
 	assert.NotContains(t, rawJSON(t, reminder), "cache_control", "reminders never spend a breakpoint")
-	assert.Contains(t, first.betas, anthropic.AnthropicBetaMidConversationSystemClearAt2026_08_21)
-	assert.NotContains(t, first.betas, anthropic.AnthropicBetaMidConversationToolChanges2026_07_01)
+	assert.Contains(t, first.betas, AnthropicBetaMidConversationSystemClearAt2026_08_21)
+	assert.NotContains(t, first.betas, AnthropicBetaMidConversationToolChanges2026_07_01)
 	assert.LessOrEqual(t, countCacheControl(first.raw), 4)
 	cc := decodeContext(t, a1.ProviderState.RequestContext)
 	require.NotNil(t, cc.Baseline)
@@ -178,7 +177,7 @@ func TestTurnScopedReminders_HTTP(t *testing.T) {
 	assert.Equal(t, []string{"user", "system", "assistant", "user", "system", "assistant", "user"}, roles(third.body))
 	assert.Equal(t, rawJSON(t, stripCacheControl(second.messages()[:5])), rawJSON(t, stripCacheControl(third.messages()[:5])), "prior turns are not rewritten")
 	assert.Nil(t, a3.ProviderState.RequestContext, "no update to record without extras")
-	assert.Contains(t, third.betas, anthropic.AnthropicBetaMidConversationSystemClearAt2026_08_21, "replayed reminders still need the header")
+	assert.Contains(t, third.betas, AnthropicBetaMidConversationSystemClearAt2026_08_21, "replayed reminders still need the header")
 }
 
 func TestTurnScopedReminders_HTTP_AssistantTailUsesTopLevel(t *testing.T) {
@@ -194,7 +193,7 @@ func TestTurnScopedReminders_HTTP_AssistantTailUsesTopLevel(t *testing.T) {
 	chatTurn(t, client, hist, nil)
 	request := srv.request(t, 0)
 	assert.Equal(t, []string{"A", "remind"}, systemTexts(request.body))
-	assert.NotContains(t, request.betas, anthropic.AnthropicBetaMidConversationSystemClearAt2026_08_21)
+	assert.NotContains(t, request.betas, AnthropicBetaMidConversationSystemClearAt2026_08_21)
 }
 
 func TestTurnScopedReminders_HTTP_OptOffIsUnchanged(t *testing.T) {
@@ -206,9 +205,9 @@ func TestTurnScopedReminders_HTTP_OptOffIsUnchanged(t *testing.T) {
 
 	a1 := chatTurn(t, client, hist, nil)
 	req := srv.request(t, 0)
-	assert.Contains(t, req.betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14, "routed through the Beta API")
+	assert.Contains(t, req.betas, AnthropicBetaInterleavedThinking2025_05_14, "routed through the Beta API")
 	assert.Equal(t, []string{"A", "env"}, systemTexts(req.body), "turn-scoped extras stay in the top-level system prompt")
 	assert.Equal(t, []string{"user"}, roles(req.body))
-	assert.NotContains(t, req.betas, anthropic.AnthropicBetaMidConversationSystemClearAt2026_08_21)
+	assert.NotContains(t, req.betas, AnthropicBetaMidConversationSystemClearAt2026_08_21)
 	assert.Nil(t, a1.ProviderState.RequestContext)
 }

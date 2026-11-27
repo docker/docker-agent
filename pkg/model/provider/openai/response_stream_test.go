@@ -7,17 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openai/openai-go/v3/responses"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
 )
 
-// fakeEventStream replays pre-decoded Responses API events. It implements
-// responseEventStream so the adapter can be tested without a transport.
 type fakeEventStream struct {
-	events []responses.ResponseStreamEventUnion
+	events []ResponseStreamEvent
 	pos    int
 }
 
@@ -29,15 +26,13 @@ func (s *fakeEventStream) Next() bool {
 	return true
 }
 
-func (s *fakeEventStream) Current() responses.ResponseStreamEventUnion { return s.events[s.pos-1] }
-func (s *fakeEventStream) Err() error                                  { return nil }
-func (s *fakeEventStream) Close() error                                { return nil }
+func (s *fakeEventStream) Current() ResponseStreamEvent { return s.events[s.pos-1] }
+func (s *fakeEventStream) Err() error                   { return nil }
+func (s *fakeEventStream) Close() error                 { return nil }
 
-// decodeEvents converts wire-format JSON events into SDK unions, exactly as
-// the SSE and WebSocket transports do.
-func decodeEvents(t *testing.T, raw []map[string]any) []responses.ResponseStreamEventUnion {
+func decodeEvents(t *testing.T, raw []map[string]any) []ResponseStreamEvent {
 	t.Helper()
-	events := make([]responses.ResponseStreamEventUnion, len(raw))
+	events := make([]ResponseStreamEvent, len(raw))
 	for i, m := range raw {
 		data, err := json.Marshal(m)
 		require.NoError(t, err)

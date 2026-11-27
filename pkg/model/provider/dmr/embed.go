@@ -15,8 +15,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/openai/openai-go/v3"
-
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/rag/types"
@@ -47,10 +45,10 @@ func (c *Client) CreateBatchEmbedding(ctx context.Context, texts []string) (*bas
 
 	slog.DebugContext(ctx, "Creating DMR embeddings", "model", c.ModelConfig.Model, "batch_size", len(texts), "base_url", c.BaseURL)
 
-	response, err := c.client.Embeddings.New(ctx, openai.EmbeddingNewParams{
-		Input: openai.EmbeddingNewParamsInputUnion{OfArrayOfStrings: texts},
+	response, err := c.client.CreateEmbedding(ctx, oaistream.EmbeddingRequest{
+		Input: texts,
 		Model: c.ModelConfig.Model,
-	})
+	}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embeddings: %w", oaistream.WrapOpenAIError(err))
 	}

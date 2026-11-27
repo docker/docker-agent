@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/docker/portcullis"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelerrors"
@@ -34,7 +33,7 @@ func wrapGeminiError(err error) error {
 	// parameter here must match a value type. Asserting *genai.APIError
 	// would silently never match, letting every Gemini error through
 	// unclassified and unwrapped (no StatusCode, no category).
-	apiErr, ok := errors.AsType[genai.APIError](err)
+	apiErr, ok := errors.AsType[APIError](err)
 	if !ok {
 		return err
 	}
@@ -54,7 +53,7 @@ func wrapGeminiError(err error) error {
 // Details is not inspected or surfaced. Retaining message context supports
 // phrase-based overflow/retry classification and useful authentication errors.
 type APIRejectionError struct {
-	genai.APIError
+	APIError
 
 	Category RequestRejectionCategory
 }

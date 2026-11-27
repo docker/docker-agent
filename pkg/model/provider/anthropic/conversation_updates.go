@@ -10,9 +10,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/param"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
@@ -135,34 +132,39 @@ func (u *updateRecord) hasContent() bool {
 // messages renders the update as wire messages: one persistent system
 // message with text, tool_addition and tool_removal blocks plus the effort
 // change, then one turn-scoped message for the transient texts.
-func (u *updateRecord) messages() []anthropic.BetaMessageParam {
+func (u *updateRecord) messages() []MessageParam {
 	if u.empty() {
 		return nil
 	}
-	var out []anthropic.BetaMessageParam
-	var blocks []anthropic.BetaContentBlockParamUnion
+	var out []MessageParam
+	blocks := make([]ContentBlockParam, 0, len(u.Texts)+len(u.AddTools)+len(u.RemoveTools))
 	for _, text := range u.Texts {
-		blocks = append(blocks, anthropic.NewBetaTextBlock(text))
+		blocks = append(blocks, newTextBlock(text))
 	}
 	for _, name := range u.AddTools {
-		blocks = append(blocks, anthropic.NewBetaToolAdditionBlock(anthropic.BetaToolChangeToolReferenceParam{Name: name}))
+		blocks = append(blocks, ContentBlockParam{Type: "tool_addition", Tool: &ToolChangeRef{Name: name}})
 	}
 	for _, name := range u.RemoveTools {
-		blocks = append(blocks, anthropic.NewBetaToolRemovalBlock(anthropic.BetaToolChangeToolReferenceParam{Name: name}))
+		blocks = append(blocks, ContentBlockParam{Type: "tool_removal", Tool: &ToolChangeRef{Name: name}})
 	}
 	if len(blocks) > 0 || u.Effort != "" {
-		out = append(out, anthropic.NewBetaSystemMessage(
-			anthropic.BetaSystemMessageOutputConfigParam{Effort: anthropic.BetaSystemMessageOutputConfigEffort(u.Effort)},
-			blocks...))
+		msg := MessageParam{
+			Role:    "system",
+			Content: blocks,
+		}
+		if u.Effort != "" {
+			msg.OutputConfig = &SystemMessageOutputConfig{Effort: u.Effort}
+		}
+		out = append(out, msg)
 	}
 	if len(u.Transient) > 0 {
-		var transient []anthropic.BetaContentBlockParamUnion
+		var transient []ContentBlockParam
 		for _, text := range u.Transient {
-			transient = append(transient, anthropic.NewBetaTextBlock(text))
+			transient = append(transient, newTextBlock(text))
 		}
-		out = append(out, anthropic.BetaMessageParam{
-			Role:    anthropic.BetaMessageParamRoleSystem,
-			ClearAt: anthropic.BetaMessageParamClearAtNextUserMessage,
+		out = append(out, MessageParam{
+			Role:    "system",
+			ClearAt: "next_user_message",
 			Content: transient,
 		})
 	}
@@ -230,10 +232,14 @@ type requestSnapshot struct {
 	effort string
 }
 
-func snapshotRequest(params *anthropic.BetaMessageNewParams) (*requestSnapshot, error) {
-	snap := &requestSnapshot{effort: string(params.OutputConfig.Effort)}
+func snapshotRequest(params *MessageRequest) (*requestSnapshot, error) {
+	var effortStr string
+	if params.OutputConfig != nil {
+		effortStr = params.OutputConfig.Effort
+	}
+	snap := &requestSnapshot{effort: effortStr}
 	for i := range params.System {
-		raw, err := params.System[i].MarshalJSON()
+		raw, err := json.Marshal(params.System[i])
 		if err != nil {
 			return nil, err
 		}
@@ -245,7 +251,7 @@ func snapshotRequest(params *anthropic.BetaMessageNewParams) (*requestSnapshot, 
 		snap.texts = append(snap.texts, text)
 	}
 	for i := range params.Tools {
-		raw, err := params.Tools[i].MarshalJSON()
+		raw, err := json.Marshal(params.Tools[i])
 		if err != nil {
 			return nil, err
 		}
@@ -464,12 +470,12 @@ type conversationUpdateResult struct {
 // headers the resulting messages need. transient texts are turn-scoped
 // reminders for this turn only; they require the conversation to end with
 // a user turn.
-func applyConversationUpdates(ctx context.Context, model string, params *anthropic.BetaMessageNewParams, messages []chat.Message, transient []string) (*conversationUpdateResult, error) {
+func applyConversationUpdates(ctx context.Context, model string, params *MessageRequest, messages []chat.Message, transient []string) (*conversationUpdateResult, error) {
 	cur, err := snapshotRequest(params)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic %s: %w", cachePreservingUpdatesOpt, err)
 	}
-	tailAcceptsSystem := len(params.Messages) > 0 && params.Messages[len(params.Messages)-1].Role != anthropic.BetaMessageParamRoleAssistant
+	tailAcceptsSystem := len(params.Messages) > 0 && params.Messages[len(params.Messages)-1].Role != "assistant"
 	if len(transient) > 0 && !tailAcceptsSystem {
 		return nil, fmt.Errorf("anthropic %s: turn-scoped system messages require the conversation to end with a user turn", cachePreservingUpdatesOpt)
 	}
@@ -514,7 +520,7 @@ func applyConversationUpdates(ctx context.Context, model string, params *anthrop
 		return reset(ctx, params, cur, transient, result, err.Error())
 	}
 
-	out := make([]anthropic.BetaMessageParam, 0, len(params.Messages)+len(chain.records)*2+2)
+	out := make([]MessageParam, 0, len(params.Messages)+len(chain.records)*2+2)
 	for i, msg := range params.Messages {
 		out = append(out, inserts[i]...)
 		out = append(out, msg)
@@ -531,7 +537,7 @@ func applyConversationUpdates(ctx context.Context, model string, params *anthrop
 
 // reset restarts the baseline from the current request after logging why
 // the change had no cache-preserving form.
-func reset(ctx context.Context, params *anthropic.BetaMessageNewParams, cur *requestSnapshot, transient []string, result *conversationUpdateResult, reason string) (*conversationUpdateResult, error) {
+func reset(ctx context.Context, params *MessageRequest, cur *requestSnapshot, transient []string, result *conversationUpdateResult, reason string) (*conversationUpdateResult, error) {
 	slog.WarnContext(ctx, "Anthropic: restarting the cached request prefix", "reason", reason)
 	result.Reset = true
 	return startBaseline(params, cur, transient, result)
@@ -540,7 +546,7 @@ func reset(ctx context.Context, params *anthropic.BetaMessageNewParams, cur *req
 // startBaseline sends the current request as the new baseline: the same
 // bytes the caller built, minus tool cache_control, plus this turn's
 // transient reminders.
-func startBaseline(params *anthropic.BetaMessageNewParams, cur *requestSnapshot, transient []string, result *conversationUpdateResult) (*conversationUpdateResult, error) {
+func startBaseline(params *MessageRequest, cur *requestSnapshot, transient []string, result *conversationUpdateResult) (*conversationUpdateResult, error) {
 	cc := conversationContext{Version: conversationContextVersion, Baseline: cur.baseline()}
 	if len(transient) > 0 {
 		cc.Update = &updateRecord{Transient: transient}
@@ -556,40 +562,50 @@ func startBaseline(params *anthropic.BetaMessageNewParams, cur *requestSnapshot,
 
 // applyBaseline installs the baseline prefix verbatim and the beta headers
 // the messages need.
-func applyBaseline(params *anthropic.BetaMessageNewParams, b *requestBaseline, declared []declaredTool) {
+func applyBaseline(params *MessageRequest, b *requestBaseline, declared []declaredTool) {
 	params.System = nil
 	for _, raw := range b.System {
-		params.System = append(params.System, param.Override[anthropic.BetaTextBlockParam](raw))
+		params.System = append(params.System, TextBlockParam{Raw: raw})
 	}
 	params.Tools = nil
 	for _, t := range declared {
-		params.Tools = append(params.Tools, param.Override[anthropic.BetaToolUnionParam](t.raw))
+		params.Tools = append(params.Tools, ToolParam{Raw: t.raw})
 	}
-	params.OutputConfig.Effort = anthropic.BetaOutputConfigEffort(b.Effort)
+	if params.OutputConfig != nil {
+		cp := *params.OutputConfig
+		cp.Effort = b.Effort
+		if cp.Effort == "" && cp.Format == nil && len(cp.TaskBudget) == 0 {
+			params.OutputConfig = nil
+		} else {
+			params.OutputConfig = &cp
+		}
+	} else if b.Effort != "" {
+		params.OutputConfig = &OutputConfigParam{Effort: b.Effort}
+	}
 	params.Betas = appendConversationBetas(params.Betas, params.Messages)
 }
 
 // appendConversationBetas adds the beta header for each feature the system
 // messages actually use: tool changes, per-message effort, clear_at.
-func appendConversationBetas(betas []anthropic.AnthropicBeta, messages []anthropic.BetaMessageParam) []anthropic.AnthropicBeta {
+func appendConversationBetas(betas []AnthropicBeta, messages []MessageParam) []AnthropicBeta {
 	var toolChanges, effort, clearAt bool
 	for _, msg := range messages {
-		if msg.Role != anthropic.BetaMessageParamRoleSystem {
+		if msg.Role != "system" {
 			continue
 		}
-		effort = effort || msg.OutputConfig.Effort != ""
+		effort = effort || (msg.OutputConfig != nil && msg.OutputConfig.Effort != "")
 		clearAt = clearAt || msg.ClearAt != ""
 		for _, block := range msg.Content {
-			toolChanges = toolChanges || block.OfToolAddition != nil || block.OfToolRemoval != nil
+			toolChanges = toolChanges || block.Type == "tool_addition" || block.Type == "tool_removal"
 		}
 	}
 	for _, b := range []struct {
-		beta   anthropic.AnthropicBeta
+		beta   AnthropicBeta
 		needed bool
 	}{
-		{anthropic.AnthropicBetaMidConversationToolChanges2026_07_01, toolChanges},
-		{anthropic.AnthropicBetaMidConversationOutputConfig2026_07_01, effort},
-		{anthropic.AnthropicBetaMidConversationSystemClearAt2026_08_21, clearAt},
+		{AnthropicBetaMidConversationToolChanges2026_07_01, toolChanges},
+		{AnthropicBetaMidConversationOutputConfig2026_07_01, effort},
+		{AnthropicBetaMidConversationSystemClearAt2026_08_21, clearAt},
 	} {
 		if b.needed && !slices.Contains(betas, b.beta) {
 			betas = append(betas, b.beta)
@@ -598,16 +614,7 @@ func appendConversationBetas(betas []anthropic.AnthropicBeta, messages []anthrop
 	return betas
 }
 
-// alignRecords maps each recorded update to the converted message it must
-// precede. Chat and converted assistant turns are paired in order by their
-// visible content (text and tool_use ids), which both replay and the
-// flattened fallback preserve. Turns with no visible content are left out
-// on both sides, so a native compaction block (an assistant message with
-// no chat assistant behind it) or a thinking-only reply the converter
-// dropped cannot shift the pairing. It fails when the visible turns do not
-// pair one-to-one, when a recorded turn has no counterpart, or when the
-// insertion point does not follow a user turn.
-func alignRecords(messages []chat.Message, converted []anthropic.BetaMessageParam, records []chainRecord) (map[int][]anthropic.BetaMessageParam, bool) {
+func alignRecords(messages []chat.Message, converted []MessageParam, records []chainRecord) (map[int][]MessageParam, bool) {
 	if len(records) == 0 {
 		return nil, true
 	}
@@ -622,7 +629,7 @@ func alignRecords(messages []chat.Message, converted []anthropic.BetaMessagePara
 	var convTurns []int
 	var convFingerprints []string
 	for j := range converted {
-		if fp := convertedFingerprint(converted[j].Content); converted[j].Role == anthropic.BetaMessageParamRoleAssistant && fp != "" {
+		if fp := convertedFingerprint(converted[j].Content); converted[j].Role == "assistant" && fp != "" {
 			convTurns = append(convTurns, j)
 			convFingerprints = append(convFingerprints, fp)
 		}
@@ -635,10 +642,10 @@ func alignRecords(messages []chat.Message, converted []anthropic.BetaMessagePara
 		position[i] = convTurns[k]
 	}
 
-	inserts := make(map[int][]anthropic.BetaMessageParam, len(records))
+	inserts := make(map[int][]MessageParam, len(records))
 	for _, rec := range records {
 		j, ok := position[rec.index]
-		if !ok || j == 0 || converted[j-1].Role == anthropic.BetaMessageParamRoleAssistant {
+		if !ok || j == 0 || converted[j-1].Role == "assistant" {
 			return nil, false
 		}
 		inserts[j] = append(inserts[j], rec.update.messages()...)
@@ -646,9 +653,6 @@ func alignRecords(messages []chat.Message, converted []anthropic.BetaMessagePara
 	return inserts, true
 }
 
-// chatFingerprint and convertedFingerprint render the visible content of an
-// assistant turn identically on both sides: the text followed by one
-// tool_use id per call, in order. Empty means no visible content.
 func chatFingerprint(msg *chat.Message) string {
 	var sb strings.Builder
 	sb.WriteString(msg.Content)
@@ -659,15 +663,15 @@ func chatFingerprint(msg *chat.Message) string {
 	return sb.String()
 }
 
-func convertedFingerprint(content []anthropic.BetaContentBlockParamUnion) string {
+func convertedFingerprint(content []ContentBlockParam) string {
 	var text, ids strings.Builder
 	for _, block := range content {
-		switch {
-		case block.OfText != nil:
-			text.WriteString(block.OfText.Text)
-		case block.OfToolUse != nil:
+		switch block.Type {
+		case "text":
+			text.WriteString(block.Text)
+		case "tool_use":
 			ids.WriteString("\x00")
-			ids.WriteString(block.OfToolUse.ID)
+			ids.WriteString(block.ID)
 		}
 	}
 	return text.String() + ids.String()

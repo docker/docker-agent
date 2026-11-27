@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -445,29 +444,33 @@ func TestApplyThinkingConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := clientWithModel(cmp.Or(tt.model, defaultTestModel), tt.budget, tt.opts)
-			params := anthropic.MessageNewParams{}
+			params := MessageRequest{}
 
 			gotEnabled := c.applyThinkingConfig(&params, tt.maxTokens)
 			assert.Equal(t, tt.wantEnabled, gotEnabled)
 
 			if !tt.wantEnabled {
-				assert.Nil(t, params.Thinking.OfAdaptive)
-				assert.Nil(t, params.Thinking.OfEnabled)
+				if params.Thinking != nil {
+					assert.Equal(t, "disabled", params.Thinking.Type)
+				}
 				return
 			}
 
+			require.NotNil(t, params.Thinking)
 			if tt.wantAdaptive {
-				require.NotNil(t, params.Thinking.OfAdaptive)
-				assert.Equal(t, tt.wantEffort, string(params.OutputConfig.Effort))
-				assert.Equal(t, tt.wantDisplayJSON, string(params.Thinking.OfAdaptive.Display))
+				assert.Equal(t, "adaptive", params.Thinking.Type)
+				var gotEffort string
+				if params.OutputConfig != nil {
+					gotEffort = params.OutputConfig.Effort
+				}
+				assert.Equal(t, tt.wantEffort, gotEffort)
+				assert.Equal(t, tt.wantDisplayJSON, params.Thinking.Display)
 			} else {
-				require.NotNil(t, params.Thinking.OfEnabled)
-				assert.Equal(t, tt.wantTokens, params.Thinking.OfEnabled.BudgetTokens)
-				assert.Equal(t, tt.wantDisplayJSON, string(params.Thinking.OfEnabled.Display))
+				assert.Equal(t, "enabled", params.Thinking.Type)
+				assert.Equal(t, tt.wantTokens, params.Thinking.BudgetTokens)
+				assert.Equal(t, tt.wantDisplayJSON, params.Thinking.Display)
 			}
 
-			// Sanity-check: the marshaled JSON omits display entirely when unset,
-			// thanks to the SDK's `json:"display,omitzero"` tag.
 			b, err := json.Marshal(params.Thinking)
 			require.NoError(t, err)
 			if tt.wantDisplayJSON == "" {
@@ -582,22 +585,29 @@ func TestApplyBetaThinkingConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := clientWithModel(cmp.Or(tt.model, defaultTestModel), tt.budget, tt.opts)
-			params := anthropic.BetaMessageNewParams{}
+			params := MessageRequest{}
 
 			c.applyBetaThinkingConfig(&params, tt.maxTokens)
 
 			switch {
 			case tt.wantAdaptive:
-				require.NotNil(t, params.Thinking.OfAdaptive)
-				assert.Equal(t, tt.wantEffort, string(params.OutputConfig.Effort))
-				assert.Equal(t, tt.wantDisplayJSON, string(params.Thinking.OfAdaptive.Display))
+				require.NotNil(t, params.Thinking)
+				assert.Equal(t, "adaptive", params.Thinking.Type)
+				var gotEffort string
+				if params.OutputConfig != nil {
+					gotEffort = params.OutputConfig.Effort
+				}
+				assert.Equal(t, tt.wantEffort, gotEffort)
+				assert.Equal(t, tt.wantDisplayJSON, params.Thinking.Display)
 			case tt.wantEnabled:
-				require.NotNil(t, params.Thinking.OfEnabled)
-				assert.Equal(t, tt.wantTokens, params.Thinking.OfEnabled.BudgetTokens)
-				assert.Equal(t, tt.wantDisplayJSON, string(params.Thinking.OfEnabled.Display))
+				require.NotNil(t, params.Thinking)
+				assert.Equal(t, "enabled", params.Thinking.Type)
+				assert.Equal(t, tt.wantTokens, params.Thinking.BudgetTokens)
+				assert.Equal(t, tt.wantDisplayJSON, params.Thinking.Display)
 			default:
-				assert.Nil(t, params.Thinking.OfAdaptive)
-				assert.Nil(t, params.Thinking.OfEnabled)
+				if params.Thinking != nil {
+					assert.Equal(t, "disabled", params.Thinking.Type)
+				}
 			}
 		})
 	}

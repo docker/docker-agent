@@ -85,18 +85,18 @@ func TestBetaDocumentPartsInMessagesAndToolResults(t *testing.T) {
 		{Type: chat.MessagePartTypeDocument, Document: &chat.Document{MimeType: "image/png", Source: chat.DocumentSource{InlineData: []byte{1}}}},
 		{Type: chat.MessagePartTypeDocument, Document: &chat.Document{MimeType: "application/pdf", Source: chat.DocumentSource{InlineData: []byte{2}}}},
 	}
-	userBlocks, err := client.convertBetaUserMultiContent(t.Context(), parts)
+	userBlocks, err := client.convertUserMultiContent(t.Context(), parts)
 	require.NoError(t, err)
-	result, err := client.convertBetaToolResultBlockWithDeferred(t.Context(), &chat.Message{MultiContent: parts}, nil)
+	result, err := client.convertToolResultBlock(t.Context(), &chat.Message{MultiContent: parts})
 	require.NoError(t, err)
-	require.NotNil(t, result.OfToolResult)
+	assert.Equal(t, "tool_result", result.Type)
 	const want = `[
 		{"type":"text","text":"<document-note-text-plain>\nhi\n</document-note-text-plain>"},
 		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQ=="}},
 		{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"Ag=="}}
 	]`
 	assert.JSONEq(t, want, rawJSON(t, userBlocks))
-	assert.JSONEq(t, want, rawJSON(t, result.OfToolResult.Content))
+	assert.JSONEq(t, want, rawJSON(t, result.Content))
 }
 
 func TestConvertToolResultBlockUsesClaudeCapabilityFallback(t *testing.T) {
@@ -122,9 +122,11 @@ func TestConvertToolResultBlockUsesClaudeCapabilityFallback(t *testing.T) {
 
 	block, err := client.convertToolResultBlock(t.Context(), msg)
 	require.NoError(t, err)
-	require.NotNil(t, block.OfToolResult)
-	require.Len(t, block.OfToolResult.Content, 2)
-	require.NotNil(t, block.OfToolResult.Content[1].OfDocument)
+	assert.Equal(t, "tool_result", block.Type)
+	content, ok := block.Content.([]ContentBlockParam)
+	require.True(t, ok)
+	require.Len(t, content, 2)
+	assert.Equal(t, "document", content[1].Type)
 }
 
 func TestConvertToolResultBlockIncludesDocumentAttachments(t *testing.T) {
@@ -150,12 +152,14 @@ func TestConvertToolResultBlockIncludesDocumentAttachments(t *testing.T) {
 
 	block, err := client.convertToolResultBlock(t.Context(), msg)
 	require.NoError(t, err)
-	require.NotNil(t, block.OfToolResult)
-	require.Len(t, block.OfToolResult.Content, 2)
-	assert.NotNil(t, block.OfToolResult.Content[0].OfText)
-	require.NotNil(t, block.OfToolResult.Content[1].OfDocument)
-	require.NotNil(t, block.OfToolResult.Content[1].OfDocument.Source.OfBase64)
-	assert.Equal(t, base64.StdEncoding.EncodeToString(pdf), block.OfToolResult.Content[1].OfDocument.Source.OfBase64.Data)
+	assert.Equal(t, "tool_result", block.Type)
+	content, ok := block.Content.([]ContentBlockParam)
+	require.True(t, ok)
+	require.Len(t, content, 2)
+	assert.Equal(t, "text", content[0].Type)
+	assert.Equal(t, "document", content[1].Type)
+	require.NotNil(t, content[1].Source)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(pdf), content[1].Source.Data)
 }
 
 func TestConvertToolResultBlockNeverSendsEmptyContent(t *testing.T) {
@@ -169,10 +173,11 @@ func TestConvertToolResultBlockNeverSendsEmptyContent(t *testing.T) {
 
 	block, err := client.convertToolResultBlock(t.Context(), msg)
 	require.NoError(t, err)
-	require.NotNil(t, block.OfToolResult)
-	require.Len(t, block.OfToolResult.Content, 1)
-	require.NotNil(t, block.OfToolResult.Content[0].OfText)
-	assert.Equal(t, "(no output)", block.OfToolResult.Content[0].OfText.Text)
+	assert.Equal(t, "tool_result", block.Type)
+	content, ok := block.Content.([]ContentBlockParam)
+	require.True(t, ok)
+	require.Len(t, content, 1)
+	assert.Equal(t, "(no output)", content[0].Text)
 }
 
 func TestConvertToolResultBlockIncludesImageDocumentAttachments(t *testing.T) {
@@ -198,12 +203,14 @@ func TestConvertToolResultBlockIncludesImageDocumentAttachments(t *testing.T) {
 
 	block, err := client.convertToolResultBlock(t.Context(), msg)
 	require.NoError(t, err)
-	require.NotNil(t, block.OfToolResult)
-	require.Len(t, block.OfToolResult.Content, 2)
-	require.NotNil(t, block.OfToolResult.Content[1].OfImage)
-	require.NotNil(t, block.OfToolResult.Content[1].OfImage.Source.OfBase64)
-	assert.Equal(t, base64.StdEncoding.EncodeToString(image), block.OfToolResult.Content[1].OfImage.Source.OfBase64.Data)
-	assert.Equal(t, "image/png", string(block.OfToolResult.Content[1].OfImage.Source.OfBase64.MediaType))
+	assert.Equal(t, "tool_result", block.Type)
+	content, ok := block.Content.([]ContentBlockParam)
+	require.True(t, ok)
+	require.Len(t, content, 2)
+	assert.Equal(t, "image", content[1].Type)
+	require.NotNil(t, content[1].Source)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(image), content[1].Source.Data)
+	assert.Equal(t, "image/png", content[1].Source.MediaType)
 }
 
 func testAttachmentClient() *Client {

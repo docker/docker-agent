@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelerrors"
@@ -18,7 +17,7 @@ import (
 func TestStreamAdapter_CloseBeforeRecv(t *testing.T) {
 	t.Parallel()
 	called := false
-	adapter := NewStreamAdapter(func(func(*genai.GenerateContentResponse, error) bool) {
+	adapter := NewStreamAdapter(func(func(*GenerateContentResponse, error) bool) {
 		called = true
 	}, "test-model", true)
 
@@ -37,24 +36,24 @@ func TestStreamAdapter_GeminiUsageMetadata(t *testing.T) {
 	// These tests pin the fixed behaviour.
 
 	t.Run("forwards chunks containing only UsageMetadata", func(t *testing.T) {
-		textChunk := &genai.GenerateContentResponse{
-			Candidates: []*genai.Candidate{
+		textChunk := &GenerateContentResponse{
+			Candidates: []*Candidate{
 				{
-					Content: &genai.Content{
-						Parts: []*genai.Part{{Text: "Hello"}},
+					Content: &Content{
+						Parts: []*Part{{Text: "Hello"}},
 					},
 				},
 			},
 		}
-		usageOnlyChunk := &genai.GenerateContentResponse{
-			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+		usageOnlyChunk := &GenerateContentResponse{
+			UsageMetadata: &GenerateContentResponseUsageMetadata{
 				PromptTokenCount:     14,
 				CandidatesTokenCount: 5,
 				ThoughtsTokenCount:   3,
 			},
 		}
 
-		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+		iter := func(fn func(*GenerateContentResponse, error) bool) {
 			if !fn(textChunk, nil) {
 				return
 			}
@@ -87,21 +86,21 @@ func TestStreamAdapter_GeminiUsageMetadata(t *testing.T) {
 		// When the upstream stream ends with a chunk that carries usage,
 		// the synthesised "done" event must propagate that usage so downstream
 		// observers receive the final tally.
-		chunk := &genai.GenerateContentResponse{
-			Candidates: []*genai.Candidate{
+		chunk := &GenerateContentResponse{
+			Candidates: []*Candidate{
 				{
-					Content: &genai.Content{
-						Parts: []*genai.Part{{Text: "ok"}},
+					Content: &Content{
+						Parts: []*Part{{Text: "ok"}},
 					},
 				},
 			},
-			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			UsageMetadata: &GenerateContentResponseUsageMetadata{
 				PromptTokenCount:     10,
 				CandidatesTokenCount: 2,
 			},
 		}
 
-		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+		iter := func(fn func(*GenerateContentResponse, error) bool) {
 			fn(chunk, nil)
 		}
 
@@ -125,13 +124,13 @@ func TestStreamAdapter_GeminiUsageMetadata(t *testing.T) {
 	t.Run("trackUsage=false suppresses usage extraction", func(t *testing.T) {
 		// When trackUsage is disabled the adapter must not populate Usage even
 		// if upstream returns UsageMetadata.
-		chunk := &genai.GenerateContentResponse{
-			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+		chunk := &GenerateContentResponse{
+			UsageMetadata: &GenerateContentResponseUsageMetadata{
 				PromptTokenCount:     10,
 				CandidatesTokenCount: 2,
 			},
 		}
-		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+		iter := func(fn func(*GenerateContentResponse, error) bool) {
 			fn(chunk, nil)
 		}
 		adapter := NewStreamAdapter(iter, "test-model", false)
@@ -161,7 +160,7 @@ func TestStreamAdapter_ToolUsePromptTokens(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			metadata := &genai.GenerateContentResponseUsageMetadata{
+			metadata := &GenerateContentResponseUsageMetadata{
 				PromptTokenCount:        100,
 				CachedContentTokenCount: tc.cached,
 				ToolUsePromptTokenCount: tc.toolUse,
@@ -169,13 +168,13 @@ func TestStreamAdapter_ToolUsePromptTokens(t *testing.T) {
 				ThoughtsTokenCount:      20,
 				TotalTokenCount:         130 + tc.toolUse,
 			}
-			adapter := NewStreamAdapter(func(yield func(*genai.GenerateContentResponse, error) bool) {
-				if !yield(&genai.GenerateContentResponse{
-					Candidates: []*genai.Candidate{{Content: &genai.Content{Parts: []*genai.Part{{Text: "42"}}}}},
+			adapter := NewStreamAdapter(func(yield func(*GenerateContentResponse, error) bool) {
+				if !yield(&GenerateContentResponse{
+					Candidates: []*Candidate{{Content: &Content{Parts: []*Part{{Text: "42"}}}}},
 				}, nil) {
 					return
 				}
-				yield(&genai.GenerateContentResponse{UsageMetadata: metadata}, nil)
+				yield(&GenerateContentResponse{UsageMetadata: metadata}, nil)
 			}, "test-model", tc.trackUsage)
 			t.Cleanup(adapter.Close)
 
@@ -213,13 +212,13 @@ func TestStreamAdapter_ToolUsePromptTokens(t *testing.T) {
 func TestStreamAdapter_FunctionCalls(t *testing.T) {
 	t.Parallel()
 	t.Run("function calls in final message", func(t *testing.T) {
-		mockResp := &genai.GenerateContentResponse{
-			Candidates: []*genai.Candidate{
+		mockResp := &GenerateContentResponse{
+			Candidates: []*Candidate{
 				{
-					Content: &genai.Content{
-						Parts: []*genai.Part{
+					Content: &Content{
+						Parts: []*Part{
 							{
-								FunctionCall: &genai.FunctionCall{
+								FunctionCall: &FunctionCall{
 									Name: "test_function",
 									Args: map[string]any{"param": "value"},
 								},
@@ -231,7 +230,7 @@ func TestStreamAdapter_FunctionCalls(t *testing.T) {
 		}
 
 		// Simulate the iterator behavior
-		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+		iter := func(fn func(*GenerateContentResponse, error) bool) {
 			// Send the response with function call
 			fn(mockResp, nil)
 		}
@@ -262,13 +261,13 @@ func TestStreamAdapter_GeneratedImage(t *testing.T) {
 
 	t.Run("inline image-only chunk is forwarded as Delta.Media", func(t *testing.T) {
 		imgBytes := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a}
-		mockResp := &genai.GenerateContentResponse{
-			Candidates: []*genai.Candidate{
+		mockResp := &GenerateContentResponse{
+			Candidates: []*Candidate{
 				{
-					Content: &genai.Content{
-						Parts: []*genai.Part{
+					Content: &Content{
+						Parts: []*Part{
 							{
-								InlineData: &genai.Blob{
+								InlineData: &Blob{
 									Data:        imgBytes,
 									MIMEType:    "image/png",
 									DisplayName: "cat.png",
@@ -280,7 +279,7 @@ func TestStreamAdapter_GeneratedImage(t *testing.T) {
 			},
 		}
 
-		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+		iter := func(fn func(*GenerateContentResponse, error) bool) {
 			fn(mockResp, nil)
 		}
 		adapter := NewStreamAdapter(iter, "test-model", true)
@@ -306,20 +305,20 @@ func TestStreamAdapter_GeneratedImage(t *testing.T) {
 
 	t.Run("text and inline image in the same chunk both surface", func(t *testing.T) {
 		imgBytes := []byte{0x01, 0x02, 0x03}
-		mockResp := &genai.GenerateContentResponse{
-			Candidates: []*genai.Candidate{
+		mockResp := &GenerateContentResponse{
+			Candidates: []*Candidate{
 				{
-					Content: &genai.Content{
-						Parts: []*genai.Part{
+					Content: &Content{
+						Parts: []*Part{
 							{Text: "here you go"},
-							{InlineData: &genai.Blob{Data: imgBytes, MIMEType: "image/jpeg"}},
+							{InlineData: &Blob{Data: imgBytes, MIMEType: "image/jpeg"}},
 						},
 					},
 				},
 			},
 		}
 
-		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+		iter := func(fn func(*GenerateContentResponse, error) bool) {
 			fn(mockResp, nil)
 		}
 		adapter := NewStreamAdapter(iter, "test-model", true)
@@ -339,19 +338,19 @@ func TestStreamAdapter_GeneratedImage(t *testing.T) {
 		// A Blob with zero bytes must not produce a spurious empty Media
 		// delta (and, since it carries no text either, must not be
 		// forwarded as a chunk at all).
-		mockResp := &genai.GenerateContentResponse{
-			Candidates: []*genai.Candidate{
+		mockResp := &GenerateContentResponse{
+			Candidates: []*Candidate{
 				{
-					Content: &genai.Content{
-						Parts: []*genai.Part{
-							{InlineData: &genai.Blob{Data: nil, MIMEType: "image/png"}},
+					Content: &Content{
+						Parts: []*Part{
+							{InlineData: &Blob{Data: nil, MIMEType: "image/png"}},
 						},
 					},
 				},
 			},
 		}
 
-		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+		iter := func(fn func(*GenerateContentResponse, error) bool) {
 			fn(mockResp, nil)
 		}
 		adapter := NewStreamAdapter(iter, "test-model", true)
@@ -367,27 +366,27 @@ func TestStreamAdapter_GeneratedImage(t *testing.T) {
 		// Gemini can pack more than one generated blob into a single chunk:
 		// multiple parts within a candidate, and/or multiple candidates.
 		// Every blob must survive, not just the last one seen.
-		mockResp := &genai.GenerateContentResponse{
-			Candidates: []*genai.Candidate{
+		mockResp := &GenerateContentResponse{
+			Candidates: []*Candidate{
 				{
-					Content: &genai.Content{
-						Parts: []*genai.Part{
-							{InlineData: &genai.Blob{Data: []byte{0x01}, MIMEType: "image/png", DisplayName: "first.png"}},
-							{InlineData: &genai.Blob{Data: []byte{0x02}, MIMEType: "image/jpeg", DisplayName: "second.jpg"}},
+					Content: &Content{
+						Parts: []*Part{
+							{InlineData: &Blob{Data: []byte{0x01}, MIMEType: "image/png", DisplayName: "first.png"}},
+							{InlineData: &Blob{Data: []byte{0x02}, MIMEType: "image/jpeg", DisplayName: "second.jpg"}},
 						},
 					},
 				},
 				{
-					Content: &genai.Content{
-						Parts: []*genai.Part{
-							{InlineData: &genai.Blob{Data: []byte{0x03}, MIMEType: "image/webp", DisplayName: "third.webp"}},
+					Content: &Content{
+						Parts: []*Part{
+							{InlineData: &Blob{Data: []byte{0x03}, MIMEType: "image/webp", DisplayName: "third.webp"}},
 						},
 					},
 				},
 			},
 		}
 
-		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+		iter := func(fn func(*GenerateContentResponse, error) bool) {
 			fn(mockResp, nil)
 		}
 		adapter := NewStreamAdapter(iter, "test-model", true)
@@ -407,15 +406,15 @@ func TestStreamAdapter_SignatureOnlyChunk(t *testing.T) {
 	for _, toolCall := range []bool{false, true} {
 		t.Run(fmt.Sprintf("toolCall=%t", toolCall), func(t *testing.T) {
 			t.Parallel()
-			part := genai.NewPartFromText("hello")
+			part := NewPartFromText("hello")
 			if toolCall {
-				part = genai.NewPartFromFunctionCall("test_function", nil)
+				part = NewPartFromFunctionCall("test_function", nil)
 			}
 			signature := []byte("signature")
-			adapter := NewStreamAdapter(func(yield func(*genai.GenerateContentResponse, error) bool) {
-				for _, p := range []*genai.Part{part, {ThoughtSignature: signature}} {
-					if !yield(&genai.GenerateContentResponse{
-						Candidates: []*genai.Candidate{{Content: &genai.Content{Parts: []*genai.Part{p}}}},
+			adapter := NewStreamAdapter(func(yield func(*GenerateContentResponse, error) bool) {
+				for _, p := range []*Part{part, {ThoughtSignature: signature}} {
+					if !yield(&GenerateContentResponse{
+						Candidates: []*Candidate{{Content: &Content{Parts: []*Part{p}}}},
 					}, nil) {
 						return
 					}
@@ -451,53 +450,53 @@ func TestStreamAdapter_SignatureOnlyChunk(t *testing.T) {
 func TestStreamAdapter_TerminalFinishReasons(t *testing.T) {
 	t.Parallel()
 
-	text := func(s string, reason genai.FinishReason) *genai.GenerateContentResponse {
-		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
-			Content: &genai.Content{Parts: []*genai.Part{{Text: s}}}, FinishReason: reason,
+	text := func(s string, reason FinishReason) *GenerateContentResponse {
+		return &GenerateContentResponse{Candidates: []*Candidate{{
+			Content: &Content{Parts: []*Part{{Text: s}}}, FinishReason: reason,
 		}}}
 	}
-	call := func(reason genai.FinishReason) *genai.GenerateContentResponse {
-		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
-			Content:      &genai.Content{Parts: []*genai.Part{genai.NewPartFromFunctionCall("lookup", map[string]any{"q": "x"})}},
+	call := func(reason FinishReason) *GenerateContentResponse {
+		return &GenerateContentResponse{Candidates: []*Candidate{{
+			Content:      &Content{Parts: []*Part{NewPartFromFunctionCall("lookup", map[string]any{"q": "x"})}},
 			FinishReason: reason,
 		}}}
 	}
-	finishOnly := func(reason genai.FinishReason) *genai.GenerateContentResponse {
-		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{FinishReason: reason}}}
+	finishOnly := func(reason FinishReason) *GenerateContentResponse {
+		return &GenerateContentResponse{Candidates: []*Candidate{{FinishReason: reason}}}
 	}
-	promptBlocked := &genai.GenerateContentResponse{PromptFeedback: &genai.GenerateContentResponsePromptFeedback{BlockReason: genai.BlockedReasonSafety}}
+	promptBlocked := &GenerateContentResponse{PromptFeedback: &GenerateContentResponsePromptFeedback{BlockReason: BlockedReasonSafety}}
 	// The SDK clears the finish reason of a chunk carrying a continuation
 	// token; when it then doesn't resume, the stream just ends.
-	checkpoint := func(s string) *genai.GenerateContentResponse {
-		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
-			Content: &genai.Content{Parts: []*genai.Part{{Text: s}}}, ContinuationToken: []byte("tok"),
+	checkpoint := func(s string) *GenerateContentResponse {
+		return &GenerateContentResponse{Candidates: []*Candidate{{
+			Content: &Content{Parts: []*Part{{Text: s}}}, ContinuationToken: []byte("tok"),
 		}}}
 	}
 
 	tests := []struct {
 		name  string
-		resps []*genai.GenerateContentResponse
+		resps []*GenerateContentResponse
 		want  chat.FinishReason
 	}{
-		{"max tokens on text chunk", []*genai.GenerateContentResponse{text("partial", genai.FinishReasonMaxTokens)}, chat.FinishReasonLength},
-		{"max tokens on finish-only chunk", []*genai.GenerateContentResponse{text("partial", ""), finishOnly(genai.FinishReasonMaxTokens)}, chat.FinishReasonLength},
-		{"safety on text chunk", []*genai.GenerateContentResponse{text("partial", genai.FinishReasonSafety)}, chat.FinishReasonRefusal},
-		{"recitation on finish-only chunk", []*genai.GenerateContentResponse{text("partial", ""), finishOnly(genai.FinishReasonRecitation)}, chat.FinishReasonRefusal},
-		{"max tokens beats tool calls", []*genai.GenerateContentResponse{call(genai.FinishReasonMaxTokens)}, chat.FinishReasonLength},
-		{"safety beats tool calls", []*genai.GenerateContentResponse{call(""), finishOnly(genai.FinishReasonSafety)}, chat.FinishReasonRefusal},
-		{"safety beats an earlier max tokens", []*genai.GenerateContentResponse{text("a", genai.FinishReasonMaxTokens), finishOnly(genai.FinishReasonSafety)}, chat.FinishReasonRefusal},
-		{"blocked prompt with no candidates", []*genai.GenerateContentResponse{promptBlocked}, chat.FinishReasonRefusal},
-		{"stop stays stop", []*genai.GenerateContentResponse{text("done", genai.FinishReasonStop)}, chat.FinishReasonStop},
-		{"tool calls with stop stay tool_calls", []*genai.GenerateContentResponse{call(genai.FinishReasonStop)}, chat.FinishReasonToolCalls},
-		{"other stays stop", []*genai.GenerateContentResponse{text("done", genai.FinishReasonOther)}, chat.FinishReasonStop},
-		{"continuation without a token is length", []*genai.GenerateContentResponse{text("partial", genai.FinishReasonContinuation)}, chat.FinishReasonLength},
-		{"unresumed continuation token is length", []*genai.GenerateContentResponse{checkpoint("partial")}, chat.FinishReasonLength},
-		{"continued stream that stops stays stop", []*genai.GenerateContentResponse{checkpoint("a"), text("b", genai.FinishReasonStop)}, chat.FinishReasonStop},
+		{"max tokens on text chunk", []*GenerateContentResponse{text("partial", FinishReasonMaxTokens)}, chat.FinishReasonLength},
+		{"max tokens on finish-only chunk", []*GenerateContentResponse{text("partial", ""), finishOnly(FinishReasonMaxTokens)}, chat.FinishReasonLength},
+		{"safety on text chunk", []*GenerateContentResponse{text("partial", FinishReasonSafety)}, chat.FinishReasonRefusal},
+		{"recitation on finish-only chunk", []*GenerateContentResponse{text("partial", ""), finishOnly(FinishReasonRecitation)}, chat.FinishReasonRefusal},
+		{"max tokens beats tool calls", []*GenerateContentResponse{call(FinishReasonMaxTokens)}, chat.FinishReasonLength},
+		{"safety beats tool calls", []*GenerateContentResponse{call(""), finishOnly(FinishReasonSafety)}, chat.FinishReasonRefusal},
+		{"safety beats an earlier max tokens", []*GenerateContentResponse{text("a", FinishReasonMaxTokens), finishOnly(FinishReasonSafety)}, chat.FinishReasonRefusal},
+		{"blocked prompt with no candidates", []*GenerateContentResponse{promptBlocked}, chat.FinishReasonRefusal},
+		{"stop stays stop", []*GenerateContentResponse{text("done", FinishReasonStop)}, chat.FinishReasonStop},
+		{"tool calls with stop stay tool_calls", []*GenerateContentResponse{call(FinishReasonStop)}, chat.FinishReasonToolCalls},
+		{"other stays stop", []*GenerateContentResponse{text("done", FinishReasonOther)}, chat.FinishReasonStop},
+		{"continuation without a token is length", []*GenerateContentResponse{text("partial", FinishReasonContinuation)}, chat.FinishReasonLength},
+		{"unresumed continuation token is length", []*GenerateContentResponse{checkpoint("partial")}, chat.FinishReasonLength},
+		{"continued stream that stops stays stop", []*GenerateContentResponse{checkpoint("a"), text("b", FinishReasonStop)}, chat.FinishReasonStop},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			adapter := NewStreamAdapter(func(fn func(*genai.GenerateContentResponse, error) bool) {
+			adapter := NewStreamAdapter(func(fn func(*GenerateContentResponse, error) bool) {
 				for _, r := range tt.resps {
 					if !fn(r, nil) {
 						return
@@ -529,30 +528,30 @@ func TestStreamAdapter_TerminalFinishReasons(t *testing.T) {
 func TestStreamAdapter_InvalidFunctionCallFails(t *testing.T) {
 	t.Parallel()
 
-	failed := func(text string, reason genai.FinishReason) *genai.GenerateContentResponse {
-		cand := &genai.Candidate{FinishReason: reason, FinishMessage: "Malformed function call: lookup(q="}
+	failed := func(text string, reason FinishReason) *GenerateContentResponse {
+		cand := &Candidate{FinishReason: reason, FinishMessage: "Malformed function call: lookup(q="}
 		if text != "" {
-			cand.Content = &genai.Content{Parts: []*genai.Part{{Text: text}}}
+			cand.Content = &Content{Parts: []*Part{{Text: text}}}
 		}
-		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{cand}}
+		return &GenerateContentResponse{Candidates: []*Candidate{cand}}
 	}
-	call := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
-		Content: &genai.Content{Parts: []*genai.Part{genai.NewPartFromFunctionCall("lookup", map[string]any{"q": "x"})}},
+	call := &GenerateContentResponse{Candidates: []*Candidate{{
+		Content: &Content{Parts: []*Part{NewPartFromFunctionCall("lookup", map[string]any{"q": "x"})}},
 	}}}
 
 	tests := []struct {
 		name     string
-		resps    []*genai.GenerateContentResponse
+		resps    []*GenerateContentResponse
 		wantText string
 	}{
-		{"malformed call on a finish-only chunk", []*genai.GenerateContentResponse{failed("", genai.FinishReasonMalformedFunctionCall)}, ""},
-		{"malformed call after text", []*genai.GenerateContentResponse{failed("Let me look that up.", genai.FinishReasonMalformedFunctionCall)}, "Let me look that up."},
-		{"unexpected tool call after a function call", []*genai.GenerateContentResponse{call, failed("", genai.FinishReasonUnexpectedToolCall)}, ""},
+		{"malformed call on a finish-only chunk", []*GenerateContentResponse{failed("", FinishReasonMalformedFunctionCall)}, ""},
+		{"malformed call after text", []*GenerateContentResponse{failed("Let me look that up.", FinishReasonMalformedFunctionCall)}, "Let me look that up."},
+		{"unexpected tool call after a function call", []*GenerateContentResponse{call, failed("", FinishReasonUnexpectedToolCall)}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			adapter := NewStreamAdapter(func(fn func(*genai.GenerateContentResponse, error) bool) {
+			adapter := NewStreamAdapter(func(fn func(*GenerateContentResponse, error) bool) {
 				for _, r := range tt.resps {
 					if !fn(r, nil) {
 						return
@@ -584,11 +583,11 @@ func TestStreamAdapter_InvalidFunctionCallFails(t *testing.T) {
 func TestInvalidFunctionCallClassification(t *testing.T) {
 	t.Parallel()
 
-	for _, reason := range []genai.FinishReason{genai.FinishReasonMalformedFunctionCall, genai.FinishReasonUnexpectedToolCall} {
+	for _, reason := range []FinishReason{FinishReasonMalformedFunctionCall, FinishReasonUnexpectedToolCall} {
 		for _, message := range []string{"", "lookup(timeout=30", "lookup(limit=500", "lookup(limit=429", "lookup(q=token limit", "lookup(q=unexpected EOF"} {
 			t.Run(string(reason)+"/"+message, func(t *testing.T) {
 				t.Parallel()
-				err := invalidFunctionCall(&genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+				err := invalidFunctionCall(&GenerateContentResponse{Candidates: []*Candidate{{
 					FinishReason: reason, FinishMessage: message,
 				}}})
 				require.ErrorIs(t, err, ErrInvalidFunctionCall)

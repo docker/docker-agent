@@ -7,9 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
-
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/httpclient"
@@ -18,7 +15,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// Opaque state must not leak to a different vendor's compatible endpoint.
 func (c *Client) firstPartyResponses() bool {
 	if c.ModelConfig.Provider == chatgpt.ProviderName {
 		return c.ModelConfig.BaseURL == "" || strings.TrimRight(c.ModelConfig.BaseURL, "/") == chatgpt.BaseURL
@@ -26,7 +22,6 @@ func (c *Client) firstPartyResponses() bool {
 	return c.ModelConfig.Provider == "openai" && catalog.IsDefaultEndpoint(c.ModelConfig.Provider, c.Endpoint())
 }
 
-// Native search needs ordered output replay to retain its loaded tools.
 func (c *Client) preservesResponseState() bool {
 	enabled, _ := c.ModelConfig.ProviderOpts["preserve_reasoning"].(bool)
 	return c.firstPartyResponses() && (enabled || c.NativeToolSearchEnabled())
@@ -42,9 +37,9 @@ func (c *Client) cacheDiagnosticsEnabled() bool {
 		modelinfo.OpenAISupportsExplicitPromptCache(c.ModelConfig.Model)
 }
 
-func (c *Client) configureResponseState(ctx context.Context, params *responses.ResponseNewParams, messages []chat.Message) {
+func (c *Client) configureResponseState(ctx context.Context, params *ResponseRequest, messages []chat.Message) {
 	if c.preservesResponseState() && modelinfo.UsesReasoningEffort(c.ModelConfig.Model) {
-		params.Include = append(params.Include, responses.ResponseIncludable("reasoning.encrypted_content"))
+		params.Include = append(params.Include, "reasoning.encrypted_content")
 	}
 	if !c.cacheDiagnosticsEnabled() {
 		return
@@ -59,9 +54,8 @@ func (c *Client) configureResponseState(ctx context.Context, params *responses.R
 		}
 		state := msg.OpenAIResponse
 		if state != nil && state.Source == c.responseSource() && state.SessionID == sessionID && state.ID != "" {
-			params.PromptCacheOptions.ComparisonResponseID = param.NewOpt(state.ID)
+			params.PromptCacheOptions = &PromptCacheOptions{ComparisonResponseID: state.ID}
 		}
-		// Do not compare across a model switch or a turn without response metadata.
 		return
 	}
 }
@@ -75,12 +69,12 @@ func (c *Client) responseAdapter(ctx context.Context, stream responseEventStream
 	}
 	adapter.preserveOutput = c.preservesResponseState()
 	if c.cacheDiagnosticsEnabled() {
-		adapter.onResponseDone = func(response responses.Response) { logCacheDiagnostics(ctx, response) }
+		adapter.onResponseDone = func(response ResponseObject) { logCacheDiagnostics(ctx, response) }
 	}
 	return adapter
 }
 
-func replayableResponseItem(item responses.ResponseOutputItemUnion) bool {
+func replayableResponseItem(item ResponseOutputItem) bool {
 	switch item.Type {
 	case "reasoning":
 		return item.EncryptedContent != ""
@@ -88,7 +82,7 @@ func replayableResponseItem(item responses.ResponseOutputItemUnion) bool {
 		if item.Role != "assistant" {
 			return false
 		}
-		return slices.ContainsFunc(item.Content, func(part responses.ResponseOutputMessageContentUnion) bool {
+		return slices.ContainsFunc(item.Content, func(part ResponseOutputContent) bool {
 			return part.Type == "output_text"
 		})
 	case "function_call":
@@ -100,13 +94,15 @@ func replayableResponseItem(item responses.ResponseOutputItemUnion) bool {
 	}
 }
 
-func responseItemJSON(item responses.ResponseOutputItemUnion) json.RawMessage {
-	return json.RawMessage(item.RawJSON())
+func responseItemJSON(item ResponseOutputItem) json.RawMessage {
+	if len(item.Raw) > 0 {
+		return item.Raw
+	}
+	b, _ := json.Marshal(item)
+	return b
 }
 
-// replayResponse preserves ordering and phase, but never bypasses hook edits,
-// tool-name sanitization, or a provider/model switch with stale raw content.
-func (c *Client) replayResponse(msg chat.Message) []responses.ResponseInputItemUnionParam {
+func (c *Client) replayResponse(msg chat.Message) []ResponseInputItem {
 	state := msg.OpenAIResponse
 	if !c.preservesResponseState() || state == nil || state.Source != c.responseSource() || msg.Role != chat.MessageRoleAssistant {
 		return nil
@@ -114,9 +110,9 @@ func (c *Client) replayResponse(msg chat.Message) []responses.ResponseInputItemU
 	var text, reasoning strings.Builder
 	hasState := false
 	var calls []tools.ToolCall
-	input := make([]responses.ResponseInputItemUnionParam, 0, len(state.Output))
+	input := make([]ResponseInputItem, 0, len(state.Output))
 	for _, raw := range state.Output {
-		var output responses.ResponseOutputItemUnion
+		var output ResponseOutputItem
 		if err := json.Unmarshal(raw, &output); err != nil || !replayableResponseItem(output) {
 			return nil
 		}
@@ -141,19 +137,18 @@ func (c *Client) replayResponse(msg chat.Message) []responses.ResponseInputItemU
 			hasState = true
 		case "function_call":
 			calls = append(calls, tools.ToolCall{ID: output.CallID, Type: "function", Function: tools.FunctionCall{
-				Name: output.Name, Arguments: output.Arguments.OfString,
+				Name: output.Name, Arguments: output.ArgumentsString(),
 			}})
 		}
-		var item responses.ResponseInputItemUnionParam
-		if output.Type == "message" {
-			item.OfOutputMessage = new(responses.ResponseOutputMessageParam)
-			if err := json.Unmarshal(raw, item.OfOutputMessage); err != nil {
-				return nil
-			}
-		} else if err := json.Unmarshal(raw, &item); err != nil {
-			return nil
-		}
-		input = append(input, item)
+		input = append(input, ResponseInputItem{
+			Raw:       raw,
+			Type:      output.Type,
+			Role:      output.Role,
+			CallID:    output.CallID,
+			Status:    output.Status,
+			Execution: output.Execution,
+			Tools:     output.Tools,
+		})
 	}
 	if reasoning.Len() > 0 && reasoning.String() != msg.ReasoningContent {
 		return nil
@@ -164,17 +159,16 @@ func (c *Client) replayResponse(msg chat.Message) []responses.ResponseInputItemU
 	return input
 }
 
-// Loaded tool definitions cannot outlive the current permission-filtered catalog.
-func (c *Client) filterToolSearchHistory(input []responses.ResponseInputItemUnionParam, requestTools []tools.Tool) []responses.ResponseInputItemUnionParam {
+func (c *Client) filterToolSearchHistory(input []ResponseInputItem, requestTools []tools.Tool) []ResponseInputItem {
 	allowed := make(map[string]bool, len(requestTools))
 	for _, tool := range requestTools {
 		allowed[tool.Name] = true
 	}
 	keep := c.NativeToolSearchEnabled()
 	for _, item := range input {
-		if output := item.OfToolSearchOutput; output != nil && output.Execution == responses.ResponseToolSearchOutputItemParamExecutionServer {
-			for _, tool := range output.Tools {
-				if tool.OfFunction == nil || !allowed[tool.OfFunction.Name] {
+		if item.Type == "tool_search_output" && item.Execution == "server" {
+			for _, tool := range item.Tools {
+				if tool.Type != "function" || !allowed[tool.Name] {
 					keep = false
 				}
 			}
@@ -183,14 +177,12 @@ func (c *Client) filterToolSearchHistory(input []responses.ResponseInputItemUnio
 	if keep {
 		return input
 	}
-	// Drop call/output pairs together; server searches have no call_id.
-	return slices.DeleteFunc(input, func(item responses.ResponseInputItemUnionParam) bool {
-		return item.OfToolSearchCall != nil && item.OfToolSearchCall.Execution == "server" ||
-			item.OfToolSearchOutput != nil && item.OfToolSearchOutput.Execution == responses.ResponseToolSearchOutputItemParamExecutionServer
+	return slices.DeleteFunc(input, func(item ResponseInputItem) bool {
+		return (item.Type == "tool_search_call" || item.Type == "tool_search_output") && item.Execution == "server"
 	})
 }
 
-func logCacheDiagnostics(ctx context.Context, response responses.Response) {
+func logCacheDiagnostics(ctx context.Context, response ResponseObject) {
 	diagnostic := response.PromptCacheDiagnostics
 	if diagnostic.Type == "" {
 		return

@@ -9,9 +9,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/shared/constant"
-
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelinfo"
@@ -19,7 +16,7 @@ import (
 
 // serverSideFallbackBeta enables the `fallbacks` request parameter. The July
 // date accepts both "default" and explicit lists.
-const serverSideFallbackBeta = anthropic.AnthropicBetaServerSideFallback2026_07_01
+const serverSideFallbackBeta = AnthropicBetaServerSideFallback2026_07_01
 
 // maxFallbacks is the longest list the API accepts.
 const maxFallbacks = 3
@@ -33,15 +30,15 @@ type fallbackSpec struct {
 
 func (s fallbackSpec) enabled() bool { return s.Default || len(s.Models) > 0 }
 
-func (s fallbackSpec) param() anthropic.BetaFallbacksParamUnion {
+func (s fallbackSpec) param() any {
 	if s.Default {
-		return anthropic.BetaFallbacksParamUnion{OfDefault: constant.ValueOf[constant.Default]()}
+		return "default"
 	}
-	list := make([]anthropic.BetaFallbackParam, len(s.Models))
+	list := make([]FallbackTargetParam, len(s.Models))
 	for i, m := range s.Models {
-		list[i] = anthropic.BetaFallbackParam{Model: m}
+		list[i] = FallbackTargetParam{Model: m}
 	}
-	return anthropic.BetaFallbacksParamUnion{OfBetaFallbackArray: list}
+	return list
 }
 
 func fallbacksEnabled(opts map[string]any) bool {
