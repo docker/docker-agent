@@ -46,8 +46,8 @@ func (f *Flock) Point(x, y float64, click bool, progress float64, width int) {
 		for i := range f.dots {
 			p := &f.dots[i]
 			fx, fy := f.force(*p, progress, width)
-			p.vx += fx * 0.22
-			p.vy += fy * 0.22
+			p.vx += fx * 0.42
+			p.vy += fy * 0.42
 		}
 	}
 }
@@ -64,7 +64,7 @@ func (f *Flock) force(p particle, progress float64, width int) (float64, float64
 	}
 	dx, dy := float64(x)+p.x-f.pointerX, float64(y)+p.y-f.pointerY
 	distance := math.Hypot(dx, dy)
-	const radius = 13.0
+	const radius = 24.0
 	if distance >= radius {
 		return 0, 0
 	}
@@ -74,7 +74,7 @@ func (f *Flock) force(p particle, progress float64, width int) (float64, float64
 		dx, dy, distance = math.Cos(angle), math.Sin(angle), 1
 	}
 	falloff := 1 - distance/radius
-	strength := 220 * falloff * falloff / distance
+	strength := 900 * falloff * falloff / distance
 	return dx * strength, dy * strength
 }
 
@@ -102,8 +102,8 @@ func (f *Flock) Step(elapsed time.Duration, progress float64, width int) bool {
 			fx, fy := f.force(*p, progress, width)
 			// Local alignment keeps neighboring dots flowing together without an
 			// all-pairs boid simulation; the spring preserves the wordmark identity.
-			p.vx += (fx - 20*p.x - 7*p.vx + 3*(g.x/float64(g.count)-p.vx)) * dt
-			p.vy += (fy - 20*p.y - 7*p.vy + 3*(g.y/float64(g.count)-p.vy)) * dt
+			p.vx += (fx - 9*p.x - 3.8*p.vx + 3*(g.x/float64(g.count)-p.vx)) * dt
+			p.vy += (fy - 9*p.y - 3.8*p.vy + 3*(g.y/float64(g.count)-p.vy)) * dt
 			p.x += p.vx * dt
 			p.y += p.vy * dt
 		}
