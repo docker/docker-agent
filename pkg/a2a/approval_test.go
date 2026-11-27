@@ -198,6 +198,8 @@ func TestApprovalRegistry_ParkAfterCloseAbandons(t *testing.T) {
 	reg.park(&pausedRun{taskID: "task-1", callID: "call-1", events: closedEvents(), cancel: func() { canceled = true }})
 
 	assert.True(t, canceled)
+	assert.Empty(t, reasons, "the task is failed once its pause is persisted, not before")
+	reg.endHandoff("task-1", true)
 	assert.Equal(t, []string{approvalShutdownReason}, reasons)
 	_, ok := reg.pending("task-1")
 	assert.False(t, ok)

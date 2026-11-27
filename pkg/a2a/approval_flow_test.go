@@ -208,6 +208,87 @@ func TestServer_ToolApproval_ShutdownFailsPausedTask(t *testing.T) {
 	assert.Zero(t, executions.Load())
 }
 
+// Shutdown landing between the park and the persisted INPUT_REQUIRED still
+// fails the task and notifies its webhook once the pause is published.
+func TestServer_ToolApproval_ShutdownDuringPauseHandoff(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		at   approvalHookPoint
+	}{
+		{"before park", hookBeforePark},
+		{"after park", hookAfterPark},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var executions atomic.Int32
+			deps := newTestTaskDeps(t)
+			// The registry shuts down while the HTTP server keeps serving the task.
+			reg := newApprovalRegistry(t.Context(), true)
+			paused := make(chan a2a.TaskID, 1)
+			release := make(chan struct{})
+			reg.hook = func(point approvalHookPoint, id a2a.TaskID) {
+				if point == tc.at {
+					paused <- id
+					<-release
+				}
+			}
+			client, _ := startApprovalServerWith(t, t.Context(), approvalTeam(&executions), session.NewInMemorySessionStore(), deps, RunOptions{ToolApproval: true, approvals: reg})
+
+			received := make(chan a2a.Event, 16)
+			webhook := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				var sr a2a.StreamResponse
+				if assert.NoError(t, json.NewDecoder(r.Body).Decode(&sr)) {
+					received <- sr.Event
+				}
+			}))
+			t.Cleanup(webhook.Close)
+			go func() {
+				_, _ = client.SendMessage(context.WithoutCancel(t.Context()), &a2a.SendMessageRequest{
+					Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("run the tool")),
+					Config:  &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: webhook.URL, Token: "tok"}},
+				})
+			}()
+			var taskID a2a.TaskID
+			select {
+			case taskID = <-paused:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the run did not reach the pause")
+			}
+
+			closed := make(chan struct{})
+			go func() {
+				reg.close()
+				close(closed)
+			}()
+			select {
+			case <-reg.done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("shutdown did not release the parked runs")
+			}
+			close(release)
+			select {
+			case <-closed:
+			case <-time.After(10 * time.Second):
+				t.Fatal("shutdown did not stop the runtime")
+			}
+
+			ctx, _ := a2asrv.NewCallContext(t.Context(), nil)
+			require.Eventually(t, func() bool {
+				stored, err := deps.tasks.Get(ctx, taskID)
+				return err == nil && stored.Task.Status.State == a2a.TaskStateFailed
+			}, 10*time.Second, 5*time.Millisecond, "the task must not stay waiting for an approval nobody can resume")
+			stored, err := deps.tasks.Get(ctx, taskID)
+			require.NoError(t, err)
+			assert.Equal(t, approvalShutdownReason, statusText(stored.Task))
+			waitPushState(t, received, a2a.TaskStateFailed)
+			assert.Zero(t, executions.Load())
+		})
+	}
+}
+
 // Cancelling a task while its approved tool runs cancels the tool.
 func TestServer_ToolApproval_CancelStopsApprovedTool(t *testing.T) {
 	t.Parallel()

@@ -127,12 +127,16 @@ func (w *executorWrapper) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCo
 // Cleanup releases the run parked for the task unless the task is still
 // waiting for it, then delegates to the ADK executor, which implements
 // a2asrv.AgentExecutionCleaner; dropping it would change cleanup semantics.
-// The SDK joins the execution before calling it, so no park can follow.
+// The SDK joins the execution and persists its result before calling it, so
+// no park can follow.
 func (w *executorWrapper) Cleanup(ctx context.Context, execCtx *a2asrv.ExecutorContext, result a2a.SendMessageResult, err error) {
 	if w.approvals.toolApproval() {
 		state := a2a.TaskStateUnspecified
 		if task, ok := result.(*a2a.Task); ok {
 			state = task.Status.State
+		}
+		if execCtx.Message != nil {
+			w.approvals.endHandoff(execCtx.TaskID, state == a2a.TaskStateInputRequired)
 		}
 		switch {
 		case execCtx.Message == nil:

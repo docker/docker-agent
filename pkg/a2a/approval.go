@@ -101,11 +101,22 @@ type approvalRegistry struct {
 	cancelCalls map[a2a.TaskID]int       // CancelTask requests in flight; they may share one SDK cancellation
 	canceled    map[a2a.TaskID]*a2a.Task // canceled by resolveCancel; reported to every in-flight CancelTask
 	closed      bool                     // shutdown released the parked runs; later parks are abandoned
+	handoffs    map[a2a.TaskID]*handoff  // parked runs whose INPUT_REQUIRED is not persisted yet
 	onAbandon   abandonFunc
 	live        int           // runtimes whose event stream is still open
 	idle        chan struct{} // closed while live is zero
 
 	hook func(approvalHookPoint, a2a.TaskID) // tests only
+}
+
+// handoff tracks a run from park until the execution publishing its
+// INPUT_REQUIRED ends. The stored task is still WORKING meanwhile, so an
+// abandon is deferred until the pause is persisted (see endHandoff).
+type handoff struct {
+	run       *pausedRun
+	abandoned bool
+	state     a2a.TaskState
+	reason    string
 }
 
 // newApprovalRegistry builds a registry. When enabled, a background janitor
@@ -125,6 +136,7 @@ func newApprovalRegistry(baseCtx context.Context, enabled bool) *approvalRegistr
 		canceling:   make(map[a2a.TaskID]bool),
 		cancelCalls: make(map[a2a.TaskID]int),
 		canceled:    make(map[a2a.TaskID]*a2a.Task),
+		handoffs:    make(map[a2a.TaskID]*handoff),
 		idle:        idle,
 	}
 	if enabled {
@@ -230,6 +242,7 @@ func bindToInvocation(invocation context.Context, cancel context.CancelFunc) (st
 // cancelled first.
 func (r *approvalRegistry) park(run *pausedRun) {
 	r.mu.Lock()
+	r.handoffs[run.taskID] = &handoff{run: run}
 	if r.closed {
 		r.mu.Unlock()
 		r.abandon(run, a2a.TaskStateFailed, approvalShutdownReason)
@@ -430,17 +443,47 @@ func (r *approvalRegistry) cancelAll() {
 // releases the run.
 func (r *approvalRegistry) abandon(run *pausedRun, state a2a.TaskState, reason string) *a2a.Task {
 	r.mu.Lock()
-	fn := r.onAbandon
+	h, deferred := r.handoffs[run.taskID]
+	deferred = deferred && h.run == run
+	if deferred {
+		h.abandoned, h.state, h.reason = true, state, reason
+	}
 	r.mu.Unlock()
 	var task *a2a.Task
-	if fn != nil {
-		// Detached: at shutdown the server context is already canceled.
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.baseCtx), abandonTimeout)
-		task = fn(ctx, run, state, reason)
-		cancel()
+	if !deferred {
+		task = r.endTask(run, state, reason)
 	}
 	run.cancelAndDrain()
 	return task
+}
+
+// endHandoff ends the handoff of the run parked for taskID once the execution
+// that paused it is over, applying an abandon that came before INPUT_REQUIRED
+// was persisted.
+func (r *approvalRegistry) endHandoff(taskID a2a.TaskID, published bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	h, ok := r.handoffs[taskID]
+	delete(r.handoffs, taskID)
+	r.mu.Unlock()
+	if ok && h.abandoned && published {
+		r.endTask(h.run, h.state, h.reason)
+	}
+}
+
+func (r *approvalRegistry) endTask(run *pausedRun, state a2a.TaskState, reason string) *a2a.Task {
+	r.mu.Lock()
+	fn := r.onAbandon
+	r.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	// Detached: at shutdown the server context is already canceled.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.baseCtx), abandonTimeout)
+	defer cancel()
+	return fn(ctx, run, state, reason)
 }
 
 // inputRequiredEvent builds the ADK event that drives the A2A task into
