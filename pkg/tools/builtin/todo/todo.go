@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
+	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo/types"
@@ -54,13 +55,24 @@ const (
 	ToolNameListTodos   = types.ToolNameListTodos
 )
 
-// CreateToolSet is used by the tools registry.
+// CreateToolSet builds the toolset outside a team load, where `shared: team`
+// has no team to share with and behaves like an unshared toolset.
 func CreateToolSet(toolset latest.Toolset) (tools.ToolSet, error) {
-	if toolset.Shared {
+	if toolset.Shared == latest.SharedScopeProcess {
 		return newSharedTodoTool(), nil
 	}
 
 	return New(), nil
+}
+
+// Creator builds this toolset from its YAML declaration. It matches
+// teamloader.ToolsetCreator so it can be registered directly.
+func Creator(ctx context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+	if toolset.Shared == latest.SharedScopeTeam {
+		return tools.TeamScoped(ctx, "todo", func() tools.ToolSet { return New() }), nil
+	}
+
+	return CreateToolSet(toolset)
 }
 
 type ToolSet struct {
