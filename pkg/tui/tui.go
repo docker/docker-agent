@@ -759,6 +759,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithSendMode(m.sendMode),
 		chat.WithInterruptMode(m.interruptMode),
 		chat.WithShowBanner(m.showBanner),
+		chat.WithBannerInteraction(m.startupBannerAnimation),
 	}
 
 	if m.leanMode {
@@ -2828,6 +2829,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 // handleMouseMotion routes mouse motion events with adjusted coordinates.
 func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+	chat.LeaveBanner(m.activeTab.chatPage)
 	if m.isDragging {
 		switch msg.Button {
 		case tea.MouseLeft:
@@ -3140,6 +3142,7 @@ func (m *appModel) resetResizeGrips() {
 	m.viewCacheValid = false
 	if m.activeTab != nil {
 		chat.ResetSidebarGrip(m.activeTab.chatPage)
+		chat.LeaveBanner(m.activeTab.chatPage)
 	}
 }
 

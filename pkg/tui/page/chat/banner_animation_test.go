@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/banner"
+	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -152,6 +153,45 @@ func TestStartupBannerNotStartedWhenNotVisible(t *testing.T) {
 			tc.setup(p)
 			assert.Nil(t, StartStartupBanner(p))
 			assert.EqualValues(t, 0, ar.ActiveCount())
+		})
+	}
+}
+
+func TestBannerPointerInteraction(t *testing.T) {
+	for _, position := range []msgtypes.SidebarPosition{msgtypes.SidebarLeft, msgtypes.SidebarRight, msgtypes.SidebarTop, msgtypes.SidebarBottom} {
+		t.Run(string(position), func(t *testing.T) {
+			p, ar := bannerPage(t)
+			p.bannerInteractive = true
+			p.hideSidebar = false
+			p.layoutSettings.SidebarPosition = position
+			p.SetSize(160, 35)
+			sl := p.computeSidebarLayout()
+			chatY := 0
+			if sl.mode != sidebarVertical && !sl.bandAtBottom {
+				chatY = sl.sidebarHeight
+			}
+			x := styles.AppPadding + sl.chatStartX + sl.chatWidth/2
+			y := chatY + (sl.chatHeight-banner.Height)/2 + 2
+			static := p.View()
+			_, cmd := p.Update(tea.MouseMotionMsg{X: x, Y: y})
+			require.NotNil(t, cmd)
+			tick, ok := ar.Accept(cmd().(animation.TickMsg))
+			require.True(t, ok)
+			_, _ = p.Update(tick)
+			assert.NotEqual(t, static, p.View())
+			require.True(t, p.bannerMotion.IsActive())
+			LeaveBanner(p)
+			for range 100 {
+				cmd = ar.Continue()
+				if cmd == nil {
+					break
+				}
+				tick, ok = ar.Accept(cmd().(animation.TickMsg))
+				require.True(t, ok)
+				_, _ = p.Update(tick)
+			}
+			assert.False(t, p.bannerMotion.IsActive())
+			assert.Equal(t, static, p.View())
 		})
 	}
 }
