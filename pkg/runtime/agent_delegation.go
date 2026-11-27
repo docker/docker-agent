@@ -324,32 +324,35 @@ func mergeExcludedTools(parent, child []string) []string {
 	return merged
 }
 
-// swapCurrentAgent swaps the runtime's current agent from `from` to `to`,
-// emitting the AgentSwitching/AgentInfo events and invoking the on_agent_switch
-// hooks on entry, and returns a closure that reverses everything (restores
-// `from`, emits the counterpart events and the matching return-side hooks)
-// when invoked.
+// swapCurrentAgent pushes `to` onto the router's active transfer stack,
+// emitting AgentSwitching/AgentInfo events and invoking on_agent_switch hooks
+// on entry, and returns a closure that runs return-side hooks, pops the
+// transfer, and emits AgentSwitching/AgentInfo for the remaining transfer or
+// the parent session's resolved agent.
 //
-// Use as `defer r.swapCurrentAgent(ctx, sessionID, childSessionID, from, to, evts)()` so the
+// Use as `defer r.swapCurrentAgent(ctx, parent, childSessionID, from, to, evts)()` so the
 // swap takes effect immediately and the restore runs at function exit.
-func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID, childSessionID string, from, to *agent.Agent, evts EventSink) func() {
+func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, parent *session.Session, childSessionID string, from, to *agent.Agent, evts EventSink) func() {
 	evts.Emit(AgentSwitching(true, from.Name(), to.Name()))
-	r.executeOnAgentSwitchHooks(ctx, from, sessionID, from.Name(), to.Name(), agentSwitchKindTransferTask)
+	r.executeOnAgentSwitchHooks(ctx, from, parent.ID, from.Name(), to.Name(), agentSwitchKindTransferTask)
 	r.transferEmitMu.Lock()
 	defer r.transferEmitMu.Unlock()
 	token := r.agents.pushTransfer(childSessionID, to.Name())
 	evts.Emit(AgentInfo(to.Name(), agentModelLabel(ctx, to), to.Description(), to.WelcomeMessage()))
 	return func() {
-		r.executeOnAgentSwitchHooks(ctx, from, sessionID, to.Name(), from.Name(), agentSwitchKindTransferTaskReturn)
+		r.executeOnAgentSwitchHooks(ctx, from, parent.ID, to.Name(), from.Name(), agentSwitchKindTransferTaskReturn)
 		r.transferEmitMu.Lock()
 		defer r.transferEmitMu.Unlock()
-		restored, _ := r.agents.popTransfer(token, from.Name())
+		restored, remaining := r.agents.popTransfer(token, from.Name())
 		evts.Emit(AgentSwitching(false, to.Name(), from.Name()))
 		restoredAgent := from
-		if restored != "" && restored != from.Name() {
+		if remaining {
 			if active, err := r.team.Agent(restored); err == nil {
 				restoredAgent = active
 			}
+		} else if resolved := r.resolveSessionAgent(parent); resolved != nil {
+			// Routed parents resume on their RouteAgent while the shared router stays on the entry agent.
+			restoredAgent = resolved
 		}
 		evts.Emit(AgentInfo(restoredAgent.Name(), agentModelLabel(ctx, restoredAgent), restoredAgent.Description(), restoredAgent.WelcomeMessage()))
 	}
@@ -402,7 +405,7 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	s := newSubSession(parent, req.SubSessionConfig, child)
 
 	if switchCurrent {
-		defer r.swapCurrentAgent(ctx, parent.ID, s.ID, callerAgent, child, evts)()
+		defer r.swapCurrentAgent(ctx, parent, s.ID, callerAgent, child, evts)()
 	}
 
 	// subagent_stop fires after the child's stream has fully drained,
