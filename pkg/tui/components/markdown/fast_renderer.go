@@ -265,6 +265,9 @@ type FastRenderer struct {
 	// contexts that render markdown but do not hit-test clicks on the icon
 	// (reasoning blocks, dialogs), so no dead copy button is ever shown.
 	hideCopyIcon bool
+
+	// allowSGR keeps embedded SGR styling; untrusted text never carries it.
+	allowSGR bool
 }
 
 // NewFastRenderer creates a new fast markdown renderer with the given width.
@@ -276,6 +279,13 @@ func NewFastRenderer(width int) *FastRenderer {
 // renderer for chaining.
 func (r *FastRenderer) HideCopyIcon() *FastRenderer {
 	r.hideCopyIcon = true
+	return r
+}
+
+// AllowSGR keeps SGR styling embedded in the input, for trusted display
+// transformer output. Other escape sequences are always removed.
+func (r *FastRenderer) AllowSGR() *FastRenderer {
+	r.allowSGR = true
 	return r
 }
 
@@ -298,7 +308,7 @@ func (r *FastRenderer) RenderCodeBlock(code, language string) string {
 	p := parserPool.Get().(*parser)
 	p.reset("", r.width)
 	p.hideCopyIcon = true
-	p.renderCodeBlock(sanitizeForTerminal(code), language)
+	p.renderCodeBlock(sanitizeForTerminal(code, false), language)
 	result := finalizeOutput(p.out.String(), r.width)
 	parserPool.Put(p)
 	return result
@@ -313,7 +323,7 @@ func (r *FastRenderer) RenderWithCodeBlocks(input string) (string, []CodeBlock, 
 		return "", nil, nil
 	}
 
-	input = sanitizeForTerminal(input)
+	input = sanitizeForTerminal(input, r.allowSGR)
 
 	p := parserPool.Get().(*parser)
 	p.reset(input, r.width)
@@ -332,8 +342,14 @@ func (r *FastRenderer) RenderWithCodeBlocks(input string) (string, []CodeBlock, 
 // parses agree. If controls change the parse, hide copy labels rather than
 // associate a visible block with the wrong source.
 func (r *FastRenderer) RenderWithSourceCodeBlocks(input string) (string, []CodeBlock, error) {
+	if containsHiddenControl(input) {
+		// Styling may be trusted for display, but controls are never safe to copy.
+		safe := *r
+		safe.HideCopyIcon()
+		return safe.RenderWithCodeBlocks(input)
+	}
 	out, blocks, err := r.RenderWithCodeBlocks(input)
-	if err != nil || len(blocks) == 0 || sanitizeForTerminal(input) == input {
+	if err != nil || len(blocks) == 0 || sanitizeForTerminal(input, false) == input {
 		return out, blocks, err
 	}
 	p := parserPool.Get().(*parser)
@@ -353,7 +369,7 @@ func (r *FastRenderer) RenderWithSourceCodeBlocks(input string) (string, []CodeB
 		normalizedBlocks = slices.Clone(p.codeBlocks)
 		parserPool.Put(p)
 	}
-	compatible := len(rawBlocks) == len(blocks) && len(normalizedBlocks) == len(blocks) && sanitizeForTerminal(rawOutput) == sanitizeForTerminal(out)
+	compatible := len(rawBlocks) == len(blocks) && len(normalizedBlocks) == len(blocks) && sanitizeForTerminal(rawOutput, false) == sanitizeForTerminal(out, false)
 	if compatible {
 		for i := range blocks {
 			// Remove CR only when the normalized parse identifies it as a line separator.
@@ -361,7 +377,7 @@ func (r *FastRenderer) RenderWithSourceCodeBlocks(input string) (string, []CodeB
 			if strings.ReplaceAll(trimmed, "\r\n", "\n") == normalizedBlocks[i].Content {
 				rawBlocks[i].Content = trimmed
 			}
-			if strings.ReplaceAll(rawBlocks[i].Content, "\r\n", "\n") != normalizedBlocks[i].Content || blocks[i].Line != normalizedBlocks[i].Line || blocks[i].Content != sanitizeForTerminal(rawBlocks[i].Content) || containsHiddenControl(rawBlocks[i].Content) {
+			if strings.ReplaceAll(rawBlocks[i].Content, "\r\n", "\n") != normalizedBlocks[i].Content || blocks[i].Line != normalizedBlocks[i].Line || blocks[i].Content != sanitizeForTerminal(rawBlocks[i].Content, false) || containsHiddenControl(rawBlocks[i].Content) {
 				compatible = false
 				break
 			}
@@ -1772,7 +1788,7 @@ func (p *parser) renderInlineWithStyleTo(out *strings.Builder, text string, rest
 
 	// Fast path: check if text contains any markdown characters or URLs
 	// If not, apply the restore style directly and return
-	firstMarker := strings.IndexAny(text, inlineMarkdownChars)
+	firstMarker := indexInlineMarker(text)
 	firstURL := findFirstURL(text)
 	if firstMarker == -1 && firstURL == -1 {
 		restoreStyle.renderTo(out, text)
@@ -1963,6 +1979,11 @@ func (p *parser) renderInlineWithStyleTo(out *strings.Builder, text string, rest
 			start := i
 			origStart := i // Track original start to detect no-progress
 			for i < n && !isInlineMarker(text[i]) {
+				// Transformer styling stays inside the run it decorates.
+				if text[i] == '\x1b' {
+					i, _ = scanAnsiSequence(text, i)
+					continue
+				}
 				// Auto-link URL detection. URLs we recognize all start with 'h'
 				// ("http://" or "https://"), so a single-byte gate keeps this hot
 				// loop tight on prose: we only pay for slice creation + memequal
@@ -2042,6 +2063,9 @@ func longestWordWidth(s string) int {
 // textWidth calculates the visual width of plain text (no ANSI codes).
 // Optimized for ASCII-only strings which are common.
 func textWidth(s string) int {
+	if strings.IndexByte(s, '\x1b') >= 0 {
+		return ansiStringWidth(s)
+	}
 	// Fast path for ASCII-only strings
 	isASCII := true
 	for i := range len(s) {
@@ -2063,8 +2087,11 @@ func textWidth(s string) int {
 
 func findClosingBracket(text string) int {
 	depth := 0
-	for i, c := range text {
-		switch c {
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\x1b':
+			end, _ := scanAnsiSequence(text, i)
+			i = end - 1
 		case '[':
 			depth++
 		case ']':
@@ -2073,6 +2100,24 @@ func findClosingBracket(text string) int {
 				return i
 			}
 		}
+	}
+	return -1
+}
+
+// indexInlineMarker finds the first inline marker outside ANSI escape sequences.
+func indexInlineMarker(text string) int {
+	if strings.IndexByte(text, '\x1b') < 0 {
+		return strings.IndexAny(text, inlineMarkdownChars)
+	}
+	for i := 0; i < len(text); {
+		if text[i] == '\x1b' {
+			i, _ = scanAnsiSequence(text, i)
+			continue
+		}
+		if isInlineMarker(text[i]) {
+			return i
+		}
+		i++
 	}
 	return -1
 }
@@ -2839,13 +2884,22 @@ func (p *parser) wrapText(text string, width int) string {
 		if len(broken) == 1 {
 			return broken[0]
 		}
-		return strings.Join(broken, "\n")
+		var out strings.Builder
+		var style sgrState
+		for j, part := range broken {
+			if j > 0 {
+				style.writeLineBreak(&out)
+			}
+			out.WriteString(part)
+			style.applyCodes(part)
+		}
+		return out.String()
 	}
 
 	var out strings.Builder
 	out.Grow(len(text) + len(text)/40)
 
-	var active []string // currently-active CSI styles (cleared on \x1b[m)
+	var style sgrState
 	lineWidth := 0
 
 	n := len(text)
@@ -2862,16 +2916,11 @@ func (p *parser) wrapText(text string, width int) string {
 		// Collect the next word — plain bytes plus any embedded ANSI sequences.
 		wordStart := i
 		wordWidth := 0
-		var wordAnsi []string
 		for i < n && text[i] != ' ' && text[i] != '\t' {
 			c := text[i]
 			if c == '\x1b' {
-				end, kind := scanAnsiSequence(text, i)
-				if kind != 0 {
-					wordAnsi = append(wordAnsi, text[i:end])
-				}
-				// Lone ESC: zero-width pass-through (no width change).
-				i = end
+				// Escape sequences, and a lone ESC, take no width.
+				i, _ = scanAnsiSequence(text, i)
 				continue
 			}
 			if c < utf8.RuneSelf {
@@ -2885,19 +2934,28 @@ func (p *parser) wrapText(text string, width int) string {
 		}
 		word := text[wordStart:i]
 
-		// Fold this word's ANSI codes into the active set BEFORE handling it.
-		// For a long word that gets split, this ensures the continuation-line
-		// breaks below close and re-open any styles that were opened inside the
-		// word, instead of replaying only the styles active before it.
-		active = updateActiveStyles(active, wordAnsi)
-		// Layout decision: do we need to wrap before this word?
+		// Style-only runs take no columns: never wrap for one, and keep the
+		// separating space only when it fits.
+		if wordWidth == 0 {
+			if lineWidth > 0 && lineWidth < width {
+				out.WriteByte(' ')
+				lineWidth++
+			}
+			out.WriteString(word)
+			style.applyCodes(word)
+			continue
+		}
+
+		// Layout decision: do we need to wrap before this word? A wrap here
+		// replays the styles active before the word; its own codes are folded
+		// in as it is written.
 		haveLine := lineWidth > 0
 		needsWrap := haveLine && lineWidth+1+wordWidth > width
 		if wordWidth > width && haveLine {
 			needsWrap = true
 		}
 		if needsWrap {
-			writeLineBreak(&out, active)
+			style.writeLineBreak(&out)
 			lineWidth = 0
 		} else if haveLine {
 			out.WriteByte(' ')
@@ -2910,51 +2968,23 @@ func (p *parser) wrapText(text string, width int) string {
 			broken := breakWord(word, width)
 			for j, part := range broken {
 				if j > 0 {
-					writeLineBreak(&out, active)
+					style.writeLineBreak(&out)
 				}
 				out.WriteString(part)
+				style.applyCodes(part)
 			}
 			// Always end a broken-word run with a line break so the following
 			// word starts on a fresh line.
-			writeLineBreak(&out, active)
+			style.writeLineBreak(&out)
 			lineWidth = 0
 		} else {
 			out.WriteString(word)
+			style.applyCodes(word)
 			lineWidth += wordWidth
 		}
 	}
 
 	return out.String()
-}
-
-// writeLineBreak emits a styled line break: it closes any active CSI styles,
-// writes '\n', then re-opens those styles so the next line continues with the
-// same formatting.
-func writeLineBreak(out *strings.Builder, active []string) {
-	if len(active) > 0 {
-		out.WriteString("\x1b[m")
-	}
-	out.WriteByte('\n')
-	for _, s := range active {
-		out.WriteString(s)
-	}
-}
-
-// updateActiveStyles folds a sequence of newly-seen ANSI codes into the list
-// of currently-active CSI styles. OSC sequences are line-local and ignored;
-// a full CSI reset (\x1b[m or \x1b[0m) clears the list.
-func updateActiveStyles(active, newCodes []string) []string {
-	for _, code := range newCodes {
-		if strings.HasPrefix(code, "\x1b]") {
-			continue
-		}
-		if code == "\x1b[m" || code == "\x1b[0m" {
-			active = active[:0]
-		} else {
-			active = append(active, code)
-		}
-	}
-	return active
 }
 
 func breakWord(word string, maxWidth int) []string {
