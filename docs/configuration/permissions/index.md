@@ -120,7 +120,7 @@ permissions:
 
 The three lists are evaluated in order `deny` → `allow` → `ask`. An `ask:` entry does not override a matching allow rule; narrow or remove the allow rule where confirmation is required. Team-level asks also yield to the active safety mode as described above.
 
-When an `ask:` pattern is provably shadowed by an `allow:` pattern — an unconditional `*` allow, or an argument-free allow whose tool name matches the ask's tool name — Docker Agent logs a warning at startup naming both patterns, since the ask rule can never prompt. The check is conservative: it does not report glob ask patterns (other than against a `*` allow) or argument-scoped allow patterns.
+When an `ask:` pattern is provably shadowed by an `allow:` pattern — an unconditional `*` allow, or an argument-free allow whose tool name matches the ask's tool name — Docker Agent logs a warning at startup naming both patterns, since the ask rule can never prompt. Normal runs discard log output, so the warning is only recorded when you run with `--debug`; it is written to the debug log (`~/.cagent/cagent.debug.log` by default, or the path given with `--log-file`) rather than printed to the terminal. A silent startup therefore does not prove that no rule is shadowed. The check is conservative: it does not report glob ask patterns (other than against a `*` allow) or argument-scoped allow patterns.
 
 ## Global Permissions
 
