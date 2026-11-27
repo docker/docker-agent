@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -21,6 +23,14 @@ import (
 // attachLatest is the value pflag assigns to --attach when it is given without
 // a value: it selects the most recent run.
 const attachLatest = "latest"
+
+// attachDiscoveryTimeout bounds how long --attach spends discovering the live
+// sessions of every registered run. A TUI suspended with Ctrl+Z (SIGSTOP) keeps
+// its registry record and its listener, but the stopped process cannot answer
+// HTTP; probing it serially would wait for the whole request timeout before the
+// attach proxy could start for a healthy run. Probing the runs concurrently under
+// one short deadline keeps such an unrelated stalled run from delaying the attach.
+const attachDiscoveryTimeout = 2 * time.Second
 
 type mcpFlags struct {
 	agentName      string
@@ -236,17 +246,20 @@ func resolveExplicitAttachSession(ctx context.Context, runs attachRuns, target s
 		return "", "", fmt.Errorf("listing live runs: %w", err)
 	}
 
+	// Probe every discovered run concurrently: an unrelated suspended TUI can
+	// otherwise consume the full HTTP timeout before a healthy run is queried.
+	probes := probeAttachSessions(ctx, records)
+
 	var sessions []attachSession
 	var unreachable []string
-	for _, rec := range records {
-		ids, err := mcp.LiveAttachSessions(ctx, rec.Addr)
-		if err != nil {
+	for i, rec := range records {
+		if probes[i].err != nil {
 			// One unreachable run must not hide a tab that lives on another;
 			// report it only when nothing matches anywhere.
-			unreachable = append(unreachable, fmt.Sprintf("%s: %v", rec.Addr, err))
+			unreachable = append(unreachable, fmt.Sprintf("%s: %v", rec.Addr, probes[i].err))
 			continue
 		}
-		for _, id := range ids {
+		for _, id := range probes[i].ids {
 			sessions = append(sessions, attachSession{addr: rec.Addr, sessionID: id})
 		}
 	}
@@ -268,7 +281,7 @@ func resolveExplicitAttachSession(ctx context.Context, runs attachRuns, target s
 		if rec.SessionID != target {
 			continue
 		}
-		resolved, err := mcp.ResolveAttachSession(ctx, rec.Addr, rec.SessionID, true)
+		resolved, err := resolveRecordedAttachSession(ctx, rec.Addr, rec.SessionID)
 		if err != nil {
 			return "", "", err
 		}
@@ -289,6 +302,46 @@ func resolveExplicitAttachSession(ctx context.Context, runs attachRuns, target s
 	default:
 		return "", "", ambiguousAttachSessionError(target, partial)
 	}
+}
+
+// attachProbe is the live-session probe of one discovered run.
+type attachProbe struct {
+	ids []string
+	err error
+}
+
+// probeAttachSessions queries every discovered run concurrently, under one short
+// overall deadline, and returns the probes in the same order as records so callers
+// keep a deterministic view. A run whose TUI is suspended still has a listener
+// that accepts the connection but never answers, so the per-request timeout is
+// what makes a serial scan slow; probing concurrently and canceling the whole
+// discovery at attachDiscoveryTimeout bounds that wait for every run at once.
+func probeAttachSessions(ctx context.Context, records []runregistry.Record) []attachProbe {
+	probes := make([]attachProbe, len(records))
+
+	ctx, cancel := context.WithTimeout(ctx, attachDiscoveryTimeout)
+	defer cancel()
+
+	var group sync.WaitGroup
+	for i, rec := range records {
+		group.Go(func() {
+			ids, err := mcp.LiveAttachSessions(ctx, rec.Addr)
+			probes[i] = attachProbe{ids: ids, err: err}
+		})
+	}
+	group.Wait()
+
+	return probes
+}
+
+// resolveRecordedAttachSession resolves the recorded initial session of the run
+// whose record names the requested target. It is bounded like discovery so a
+// suspended target run cannot reintroduce the long request timeout after the
+// concurrent probe returned.
+func resolveRecordedAttachSession(ctx context.Context, addr, recorded string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, attachDiscoveryTimeout)
+	defer cancel()
+	return mcp.ResolveAttachSession(ctx, addr, recorded, true)
 }
 
 // ambiguousAttachSessionError reports every live tab a target matches instead of

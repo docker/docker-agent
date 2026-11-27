@@ -186,6 +186,18 @@ func attachSessionsServer(t *testing.T, ids ...string) *httptest.Server {
 	return srv
 }
 
+// attachStalledSessionsServer mimics a TUI suspended with Ctrl+Z: the process is
+// stopped, so its listener accepts the connection but never answers and a probe
+// stalls until its request deadline.
+func attachStalledSessionsServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func attachTestRecord(addr, sessionID string) runregistry.Record {
 	return runregistry.Record{PID: 4242, Addr: addr, SessionID: sessionID, StartedAt: time.Now()}
 }
@@ -278,6 +290,35 @@ func TestResolveAttachTarget_SelectsTabOnSecondRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, second.URL, addr)
 	assert.Equal(t, "tab-2", sessionID)
+}
+
+// TestResolveAttachTarget_StalledRunDoesNotDelayHealthyExactMatch is the
+// regression test for the third #4931 review: a TUI suspended with Ctrl+Z keeps
+// its registry record but cannot answer HTTP, so a serial discovery waited for the
+// full request timeout on it before the healthy run holding the requested session
+// was even queried. Discovery probes concurrently under a short overall deadline,
+// so the healthy exact match is selected promptly.
+func TestResolveAttachTarget_StalledRunDoesNotDelayHealthyExactMatch(t *testing.T) {
+	t.Parallel()
+
+	stalled := attachStalledSessionsServer(t)
+	healthy := attachSessionsServer(t, "spawned-b")
+	runs := &fakeAttachRuns{records: []runregistry.Record{
+		// The suspended unrelated run comes first, so a serial scan would stall
+		// on it before reaching the healthy run.
+		attachTestRecord(stalled.URL, "stalled-initial"),
+		attachTestRecord(healthy.URL, "initial-tab-spawned-b"),
+	}}
+
+	start := time.Now()
+	addr, sessionID, err := resolveAttachTarget(t.Context(), runs, "spawned-b")
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Equal(t, healthy.URL, addr, "the healthy run must serve the selected tab")
+	assert.Equal(t, "spawned-b", sessionID, "the exact match on the healthy run must win")
+	assert.Less(t, elapsed, 5*time.Second,
+		"a stalled unrelated run must not delay a healthy exact match for the full request timeout")
 }
 
 func TestResolveAttachTarget_RunDiscoveryStillResolvesLiveTab(t *testing.T) {
@@ -382,8 +423,11 @@ func newAttachTestCommand(runs *fakeAttachRuns) (*cobra.Command, *attachCommandR
 func TestMCPAttachAdvertisedCommandSelectsNamedTab(t *testing.T) {
 	t.Parallel()
 
-	srv := attachSessionsServer(t, "spawned-b")
-	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-closed")}}
+	// The recorded initial tab is live next to the spawned tab: a command that
+	// ignores the explicit ID and resolves the most recent run would select the
+	// initial tab and fail this test (#4931 review).
+	srv := attachSessionsServer(t, "initial-tab", "spawned-b")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-tab")}}
 
 	cmd, recorder := newAttachTestCommand(runs)
 	cmd.SetArgs([]string{"--attach=spawned-b"})
@@ -400,8 +444,11 @@ func TestMCPAttachAdvertisedCommandSelectsNamedTab(t *testing.T) {
 func TestMCPAttachSpaceSeparatedValueSelectsNamedTab(t *testing.T) {
 	t.Parallel()
 
-	srv := attachSessionsServer(t, "spawned-b")
-	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-closed")}}
+	// Same two-live-tab fixture as the advertised spelling: with the recorded
+	// initial tab also live, selecting anything but the named spawned tab would
+	// mean the space-separated value was dropped and "latest" resolved instead.
+	srv := attachSessionsServer(t, "initial-tab", "spawned-b")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-tab")}}
 
 	cmd, recorder := newAttachTestCommand(runs)
 	cmd.SetArgs([]string{"--attach", "spawned-b"})
@@ -411,19 +458,21 @@ func TestMCPAttachSpaceSeparatedValueSelectsNamedTab(t *testing.T) {
 	assert.Equal(t, "spawned-b", recorder.sessionID)
 }
 
-// TestMCPAttachWithoutValueSelectsMostRecentRun pins the bare --attach meaning
-// (the most recent run), which accepting the space-separated value must not
-// break.
+// TestMCPAttachWithoutValueSelectsMostRecentRun pins the bare --attach meaning:
+// the most recent run, whose live recorded initial tab is selected. A spawned tab
+// is live too, so a leaked value from the bare spelling would select it instead
+// (#4931 review).
 func TestMCPAttachWithoutValueSelectsMostRecentRun(t *testing.T) {
 	t.Parallel()
 
-	srv := attachSessionsServer(t, "spawned-a")
-	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-closed")}}
+	srv := attachSessionsServer(t, "initial-tab", "spawned-b")
+	runs := &fakeAttachRuns{records: []runregistry.Record{attachTestRecord(srv.URL, "initial-tab")}}
 
 	cmd, recorder := newAttachTestCommand(runs)
 	cmd.SetArgs([]string{"--attach"})
 	require.NoError(t, cmd.ExecuteContext(t.Context()))
 	require.Equal(t, 1, recorder.calls)
 	assert.Equal(t, srv.URL, recorder.addr)
-	assert.Equal(t, "spawned-a", recorder.sessionID)
+	assert.Equal(t, "initial-tab", recorder.sessionID,
+		"bare --attach must select the most recent run's live initial tab, not a tab spawned after startup")
 }
