@@ -267,6 +267,9 @@ func pumpEvents(ctx agent.InvocationContext, yield func(*adksession.Event, error
 			// Empty for a command call that cannot be scoped to its command.
 			parked.grant = permissions.ScopedPermissionPattern(ctx, e.ToolCall)
 			parked.callID = e.ToolCall.ID
+			if _, ok := decodeToolArgs(e.ToolCall.Function.Arguments); !ok {
+				parked.rawArgs = e.ToolCall.Function.Arguments
+			}
 			parked.created = time.Now()
 			reg.runHook(hookBeforePark, run.taskID)
 			reg.park(&parked)

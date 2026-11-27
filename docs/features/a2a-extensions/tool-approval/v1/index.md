@@ -67,6 +67,7 @@ pending call, with:
 | `grant` | string | The permission pattern that `approve-in-context` stores, e.g. `shell:cmd=ls*`. |
 | `grantLabel` | string | Display label for `grant`, e.g. `allow ls* in this context`. |
 | `responseSchema` | object | JSON Schema of the expected `response` object. |
+| `rawArguments` | string | The call's arguments as sent by the model, present only when they are not a JSON object (`data.args` is then absent). Some tools repair and run such arguments, so show them before approving. |
 
 ```json
 {

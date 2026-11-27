@@ -158,7 +158,9 @@ The function-call part carries the extension's metadata: a human-readable
 with its display label (`grantLabel`), and a JSON Schema `responseSchema` for
 the reply, readable by a UI or a model. A shell call that cannot be scoped to
 one command (empty command, or a glob, `:` or `\` in its first word) has no `grant` and no
-`approve-in-context` in the enum.
+`approve-in-context` in the enum. When the call's arguments are not a JSON
+object, `data.args` is absent and `rawArguments` holds them verbatim, since
+some tools repair and run such arguments.
 
 ```json
 {

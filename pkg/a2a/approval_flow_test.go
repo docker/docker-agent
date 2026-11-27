@@ -459,7 +459,37 @@ func TestServer_ToolApproval_Extension(t *testing.T) {
 		assert.Equal(t, []any{"approve", "approve-in-context", "reject"}, decision["enum"])
 		assert.Equal(t, "approval_canary", meta["grant"])
 		assert.Equal(t, "allow approval_canary in this context", meta["grantLabel"])
+		assert.NotContains(t, meta, "rawArguments", "decoded args are already in data.args")
 	})
+}
+
+// Arguments that don't decode as an object are shown verbatim: a handler may
+// repair and run them (e.g. edit_file), so the approver must see them.
+func TestServer_ToolApproval_MalformedArgsAreShown(t *testing.T) {
+	t.Parallel()
+
+	const raw = `{"path": "a.txt", "edits": [{"oldText": "a", "newText": "b"}]`
+	var executions atomic.Int32
+	tool := approvalCanaryTool(&executions)
+	tm, _ := approvalTeamWith(tool, &mockStream{responses: []chat.MessageStreamResponse{{
+		Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ToolCalls: []tools.ToolCall{{
+			ID:       "tool-call",
+			Type:     "function",
+			Function: tools.FunctionCall{Name: tool.Name, Arguments: raw},
+		}}}}},
+	}}}, stopStream())
+	client := startToolApprovalServer(t, tm, session.NewInMemorySessionStore(), true)
+
+	task, _ := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	var meta map[string]any
+	for _, part := range task.Status.Message.Parts {
+		if m, ok := part.Meta()[toolApprovalExtensionURI].(map[string]any); ok {
+			meta = m
+			assert.NotContains(t, part.Data(), "args")
+		}
+	}
+	require.NotNil(t, meta)
+	assert.Equal(t, raw, meta["rawArguments"]) //nolint:testifylint // raw is deliberately invalid JSON.
 }
 
 // approve-in-context survives a server restart: the grant lives in the session store.

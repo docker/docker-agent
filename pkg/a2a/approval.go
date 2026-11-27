@@ -71,6 +71,7 @@ type pausedRun struct {
 	cancel    context.CancelFunc
 	grant     string // permission pattern approve-in-context persists (shell:cmd=ls* for commands); "" disables it
 	callID    string // tool-call ID reported to the client as long-running
+	rawArgs   string // call arguments when they don't decode to a JSON object; handlers may still repair and run them
 	created   time.Time
 	user      *a2asrv.User      // caller that owns the task in the task store
 	spanCtx   trace.SpanContext // invocation that started the run, linked from resumes
@@ -448,12 +449,7 @@ func (r *approvalRegistry) abandon(run *pausedRun, state a2a.TaskState, reason s
 // status-message DataPart (metadata adk_type=function_call,
 // adk_is_long_running=true) that the client replies to.
 func inputRequiredEvent(agentName string, tc tools.ToolCall) *adksession.Event {
-	var args map[string]any
-	if raw := strings.TrimSpace(tc.Function.Arguments); raw != "" {
-		// Malformed arguments should still surface the call for approval, just
-		// without a parsed args map.
-		_ = json.Unmarshal([]byte(raw), &args)
-	}
+	args, _ := decodeToolArgs(tc.Function.Arguments)
 	return &adksession.Event{
 		Author: agentName,
 		LLMResponse: model.LLMResponse{
@@ -467,6 +463,19 @@ func inputRequiredEvent(agentName string, tc tools.ToolCall) *adksession.Event {
 		},
 		LongRunningToolIDs: []string{tc.ID},
 	}
+}
+
+// decodeToolArgs decodes call arguments as a JSON object. ok is false when
+// non-empty arguments are not one.
+func decodeToolArgs(raw string) (args map[string]any, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, true
+	}
+	if err := json.Unmarshal([]byte(raw), &args); err != nil || args == nil {
+		return nil, false
+	}
+	return args, true
 }
 
 // resumeDecision maps a validated approval response to a runtime

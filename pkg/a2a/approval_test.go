@@ -59,6 +59,28 @@ func TestInputRequiredEvent_MalformedArgsStillSurfacesCall(t *testing.T) {
 	assert.Equal(t, []string{"call-2"}, ev.LongRunningToolIDs)
 }
 
+func TestDecodeToolArgs(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		raw    string
+		want   map[string]any
+		wantOK bool
+	}{
+		{raw: "", wantOK: true},
+		{raw: "  ", wantOK: true},
+		{raw: `{"cmd":"ls"}`, want: map[string]any{"cmd": "ls"}, wantOK: true},
+		{raw: `{"cmd":`},
+		{raw: "null"},
+		{raw: `["ls"]`},
+		{raw: `"ls"`},
+	} {
+		args, ok := decodeToolArgs(tc.raw)
+		assert.Equal(t, tc.wantOK, ok, tc.raw)
+		assert.Equal(t, tc.want, args, tc.raw)
+	}
+}
+
 func TestResumeDecision(t *testing.T) {
 	t.Parallel()
 

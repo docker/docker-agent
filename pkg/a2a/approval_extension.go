@@ -82,6 +82,9 @@ func annotateApprovalParts(event a2a.Event, approvals *approvalRegistry) {
 			"prompt":         fmt.Sprintf("Tool %q requires approval", name),
 			"responseSchema": approvalResponseSchema(run.grant),
 		}
+		if run.rawArgs != "" {
+			meta["rawArguments"] = run.rawArgs
+		}
 		if run.grant != "" {
 			meta["grant"] = run.grant
 			meta["grantLabel"] = "allow " + permissions.PatternLabel(run.grant) + " in this context"
