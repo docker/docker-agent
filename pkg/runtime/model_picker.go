@@ -13,10 +13,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 )
 
-// rootSessionKey is the context key holding the session of the root stream, so
-// that tools running in a sub-session can record state on it.
-type rootSessionKey struct{}
-
 // findModelPickerTool returns the Tool from the current agent's
 // toolsets, or nil if the agent has no model_picker configured.
 func findModelPickerTool(a *agent.Agent) *modelpicker.ToolSet {
@@ -84,12 +80,9 @@ func (r *LocalRuntime) setModelAndEmitInfo(ctx context.Context, sess *session.Se
 // the user's model picker does. The override applies to the whole team, so a
 // switch made in a sub-session is recorded on the root session.
 func (r *LocalRuntime) recordModelOverride(ctx context.Context, sess *session.Session, agentName, modelRef string) {
+	sess = sess.Root()
 	if sess.IsSubSession() {
-		root, ok := ctx.Value(rootSessionKey{}).(*session.Session)
-		if !ok {
-			return
-		}
-		sess = root
+		return
 	}
 	sess.SetAgentModelOverride(agentName, modelRef)
 	if err := r.sessionStore.UpdateSession(context.WithoutCancel(ctx), sess); err != nil {

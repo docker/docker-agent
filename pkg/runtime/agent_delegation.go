@@ -272,6 +272,7 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithSendUserMessage(false),
 		session.WithStructuredOutputDisabled(cfg.DisableStructuredOutput),
 		session.WithParentID(parent.ID),
+		session.WithRootOf(parent),
 		// Preserve workspace provenance, including an isolated checkout override.
 		session.WithWorkingDir(workingDir),
 		session.WithAttachedFiles(attachedFiles),

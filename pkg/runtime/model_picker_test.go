@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"context"
 	"io"
 	"path/filepath"
 	"testing"
@@ -85,8 +84,8 @@ func TestModelPickerRecordsOverrideOnSession(t *testing.T) {
 	assert.Empty(t, stored())
 
 	// A sub-agent's switch is recorded on the root session, which is the one resumed.
-	child := session.New(session.WithParentID(sess.ID), session.WithToolsApproved(true))
-	ctx := context.WithValue(t.Context(), rootSessionKey{}, sess)
-	rt.processToolCalls(ctx, child, root, []tools.ToolCall{{ID: "sub", Type: "function", Function: tools.FunctionCall{Name: "change_model", Arguments: `{"model":"chosen"}`}}}, ts, NewChannelSink(make(chan Event, 128)), nil)
+	child := newSubSession(sess, SubSessionConfig{ToolsApproved: true}, root)
+	grandchild := newSubSession(child, SubSessionConfig{ToolsApproved: true}, root)
+	rt.processToolCalls(t.Context(), grandchild, root, []tools.ToolCall{{ID: "sub", Type: "function", Function: tools.FunctionCall{Name: "change_model", Arguments: `{"model":"chosen"}`}}}, ts, NewChannelSink(make(chan Event, 128)), nil)
 	assert.Equal(t, map[string]string{"root": "chosen"}, stored())
 }

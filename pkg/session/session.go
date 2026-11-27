@@ -447,6 +447,10 @@ type Session struct {
 	// within the parent session's Messages array.
 	ParentID string `json:"-"`
 
+	// root is the top-level session of a sub-session. It is set at
+	// construction by WithRootOf and is not persisted.
+	root *Session
+
 	// DelegationLineage records the names of the agents that delegated,
 	// transitively, to produce this sub-session (root caller first), not
 	// including the agent running the session itself. The runtime uses it to
@@ -1864,6 +1868,21 @@ func WithAttachedFiles(paths []string) Opt {
 // IsSubSession returns true if this session is a sub-session (has a parent).
 func (s *Session) IsSubSession() bool {
 	return s.ParentID != ""
+}
+
+// WithRootOf links a sub-session to the top-level session above parent.
+func WithRootOf(parent *Session) Opt {
+	return func(s *Session) {
+		s.root = parent.Root()
+	}
+}
+
+// Root returns the top-level session set by WithRootOf, or s itself.
+func (s *Session) Root() *Session {
+	if s.root != nil {
+		return s.root
+	}
+	return s
 }
 
 // MessageCount returns the number of items that contain a message.
