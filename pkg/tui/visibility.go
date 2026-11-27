@@ -71,10 +71,25 @@ func (m *appModel) setPaneHidden(hidden bool) tea.Cmd {
 	m.viewCacheValid = false
 	if hidden {
 		m.resetResizeGrips()
+		if m.tabBar != nil {
+			m.tabBar.CancelHover()
+		}
+		if bar := m.attachmentBar(); bar != nil {
+			bar.ClearHover()
+		}
 		if m.activeTab != nil {
 			chat.CancelStartupBanner(m.activeTab.chatPage)
 		}
+		if m.contextBar != nil {
+			m.contextBar.Cancel()
+		}
 		m.ar.Pause()
+		if m.composer.motion.Running() {
+			m.composer.motion.Cancel()
+			m.composer.historyValue = ""
+			m.composer.rows = m.composer.target
+			return m.layoutComposer()
+		}
 		return nil
 	}
 	return m.ar.Resume()

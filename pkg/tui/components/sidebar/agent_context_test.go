@@ -141,3 +141,59 @@ func TestAgentCardMetricLinesFitNarrowWidth(t *testing.T) {
 	assert.NotContains(t, metrics, gaugePattern(4), "the decorative gauge is omitted at the minimum width")
 	assert.Contains(t, metrics, "Ctx 100%", "the compact context label keeps its percent")
 }
+
+func TestSetAgentInfoUpdatesPerAgentContextLimit(t *testing.T) {
+	t.Parallel()
+	m := newTestSidebar(t)
+	m.startStream("session-1", "root")
+	recordAgentUsage(m.model, "session-1", "root", 30, 100)
+	assert.Equal(t, "30%", m.agentContextPercent("root"))
+
+	m.SetAgentInfo("root", "openai/gpt-5", "", 200, "", 0)
+	assert.Equal(t, "15%", m.contextPercent())
+	assert.Equal(t, "15%", m.agentContextPercent("root"))
+}
+
+func TestSetTokenUsageAccountingUpdatePreservesAgentContext(t *testing.T) {
+	t.Parallel()
+	m := newTestSidebar(t)
+	m.startStream("session-1", "root")
+	recordAgentUsage(m.model, "session-1", "root", 30, 100)
+	assert.Equal(t, "30%", m.agentContextPercent("root"))
+
+	m.SetTokenUsage(&runtime.TokenUsageEvent{
+		SessionID:    "session-1",
+		AgentContext: runtime.AgentContext{AgentName: "root"},
+		Usage:        &runtime.Usage{Cost: 0.42},
+	})
+	assert.Equal(t, "30%", m.contextPercent())
+	assert.Equal(t, "30%", m.agentContextPercent("root"))
+}
+
+func TestSetAgentInfoUpdatesContextLimitAfterSameSessionHandoff(t *testing.T) {
+	t.Parallel()
+	m := newTestSidebar(t)
+	m.startStream("session-1", "root")
+	recordAgentUsage(m.model, "session-1", "root", 30, 100)
+
+	// Same-session handoff to helper updates workingAgent while sessionStack keeps root.
+	m.Update(&runtime.AgentInfoEvent{
+		SessionID:    "session-1",
+		AgentName:    "helper",
+		Model:        "openai/gpt-5",
+		ContextLimit: 100,
+	})
+	recordAgentUsage(m.model, "session-1", "helper", 30, 100)
+	assert.Equal(t, "30%", m.contextPercent())
+	assert.Equal(t, "30%", m.agentContextPercent("helper"))
+
+	// Subsequent context-limit update for helper must apply to both session and agent.
+	m.Update(&runtime.AgentInfoEvent{
+		SessionID:    "session-1",
+		AgentName:    "helper",
+		Model:        "openai/gpt-5",
+		ContextLimit: 200,
+	})
+	assert.Equal(t, "15%", m.contextPercent())
+	assert.Equal(t, "15%", m.agentContextPercent("helper"))
+}

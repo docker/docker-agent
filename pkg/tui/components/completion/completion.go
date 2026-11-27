@@ -133,22 +133,24 @@ type Manager interface {
 	// SetEditorBottom sets the height from the bottom of the screen where the editor ends.
 	// This is used to position the completion popup above the editor.
 	SetEditorBottom(height int)
+	SetAnchor(x, width, bottom int)
 }
 
 // manager represents an item completion component that manages completion state and UI
 type manager struct {
-	keyMap        completionKeyMap
-	width         int
-	height        int
-	editorBottom  int // height from screen bottom where editor ends (for popup positioning)
-	items         []Item
-	filteredItems []Item
-	query         string
-	selected      int
-	scrollOffset  int
-	visible       bool
-	matchMode     MatchMode
-	loading       bool // true when async loading is in progress
+	keyMap               completionKeyMap
+	width                int
+	height               int
+	anchorX, anchorWidth int
+	editorBottom         int // height from screen bottom where editor ends (for popup positioning)
+	items                []Item
+	filteredItems        []Item
+	query                string
+	selected             int
+	scrollOffset         int
+	visible              bool
+	matchMode            MatchMode
+	loading              bool // true when async loading is in progress
 }
 
 // New creates a new  completion component
@@ -323,6 +325,11 @@ func (c *manager) SetEditorBottom(height int) {
 	c.editorBottom = height
 }
 
+// SetAnchor pins the completion popup to the top of the composer dock.
+func (c *manager) SetAnchor(x, width, bottom int) {
+	c.anchorX, c.anchorWidth, c.editorBottom = x, width, bottom
+}
+
 func (c *manager) View() string {
 	if !c.visible {
 		return ""
@@ -371,7 +378,7 @@ func (c *manager) View() string {
 			if item.Description != "" {
 				line = lipgloss.JoinHorizontal(lipgloss.Top, line, " ", descStyle.Render(item.Description))
 			}
-			if pad := (c.width - 6) - lipgloss.Width(line); pad > 0 {
+			if pad := (min(c.width, cmp.Or(c.anchorWidth, c.width)) - 6) - lipgloss.Width(line); pad > 0 {
 				line += itemStyle.Render(strings.Repeat(" ", pad))
 			}
 
@@ -401,10 +408,17 @@ func (c *manager) GetLayers() []*lipgloss.Layer {
 
 	// Use actual editor height if set, otherwise fall back to reasonable default
 	editorHeight := cmp.Or(c.editorBottom, 4)
-	yPos := max(c.height-viewHeight-editorHeight-1, 0)
+	yPos := max(c.height-viewHeight-editorHeight, 0)
+	x := c.anchorX
+	if c.anchorWidth == 0 {
+		x = styles.AppPadding
+	}
+	if available := c.width - x; available > 0 {
+		view = lipgloss.NewStyle().MaxWidth(min(available, cmp.Or(c.anchorWidth, available))).Render(view)
+	}
 
 	return []*lipgloss.Layer{
-		lipgloss.NewLayer(view).X(styles.AppPadding).Y(yPos),
+		lipgloss.NewLayer(view).X(x).Y(yPos),
 	}
 }
 

@@ -169,13 +169,14 @@ func TestCloseLastTabKeepsUIUntilReplacement(t *testing.T) {
 
 			_, cmd := m.handleCloseTab(oldID)
 
-			assert.NotContains(t, m.tabs, oldID)
 			if fail {
-				assert.Zero(t, m.supervisor.Count())
+				assert.Contains(t, m.tabs, oldID)
+				assert.Equal(t, 1, m.supervisor.Count())
 				assert.Same(t, oldPage, m.activeTab.chatPage)
 				assert.Same(t, oldEditor, m.activeTab.editor)
 				assert.True(t, hasMsg[notification.ShowMsg](collectMsgs(cmd)))
 			} else {
+				assert.NotContains(t, m.tabs, oldID)
 				assert.Equal(t, 1, m.supervisor.Count())
 				assert.NotSame(t, oldPage, m.activeTab.chatPage)
 				assert.NotSame(t, oldEditor, m.activeTab.editor)

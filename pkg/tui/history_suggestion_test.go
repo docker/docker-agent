@@ -30,7 +30,7 @@ func TestHistorySuggestionKeepsStatusBarVisible(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, _, _ := frozenClockRoot(t, width, height)
-			require.Equal(t, 3, root.editorLines-1, "default number of editable rows")
+			require.Equal(t, composerMinRows, root.composer.rows, "an empty draft starts at the composer floor")
 			require.NoError(t, root.history.Add(tc.prompt))
 			baseline := strings.Split(ansi.Strip(root.View().Content), "\n")
 			require.Len(t, baseline, height)
@@ -53,11 +53,11 @@ func TestHistorySuggestionKeepsStatusBarVisible(t *testing.T) {
 			}
 			t.Logf("preview renders %d rows; status bar is on row %d", len(lines), statusRow)
 			assert.Equal(t, height, statusRow, "status bar must stay on the last terminal row")
-			firstRow := root.contentHeight + 1 + root.tabBar.Height() + styles.EditorStyle.GetPaddingTop()
-			for i, want := range rows[:3] {
+			firstRow := root.composerDock().editorTop + styles.EditorStyle.GetPaddingTop()
+			for i, want := range rows[:composerMinRows] {
 				assert.Contains(t, lines[firstRow+i], want)
 			}
-			for _, hidden := range rows[3:] {
+			for _, hidden := range rows[composerMinRows:] {
 				assert.NotContains(t, frame, hidden)
 			}
 

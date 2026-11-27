@@ -25,7 +25,7 @@ func TestTextOccupancyUsesVisibleWrappedGlyphs(t *testing.T) {
 	// penultimate row wraps, and each CJK glyph occupies two columns.
 	e.SetValue("earlier\n" + strings.Repeat("界", 12) + "\n字  語")
 	frame := styles.EditorStyle
-	x := origin.X + frame.GetPaddingLeft()
+	x := origin.X + frame.GetMarginLeft() + frame.GetPaddingLeft()
 	y := origin.Y + frame.GetPaddingTop()
 	want := []image.Rectangle{
 		image.Rect(x, y, x+12, y+1),

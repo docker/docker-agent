@@ -68,12 +68,12 @@ func TestContextPercent_FallbackToSingleSession(t *testing.T) {
 	m := New(animation.NewRuntime(), t.Context(), sessionState).(*model)
 
 	// Session with no active stream (e.g., restored from persistence)
-	m.sessionUsage["session-1"] = &runtime.Usage{
+	m.sessionUsage["session-1"] = &sessionUsage{Usage: runtime.Usage{
 		InputTokens:   5000,
 		OutputTokens:  5000,
 		ContextLength: 10000,
 		ContextLimit:  100000,
-	}
+	}}
 
 	assert.Equal(t, "10%", m.contextPercent())
 }
@@ -156,7 +156,7 @@ func (s *testSidebar) startStream(sessionID, agentName string) {
 	if len(s.sessionStack) == 0 {
 		s.rootSessionID = sessionID
 	}
-	s.sessionStack = append(s.sessionStack, sessionID)
+	s.sessionStack = append(s.sessionStack, streamIdentity{sessionID, agentName})
 }
 
 func (s *testSidebar) stopStream() {

@@ -24,6 +24,7 @@ type KeyMap struct {
 	CycleAgent            key.Binding
 	ModelPicker           key.Binding
 	ClearQueue            key.Binding
+	CloseTab              key.Binding
 	Suspend               key.Binding
 	ToggleSidebar         key.Binding
 	EditExternal          key.Binding
@@ -69,7 +70,7 @@ var namedKeys = map[string]bool{
 // table makes an override onto one of them rejected-with-warning rather than
 // silently shadowed by the built-in handler.
 var reservedKeys = []string{
-	"ctrl+t", "ctrl+w", "ctrl+p", "ctrl+n", // tab bar
+	"ctrl+t", "ctrl+p", "ctrl+n", // tab bar
 	"shift+tab", // cycle thinking level
 	"esc",       // cancel / dismiss
 	"ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5",
@@ -89,6 +90,7 @@ func DefaultKeyMap() KeyMap {
 		ToggleHideToolResults: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("Ctrl+o", "toggle hide tool results")),
 		CycleAgent:            key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("Ctrl+s", "cycle agent")),
 		ModelPicker:           key.NewBinding(key.WithKeys("ctrl+m"), key.WithHelp("Ctrl+m", "model picker")),
+		CloseTab:              key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("Ctrl+w", "close tab")),
 		ClearQueue:            key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("Ctrl+x", "clear queue")),
 		Suspend:               key.NewBinding(key.WithKeys("ctrl+z"), key.WithHelp("Ctrl+z", "suspend")),
 		ToggleSidebar:         key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("Ctrl+b", "toggle sidebar")),
@@ -121,6 +123,7 @@ func actionMapFor(keys *KeyMap) []actionEntry {
 		{"cycle_agent", &keys.CycleAgent, "cycle agent"},
 		{"model_picker", &keys.ModelPicker, "model picker"},
 		{"clear_queue", &keys.ClearQueue, "clear queue"},
+		{"close_tab", &keys.CloseTab, "close tab"},
 		{"suspend", &keys.Suspend, "suspend"},
 		{"toggle_sidebar", &keys.ToggleSidebar, "toggle sidebar"},
 		{"edit_external", &keys.EditExternal, "edit in external editor"},

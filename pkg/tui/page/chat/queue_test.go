@@ -847,3 +847,15 @@ func (r *skillDispatchRuntime) ReadSkillContent(ctx context.Context, sess *sessi
 func (queueTestRuntime) ReadSkillContent(context.Context, *session.Session, string) (string, error) {
 	return "", nil
 }
+
+func TestHandleSendMsg_BypassQueueExecutesWhileWorking(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), queueTestRuntime{}, sess), service.NewSessionState(sess)).(*chatPage)
+	p.working = true
+	p.sendMode = messages.SendModeQueue
+
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "resolved skill prompt", BypassQueue: true})
+	require.NotNil(t, cmd)
+	assert.Equal(t, 0, p.QueueLength(), "BypassQueue message must not be queued while working")
+}

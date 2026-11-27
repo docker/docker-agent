@@ -64,12 +64,12 @@ func (e *editor) AppendOccupiedTextCells(dst []image.Rectangle, origin image.Poi
 }
 
 // textareaOrigin is the textarea's top-left inside the editor View: the frame
-// (margin, border and padding) plus any attachment banner rows above it.
+// (margin, border and padding). The attachment banner is laid out separately.
 func (e *editor) textareaOrigin() image.Point {
-	frame := styles.EditorStyle
+	frame := e.frame()
 	return image.Pt(
 		frame.GetMarginLeft()+frame.GetBorderLeftSize()+frame.GetPaddingLeft(),
-		frame.GetMarginTop()+frame.GetBorderTopSize()+frame.GetPaddingTop()+e.BannerHeight(),
+		frame.GetMarginTop()+frame.GetBorderTopSize()+frame.GetPaddingTop(),
 	)
 }
 

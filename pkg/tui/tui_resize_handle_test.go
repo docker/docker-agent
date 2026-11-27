@@ -46,26 +46,26 @@ func TestRenderResizeHandle_TinyWidths(t *testing.T) {
 func TestComposerGripFollowsDragFromPaddedEdge(t *testing.T) {
 	for _, chrome := range []string{"plain", "tabs and attachment"} {
 		t.Run(chrome, func(t *testing.T) {
-			m, _, _ := frozenClockRoot(t, 160, 40)
+			m, _, _ := frozenClockRoot(t, 320, 40)
 			m.showTopMargin = true
-			m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+			m.Update(tea.WindowSizeMsg{Width: 320, Height: 40})
 			m.composerGrip = resizegrip.Reveal{} // Snap to targets; timed fades are tested in resizegrip.
 			if chrome != "plain" {
 				m.tabBar.SetTabs([]messages.TabInfo{{SessionID: "profile", Title: "One"}, {SessionID: "second", Title: "Two"}}, 0)
-				m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+				m.Update(tea.WindowSizeMsg{Width: 320, Height: 40})
 				file := filepath.Join(t.TempDir(), "attachment.txt")
 				require.NoError(t, os.WriteFile(file, []byte("attached"), 0o600))
 				before := m.contentHeight
 				m.Update(messages.InsertFileRefMsg{FilePath: file})
-				require.Equal(t, 1, m.activeTab.editor.BannerHeight())
-				require.Equal(t, before-1, m.contentHeight, "attachment adds a row without taking an editable row")
+				require.Positive(t, m.activeTab.editor.BannerHeight())
+				require.Equal(t, before-m.activeTab.editor.BannerHeight(), m.contentHeight, "attachment adds a row without taking an editable row")
 			}
 			textRows := func() int {
 				_, editorHeight := m.activeTab.editor.GetSize()
-				return editorHeight - styles.EditorStyle.GetVerticalFrameSize() - m.activeTab.editor.BannerHeight()
+				return editorHeight - styles.EditorStyle.GetVerticalFrameSize()
 			}
-			assert.Equal(t, 3, textRows(), "default matches upstream's editable height")
-			y := m.topMargin() + m.contentHeight
+			assert.Equal(t, composerMinRows, textRows(), "empty draft stays at the composer floor")
+			y := m.topMargin() + m.composerDock().separatorTop
 			start := (m.width - resizeHandleWidth) / 2
 			segment := strings.Repeat("─", resizeHandleWidth)
 			blank := strings.Repeat(" ", m.width)
@@ -77,7 +77,7 @@ func TestComposerGripFollowsDragFromPaddedEdge(t *testing.T) {
 			m.Update(tea.MouseMotionMsg{X: start, Y: y})
 			assert.Contains(t, m.renderResizeHandle(m.width), styles.ResizeHandleHoverStyle.Render(segment))
 
-			assert.False(t, m.composerResizeHit(m.width/2, m.editorTop()+styles.EditorStyle.GetPaddingTop()))
+			assert.False(t, m.composerResizeHit(m.width/2, m.composerDock().editorTop+styles.EditorStyle.GetPaddingTop()))
 			m.Update(tea.MouseClickMsg{X: -1, Y: y, Button: tea.MouseLeft})
 			require.False(t, m.isDragging)
 			m.Update(tea.MouseClickMsg{X: 0, Y: y, Button: tea.MouseLeft})
@@ -85,12 +85,12 @@ func TestComposerGripFollowsDragFromPaddedEdge(t *testing.T) {
 			assert.NotEqual(t, edge, m.renderResizeHandle(m.width), "press darkens the grip")
 			for _, row := range []int{y, y - 4} {
 				m.Update(tea.MouseMotionMsg{X: 0, Y: row, Button: tea.MouseLeft})
-				require.Equal(t, row, m.topMargin()+m.contentHeight, "divider follows the pointer")
+				require.Equal(t, row, m.topMargin()+m.composerDock().separatorTop, "divider follows the pointer")
 				assert.Equal(t, shown, strings.Split(ansi.Strip(m.View().Content), "\n")[row])
 			}
 			m.Update(tea.MouseMotionMsg{X: 0, Y: m.height - 1, Button: tea.MouseLeft})
-			assert.Equal(t, y, m.topMargin()+m.contentHeight, "manual minimum matches the default")
-			assert.Equal(t, 3, textRows(), "drag floor keeps three editable rows")
+			assert.Equal(t, y, m.topMargin()+m.composerDock().separatorTop, "manual minimum matches the default")
+			assert.Equal(t, composerMinRows, textRows(), "drag floor preserves the editable cursor row")
 			m.Update(tea.MouseReleaseMsg{X: -1, Y: y, Button: tea.MouseLeft})
 			assert.False(t, m.isDragging)
 			assert.Equal(t, blank, m.renderResizeHandle(m.width))
@@ -156,7 +156,7 @@ func TestHistorySuggestionFollowsComposerResize(t *testing.T) {
 		require.Len(t, rows, height)
 		assert.Equal(t, status, rows[height-1], "status remains on the last terminal row")
 		assert.Equal(t, ansi.Strip(m.renderResizeHandle(m.width)), rows[m.topMargin()+m.contentHeight])
-		firstTextRow := m.topMargin() + m.editorTop() + styles.EditorStyle.GetPaddingTop()
+		firstTextRow := m.topMargin() + m.composerDock().editorTop + styles.EditorStyle.GetPaddingTop()
 		for i, want := range preview[:visible] {
 			assert.Contains(t, rows[firstTextRow+i], want)
 		}
@@ -166,16 +166,16 @@ func TestHistorySuggestionFollowsComposerResize(t *testing.T) {
 	}
 
 	m.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
-	checkPreview(3)
+	checkPreview(composerMinRows)
 
 	x, y := width/2, m.topMargin()+m.contentHeight
 	m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	require.True(t, m.isDragging)
 	m.Update(tea.MouseMotionMsg{X: x, Y: y - 2, Button: tea.MouseLeft})
-	checkPreview(5)
+	checkPreview(composerMinRows + 2)
 	m.Update(tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseLeft})
 	m.Update(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
-	checkPreview(3)
+	checkPreview(composerMinRows)
 
 	require.Equal(t, "h", m.activeTab.editor.Value(), "the preview isn't editor input")
 	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})

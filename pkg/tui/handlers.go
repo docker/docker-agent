@@ -464,6 +464,11 @@ func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
 // handleTogglePause toggles whether the runtime loop is paused at iteration
 // boundaries. The pause kicks in once the in-flight LLM request and its tool
 // calls finish; running /pause again resumes the loop.
+//
+// The composer footer reflects this: requesting a pause
+// while the agent is working shows "Pausing…" until the runtime emits a
+// RuntimePausedEvent at the next iteration boundary (flipping it to
+// "Paused"); requesting a pause while idle shows "Paused" immediately.
 func (m *appModel) handleTogglePause() (tea.Model, tea.Cmd) {
 	paused, supported := m.application.TogglePause()
 	switch {
@@ -475,10 +480,10 @@ func (m *appModel) handleTogglePause() (tea.Model, tea.Cmd) {
 			return m, notification.InfoCmd("Pausing after the current request — /pause again to resume")
 		}
 		m.activeTab.sessionState.SetPauseState(service.PausePaused)
-		return m, notification.InfoCmd("Runtime paused — /pause again to resume")
+		return m, tea.Batch(notification.InfoCmd("Runtime paused — /pause again to resume"), m.syncComposerHeight())
 	default:
 		m.activeTab.sessionState.SetPauseState(service.PauseNone)
-		return m, notification.SuccessCmd("Runtime resumed")
+		return m, tea.Batch(notification.SuccessCmd("Runtime resumed"), m.syncComposerHeight())
 	}
 }
 
@@ -963,6 +968,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		HideToolResults:               settings.HideToolResults,
 		RenderImages:                  settings.GetRenderImages(),
 		ShowBanner:                    settings.GetShowBanner(),
+		HideSingleTab:                 settings.GetHideSingleTab(),
 		TopMargin:                     m.showTopMargin,
 		FadeScrollEdges:               settings.GetFadeScrollEdges(),
 		YOLO:                          settings.YOLO,
@@ -1017,6 +1023,8 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 		cmd = tea.Batch(cmd, m.syncImageRendering(before))
 	}
 	m.tabBar.SetMaxTitleLength(preferences.TabTitleMaxLength)
+	m.tabBar.SetHideSingle(preferences.HideSingleTab)
+	m.statusBar.SetShowNewTab(m.tabBar.Height() == 0 && m.supervisor != nil && m.supervisor.Spawner() != nil)
 	cmd = tea.Batch(cmd, m.updateChatCmd(messages.SessionToggleChangedMsg{}))
 	oldMargin := m.topMargin()
 	terminalHeight := m.height + oldMargin
@@ -1110,6 +1118,7 @@ func savePreferences(p messages.Preferences) error {
 		s.HideToolResults = p.HideToolResults
 		s.RenderImages = boolPreference(p.RenderImages, true)
 		s.ShowBanner = boolPreference(p.ShowBanner, true)
+		s.HideSingleTab = p.HideSingleTab
 		s.TopMargin = p.TopMargin
 		s.FadeScrollEdges = boolPreference(p.FadeScrollEdges, true)
 		s.YOLO = p.YOLO
@@ -1174,6 +1183,7 @@ func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.Send
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
+		HideSingleTab:   settings.GetHideSingleTab(),
 		TopMargin:       settings.GetTopMargin(),
 		FadeScrollEdges: settings.GetFadeScrollEdges(),
 		YOLO:            settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
@@ -1302,7 +1312,7 @@ func (m *appModel) handleAttachFile(filePath string) (tea.Model, tea.Cmd) {
 				}),
 			)
 		}
-		return m, notification.SuccessCmd("File attached: " + filePath)
+		return m, tea.Batch(notification.SuccessCmd("File attached: "+filePath), m.syncComposerHeight())
 	}
 
 	// No path provided — open the file picker dialog

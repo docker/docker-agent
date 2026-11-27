@@ -79,6 +79,9 @@ type Settings struct {
 	ShowBanner *bool `yaml:"show_banner,omitempty"`
 	// TopMargin adds a blank row above the TUI in terminals taller than 24 rows.
 	TopMargin bool `yaml:"top_margin,omitempty"`
+	// HideSingleTab hides the composer tab strip when only one session is open
+	// and moves the new-tab action into the status bar.
+	HideSingleTab bool `yaml:"hide_single_tab,omitempty"`
 	// FadeScrollEdges dims viewport edges when content is hidden.
 	// Defaults to true when not set.
 	FadeScrollEdges *bool `yaml:"fade_scroll_edges,omitempty"`
@@ -308,6 +311,11 @@ func (s *Settings) GetRenderImages() bool {
 // GetTopMargin returns whether the optional top margin is enabled.
 func (s *Settings) GetTopMargin() bool {
 	return s != nil && s.TopMargin
+}
+
+// GetHideSingleTab returns whether the tab strip is hidden when only one session is open.
+func (s *Settings) GetHideSingleTab() bool {
+	return s != nil && s.HideSingleTab
 }
 
 // GetShowBanner returns whether the startup banner is displayed, defaulting to true.

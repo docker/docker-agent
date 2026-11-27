@@ -146,7 +146,7 @@ func TestWriterClipsSingleVisibleUpscaledMarkerRow(t *testing.T) {
 	assert.NotContains(t, commands, "\x1b_Ga=t,")
 
 	// A foreground mask at the image edge must retain the later row's source offset.
-	writer.SetContent(lines[15], stdimage.Rect(2, 0, 3, 1))
+	writer.SetContent(lines[15], ForegroundLayer{Bounds: stdimage.Rect(2, 0, 3, 1)})
 	commands = writeFrame()
 	require.Equal(t, 1, strings.Count(commands, "\x1b_Ga=p,"))
 	assert.Contains(t, commands, "\x1b[1;4H\x1b_Ga=p,")
@@ -223,4 +223,40 @@ func TestWriterDisablingClearsExistingPlacements(t *testing.T) {
 			assert.Contains(t, output.String(), "a=p,i=")
 		})
 	}
+}
+
+func TestWriterClipsForegroundPreviewToViewport(t *testing.T) {
+	var data, output bytes.Buffer
+	require.NoError(t, png.Encode(&data, stdimage.NewGray(stdimage.Rect(0, 0, 100, 100))))
+	img := Inline{PNGData: data.Bytes(), Width: 100, Height: 100}
+	markerLines := RenderMarkers(img, 24)
+	require.GreaterOrEqual(t, len(markerLines), 4)
+	layerContent := strings.Join(markerLines, "\n")
+	frame := strings.Repeat(strings.Repeat(" ", 40)+"\n", 11) + strings.Repeat(" ", 40)
+
+	writer := NewWriter(&output)
+
+	// Partly off the left and top edges: clipped to (0,0) with non-zero source crop.
+	writer.SetContent(frame, ForegroundLayer{
+		Bounds:       stdimage.Rect(-10, -2, 14, len(markerLines)-2),
+		ImageContent: layerContent,
+	})
+	output.Reset()
+	_, err := writer.Write([]byte("frame"))
+	require.NoError(t, err)
+	rendered := output.String()
+	require.Equal(t, 1, strings.Count(rendered, "\x1b_Ga=p,"))
+	assert.Contains(t, rendered, "\x1b[1;1H\x1b_Ga=p,")
+	assert.NotContains(t, rendered, "\x1b[1;-")
+	assert.NotContains(t, rendered, ",x=0,")
+
+	// Fully off-screen to the left: dropped completely.
+	writer.SetContent(frame, ForegroundLayer{
+		Bounds:       stdimage.Rect(-30, 0, -6, len(markerLines)),
+		ImageContent: layerContent,
+	})
+	output.Reset()
+	_, err = writer.Write([]byte("frame"))
+	require.NoError(t, err)
+	assert.NotContains(t, output.String(), "\x1b_Ga=p,")
 }

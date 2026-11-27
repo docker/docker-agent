@@ -1,6 +1,7 @@
 package sidebar
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -76,6 +77,7 @@ type Model interface {
 	layout.Positionable
 
 	SetTokenUsage(event *runtime.TokenUsageEvent)
+	ActiveContextUsage() (used, limit int64, known bool)
 	SetTodos(result *tools.ToolCallResult) error
 	SetMode(mode Mode)
 	// SetMirroredPadding swaps the horizontal edge padding so the sidebar hugs
@@ -320,15 +322,25 @@ func transferTimer(d time.Duration, gen int64, kind transferTimerKind) TransferT
 	return TransferTimer{Duration: d, Msg: transferTimerMsg{gen: gen, kind: kind}}
 }
 
+type streamIdentity struct {
+	sessionID, agent string
+}
+
+type sessionUsage struct {
+	runtime.Usage
+
+	restored bool
+}
+
 // model implements Model
 type model struct {
 	ar           *animation.Runtime
 	width        int
 	height       int
-	xPos         int                       // absolute x position on screen
-	yPos         int                       // absolute y position on screen
-	layoutCfg    LayoutConfig              // layout configuration for spacing
-	sessionUsage map[string]*runtime.Usage // sessionID -> latest usage snapshot
+	xPos         int                      // absolute x position on screen
+	yPos         int                      // absolute y position on screen
+	layoutCfg    LayoutConfig             // layout configuration for spacing
+	sessionUsage map[string]*sessionUsage // sessionID -> latest usage snapshot
 	// budgetUsage is the newest run-budget snapshot, or nil on an
 	// unbudgeted run. It is a single value rather than a per-session map
 	// because one budget covers the whole run, sub-sessions included.
@@ -360,9 +372,9 @@ type model struct {
 	availableSkills      int
 	toolsLoading         bool // true when more tools may still be loading
 	sessionState         *service.SessionState
-	workingAgent         string   // Name of the agent currently working (empty if none)
-	sessionStack         []string // Active stream session IDs; the top is the active (deepest) session
-	rootSessionID        string   // Main (top-level) session, shown when no stream is active
+	workingAgent         string           // Name of the agent currently working (empty if none)
+	sessionStack         []streamIdentity // The top is the active (deepest) session
+	rootSessionID        string           // Main (top-level) session, shown when no stream is active
 	scrollview           *scrollview.Model
 	workingDirectory     string
 	gitBranchName        string // current git branch, empty if not in a repo
@@ -441,7 +453,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		width:             20,
 		layoutCfg:         DefaultLayoutConfig(),
 		height:            24,
-		sessionUsage:      make(map[string]*runtime.Usage),
+		sessionUsage:      make(map[string]*sessionUsage),
 		todoComp:          todotool.NewSidebarComponent(),
 		transferAnimation: ar.Subscribe(),
 		spinner:           spinner.NewThemed(ar, spinner.ModeSpinnerOnly, func() lipgloss.Style { return styles.SpinnerDotsHighlightStyle }),
@@ -527,14 +539,24 @@ func (m *model) SetTokenUsage(event *runtime.TokenUsageEvent) {
 
 	// Store/replace by session ID (each event has cumulative totals for that session)
 	usage := *event.Usage
-	m.sessionUsage[event.SessionID] = &usage
+	snapshot := &sessionUsage{Usage: usage}
+	if usage.ContextLength == 0 && usage.ContextLimit == 0 {
+		// Accounting-only updates must not replace a conversation's reading.
+		if prev := m.sessionUsage[event.SessionID]; prev != nil {
+			snapshot.ContextLength = prev.ContextLength
+			snapshot.ContextLimit = prev.ContextLimit
+			snapshot.CompactionThreshold = prev.CompactionThreshold
+			snapshot.restored = prev.restored
+		}
+	}
+	m.sessionUsage[event.SessionID] = snapshot
 
 	// Record the per-agent snapshot and the session→agent cost attribution
 	// in the shared session state so the agent roster and the agent-details
 	// dialog can show per-agent context usage and cumulative cost.
 	// Background agent tasks reach this path too: their usage events are
 	// forwarded out-of-band by the runtime.
-	m.sessionState.SetAgentUsage(event.SessionID, event.AgentName, usage)
+	m.sessionState.SetAgentUsage(event.SessionID, event.AgentName, snapshot.Usage)
 
 	// Mark session as having content once we receive token usage
 	m.sessionHasContent = true
@@ -551,6 +573,9 @@ func (m *model) SetTodos(result *tools.ToolCallResult) error {
 // compactionModel and primaryContextLimit attribute a capped contextLimit to the
 // dedicated compaction model imposing it; both are ""/0 when the limit isn't capped.
 func (m *model) SetAgentInfo(agentName, modelID, description string, contextLimit int64, compactionModel string, primaryContextLimit int64) tea.Cmd {
+	if contextLimit > 0 && agentName != "" {
+		m.updateContextLimit(agentName, contextLimit)
+	}
 	if m.currentAgent == agentName && m.agentModel == modelID && m.agentDescription == description &&
 		m.agentCompactionModel == compactionModel && m.agentPrimaryLimit == primaryContextLimit {
 		return nil
@@ -580,6 +605,32 @@ func (m *model) SetAgentInfo(agentName, modelID, description string, contextLimi
 	}
 	m.invalidateCache()
 	return nil
+}
+
+func (m *model) updateContextLimit(agent string, limit int64) {
+	id := m.activeSessionID()
+	activeAgent := m.workingAgent
+	if activeAgent == "" {
+		if n := len(m.sessionStack); n > 0 {
+			activeAgent = m.sessionStack[n-1].agent
+		}
+	}
+	if activeAgent != "" && agent != activeAgent {
+		// Metadata may precede the delegated stream or return to its parent.
+		return
+	}
+	if usage := m.sessionUsage[id]; usage != nil && (!usage.restored || usage.ContextLength > 0) && usage.ContextLimit != limit {
+		usage.ContextLimit = limit
+		usage.restored = false
+		m.invalidateCache()
+	}
+	if m.sessionState != nil {
+		if agentUsage, ok := m.sessionState.AgentUsage(agent); ok && agentUsage.ContextLimit != limit {
+			agentUsage.ContextLimit = limit
+			m.sessionState.SetAgentUsage("", agent, agentUsage)
+			m.invalidateCache()
+		}
+	}
 }
 
 // SetTeamInfo sets the available agents in the team
@@ -1061,12 +1112,12 @@ func (m *model) LoadFromSession(sess *session.Session) {
 
 	// Load token usage from session
 	if sess.InputTokens > 0 || sess.OutputTokens > 0 || totalCost > 0 {
-		m.sessionUsage[sess.ID] = &runtime.Usage{
+		m.sessionUsage[sess.ID] = &sessionUsage{restored: true, Usage: runtime.Usage{
 			InputTokens:   sess.InputTokens,
 			OutputTokens:  sess.OutputTokens,
 			ContextLength: sess.InputTokens + sess.OutputTokens,
 			Cost:          totalCost,
-		}
+		}}
 	}
 
 	// The restored session is the main session until a stream starts. A freshly
@@ -1124,21 +1175,19 @@ func (m *model) ResetStreamTracking() {
 // flickering between the parent and sub-session.
 func (m *model) activeSessionID() string {
 	if n := len(m.sessionStack); n > 0 {
-		return m.sessionStack[n-1]
+		return m.sessionStack[n-1].sessionID
 	}
 	return m.rootSessionID
 }
 
 // activeSessionUsage returns the usage snapshot for the active session.
-func (m *model) activeSessionUsage() (*runtime.Usage, bool) {
+func (m *model) activeSessionUsage() (*sessionUsage, bool) {
 	if id := m.activeSessionID(); id != "" {
-		if usage, ok := m.sessionUsage[id]; ok {
-			return usage, true
-		}
+		usage, ok := m.sessionUsage[id]
+		return usage, ok
 	}
 
-	// Fallback: if there's exactly one session, use it (e.g. restored from
-	// persistence before any stream has started).
+	// Before a session is identified, fall back to the only snapshot.
 	if len(m.sessionUsage) == 1 {
 		for _, usage := range m.sessionUsage {
 			return usage, true
@@ -1155,22 +1204,24 @@ func (m *model) activeSessionTokens() (tokens int64, found bool) {
 	return 0, false
 }
 
-// contextPercent returns a context usage percentage string for the active session.
-func (m *model) contextPercent() string {
-	if usage, ok := m.activeSessionUsage(); ok {
-		return usageContextPercent(usage)
+// ActiveContextUsage returns the context reading for the visible conversation.
+// Restored totals alone are not a reading until the window size is known.
+func (m *model) ActiveContextUsage() (used, limit int64, known bool) {
+	if usage, ok := m.activeSessionUsage(); ok && !usage.restored {
+		return usage.ContextLength, usage.ContextLimit, usage.ContextLength > 0 || usage.ContextLimit > 0
 	}
-	return ""
+	return 0, 0, false
+}
+
+func (m *model) contextPercent() string {
+	used, limit, _ := m.ActiveContextUsage()
+	return styles.ContextPercent(used, limit)
 }
 
 // usageContextPercent formats a usage snapshot's context fill as "N%", or ""
-// when the snapshot is missing or its context limit is unknown.
+// when its context limit is unknown.
 func usageContextPercent(usage *runtime.Usage) string {
-	if usage == nil || usage.ContextLimit <= 0 {
-		return ""
-	}
-	percent := (float64(usage.ContextLength) / float64(usage.ContextLimit)) * 100
-	return fmt.Sprintf("%.0f%%", percent)
+	return styles.ContextPercent(usage.ContextLength, usage.ContextLimit)
 }
 
 // agentContextPercent returns the latest known context usage percentage for
@@ -1390,9 +1441,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// main session; nested sub-agent streams are pushed on top so their
 		// usage is shown while they run, then popped when they stop.
 		if len(m.sessionStack) == 0 {
-			m.rootSessionID = msg.SessionID
+			m.rootSessionID = cmp.Or(msg.SessionID, m.rootSessionID)
 		}
-		m.sessionStack = append(m.sessionStack, msg.SessionID)
+		m.sessionStack = append(m.sessionStack, streamIdentity{cmp.Or(msg.SessionID, m.activeSessionID()), msg.AgentName})
 		// If title hasn't been generated yet, show the title generation spinner
 		if !m.titleGenerated {
 			m.titleRegenerating = true
@@ -1977,7 +2028,7 @@ func (m *model) computeUsageStats() usageStats {
 	s.tokens, _ = m.activeSessionTokens()
 	s.contextPct = m.contextPercent()
 	if usage, ok := m.activeSessionUsage(); ok {
-		s.contextLevel = usageGaugeLevel(usage)
+		s.contextLevel = usageGaugeLevel(&usage.Usage)
 	}
 	return s
 }

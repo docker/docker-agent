@@ -1783,3 +1783,22 @@ func TestConfig_AliasSafetyRoundTrip(t *testing.T) {
 	assert.Equal(t, latest.SafetyModeStrict, alias.Safety)
 	assert.Equal(t, latest.SafetyModeBalanced, loaded.GetSettings().Safety)
 }
+
+func TestSettings_GetHideSingleTab(t *testing.T) {
+	var nilSettings *Settings
+	assert.False(t, nilSettings.GetHideSingleTab())
+	assert.False(t, (&Settings{}).GetHideSingleTab())
+	assert.True(t, (&Settings{HideSingleTab: true}).GetHideSingleTab())
+
+	data, err := yaml.Marshal(&Settings{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "hide_single_tab")
+
+	data, err = yaml.Marshal(&Settings{HideSingleTab: true})
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "hide_single_tab: true")
+
+	var decoded Settings
+	require.NoError(t, yaml.Unmarshal(data, &decoded))
+	assert.True(t, decoded.GetHideSingleTab())
+}

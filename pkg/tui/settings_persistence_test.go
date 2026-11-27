@@ -132,6 +132,7 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 		ExpandThinking:                true,
 		HideToolResults:               true,
 		ShowBanner:                    false,
+		HideSingleTab:                 true,
 		TopMargin:                     true,
 		YOLO:                          true,
 		RestoreTabs:                   true,
@@ -155,6 +156,7 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 	assert.Equal(t, preferences.ExpandThinking, settings.GetExpandThinking())
 	assert.Equal(t, preferences.HideToolResults, settings.HideToolResults)
 	assert.Equal(t, preferences.ShowBanner, settings.GetShowBanner())
+	assert.Equal(t, preferences.HideSingleTab, settings.GetHideSingleTab())
 	assert.Equal(t, preferences.TopMargin, settings.GetTopMargin())
 	assert.Equal(t, preferences.YOLO, settings.YOLO)
 	assert.Equal(t, preferences.RestoreTabs, settings.GetRestoreTabs())

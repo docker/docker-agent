@@ -17,10 +17,12 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
+	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 type wallClockCountingWriter struct{ writes, bytes atomic.Uint64 }
@@ -82,12 +84,8 @@ func frozenClockRoot(tb testing.TB, width, height int) (*appModel, time.Duration
 	return harnessRoot(tb, width, height, animation.NewRuntimeWithScheduler(frozenScheduler{}))
 }
 
-// harnessRoot is the shared body of wallClockRoot and frozenClockRoot. When ar
-// is non-nil it replaces the runtime created by New before the spinner and
-// chat page are built, so both share it. The tab bar constructed inside New
-// keeps the wall runtime, but it only reads ar.Now() and never schedules a
-// tick itself (the harness discards Init()'s commands and EnsureRunning goes
-// through m.ar), so its clock stays at zero.
+// harnessRoot shares the supplied runtime across composer, tab bar, spinner
+// and chat page so deterministic tests can advance their animations together.
 func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appModel, time.Duration, runtime.MemStats) {
 	tb.Helper()
 	if setter, ok := tb.(interface{ Setenv(key, value string) }); ok {
@@ -101,6 +99,7 @@ func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appM
 	m := New(tb.Context(), nil, a, "", func() {}, WithHideSidebar()).(*appModel)
 	if ar != nil {
 		m.ar = ar
+		m.tabBar = tabbar.New(ar, userconfig.Get().GetTabTitleMaxLength())
 	}
 	if cleaner, ok := tb.(interface{ Cleanup(f func()) }); ok {
 		cleaner.Cleanup(m.cleanupManagedResources)
@@ -112,6 +111,7 @@ func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appM
 	_ = page.SetSize(width, height-9)
 	m.tabs = map[string]*tabModel{"profile": {editor: m.activeTab.editor}}
 	m.supervisor.AddSession(tb.Context(), a, sess, "", nil)
+	m.tabBar.SetTabs(m.supervisor.GetTabs())
 	m.tabs["profile"].chatPage, m.tabs["profile"].sessionState = page, ss
 	m.activeTab, m.application = m.tabs["profile"], a
 	m.workingSpinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)

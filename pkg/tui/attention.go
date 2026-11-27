@@ -55,14 +55,18 @@ func (m *appModel) refreshTabs() tea.Cmd {
 	if m.supervisor == nil || m.tabBar == nil {
 		return nil
 	}
-	tabs, active := m.supervisor.GetTabs()
 	previous := m.tabBar.Height()
-	m.tabBar.SetTabs(tabs, active)
-	m.statusBar.SetShowNewTab(m.tabBar.Height() == 0)
+	m.syncTabs()
 	if previous != m.tabBar.Height() {
 		return m.resizeAll()
 	}
 	return nil
+}
+
+func (m *appModel) syncTabs() {
+	tabs, active := m.supervisor.GetTabs()
+	m.tabBar.SetTabs(tabs, active)
+	m.statusBar.SetShowNewTab(m.tabBar.Height() == 0 && m.supervisor != nil && m.supervisor.Spawner() != nil)
 }
 
 // replayPendingEvent consumes prompts only as they are opened, synchronously and in FIFO order.
@@ -124,6 +128,7 @@ func (m *appModel) retireAttention(tab *tabModel) {
 func (m *appModel) preparePageReplacement(tabID string) {
 	m.supervisor.RetirePage(tabID)
 	if tab := m.tabs[tabID]; tab != nil {
+		tab.pendingUsage = nil
 		m.retireAttention(tab)
 	}
 }

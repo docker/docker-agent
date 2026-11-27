@@ -57,6 +57,13 @@ func RGBToColor(r, g, b float64) color.Color {
 	return lipgloss.Color(RGBToHex(r, g, b))
 }
 
+// BlendColor mixes two colors by ratio (0 = a, 1 = b).
+func BlendColor(a, b color.Color, ratio float64) color.Color {
+	ar, ag, ab := ColorToRGB(a)
+	br, bg, bb := ColorToRGB(b)
+	return RGBToColor(ar+(br-ar)*ratio, ag+(bg-ag)*ratio, ab+(bb-ab)*ratio)
+}
+
 func clamp8(v float64) int {
 	if v < 0 {
 		return 0
@@ -448,4 +455,18 @@ func deriveEmphasisBg(hex string) color.Color {
 
 	nr, ng, nb := hslToRGB(h, s, l)
 	return lipgloss.Color(RGBToHex(nr, ng, nb))
+}
+
+// raisedEditorColor gives the input its own surface in themes predating editor_bg.
+func raisedEditorColor(colors ThemeColors) color.Color {
+	if colors.EditorBg != "" {
+		return lipgloss.Color(colors.EditorBg)
+	}
+	r, g, b := ColorToRGB(lipgloss.Color(colors.Background))
+	target := 1.0
+	if relativeLuminance(r, g, b) > 0.5 {
+		target = 0
+	}
+	const lift = 0.05
+	return RGBToColor(r+(target-r)*lift, g+(target-g)*lift, b+(target-b)*lift)
 }

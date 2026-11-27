@@ -87,7 +87,7 @@ func TestSettingsDialogNavigation(t *testing.T) {
 	require.Equal(t, rowTopMargin, d.selected[tabAppearance], "down must stop at the last row")
 
 	d.Update(up)
-	require.Equal(t, rowShowBanner, d.selected[tabAppearance])
+	require.Equal(t, rowHideSingleTab, d.selected[tabAppearance])
 }
 
 func TestSettingsDialogTabSwitching(t *testing.T) {
@@ -463,6 +463,24 @@ func TestSettingsDialogTogglesTopMargin(t *testing.T) {
 	applied, ok := msgs[1].(messages.ApplySettingsMsg)
 	require.True(t, ok)
 	assert.True(t, applied.Preferences.TopMargin)
+}
+
+func TestSettingsDialogTogglesHideSingleTab(t *testing.T) {
+	t.Parallel()
+
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.selected[tabAppearance] = rowHideSingleTab
+	assert.Contains(t, ansi.Strip(d.View()), "[ ] Hide tabs when only one session is open")
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	assert.Nil(t, cmd, "single-tab visibility changes only on save")
+	assert.Contains(t, ansi.Strip(d.View()), "[x] Hide tabs when only one session is open")
+
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	msgs := collectMsgs(cmd)
+	require.Len(t, msgs, 2)
+	applied, ok := msgs[1].(messages.ApplySettingsMsg)
+	require.True(t, ok)
+	assert.True(t, applied.Preferences.HideSingleTab)
 }
 
 func TestSettingsDialogApplyEmitsApplySettings(t *testing.T) {

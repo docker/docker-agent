@@ -9,6 +9,8 @@
 package tui_test
 
 import (
+	"fmt"
+	"regexp"
 	"testing"
 	"time"
 
@@ -43,6 +45,29 @@ func TestChat_PromptIsEditable(t *testing.T) {
 	// After submitting, the draft is sent and the agent's reply streams in.
 	d.Enter().
 		WaitFor(tuitest.Contains("2 + 2 equals 4."))
+}
+
+// TestChat_MultilinePromptReturnsToOneRow types a newline into the prompt,
+// which grows the bottom-anchored input upward by one row. Sending empties
+// the input, which holds its height briefly and then returns to one row.
+func TestChat_MultilinePromptReturnsToOneRow(t *testing.T) {
+	d := newTUI(t, "testdata/basic.yaml", 120, 40)
+
+	d.Type("What's 2+2?").
+		WaitFor(tuitest.Contains("What's 2+2?"))
+	_, row := d.MustFindText("What's 2+2?")
+
+	d.Press('j', tea.ModCtrl).
+		WaitFor(textOnRow("What's 2+2?", row-1))
+
+	d.Enter().
+		WaitFor(textOnRow("Type your message here…", row-1)).
+		WaitFor(tuitest.Contains("2 + 2 equals 4.")).
+		WaitFor(textOnRow("Type your message here…", row))
+}
+
+func textOnRow(text string, row int) tuitest.Matcher {
+	return tuitest.Matches(fmt.Sprintf(`^(?:.*\n){%d}.*%s`, row, regexp.QuoteMeta(text)))
 }
 
 func TestChat_CopyAssistantMessageToClipboard(t *testing.T) {

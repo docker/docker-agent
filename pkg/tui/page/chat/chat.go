@@ -193,6 +193,11 @@ type Page interface {
 	// standalone adapter, which dispatches all effects as visible.
 	UpdateEffects(msg tea.Msg) (Page, Effects)
 	VisualGeneration() uint64
+	ActiveContextUsage() (used, limit int64, known bool)
+}
+
+func (p *chatPage) ActiveContextUsage() (used, limit int64, known bool) {
+	return p.sidebar.ActiveContextUsage()
 }
 
 func (p *chatPage) VisualGeneration() uint64 { return p.messages.VisualGeneration() }

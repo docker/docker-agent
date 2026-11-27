@@ -525,7 +525,7 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Shift+Tab  | Cycle the current model's thinking-effort level (shows a `✻ Thinking: <level>` toast) |
 | Ctrl+1 – 9 | Switch directly to agent _N_ in the team list   |
 | Ctrl+T     | Open a new tab (additional agent session)       |
-| Ctrl+W     | Close the current tab                           |
+| Ctrl+W     | Close the current tab (when multiple tabs are open and focus is outside the editor; customizable via `close_tab`) |
 | Ctrl+N     | Next tab                                        |
 | Ctrl+P     | Previous tab                                    |
 | Ctrl+B     | Toggle the sidebar (full-UI mode only; disabled when --sidebar=false) |

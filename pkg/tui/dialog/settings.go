@@ -56,6 +56,7 @@ const (
 	rowHideToolResults
 	rowRenderImages
 	rowShowBanner
+	rowHideSingleTab
 	rowTopMargin
 	appearanceRowCount
 )
@@ -344,6 +345,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.RenderImages = !d.current.RenderImages
 		case rowShowBanner:
 			d.current.ShowBanner = !d.current.ShowBanner
+		case rowHideSingleTab:
+			d.current.HideSingleTab = !d.current.HideSingleTab
 		case rowTopMargin:
 			d.current.TopMargin = !d.current.TopMargin
 		}
@@ -580,6 +583,7 @@ func (d *settingsDialog) renderAppearanceTab(content *settingsContent, width int
 	toggle(rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)
 	toggle(rowRenderImages, "Render images", d.current.RenderImages)
 	toggle(rowShowBanner, "Show startup banner", d.current.ShowBanner)
+	toggle(rowHideSingleTab, "Hide tabs when only one session is open", d.current.HideSingleTab)
 	toggle(rowTopMargin, "Show top margin", d.current.TopMargin)
 }
 
@@ -666,7 +670,6 @@ func (d *settingsDialog) renderFooter(width, maxHeight int) string {
 	if d.confirmYOLO {
 		style = styles.WarningStyle
 	}
-	detail = style.Render(ansi.Wrap(detail, width, ""))
 	bindings := []string{"↑↓", "move", "←→/space", "change", "tab", "category", "enter", enter, "esc", "cancel"}
 	if HelpKeysWidth(bindings...) > width {
 		bindings = bindings[4:]
@@ -674,6 +677,7 @@ func (d *settingsDialog) renderFooter(width, maxHeight int) string {
 	actions := renderSettingsHelp(width, bindings...)
 	parts := []string{"", actions}
 	if detail != "" {
+		detail = style.Render(ansi.Wrap(detail, width, ""))
 		parts = []string{"", detail, actions}
 	}
 	if lipgloss.Height(strings.Join(parts, "\n")) > maxHeight && !d.confirmYOLO {
