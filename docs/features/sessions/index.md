@@ -14,6 +14,11 @@ Every `docker agent run` creates or resumes a **session**: the record of a conve
 
 A session is only persisted to disk once it has content (the first message added), so a run you cancel before sending anything never leaves an empty session behind.
 
+> [!NOTE]
+> Reopening a session restores conversation history. To also recover execution
+> progress after a crash, Go applications can opt into the
+> [Durable Runtime](../../guides/durable-runtime/index.md).
+
 ## Where Sessions Are Stored
 
 Sessions live in a SQLite database, `session.db`, under the [data directory](../cli/index.md#global-flags) (`~/.cagent` by default):

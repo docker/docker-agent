@@ -279,6 +279,16 @@
     - title: Troubleshooting
       url: /guides/troubleshooting/
 
+  groups:
+    - label: Durable Runtime
+      items:
+        - title: Durable Runtime Overview
+          url: /guides/durable-runtime/
+        - title: Build a Durable Worker
+          url: /guides/durable-runtime-quickstart/
+        - title: Recovery and Operations
+          url: /guides/durable-runtime-recovery/
+
 - section: Community
   items:
     - title: Contributing
