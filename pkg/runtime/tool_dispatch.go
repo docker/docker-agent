@@ -54,11 +54,11 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 		}
 	}
 
-	handlers[modelpicker.ToolNameChangeModel] = func(ctx context.Context, _ *session.Session, tc tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
-		return r.handleChangeModel(ctx, caller, tc, events)
+	handlers[modelpicker.ToolNameChangeModel] = func(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+		return r.handleChangeModel(ctx, sess, caller, tc, events)
 	}
-	handlers[modelpicker.ToolNameRevertModel] = func(ctx context.Context, _ *session.Session, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
-		return r.handleRevertModel(ctx, caller, events)
+	handlers[modelpicker.ToolNameRevertModel] = func(ctx context.Context, sess *session.Session, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+		return r.handleRevertModel(ctx, sess, caller, events)
 	}
 	handlers[transfertask.ToolNameTransferTask] = func(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
 		return r.handleTaskTransfer(ctx, sess, tc, events, caller)

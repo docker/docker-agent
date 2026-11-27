@@ -163,6 +163,7 @@ func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idl
 		// skip this: they share the root's tracker so a fan-out spends
 		// against one wallet rather than one allowance per child.
 		r.ensureBudget()
+		ctx = context.WithValue(ctx, rootSessionKey{}, sess)
 	}
 
 	// Register before the run goroutine starts so the session is listed in
