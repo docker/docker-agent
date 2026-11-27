@@ -394,6 +394,11 @@ func TestServer_ToolApproval_InvalidDecisionKeepsTaskWaiting(t *testing.T) {
 	})
 	requireInvalidParams(t, err, "decision 'maybe' not allowed; expected [approve, approve-in-context, reject]")
 
+	_, err = client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "reject", "reason": 123}),
+	})
+	requireInvalidParams(t, err, "reason must be a string")
+
 	after, err := client.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
 	require.NoError(t, err)
 	assert.Equal(t, a2a.TaskStateInputRequired, after.Status.State)

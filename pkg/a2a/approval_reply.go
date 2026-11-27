@@ -102,6 +102,11 @@ func (r *approvalRegistry) validateReply(msg *a2a.Message) error {
 	if allowed := allowedDecisions(run.grant); !slices.Contains(allowed, decision) {
 		return invalidReply(fmt.Sprintf("decision '%s' not allowed; expected [%s]", decision, strings.Join(allowed, ", ")))
 	}
+	if reason, ok := fr.Response["reason"]; ok {
+		if _, isString := reason.(string); !isString {
+			return invalidReply("reason must be a string")
+		}
+	}
 	return nil
 }
 
