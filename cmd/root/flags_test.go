@@ -148,9 +148,7 @@ func TestGatewayFlags_RunsParentBeforeMaterialisingEnvProvider(t *testing.T) {
 	// PersistentPreRunE that overrides --config-dir / --cache-dir /
 	// --data-dir. Because EnvProvider() caches its result, the parent
 	// override never landed in the cached chain — providers reading
-	// from the config dir were constructed with the wrong path
-	// (~/.config/cagent inside the sandbox image instead of the host
-	// config dir bind-mounted at the same location).
+	// from the config dir were constructed with the wrong path.
 	parentRanFirst := false
 	envProviderConsulted := false
 

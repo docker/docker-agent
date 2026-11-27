@@ -105,22 +105,6 @@ func Resolve(agentFilename string, envProvider environment.Provider, ociOpts ...
 	return source, nil
 }
 
-// ResolveWithConfig resolves against an already validated alias configuration.
-// It does not reload user configuration or silently fall back to another agent.
-func ResolveWithConfig(ref string, cfg *userconfig.Config, env environment.Provider) (config.Source, *userconfig.Alias, error) {
-	ref = cmp.Or(ref, "default")
-	alias, _ := cfg.GetAlias(ref)
-	if alias != nil {
-		ref = alias.Path
-	}
-	resolved, err := resolvePath(ref)
-	if err != nil {
-		return nil, nil, err
-	}
-	_, source := resolveOne(resolved, env, nil)
-	return source, alias, nil
-}
-
 // resolveOne maps a resolved path to the appropriate Source and a key for use
 // in Sources maps. The path must already be resolved via resolve().
 // This is the single place that decides which source type a reference maps to.

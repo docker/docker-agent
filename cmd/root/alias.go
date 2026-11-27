@@ -53,7 +53,6 @@ type aliasAddFlags struct {
 	safety          string
 	model           string
 	hideToolResults bool
-	sandbox         bool
 }
 
 func newAliasAddCmd() *cobra.Command {
@@ -70,8 +69,7 @@ the alias is used:
   --yolo               Automatically approve all tool calls without prompting
   --safety             Default safety mode: strict, balanced, restricted, or autonomous
   --model              Override the agent's model (format: [agent=]provider/model)
-  --hide-tool-results  Hide tool call results in the TUI
-  --sandbox            Always run the agent inside a Docker sandbox`,
+  --hide-tool-results  Hide tool call results in the TUI`,
 		Example: `  # Create a simple alias
   docker-agent alias add code myorg/notion-expert
 
@@ -87,9 +85,6 @@ the alias is used:
   # Create an alias with hidden tool results
   docker-agent alias add quiet myorg/coder --hide-tool-results
 
-  # Create an alias that always runs in a sandbox
-  docker-agent alias add safe-coder myorg/coder --sandbox
-
   # Create an alias with multiple options
   docker-agent alias add turbo myorg/coder --yolo --model anthropic/claude-sonnet-4-0`,
 		Args: cobra.ExactArgs(2),
@@ -102,7 +97,6 @@ the alias is used:
 	cmd.Flags().StringVar(&flags.safety, "safety", "", "Default safety mode when running the alias: strict, balanced, restricted, or autonomous (wins over --yolo)")
 	cmd.Flags().StringVar(&flags.model, "model", "", "Override agent model (format: [agent=]provider/model)")
 	cmd.Flags().BoolVar(&flags.hideToolResults, "hide-tool-results", false, "Hide tool call results in the TUI")
-	cmd.Flags().BoolVar(&flags.sandbox, "sandbox", false, "Always run the agent inside a Docker sandbox")
 
 	return cmd
 }
@@ -171,7 +165,6 @@ func runAliasAddCommand(cmd *cobra.Command, args []string, flags *aliasAddFlags)
 		Safety:          safety,
 		Model:           flags.model,
 		HideToolResults: flags.hideToolResults,
-		Sandbox:         flags.sandbox,
 	}
 
 	// Store the alias
@@ -195,9 +188,6 @@ func runAliasAddCommand(cmd *cobra.Command, args []string, flags *aliasAddFlags)
 	}
 	if flags.hideToolResults {
 		out.Printf("  Hide tool results: enabled\n")
-	}
-	if flags.sandbox {
-		out.Printf("  Sandbox: enabled\n")
 	}
 
 	if name == "default" {
@@ -279,9 +269,6 @@ func runAliasListCommand(cmd *cobra.Command, args []string, asJSON bool) (comman
 		}
 		if alias.HideToolResults {
 			options = append(options, "hide-tool-results")
-		}
-		if alias.Sandbox {
-			options = append(options, "sandbox")
 		}
 
 		if len(options) > 0 {

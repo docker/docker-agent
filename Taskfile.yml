@@ -247,11 +247,6 @@ tasks:
     cmds:
       - docker buildx build --push --platform linux/amd64,linux/arm64 -t docker/docker-agent --build-arg GIT_TAG --build-arg GIT_COMMIT .
 
-  template:
-    desc: Build the sandbox template image with the locally-built binary
-    cmds:
-      - docker buildx build --load --target=template --build-arg GIT_TAG --build-arg GIT_COMMIT -t docker/docker-agent-sbx-templates .
-
   docs-serve:
     desc: Preview the documentation site locally with Hugo
     dir: docs

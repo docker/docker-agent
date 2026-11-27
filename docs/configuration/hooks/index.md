@@ -1560,7 +1560,7 @@ See [the skill guard example](https://github.com/docker/docker-agent/blob/main/e
 ## Prompt file guard
 
 `prompt_file_guard` screens the instructions loaded by `add_prompt_files` without
-replacing its discovery, ordering, home/sandbox lookup, or per-turn refresh.
+replacing its discovery, ordering, home directory lookup, or per-turn refresh.
 It runs before newly loaded instructions enter session state or the main model's
 prompt. A denial or failure stops the turn; it never silently drops project rules
 and continues. With no guard configured, existing loading behavior is unchanged.

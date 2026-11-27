@@ -129,7 +129,7 @@ Models can be referenced inline or defined in the `models` section:
 
 - [**Hooks**](../hooks/index.md) — run shell commands at lifecycle events like tool calls and session start/end.
 - [**Permissions**](../permissions/index.md) — control which tools auto-approve, require confirmation, or are blocked.
-- [**Sandbox Mode**](../sandbox/index.md) — run agents in an isolated Docker container for security.
+- [**Docker Sandboxes**](../sandbox/index.md) — run Docker Agent and its tools in an isolated VM with `sbx`.
 - [**Structured Output**](../structured-output/index.md) — constrain agent responses to match a specific JSON schema.
 - [**Flavors**](../flavors/index.md) — ship one agent file with named variants, enabled at run time as YAML patches.
 

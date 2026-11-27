@@ -123,4 +123,4 @@ The shell toolset exposes one tool:
 > [!WARNING]
 > **Safety**
 >
-> The shell tool gives agents full access to the system shell. Always set `max_iterations` on agents that use the shell tool to prevent infinite loops. A value of 20–50 is typical for development agents. Use [Sandbox Mode](../../configuration/sandbox/index.md) for additional isolation.
+> The shell tool gives agents full access to the system shell. Always set `max_iterations` on agents that use the shell tool to prevent infinite loops. A value of 20–50 is typical for development agents. Use [Docker Sandboxes](../../configuration/sandbox/index.md) for additional isolation.

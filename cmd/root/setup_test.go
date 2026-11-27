@@ -533,7 +533,7 @@ func TestSetupWizard_ClaudeHarnessAlreadyLoggedIn(t *testing.T) {
 	assert.NotContains(t, output, "(Claude Code)", "the version must not repeat the product name")
 	assert.Contains(t, output, "--dangerously-skip-permissions")
 	assert.Contains(t, output, "--worktree")
-	assert.Contains(t, output, "`--sandbox` does not carry the `claude` CLI or its login", "sandbox mode must not be presented as harness isolation")
+	assert.Contains(t, output, "When running in an sbx sandbox, use a kit that provides the `claude` CLI")
 	assert.Contains(t, output, "docker agent run "+result.AgentFile)
 	assert.Contains(t, output, "docker agent doctor "+result.AgentFile)
 	assert.NotContains(t, output, "--model", "the harness model is not a docker agent provider model")

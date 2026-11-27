@@ -222,7 +222,7 @@ func (r *LocalRuntime) promptFilesCategory(ctx context.Context, names []string, 
 	var parts []string
 	var loaded []string
 	for _, name := range names {
-		for _, path := range promptfiles.PathsFromEnv(r.workingDir, home, name) {
+		for _, path := range promptfiles.Paths(r.workingDir, home, name) {
 			content, err := os.ReadFile(path)
 			if err != nil {
 				slog.WarnContext(ctx, "Context breakdown: failed to read prompt file", "path", path, "error", err)

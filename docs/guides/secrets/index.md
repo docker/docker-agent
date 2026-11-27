@@ -26,7 +26,7 @@ The first provider that has a value wins. You can mix and match — for example,
 
 Whatever provider returns the value, if that value looks like a [1Password secret reference](#1password-references) (it starts with `op://`), Docker Agent resolves it through the `op` CLI before handing it to a model provider or tool. This applies to every variable, API keys included, and needs no credential helper: `ANTHROPIC_API_KEY=op://Personal/Anthropic/api-key` in any source above is enough.
 
-When Docker Agent runs an agent with `--sandbox` and a Docker AI gateway is configured, the sandbox proxy authenticates gateway requests itself: it injects your Docker login token into HTTPS requests to the gateway host (docker.com domains only). The token never enters the sandbox — inside it, `DOCKER_TOKEN` is a proxy-managed placeholder.
+When running in [Docker Sandboxes](../../configuration/sandbox/index.md), configure the provider credentials through `sbx`. The workload kit can let the sandbox proxy authenticate requests without exposing the key to the VM. Docker Agent does not forward your host secrets.
 
 ## Environment Variables
 
@@ -68,7 +68,7 @@ docker agent run agent.yaml
 - `docker agent doctor` shows which name supplied each credential.
 
 > [!NOTE]
-> With `--sandbox`, the provider API keys that the sandbox proxy injects itself (such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`) are not read through Docker Agent, so neither the prefix nor `op://` references apply to them. Other variables are resolved on the host, prefix included, and forwarded under their plain name.
+> For proxy-managed credentials in Docker Sandboxes, configure secret references through `sbx`, not through Docker Agent’s environment-variable prefix.
 
 ## Env Files
 

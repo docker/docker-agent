@@ -46,7 +46,7 @@
       url: /configuration/permissions/
     - title: Ignoring Files
       url: /configuration/agentsignore/
-    - title: Sandbox Mode
+    - title: Docker Sandboxes
       url: /configuration/sandbox/
     - title: Structured Output
       url: /configuration/structured-output/

@@ -386,8 +386,8 @@ jobs:
           AFTER_SHA: ${{ github.sha }}
         run: ./scripts/ci-report-failures.sh
 
-  # Builds the image and the sandbox template, on Build Cloud whenever the run
-  # can authenticate to Docker Hub: both platforms natively on one runner.
+  # Builds both platforms natively on Build Cloud when the run can authenticate
+  # to Docker Hub.
   # main, v* tags and `image_mode: auto` dispatches on main push by digest,
   # untagged; every other run builds into the cache only. Runs that cannot
   # authenticate (PRs from forks, PRs opened by Dependabot and other bots
@@ -412,10 +412,8 @@ jobs:
     outputs:
       publish: ${{ steps.mode.outputs.publish }}
       image-digest: ${{ steps.image.outputs.digest }}
-      template-digest: ${{ steps.template.outputs.digest }}
     env:
       IMAGE: docker/docker-agent
-      TEMPLATE: docker/docker-agent-sbx-templates
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -449,7 +447,6 @@ jobs:
             {
               echo "publish=true"
               echo "image-outputs=type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true"
-              echo "template-outputs=type=image,name=${TEMPLATE},push-by-digest=true,name-canonical=true,push=true"
               echo "provenance=mode=max"
               echo "git-tag=${GITHUB_REF_NAME}"
               echo "git-commit=${GITHUB_SHA}"
@@ -460,7 +457,6 @@ jobs:
             {
               echo "publish=false"
               echo "image-outputs=type=cacheonly"
-              echo "template-outputs=type=cacheonly"
               echo "provenance=false"
               echo "git-tag=pr"
               echo "git-commit=dev"
@@ -513,28 +509,6 @@ jobs:
             GIT_TAG=${{ steps.mode.outputs.git-tag }}
             GIT_COMMIT=${{ steps.mode.outputs.git-commit }}
 
-      # A stage of the same Dockerfile with identical build args, so it reuses
-      # the builder-linux layer above and embeds the exact same binary.
-      - name: Build template
-        id: template
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        env:
-          DOCKER_BUILD_RECORD_UPLOAD: ${{ steps.mode.outputs.record-upload }}
-          DOCKER_BUILD_SUMMARY: ${{ steps.mode.outputs.record-upload }}
-        with:
-          builder: ${{ steps.cloud.outputs.builder || steps.local.outputs.name }}
-          context: .
-          target: template
-          platforms: ${{ steps.mode.outputs.platforms }}
-          load: false
-          github-token: ''
-          sbom: ${{ steps.mode.outputs.publish }}
-          provenance: ${{ steps.mode.outputs.provenance }}
-          outputs: ${{ steps.mode.outputs.template-outputs }}
-          build-args: |
-            GIT_TAG=${{ steps.mode.outputs.git-tag }}
-            GIT_COMMIT=${{ steps.mode.outputs.git-commit }}
-
   # Single required status check; see the header comment.
   gate:
     if: always()
@@ -554,8 +528,7 @@ jobs:
           jq -e '[.[] | .result] | all(. == "success" or . == "skipped")' <<< "$RESULTS" >/dev/null
 
   # Moves tags onto the digests pushed by `image` once the gate is green. On
-  # main only edge moves; on a v* tag the version tag and the floating latest
-  # tag that sandboxes pull by default.
+  # main only edge moves; on a v* tag the version tag moves.
   publish:
     if: needs.image.outputs.publish == 'true'
     needs: [ gate, image ]
@@ -566,9 +539,7 @@ jobs:
     timeout-minutes: 15
     env:
       IMAGE: docker/docker-agent
-      TEMPLATE: docker/docker-agent-sbx-templates
       IMAGE_DIGEST: ${{ needs.image.outputs.image-digest }}
-      TEMPLATE_DIGEST: ${{ needs.image.outputs.template-digest }}
     steps:
       # imagetools talks to the registry directly; no builder needed.
       - uses: $/.github/actions/setup-buildx
@@ -595,16 +566,3 @@ jobs:
           for tag in "${tags[@]}"; do args+=(-t "$tag"); done
           docker buildx imagetools create "${args[@]}" "${IMAGE}@${IMAGE_DIGEST}"
           docker buildx imagetools inspect "${IMAGE}:${VERSION}"
-
-      - name: Tag template
-        run: |
-          : "${TEMPLATE_DIGEST:?image produced no template digest}"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            version="${GITHUB_REF_NAME#v}"
-            tags=(-t "${TEMPLATE}:${version}" -t "${TEMPLATE}:latest")
-          else
-            version=edge
-            tags=(-t "${TEMPLATE}:edge")
-          fi
-          docker buildx imagetools create "${tags[@]}" "${TEMPLATE}@${TEMPLATE_DIGEST}"
-          docker buildx imagetools inspect "${TEMPLATE}:${version}"

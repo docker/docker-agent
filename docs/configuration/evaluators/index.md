@@ -95,7 +95,7 @@ Custom `base_url` and exact `endpoint` settings do **not** implicitly bypass the
 gateway. Their upstream target/path is forwarded through it, so the gateway must
 support that destination. For a local evaluator or a private deployment not served
 by the gateway, set `bypass_models_gateway: true`; its API key is then required
-and is included in credential preflight and sandbox forwarding.
+and is included in credential preflight.
 
 ## OpenAI Decisions
 

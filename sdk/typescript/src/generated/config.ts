@@ -916,9 +916,7 @@ export interface RoutingRule {
 /** Go: pkg/config/latest/types.go RuntimeDefaults */
 export interface RuntimeDefaults {
   stream_idle_timeout?: StreamIdleTimeout;
-  sandbox?: boolean;
   safety?: SafetyMode;
-  network_allowlist?: string[];
 }
 
 /** Go: pkg/config/latest/types.go SafetyMode */

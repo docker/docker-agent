@@ -35,7 +35,7 @@ $ docker agent run [config] [message...] [flags]
 | `--prompt-file <path>`                  | Include file contents as additional system context (repeatable)                                                                           |
 | `--attach <path>`                       | Attach an image file to the initial message                                                                                               |
 | `--dry-run`                             | Initialize the agent without executing anything (useful for validating a config)                                                          |
-| `--remote <addr>`                       | Use a remote runtime at the given address instead of running the agent locally. Mutually exclusive with `--sandbox`, `--worktree`, `--worktree-pr`, `--worktree-base`, `--session`, `--session-db`, `--record`, and `--fake` — a remote runtime owns its own session storage and execution environment, so these local-only concerns don't apply. |
+| `--remote <addr>`                       | Use a remote runtime at the given address instead of running the agent locally. Mutually exclusive with `--worktree`, `--worktree-pr`, `--worktree-base`, `--session`, `--session-db`, `--record`, and `--fake` — a remote runtime owns its own session storage and execution environment, so these local-only concerns don't apply. |
 | `--remote-auth-token <token>`           | Bearer token for `--remote`. Defaults to `DOCKER_AGENT_REMOTE_AUTH_TOKEN`; the flag takes precedence. Prefer the environment variable to keep the token out of command-line arguments. |
 | `--listen <addr>`                       | Expose this run's control plane over HTTP so an external process can drive the running TUI (send follow-ups, stream events, read the title). Accepts `host:port` or `unix://`, `npipe://`, `fd://`. Hidden from `docker agent run --help` — it's a stable but advanced/automation-oriented flag rather than a day-to-day one. See the [API Server](../api-server/index.md#listen) guide for the full walkthrough. |
 | `--session-workingdir-root <path>`      | Confine the `working_dir` of sessions created through the `--listen` control plane to this directory and its descendants (default: no restriction — any clean host directory is accepted, though raw values containing `..` are rejected). Recommended when the control plane is reachable by other users. Hidden from `--help`, like `--listen`. |
@@ -49,17 +49,10 @@ $ docker agent run [config] [message...] [flags]
 | `--last`                                | Print only the final agent answer after all turns finish (requires `--exec`); omit thinking, tool calls/results, and intermediate responses |
 | `--hide-tool-calls`                     | Hide tool calls in the output                                                                                                             |
 | `--hide-tool-results`                   | Hide tool call results in the output                                                                                                      |
-| `--sandbox`                             | Run the agent in sandbox mode using standalone `sbx` or the `docker sandbox` plugin (see [Sandbox](../../configuration/sandbox/index.md))                                 |
-| `--sbx` | Prefer standalone `sbx` when available (default: `true`); set `--sbx=false` to force the `docker sandbox` plugin. |
-| `--cloud` | Run in a fresh cloud sandbox without uploading host files/config/credentials; implies `--sandbox`. See [cloud sandbox mode](../../configuration/sandbox/index.md#cloud-sandboxes). |
-| `--sandbox-kit`, `--kit`, `--kit-arg` | Select an sbx workload and mixins, and pass kit arguments. Supports kits v3 through sbx. |
-| `--sandbox-ttl` | Cloud sandbox lifetime, default `1h`; stopped on expiry and when the agent exits. |
-| `--template <image>`                    | Template image for the sandbox (default: `docker/docker-agent-sbx-templates:latest`)                                                      |
-| `--no-kit`                              | Disable the [auto-kit](../../configuration/sandbox/index.md#auto-kit): do not stage skills or prompt files into the sandbox    |
 | `--agent-picker [refs]`                 | Show a full-screen interactive picker before launching, letting you browse and select an agent. Accepts an optional comma-separated list of agent references to show (defaults to the built-in `default` and `minimal` agents plus any agent configs found in `~/.agents`). Arrow keys navigate; `?` toggles the YAML preview panel; `l` (or mouse-click) toggles the **Lean Mode** checkbox to launch in the lean TUI; `b` (or clicking **[ Open Board ]**) opens the Kanban board (`docker agent board`) instead of running an agent; Enter confirms. Not available in `--exec` or non-TTY modes. |
-| `-w, --worktree [name]`                 | Run the agent in a fresh git worktree of the working directory, isolating its changes from your checkout. Optionally name it (`--worktree=my-feature`); otherwise a name is generated. Requires the working directory to be inside a git repository. Every tool (the shell included) runs inside the worktree. Combine with `--working-dir` to branch from another repository, and with `--session` to resume into the same worktree later. Cannot be combined with `--remote` or `--sandbox`. When the session ends, a clean worktree is removed automatically; one with work prompts to keep or remove (never in `--exec`). |
-| `--worktree-base <ref>`                  | Branch the `--worktree` from `<ref>` (a branch, tag, commit, or remote-tracking ref like `origin/main`) instead of the current `HEAD`. A remote-tracking ref is fetched first so the worktree starts from the latest remote state. Requires `--worktree`; cannot be combined with `--worktree-pr`, `--remote`, or `--sandbox`. |
-| `--worktree-pr <number\|url>`            | Run the agent in a git worktree checked out on an existing GitHub pull request (PR number, `#123`, or PR URL). Continues the PR's branch so commits push back to it. Requires the [GitHub CLI](https://cli.github.com/) (`gh`). Cannot be combined with `--worktree`, `--remote`, or `--sandbox`. |
+| `-w, --worktree [name]`                 | Run the agent in a fresh git worktree of the working directory, isolating its changes from your checkout. Optionally name it (`--worktree=my-feature`); otherwise a name is generated. Requires the working directory to be inside a git repository. Every tool (the shell included) runs inside the worktree. Combine with `--working-dir` to branch from another repository, and with `--session` to resume into the same worktree later. Cannot be combined with `--remote`. When the session ends, a clean worktree is removed automatically; one with work prompts to keep or remove (never in `--exec`). |
+| `--worktree-base <ref>`                  | Branch the `--worktree` from `<ref>` (a branch, tag, commit, or remote-tracking ref like `origin/main`) instead of the current `HEAD`. A remote-tracking ref is fetched first so the worktree starts from the latest remote state. Requires `--worktree`; cannot be combined with `--worktree-pr` or `--remote`. |
+| `--worktree-pr <number\|url>`            | Run the agent in a git worktree checked out on an existing GitHub pull request (PR number, `#123`, or PR URL). Continues the PR's branch so commits push back to it. Requires the [GitHub CLI](https://cli.github.com/) (`gh`). Cannot be combined with `--worktree` or `--remote`. |
 | `--working-dir <path>`                  | Set the working directory for the session (applies to tools and relative paths). In the full TUI, an explicitly supplied path also becomes the default directory for new sessions (`/new`, Ctrl+T, the `+` buttons); `/new <dir>` overrides it for one session |
 | `--env-from-file <path>`                | Load environment variables from file (repeatable)                                                                                         |
 | `--flavor <name>`                       | Enable a config flavor, a YAML patch defined under the config's `flavors` section (repeatable, applied in order). See [Flavors](../../configuration/flavors/index.md). |
@@ -77,6 +70,8 @@ $ docker agent run [config] [message...] [flags]
 | `-d, --debug`                           | Enable debug logging                                                                                                                      |
 | `--log-file <path>`                     | Custom debug log location                                                                                                                 |
 | `-o, --otel`                            | Enable OpenTelemetry observability: traces, metrics, and logs. Requires `OTEL_EXPORTER_OTLP_ENDPOINT` to export to a collector. |
+
+To isolate the agent and its tools in a VM, [launch Docker Agent with `sbx`](../../configuration/sandbox/index.md).
 
 ```bash
 # Examples
@@ -632,7 +627,6 @@ $ docker agent alias add other ociReference
 $ docker agent alias add yolo-coder myorg/coder --yolo
 $ docker agent alias add careful-coder myorg/coder --safety balanced
 $ docker agent alias add fast-coder myorg/coder --model openai/gpt-4o-mini
-$ docker agent alias add safe-coder myorg/coder --sandbox
 $ docker agent alias add turbo myorg/coder --yolo --model anthropic/claude-sonnet-4-5
 
 # Use an alias
@@ -646,7 +640,6 @@ $ docker agent run yolo-coder
 - `--safety <mode>` — Default [safety mode](../../configuration/permissions/index.md#safety-modes) (`strict`, `balanced`, `restricted`, or `autonomous`) when running the alias. Wins over the alias's `yolo` option; both are stored declaratively in the user config (`aliases.<name>.safety` / `aliases.<name>.yolo`), so you can also edit them there by hand.
 - `--model <ref>` — Override the model for the alias
 - `--hide-tool-results` — Hide tool call results in the TUI when running the alias
-- `--sandbox` — Always run the alias inside a [Docker sandbox](../../configuration/sandbox/index.md)
 
 Alias safety options are defaults for new sessions: an explicit `--safety`/`--yolo` on the command line wins over them, they win over `settings.safety`/`settings.YOLO` and over anything declared in the agent YAML, and they never change the mode of a resumed session.
 
@@ -704,26 +697,6 @@ JSON output is sorted by name and omits false/zero-valued fields. This is useful
 > ```
 >
 > Then simply run `docker agent` — it will launch that agent automatically.
-
-### `docker agent sandbox`
-
-Manage settings shared by every [`--sandbox`](../../configuration/sandbox/index.md) run — today, the persistent network allowlist that turns a `Blocked by network policy` 403 into a one-line, durable fix:
-
-```bash
-# Allow a host on every subsequent --sandbox run.
-$ docker agent sandbox allow api.example.com
-
-# Or several at once.
-$ docker agent sandbox allow api.example.com registry.npmjs.org:443
-
-# See what's persisted in ~/.config/cagent/config.yaml.
-$ docker agent sandbox list
-
-# Drop a host you no longer need.
-$ docker agent sandbox deny api.example.com
-```
-
-Entries are unioned with the gateway, the kit-resolved tool install hosts, and any `runtime.network_allowlist` declared by the agent. The launch summary lists every source separately so you can see which holes were punched by which layer.
 
 ### `docker agent plans`
 

@@ -46,7 +46,6 @@ func TestRunAliasListCommand_JSONFormat(t *testing.T) {
 	assert.False(t, entries[1].Yolo)
 
 	// Zero-valued options are omitted from the JSON output.
-	assert.NotContains(t, buf.String(), `"sandbox"`)
 }
 
 func TestRunAliasListCommand_JSONFormatEmpty(t *testing.T) {
