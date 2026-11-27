@@ -19,3 +19,7 @@ type ToggleDiffViewMsg struct{}
 
 // ImageRenderingChangedMsg invalidates cached image rows after capability or preference changes.
 type ImageRenderingChangedMsg struct{}
+
+// MarkdownTransformedMsg reports completed display transforms; views refresh
+// only messages whose transformed Markdown changed.
+type MarkdownTransformedMsg struct{}

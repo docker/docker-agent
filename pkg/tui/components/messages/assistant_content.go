@@ -67,8 +67,56 @@ func (m *model) ResetReasoningContent(sessionID, messageID, agentName string) te
 	return materialize
 }
 
-// ReconcileAssistantContent replaces incomplete streamed text with the saved answer.
+// ReconcileAssistantContent replaces incomplete streamed text with the saved
+// answer. The saved answer also completes the reply for display transforms.
 func (m *model) ReconcileAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd {
+	cmd := m.reconcileAssistantContent(sessionID, messageID, agentName, content)
+	m.completeReply(sessionID, messageID, agentName)
+	return cmd
+}
+
+// completeReply ends streaming for every segment of a logical reply,
+// including segments split at tool-call or reasoning boundaries.
+func (m *model) completeReply(sessionID, messageID, agentName string) {
+	m.completeReplies(func(msg *types.Message) bool {
+		return msg.SessionID == sessionID && msg.MessageID == messageID && msg.Sender == agentName
+	})
+}
+
+// CompleteSession ends streaming for the replies of a session whose last
+// stream stopped. A deferred tail is materialized first, so the completed
+// snapshot is the full reply.
+func (m *model) CompleteSession(sessionID string) tea.Cmd {
+	if m.markdown == nil {
+		return nil
+	}
+	match := func(msg *types.Message) bool { return msg.SessionID == sessionID }
+	var cmd tea.Cmd
+	if m.deferredTailIndex >= 0 && m.deferredTailIndex < len(m.messages) && match(m.messages[m.deferredTailIndex]) {
+		cmd = m.materializeDeferredTailForInteraction()
+	}
+	m.completeReplies(match)
+	return cmd
+}
+
+func (m *model) completeReplies(match func(*types.Message) bool) {
+	if m.markdown == nil {
+		return
+	}
+	var changed []int
+	for i, msg := range m.messages {
+		if msg.Type != types.MessageTypeAssistant || !match(msg) {
+			continue
+		}
+		if mv, ok := m.views[i].(message.Model); ok && mv.Streaming() {
+			mv.SetStreaming(false)
+			changed = append(changed, i)
+		}
+	}
+	m.refreshItems(changed)
+}
+
+func (m *model) reconcileAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd {
 	if content == "" {
 		return nil
 	}
