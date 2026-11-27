@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -99,6 +101,72 @@ func AttachServer(ctx context.Context, addr, sessionID string) (*mcp.Server, err
 
 	slog.DebugContext(ctx, "MCP attach server ready", "addr", addr, "session_id", sessionID)
 	return server, nil
+}
+
+// ResolveAttachSession returns the session ID an attach client should drive for
+// the run at addr. recorded is the session ID stored in the run's discovery
+// record; explicit reports whether the caller named that session explicitly
+// (rather than discovering the run by pid, address, or "latest").
+//
+// A run's discovery record keeps naming the session it started with, but under
+// --listen that initial tab can be closed while the run (and other tabs) stay
+// alive. Attaching to the closed ID would make every send fail with "session
+// not found or not running", so:
+//
+//   - when the recorded session is still attached, it is used;
+//   - an explicitly named session that is no longer attached fails with a clear
+//     error listing the live sessions instead of being silently redirected to
+//     another one;
+//   - a fresh run-level discovery resolves the live session when there is
+//     exactly one, and otherwise fails clearly listing the candidates.
+func ResolveAttachSession(ctx context.Context, addr, recorded string, explicit bool) (string, error) {
+	live, err := LiveAttachSessions(ctx, addr)
+	if err != nil {
+		return "", err
+	}
+	if slices.Contains(live, recorded) {
+		return recorded, nil
+	}
+
+	if explicit {
+		return "", fmt.Errorf("session %s is no longer attached to the run at %s (its tab was closed); live sessions: %s", recorded, addr, formatSessionIDs(live))
+	}
+	switch len(live) {
+	case 0:
+		return "", fmt.Errorf("the run at %s has no attached session: its initial session %s was closed and no other tab is open", addr, recorded)
+	case 1:
+		return live[0], nil
+	default:
+		return "", fmt.Errorf("the run's initial session %s is no longer attached and the run has several live sessions; select one explicitly with --attach=<session-id>: %s", recorded, formatSessionIDs(live))
+	}
+}
+
+// LiveAttachSessions returns the IDs of the sessions currently attached to the
+// run serving at addr (GET /api/sessions?active=true). Unlike the run's
+// discovery record, which keeps naming the session the run started with, this is
+// the live view: under --listen every open TUI tab is listed, including tabs
+// spawned after startup, so a caller can select one explicitly.
+func LiveAttachSessions(ctx context.Context, addr string) ([]string, error) {
+	client, err := remote.NewClient(addr)
+	if err != nil {
+		return nil, fmt.Errorf("client for %s: %w", addr, err)
+	}
+	active, err := client.GetActiveSessions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing attached sessions of %s: %w", addr, err)
+	}
+	ids := make([]string, 0, len(active))
+	for _, sess := range active {
+		ids = append(ids, sess.ID)
+	}
+	return ids, nil
+}
+
+func formatSessionIDs(ids []string) string {
+	if len(ids) == 0 {
+		return "none"
+	}
+	return strings.Join(ids, ", ")
 }
 
 // StartAttachStdio runs the attach MCP server over stdio.

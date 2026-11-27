@@ -163,6 +163,59 @@ func TestEventLog_NoGapWhenCaughtUp(t *testing.T) {
 	})
 }
 
+// TestEventLog_ContinuityAcrossReattach pins the same-ID reattach behavior: a
+// log recreated for a reattached session starts at the previous log's last
+// sequence number, so a client reconnecting with its last event ID keeps a valid
+// cursor and receives the replacement's events instead of filtering them out.
+func TestEventLog_ContinuityAcrossReattach(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		oldLog := newEventLog(8)
+		oldLog.append("old-1") // 1
+		oldLog.append("old-2") // 2
+		resumeCursor := oldLog.lastSeq()
+
+		newLog := newEventLogAt(8, resumeCursor)
+		stop, got := collect(t, newLog, &resumeCursor)
+		defer stop()
+
+		newLog.append("startup") // 3
+		synctest.Wait()
+		require.Len(t, got(), 1, "resuming across a reattach must not need a reset")
+		assert.Equal(t, uint64(3), got()[0].seq)
+		_, isGap := got()[0].event.(gapEvent)
+		assert.False(t, isGap)
+	})
+}
+
+// TestEventLog_CursorAboveLastSeqSignalsReset covers the defensive reset: a
+// cursor above everything this log has ever produced cannot belong to it (e.g.
+// a log recreated without continuity), so it must be signalled as a gap instead
+// of filtering out every event.
+func TestEventLog_CursorAboveLastSeqSignalsReset(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		log := newEventLog(8)
+		log.append("a") // 1
+		since := uint64(2)
+
+		stop, got := collect(t, log, &since)
+		defer stop()
+
+		synctest.Wait()
+		require.Len(t, got(), 1)
+		_, isGap := got()[0].event.(gapEvent)
+		assert.True(t, isGap, "a cursor above the log's last sequence must signal a reset")
+
+		log.append("b") // 2
+		synctest.Wait()
+		require.Len(t, got(), 2)
+		assert.Equal(t, uint64(2), got()[1].seq)
+	})
+}
+
 // TestEventLog_RegistrationIsGapless asserts the critical property: an event
 // appended concurrently with a new subscriber connecting is delivered exactly
 // once — either in the backlog or live, never dropped and never duplicated.

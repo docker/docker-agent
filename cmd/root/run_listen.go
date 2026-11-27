@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -34,20 +35,20 @@ import (
 // become first-class control-plane sessions: clients can snapshot them, tail
 // their events and send follow-ups, exactly like the initial session. Without
 // this, a board watching the run sees a green card while a tab is mid-turn.
-func (f *runExecFlags) recallCoordinatorOpt(ctx context.Context, rt runtime.Runtime, sess *session.Session) app.Opt {
+func (f *runExecFlags) recallCoordinatorOpt(ctx context.Context, rt runtime.Runtime, sess *session.Session) (app.Opt, func()) {
 	sm := f.listenSM
 	exposed := sm != nil
 	if !exposed {
 		sm = server.NewSessionManager(ctx, nil, rt.SessionStore(), 0, &f.runConfig, server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
 	}
-	guard := sm.AttachRuntime(ctx, sess.ID, rt, sess)
+	attachment := sm.AttachRuntime(ctx, sess.ID, rt, sess)
 	return func(a *app.App) {
-		app.WithStreamGuard(guard)(a)
+		app.WithStreamGuard(attachment)(a)
 		if exposed {
 			registerAppEventSource(sm, sess.ID, a)
 		}
 		sm.RegisterFollowUpInjector(sess.ID, a.InjectUserMessage)
-	}
+	}, attachment.Detach
 }
 
 // registerAppEventSource exposes an App's runtime events on the control
@@ -67,13 +68,14 @@ func registerAppEventSource(sm *server.SessionManager, sessionID string, a *app.
 // external processes can drive the running TUI (steer, followup, resume, ...).
 // It returns an app.Opt that registers the App as the attached session owner
 // (see recallCoordinatorOpt for the stream-guard wiring shared by both paths).
-func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Printer, rt runtime.Runtime, sess *session.Session) (app.Opt, error) {
+func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Printer, rt runtime.Runtime, sess *session.Session) (app.Opt, func(), error) {
 	if f.listenAddr == "" {
-		return f.recallCoordinatorOpt(ctx, rt, sess), nil
+		opt, detach := f.recallCoordinatorOpt(ctx, rt, sess)
+		return opt, detach, nil
 	}
 
 	sm := server.NewSessionManager(ctx, nil, rt.SessionStore(), 0, &f.runConfig, server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
-	guard := sm.AttachRuntime(ctx, sess.ID, rt, sess)
+	attachment := sm.AttachRuntime(ctx, sess.ID, rt, sess)
 	// Publish the serving manager so sessions spawned later (TUI tabs) attach
 	// to it too (see recallCoordinatorOpt). Set before the TUI starts, so no
 	// spawn can race it.
@@ -81,15 +83,15 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 
 	ln, err := server.Listen(ctx, f.listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", f.listenAddr, err)
+		return nil, nil, fmt.Errorf("listen %s: %w", f.listenAddr, err)
 	}
 	if err := httpsec.ValidateListenerAuth(ln.Addr(), ""); err != nil {
 		_ = ln.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	context.AfterFunc(ctx, func() { _ = ln.Close() })
 
-	cleanup, err := runregistry.Default().Write(runregistry.Record{
+	cleanup, err := f.discoveryRegistry().Write(runregistry.Record{
 		PID:       os.Getpid(),
 		Addr:      "http://" + ln.Addr().String(),
 		SessionID: sess.ID,
@@ -112,10 +114,24 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 	}()
 
 	return func(a *app.App) {
-		app.WithStreamGuard(guard)(a)
+		app.WithStreamGuard(attachment)(a)
 		registerAppEventSource(sm, sess.ID, a)
 		// Route control-plane follow-ups and idle recalls into the TUI App so
 		// each starts a real turn and streams events to every subscriber.
 		sm.RegisterFollowUpInjector(sess.ID, a.InjectUserMessage)
-	}, nil
+	}, attachment.Detach, nil
+}
+
+// detachOnClose runs detach before cleanup, once, so a closed tab stops being
+// an attached control-plane session before its runtime is torn down. Both the
+// initial tab and the tabs the spawner creates use it (see run.go and
+// createSessionSpawner).
+func detachOnClose(cleanup, detach func()) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			detach()
+			cleanup()
+		})
+	}
 }
