@@ -50,7 +50,7 @@ func New(ctx context.Context, sessionStore session.Store, runConfig *config.Runt
 	return NewWithManager(NewSessionManager(ctx, agentSources, sessionStore, refreshInterval, runConfig, opts...), authToken, WithMaxRequestBytes(maxRequestBytes)), nil
 }
 
-const defaultMaxRequestBytes int64 = 1 << 20 // 1 MiB
+const defaultMaxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // Option configures a [Server] at construction time.
 type Option func(*serverOptions)
@@ -61,7 +61,7 @@ type serverOptions struct {
 
 // WithMaxRequestBytes sets the maximum request body size in bytes. Requests
 // whose body exceeds the limit are rejected with HTTP 413. Zero or negative
-// values fall back to the default (1 MiB).
+// values fall back to the default (32 MiB).
 func WithMaxRequestBytes(n int64) Option {
 	return func(o *serverOptions) { o.maxRequestBytes = n }
 }

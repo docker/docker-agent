@@ -90,7 +90,7 @@ func TestServer_ZeroAgentSource(t *testing.T) {
 }
 
 // TestServer_OversizedBodyRejected pins the fix for docker/docker-agent#3595:
-// a request body over the 1 MiB cap must be rejected with 413 before it
+// a request body over the default cap must be rejected with 413 before it
 // reaches a JSON-decoding handler. The Content-Length header alone triggers
 // the rejection, so no SessionManager is needed.
 func TestServer_OversizedBodyRejected(t *testing.T) {
@@ -149,7 +149,7 @@ func TestServer_MaxRequestBytesOption(t *testing.T) {
 }
 
 // TestServer_WithMaxRequestBytesZeroFallback verifies that zero and negative
-// values fall back to the 1 MiB default. A body just over 1 MiB must still
+// values fall back to the default cap. A body just over the default must still
 // trigger 413 even when WithMaxRequestBytes received 0 or -1.
 func TestServer_WithMaxRequestBytesZeroFallback(t *testing.T) {
 	t.Parallel()
@@ -158,7 +158,7 @@ func TestServer_WithMaxRequestBytesZeroFallback(t *testing.T) {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			t.Parallel()
 			srv := NewWithManager(nil, "", WithMaxRequestBytes(n))
-			// A body over the default 1 MiB cap must still be rejected.
+			// A body over the default cap must still be rejected.
 			body := bytes.Repeat([]byte("a"), int(defaultMaxRequestBytes)+1)
 			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/sessions", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")

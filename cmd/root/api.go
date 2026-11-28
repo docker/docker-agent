@@ -57,7 +57,7 @@ func newAPICmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.fakeResponses, "fake", "", "Replay AI responses from cassette file (for testing)")
 	cmd.PersistentFlags().StringVar(&flags.recordPath, "record", "", "Record AI API interactions to cassette file")
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for API requests (required for non-loopback TCP listeners)")
-	cmd.PersistentFlags().Int64Var(&flags.maxRequestSize, "max-request-size", 1<<20, "Maximum request body size in bytes (default 1 MiB). Requests exceeding this limit are rejected with HTTP 413.")
+	cmd.PersistentFlags().Int64Var(&flags.maxRequestSize, "max-request-size", 32<<20, "Maximum request body size in bytes (default 32 MiB). Requests exceeding this limit are rejected with HTTP 413.")
 	cmd.PersistentFlags().StringVar(&flags.sessionWorkingDirRoot, "session-workingdir-root", "", "Restrict the working_dir of sessions created via POST /api/sessions to this directory and its descendants (empty = no restriction; recommended for multi-user deployments)")
 	cmd.PersistentFlags().DurationVar(&flags.streamCoalesceWindow, "stream-coalesce-window", eventmerge.DefaultWindow, "Merge consecutive streaming deltas (text, reasoning, tool-call arguments, tool output) arriving within this window into one SSE event (0 = one event per delta)")
 	cmd.PersistentFlags().StringVar(&flags.pprofAddr, "pprof-addr", "", "TCP host:port to expose Go pprof endpoints at /debug/pprof/ (e.g. 127.0.0.1:6060); also set via DOCKER_AGENT_PPROF_ADDR")

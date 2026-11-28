@@ -82,7 +82,7 @@ type Options struct {
 	// fingerprint the server.
 	APIKey string
 	// MaxRequestBytes caps the size of an incoming request body. Zero
-	// means use the package default (1 MiB).
+	// means use the package default (32 MiB).
 	MaxRequestBytes int64
 	// RequestTimeout caps how long a single chat completion is allowed to
 	// run. Zero means use the package default (5 minutes). The cap covers
@@ -106,7 +106,7 @@ type Options struct {
 }
 
 const (
-	defaultMaxRequestBytes int64         = 1 << 20 // 1 MiB
+	defaultMaxRequestBytes int64         = 32 << 20 // 32 MiB
 	defaultRequestTimeout  time.Duration = 5 * time.Minute
 	defaultConversationTTL time.Duration = 30 * time.Minute
 )

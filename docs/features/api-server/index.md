@@ -364,9 +364,9 @@ $ curl -X POST http://127.0.0.1:8080/api/sessions/$SID/followup \
 > Each run started with `--listen` writes a discovery record to `<data-dir>/runs/<pid>.json` containing its address and initial session id, so a supervising process can find a live run by session id, pid, or address. TUI tabs opened later are separate sessions attached to the same control plane; use `GET /api/sessions?active=true` on that address to enumerate them and read their `streaming` state without loading session history.
 
 > [!WARNING]
-> **This control plane has a fixed 1 MiB request-body cap and no built-in authentication**
+> **This control plane has a fixed 32 MiB request-body cap and no built-in authentication**
 >
-> Unlike the standalone `docker agent serve api` process above, an attached run's `--listen` control plane exposes neither `--max-request-size` nor `--auth-token`: every request is capped at a fixed, non-configurable 1 MiB body (returning HTTP 413 above it — see [Troubleshooting: HTTP 413](../../guides/troubleshooting/index.md#http-413-request-body-too-large)), and there is no bearer token to require. If you need a configurable cap, built-in bearer auth, or a network-reachable listener, run a standalone `docker agent serve api` deployment instead. `--listen` only supports loopback TCP addresses or local sockets; non-loopback TCP listeners are rejected. An authenticating proxy can connect to a local listener.
+> Unlike the standalone `docker agent serve api` process above, an attached run's `--listen` control plane exposes neither `--max-request-size` nor `--auth-token`: every request is capped at a fixed, non-configurable 32 MiB body (returning HTTP 413 above it — see [Troubleshooting: HTTP 413](../../guides/troubleshooting/index.md#http-413-request-body-too-large)), and there is no bearer token to require. If you need a configurable cap, built-in bearer auth, or a network-reachable listener, run a standalone `docker agent serve api` deployment instead. `--listen` only supports loopback TCP addresses or local sockets; non-loopback TCP listeners are rejected. An authenticating proxy can connect to a local listener.
 
 ## Session event stream and reconnection
 
