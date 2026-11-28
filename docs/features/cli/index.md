@@ -409,6 +409,36 @@ $ docker agent serve a2a agent.yaml --listen 127.0.0.1:9000
 $ docker agent serve a2a myorg/agent:tag
 ```
 
+### `docker agent serve ag-ui`
+
+Start an [AG-UI](https://docs.ag-ui.com) protocol server. `POST` a `RunAgentInput` to `/ag-ui` and the run is streamed back as AG-UI events over Server-Sent Events, for any AG-UI client SDK.
+
+```bash
+$ docker agent serve ag-ui <config> [flags]
+```
+
+| Flag                      | Default                 | Description                                                                             |
+| ------------------------- | ----------------------- | --------------------------------------------------------------------------------------- |
+| `-a, --agent <name>`      | (team default)          | Name of the agent to run. Defaults to the team's first agent if not specified.          |
+| `-l, --listen <addr>`     | `127.0.0.1:8084`        | Address to listen on.                                                                   |
+| `--auth-token <token>`    | (none)                  | Bearer token required for all requests (`Authorization: Bearer <token>`).               |
+| `--cors-origin <origins>` | (none)                  | Allowed browser origins, comma-separated; empty disables CORS.                          |
+| `--insecure-no-auth`      | `false`                 | Allow an unauthenticated non-loopback listener (unsafe).                                |
+| `--safety <policy>`       | `restricted`            | Tool safety policy; `autonomous` is permitted only through this explicit CLI flag.      |
+| `-s, --session-db <path>` | `<data-dir>/session.db` | Path to the SQLite session database. An AG-UI `threadId` is a session ID in it.         |
+
+All [runtime configuration flags](#runtime-configuration-flags) are also accepted.
+
+```bash
+# Examples
+$ docker agent serve ag-ui agent.yaml
+$ docker agent serve ag-ui ./team.yaml --agent reviewer
+$ docker agent serve ag-ui myorg/agent:tag --listen 127.0.0.1:9090
+$ docker agent serve ag-ui agent.yaml --auth-token "$AG_UI_TOKEN" --cors-origin http://localhost:3000
+```
+
+See [AG-UI](../ag-ui/index.md) for the endpoint, the event mapping and the current limitations.
+
 ### `docker agent serve acp`
 
 Start an ACP (Agent Client Protocol) server over stdio. This allows external clients to interact with your agents using the ACP protocol. If no config is specified, uses the `default` built-in agent (or your `default` alias, if configured).
@@ -899,7 +929,7 @@ When `--otel` is enabled, the standard [OTel SDK env vars](https://opentelemetry
 
 ## Runtime Configuration Flags
 
-These flags are accepted by every command that loads an agent (`run`, `run --exec`, `new`, `eval`, `serve api`, `serve mcp`, `serve a2a`, `serve acp`, `serve chat`). They are listed once here to avoid repetition in the per-command tables above.
+These flags are accepted by every command that loads an agent (`run`, `run --exec`, `new`, `eval`, `serve api`, `serve mcp`, `serve a2a`, `serve ag-ui`, `serve acp`, `serve chat`). They are listed once here to avoid repetition in the per-command tables above.
 
 | Flag                            | Description                                                                                                              |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |

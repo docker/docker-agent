@@ -156,6 +156,8 @@
       url: /features/harnesses/
     - title: A2A Protocol
       url: /features/a2a/
+    - title: AG-UI Protocol
+      url: /features/ag-ui/
     - title: ACP
       url: /features/acp/
     - title: API Server

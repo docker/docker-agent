@@ -1,0 +1,9 @@
+version: "2"
+
+agents:
+  root:
+    model: openai/gpt-3.5-turbo
+    description: A helpful AI assistant
+    instruction: |
+      You are a knowledgeable assistant that helps users with various tasks.
+      Be helpful, accurate, and concise in your responses.
