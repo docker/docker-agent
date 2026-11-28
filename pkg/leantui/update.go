@@ -149,7 +149,7 @@ func (m *model) cancelPendingMessages(ctx context.Context) bool {
 
 func (m *model) handleInterrupt() {
 	switch {
-	case m.busy:
+	case m.busy || m.runCancel != nil:
 		if m.runCancel != nil {
 			m.runCancel()
 		}
@@ -371,6 +371,10 @@ func (m *model) handleSlash(ctx context.Context, text string, mode busySubmitMod
 		m.handleSessionsCommand(ctx, rest)
 		return true
 	case "compact":
+		if m.busy || m.runCancel != nil {
+			m.addNotice("", "Wait for the current response to finish before compacting", ui.StMuted())
+			return true
+		}
 		m.addUserEcho(text)
 		m.startCompact(ctx, rest)
 		return true

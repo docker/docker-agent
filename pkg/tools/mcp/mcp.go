@@ -214,6 +214,8 @@ type Toolset struct {
 	sessionOwned bool
 
 	mu sync.Mutex
+	// refreshCtx belongs to the current connection, not the triggering request.
+	refreshCtx context.Context //nolint:containedctx // cancelled when that connection closes
 
 	// Cached tools and prompts, invalidated via MCP notifications and
 	// supervisor disconnect callbacks. cacheGen is bumped on each
@@ -401,14 +403,20 @@ func newSupervisor(ts *Toolset, base lifecycle.Policy) *lifecycle.Supervisor {
 		defer ts.mu.Unlock()
 		ts.invalidateCache()
 	}
-	policy.OnRestart = func(ctx context.Context) {
+	policy.OnRestart = func(context.Context) {
+		ts.mu.Lock()
+		refreshCtx := ts.refreshCtx
+		ts.mu.Unlock()
+		if refreshCtx == nil {
+			return
+		}
 		// Refresh tool and prompt caches eagerly so subsequent
 		// Tools()/ListPrompts() calls return the up-to-date data
 		// from the new server. The new server may expose a
 		// different set of tools/prompts and notifications won't
 		// fire for tools that disappeared.
-		ts.refreshToolCache(ctx)
-		ts.refreshPromptCache(ctx)
+		ts.refreshToolCache(refreshCtx)
+		ts.refreshPromptCache(refreshCtx)
 	}
 	return lifecycle.New(ts.logID, connector, policy)
 }
@@ -632,6 +640,13 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 	parentCtx := ctx
 	ctx = context.WithoutCancel(ctx)
 	ctx = withCancellableParent(ctx, parentCtx)
+	refreshCtx, cancel := context.WithCancel(ctx)
+	connected := false
+	defer func() {
+		if !connected {
+			cancel()
+		}
+	}()
 
 	slog.DebugContext(ctx, "Starting MCP toolset", "server", ts.logID)
 
@@ -640,21 +655,27 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 	// They are re-registered on every Connect so that a fresh client
 	// session inherits them.
 	ts.mcpClient.SetToolListChangedHandler(func() {
+		if refreshCtx.Err() != nil {
+			return
+		}
 		ts.mu.Lock()
 		ts.invalidateCache()
 		ts.mu.Unlock()
 		slog.DebugContext(ctx, "MCP server notified tool list changed, refreshing", "server", ts.logID)
 		if !ts.sessionOwned {
-			ts.refreshToolCache(ctx)
+			ts.refreshToolCache(refreshCtx)
 		}
 	})
 	ts.mcpClient.SetPromptListChangedHandler(func() {
+		if refreshCtx.Err() != nil {
+			return
+		}
 		ts.mu.Lock()
 		ts.invalidateCache()
 		ts.mu.Unlock()
 		slog.DebugContext(ctx, "MCP server notified prompt list changed, refreshing", "server", ts.logID)
 		if !ts.sessionOwned {
-			ts.refreshPromptCache(ctx)
+			ts.refreshPromptCache(refreshCtx)
 		}
 	})
 
@@ -712,8 +733,10 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 	defer ts.mu.Unlock()
 	ts.invalidateCache()
 	ts.instructions = result.Instructions
+	ts.refreshCtx = refreshCtx
+	connected = true
 
-	return &clientSession{client: ts.mcpClient}, nil
+	return &clientSession{client: ts.mcpClient, cancel: cancel}, nil
 }
 
 // clientSession adapts an mcpClient's Wait/Close to the lifecycle.Session
@@ -721,10 +744,19 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 // gomcp.ClientSession is created internally by the client each Initialize.
 type clientSession struct {
 	client mcpClient
+	cancel context.CancelFunc
 }
 
-func (s *clientSession) Wait() error                     { return s.client.Wait() }
-func (s *clientSession) Close(ctx context.Context) error { return s.client.Close(ctx) }
+func (s *clientSession) Wait() error {
+	err := s.client.Wait()
+	s.cancel()
+	return err
+}
+
+func (s *clientSession) Close(ctx context.Context) error {
+	s.cancel()
+	return s.client.Close(ctx)
+}
 
 func (ts *Toolset) Instructions() string {
 	ts.mu.Lock()

@@ -276,6 +276,9 @@ func annotateHookSpan(span trace.Span, event EventType, r *Result) {
 
 // hooksFor keeps the first matching occurrence of each complete definition.
 // Identical user-authored and auto-injected hooks run only once per dispatch.
+// The AutoInjected marker is part of that identity (and is not representable
+// in configuration), so auto-injected hooks are never collapsed into — or
+// displaced by — a user-authored entry, even one that copies their name.
 func (e *Executor) hooksFor(event EventType, toolName string) []Hook {
 	var hooks []Hook
 	for _, m := range e.events[event] {
@@ -294,7 +297,8 @@ func (e *Executor) hooksFor(event EventType, toolName string) []Hook {
 
 // sameHook compares configured values without expanding env or working_dir.
 func sameHook(a, b Hook) bool {
-	return a.Name == b.Name &&
+	return a.AutoInjected == b.AutoInjected &&
+		a.Name == b.Name &&
 		a.Type == b.Type &&
 		a.Command == b.Command &&
 		slices.Equal(a.Args, b.Args) &&
@@ -547,6 +551,9 @@ func aggregate(results []hookResult, event EventType) *Result {
 			}
 			if contract.Rewrite == events.RewriteToolResponse && hso.UpdatedToolResultMeta != nil {
 				final.UpdatedToolResultMeta = hso.UpdatedToolResultMeta
+			}
+			if contract.Rewrite == events.RewriteToolResponse && hso.UpdatedToolDocuments != nil {
+				final.UpdatedToolDocuments = hso.UpdatedToolDocuments
 			}
 			if contract.Metadata && len(hso.Metadata) > 0 {
 				// Metadata from every matching hook is merged so multiple

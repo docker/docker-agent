@@ -161,7 +161,7 @@ func dispatchThink(t *testing.T, rt *LocalRuntime, ctx context.Context, sess *se
 	available, err := ts.Tools(t.Context())
 	require.NoError(t, err)
 	events := make(chan Event, 64)
-	rt.processToolCalls(ctx, sess, caller, []tools.ToolCall{{ID: "call", Type: "function", Function: tools.FunctionCall{Name: "think", Arguments: fmt.Sprintf(`{"thought":%q}`, thought)}}}, available, NewChannelSink(events))
+	rt.processToolCalls(ctx, sess, caller, []tools.ToolCall{{ID: "call", Type: "function", Function: tools.FunctionCall{Name: "think", Arguments: fmt.Sprintf(`{"thought":%q}`, thought)}}}, available, NewChannelSink(events), nil)
 	close(events)
 	var result *tools.ToolCallResult
 	for ev := range events {

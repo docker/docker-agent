@@ -38,7 +38,7 @@ const structuredOutputReminderText = "Reminder: this conversation requires struc
 // a one-element system-message slice, or nil when no reminder is due. The
 // counter is reset on agent switch by the run loop.
 func (ls *loopState) structuredOutputReminderMessages() []chat.Message {
-	if ls.structuredOutputReminders == 0 {
+	if ls.StructuredOutputReminders == 0 {
 		return nil
 	}
 	return []chat.Message{{Role: chat.MessageRoleSystem, Content: structuredOutputReminderText}}
@@ -104,17 +104,18 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 	ctx context.Context,
 	sess *session.Session,
 	a *agent.Agent,
-	res *streamResult,
+	answer *modelAnswer,
 	agentTools []tools.Tool,
 	modelID string,
+	rec *runRecord,
 	events EventSink,
 ) (dispatchCalls []tools.ToolCall, finalized bool) {
 	if !structuredOutputEnabled(sess, a) {
-		return res.Calls, false
+		return answer.Calls, false
 	}
 
 	var outputCalls, otherCalls []tools.ToolCall
-	for _, tc := range res.Calls {
+	for _, tc := range answer.Calls {
 		if tc.Function.Name == structuredoutput.ToolName {
 			outputCalls = append(outputCalls, tc)
 		} else {
@@ -122,7 +123,7 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 		}
 	}
 	if len(outputCalls) == 0 {
-		return res.Calls, false
+		return answer.Calls, false
 	}
 
 	tool, ok := findToolByName(agentTools, structuredoutput.ToolName)
@@ -131,7 +132,7 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 		// after every session filter, so this should not occur when
 		// enforcement is active); let the dispatcher reject the calls as
 		// unavailable rather than inventing a definition here.
-		return res.Calls, false
+		return answer.Calls, false
 	}
 
 	if len(outputCalls) > 1 || len(otherCalls) > 0 {
@@ -145,8 +146,12 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 				"Finish any other tool use first, then call %s alone with the final answer.",
 			structuredoutput.ToolName, structuredoutput.ToolName,
 		)
+		// The other calls of the batch are recorded as they go. So are these:
+		// a batch that is cut off must not find them rejected twice.
 		for _, tc := range outputCalls {
-			r.rejectStructuredOutputCall(ctx, sess, a, tc, tool, rejectMsg, events)
+			rec.finishCall(ctx, tc.ID, func() {
+				r.rejectStructuredOutputCall(ctx, sess, a, tc, tool, rejectMsg, events)
+			})
 		}
 		return otherCalls, false
 	}
@@ -168,8 +173,8 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 		CreatedAt: r.now().Format(time.RFC3339),
 		Model:     modelID,
 	}, events)
-	res.Content = result.Output
-	res.Stopped = true
+	answer.Content = result.Output
+	answer.Stopped = true
 	return nil, true
 }
 
@@ -317,11 +322,11 @@ func (r *LocalRuntime) structuredOutputStop(
 	events EventSink,
 ) (turnControl, string) {
 	_, rejectsPrefill := modelinfo.LookupClaude5(servingModel)
-	if !rejectsPrefill && ls.structuredOutputReminders < maxStructuredOutputReminders {
-		ls.structuredOutputReminders++
+	if !rejectsPrefill && ls.StructuredOutputReminders < maxStructuredOutputReminders {
+		ls.StructuredOutputReminders++
 		slog.InfoContext(ctx, "Model stopped without structured output; injecting transient reminder",
 			"agent", a.Name(), "session_id", sess.ID,
-			"reminder", ls.structuredOutputReminders, "max", maxStructuredOutputReminders)
+			"reminder", ls.StructuredOutputReminders, "max", maxStructuredOutputReminders)
 		return turnContinue, turnEndReasonContinue
 	}
 	errMsg := fmt.Sprintf(

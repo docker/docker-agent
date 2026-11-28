@@ -87,9 +87,9 @@ const (
 // responses; StopRun also terminates the agent's run loop with a
 // user-visible reason produced by a post_tool_use hook deny verdict.
 type CallOutcome struct {
-	Canceled    bool
-	StopRun     bool
-	StopMessage string
+	Canceled    bool   `json:"canceled,omitempty"`
+	StopRun     bool   `json:"stop_run,omitempty"`
+	StopMessage string `json:"stop_message,omitempty"`
 }
 
 // Emitter receives the events the [Dispatcher] emits while processing a
@@ -236,8 +236,101 @@ type Dispatcher struct {
 	// AppendThought binds internal scratchpad mutation to this batch's caller.
 	AppendThought func(ctx context.Context, owner any, thought string) ([]string, error)
 
+	// Journal keeps track of how far each call gets, so a batch that was
+	// cut off can be processed again without running a tool twice. May be
+	// nil: every call then runs.
+	Journal Journal
+
 	confirmationMu         *sync.Mutex
 	fallbackConfirmationMu sync.Mutex
+}
+
+// CallProgress is how far a tool call had got when its batch was last processed.
+type CallProgress int
+
+const (
+	// CallNotStarted: the call's tool has not run.
+	CallNotStarted CallProgress = iota
+	// CallStarted: the call's tool was started and left no result. It may or
+	// may not have run to its end.
+	CallStarted
+	// CallRecorded: the call's result is in the session, and the
+	// post_tool_use hook that follows it may not have run.
+	CallRecorded
+	// CallFinished: the dispatcher was done with the call.
+	CallFinished
+)
+
+// CallRecord is what a [Journal] keeps of a call.
+type CallRecord struct {
+	Progress CallProgress `json:"progress"`
+	// Call is the call as its tool was given it, kept until the dispatcher
+	// is done with the call. It is not quite what the session holds: hooks
+	// rewrite a call's arguments.
+	Call *tools.ToolCall `json:"call,omitempty"`
+	// Result is the result the call's post_tool_use hook is to be given,
+	// kept while Progress is CallRecorded. The session holds it capped.
+	Result *tools.ToolCallResult `json:"result,omitempty"`
+	// Outcome is what the call meant for the run, once Progress is
+	// CallFinished.
+	Outcome CallOutcome `json:"outcome"`
+}
+
+// Journal keeps track of how far the calls of a batch get. A [Dispatcher]
+// given one tells it about each call as it goes, and asks it about every call
+// before processing it:
+//
+//   - a call that finished is left alone, and means for the run what it
+//     meant then;
+//   - a call whose result is in the session gets its post_tool_use hook;
+//   - a call that started and left no result runs again only when its tool
+//     is idempotent, does not hand work to another agent, and is given the
+//     arguments it was given the first time; it gets [InterruptedResult]
+//     otherwise;
+//   - any other call is processed as usual.
+//
+// A call's result reaches the session inside the step that notes it, so the
+// journal and the session never disagree about which calls have theirs.
+//
+// Implementations must be safe for concurrent use: the calls of a batch run
+// in parallel.
+type Journal interface {
+	// Call returns what the journal keeps of the call.
+	Call(callID string) CallRecord
+	// CallStarted notes that the call's tool is about to run, given call.
+	// On an error the tool does not run and the run stops.
+	CallStarted(ctx context.Context, callID string, call tools.ToolCall) error
+	// CallRecorded calls record, which puts the call's result in the
+	// session, and notes that it is there with its hook still to come, as
+	// one step. It keeps result for that hook. On an error the run stops.
+	CallRecorded(ctx context.Context, callID string, result *tools.ToolCallResult, record func()) error
+	// CallFinished notes that the dispatcher is done with the call, and
+	// what the call means for the run. record, when not nil, puts the
+	// call's result in the session; it is called in the same step. On an
+	// error the run stops.
+	CallFinished(ctx context.Context, callID string, outcome CallOutcome, record func()) error
+}
+
+// InterruptedResult is the result of a call whose tool was cut off before it
+// returned one, and is not safe to run again.
+const InterruptedResult = "The tool call was interrupted before it returned a result; it may or may not have run."
+
+// sameInvocation reports whether two calls give a tool the same thing to do.
+// The arguments are compared as written. A call that went through the same
+// hooks twice comes out written the same way, and no reading of two
+// different texts as one value is safe here: numbers, for one, lose digits.
+func sameInvocation(a, b tools.ToolCall) bool {
+	return a.Function.Name == b.Function.Name && a.Function.Arguments == b.Function.Arguments
+}
+
+// replaySafe reports whether running the tool a second time with the same
+// arguments is harmless, which is what its idempotent annotation says. The
+// read-only annotation does not: it is about a tool's effect on the
+// workspace, and tools that carry it ask the user a question or add to a
+// scratchpad. A tool that hands work to another agent is never safe to run
+// again: what the other agent did is not on record.
+func replaySafe(tool tools.Tool) bool {
+	return tool.Annotations.IdempotentHint && !tool.Delegation
 }
 
 var (
@@ -349,6 +442,16 @@ type call struct {
 	// notifyApproval all consume it.
 	labelComputed bool
 	label         safety.Label
+
+	// hookFollows says a post_tool_use hook follows the call's result.
+	hookFollows bool
+	// ranAs is the call as its tool was given it, when the call is run
+	// again after it was cut off mid-run.
+	ranAs *tools.ToolCall
+	// record puts in the session a result the journal has yet to hear of.
+	record func()
+	// journalErr is why the journal could not keep track of the call.
+	journalErr error
 }
 
 // safetyLabel labels the call for the (mode × label) table: command
@@ -373,6 +476,52 @@ func (c *call) safetyLabel() safety.Label {
 // and approval bookkeeping lives here so the call lifecycle is visible
 // at a glance.
 func (c *call) run(ctx context.Context) CallOutcome {
+	journal := c.d.Journal
+	if journal == nil {
+		return c.process(ctx)
+	}
+	var outcome CallOutcome
+	kept := journal.Call(c.tc.ID)
+	switch kept.Progress {
+	case CallFinished:
+		return kept.Outcome
+	case CallRecorded:
+		// What follows the result of a call whose batch was cut off once
+		// that result was in the session: its post_tool_use hook, for the
+		// call as it was run.
+		if kept.Call != nil {
+			c.tc = *kept.Call
+		}
+		outcome.StopRun, outcome.StopMessage = c.postHook(ctx, kept.Result)
+	case CallStarted:
+		if c.available && replaySafe(c.tool) {
+			c.ranAs = kept.Call
+			outcome = c.process(ctx)
+		} else {
+			c.errorResponse(ctx, InterruptedResult)
+		}
+	case CallNotStarted:
+		outcome = c.process(ctx)
+	}
+	c.note(journal.CallFinished(ctx, c.tc.ID, outcome, c.record))
+	c.record = nil
+	if c.journalErr != nil && ctx.Err() == nil {
+		// The call's progress is not on record, so the run cannot vouch for
+		// it later. A cancelled run is stopping already.
+		return CallOutcome{StopRun: true, StopMessage: fmt.Sprintf("The progress of tool call %q could not be recorded: %v", c.tc.Function.Name, c.journalErr)}
+	}
+	return outcome
+}
+
+// note remembers the first time the journal could not keep track of the call.
+func (c *call) note(err error) {
+	if c.journalErr == nil {
+		c.journalErr = err
+	}
+}
+
+// process takes the call through approval and runs its tool.
+func (c *call) process(ctx context.Context) CallOutcome {
 	// gen_ai.* attributes are always emitted (spec-compliant). Legacy
 	// attribute names are added only when the OTel stability flag is
 	// at its default — `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`
@@ -437,13 +586,31 @@ func (c *call) run(ctx context.Context) CallOutcome {
 		}
 	}
 
-	outcome := c.approveAndRun(ctx, runTool)
+	outcome := c.approveAndRun(ctx, c.onlyAsBefore(ctx, runTool))
 	if outcome.Canceled {
 		span.SetStatus(codes.Ok, "tool call canceled by user")
 	} else {
 		span.SetStatus(codes.Ok, "tool call processed")
 	}
 	return outcome
+}
+
+// onlyAsBefore guards the tool of a call that is run again after it was cut
+// off mid-run. The call goes through its hooks again, which may rewrite it
+// another way than they did: its tool runs only if it is given what it was
+// given the first time. Otherwise the call is reported as interrupted, as
+// one that is not safe to run again is.
+func (c *call) onlyAsBefore(ctx context.Context, runTool func() CallOutcome) func() CallOutcome {
+	if c.ranAs == nil {
+		return runTool
+	}
+	return func() CallOutcome {
+		if !sameInvocation(*c.ranAs, c.tc) {
+			c.errorResponse(ctx, InterruptedResult)
+			return CallOutcome{}
+		}
+		return runTool()
+	}
 }
 
 // approveAndRun runs runTool if the configured approval pipeline allows
@@ -1026,6 +1193,7 @@ func resumeVerdict(ctx context.Context, sess *session.Session, req ResumeRequest
 // c.tc. The post-tool-use hook may signal run termination via its
 // returned [CallOutcome].
 func (c *call) runToolset(ctx context.Context) CallOutcome {
+	c.hookFollows = c.d.Hooks != nil
 	res, nestedStop := c.invoke(ctx, "runtime.tool.handler", func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
 		res, err := c.tool.Handler(ctx, c.tc, callRuntime{c})
 		return res, 0, err
@@ -1080,7 +1248,7 @@ func (r callRuntime) RunTool(ctx context.Context, tc tools.ToolCall, tool tools.
 	} else if result != nil {
 		response = *result
 	}
-	response.Output, response.Meta = c.transformToolResult(ctx, response.Output, response.IsError, response.Meta)
+	response.Output, response.Meta, response.Documents = c.transformToolResult(ctx, response.Output, response.IsError, response.Meta, response.Documents)
 	c.em.EmitToolCallResponse(tc.ID, tool, &response, response.Output, c.a.Name())
 	return result, err
 }
@@ -1162,13 +1330,15 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 
 	c.em.EmitToolCall(c.tc, c.tool, c.a.Name())
 
-	res, duration, err := exec(ctx)
+	res, duration, err := c.journalStart(ctx, exec)
 	telemetry.RecordToolCall(ctx, c.tc.Function.Name, c.sess.ID, c.a.Name(), duration, err)
 
 	var stop *StopRunError
 	if errors.As(err, &stop) {
 		res = tools.ResultError(stop.Error())
 		err = nil
+		// The run stops on this result: no hook follows it.
+		c.hookFollows = false
 	}
 	if err != nil {
 		res = c.translateError(ctx, span, err)
@@ -1184,7 +1354,7 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 	// only paid when at least one hook is configured for the event, so
 	// agents that haven't opted into output rewriting take the cheap
 	// path through Dispatch's `exec.Has(event)` short-circuit.
-	res.Output, res.Meta = c.transformToolResult(ctx, res.Output, res.IsError, res.Meta)
+	res.Output, res.Meta, res.Documents = c.transformToolResult(ctx, res.Output, res.IsError, res.Meta, res.Documents)
 
 	// gen_ai.tool.call.result captures the post-transform output so the
 	// span matches what the LLM actually saw on the next turn (any
@@ -1195,7 +1365,7 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 	}
 
 	c.em.EmitToolCallResponse(c.tc.ID, c.tool, res, res.Output, c.a.Name())
-	c.recordToolResponse(res)
+	c.recordToolResponse(ctx, res)
 	return res, stop
 }
 
@@ -1213,11 +1383,17 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 // the persisted session file, the input the post_tool_use hook sees,
 // and the messages going to the next LLM call.
 func (c *call) applyToolResponseTransform(ctx context.Context, payload string, isError bool) string {
-	output, _ := c.transformToolResult(ctx, payload, isError, nil)
+	output, _, _ := c.transformToolResult(ctx, payload, isError, nil, nil)
 	return output
 }
 
-func (c *call) transformToolResult(ctx context.Context, payload string, isError bool, meta any) (output string, transformedMeta any) {
+// transformToolResult fires [hooks.EventToolResponseTransform] and returns
+// the hook-supplied rewrites for the textual output, the display metadata,
+// and the inline document attachments. Documents ride through the transform
+// because emission and recordToolResponse both read them off the result:
+// skipping them leaks attachment text (MCP inline-text resources) verbatim
+// into the event stream and the persisted session.
+func (c *call) transformToolResult(ctx context.Context, payload string, isError bool, meta any, documents []tools.DocumentContent) (output string, transformedMeta any, transformedDocuments []tools.DocumentContent) {
 	defer func() {
 		output = builtins.BoundToolResult(c.tool.Category, c.tool.Name, output, "The full result was not saved by the output limiter; narrow the tool query to retrieve the part you need.")
 	}()
@@ -1228,17 +1404,18 @@ func (c *call) transformToolResult(ctx context.Context, payload string, isError 
 		}
 	}
 	if c.d.Hooks == nil {
-		return payload, meta
+		return payload, meta, documents
 	}
 	in := NewPostToolHooksInput(c.sess, c.tc, &tools.ToolCallResult{Output: payload, IsError: isError, Meta: meta})
 	in.ToolCategory = c.tool.Category
+	in.ToolDocuments = documents
 	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventToolResponseTransform, in)
 	// A canceled hook can discard its rewrite; never fall back to the untransformed payload.
 	if ctx.Err() != nil {
-		return c.cancellationMessage(ctx), nil
+		return c.cancellationMessage(ctx), nil, nil
 	}
 	if result == nil {
-		return payload, meta
+		return payload, meta, documents
 	}
 	if result.UpdatedToolResultMeta != nil {
 		meta = result.UpdatedToolResultMeta
@@ -1246,7 +1423,10 @@ func (c *call) transformToolResult(ctx context.Context, payload string, isError 
 	if result.UpdatedToolResponse != nil {
 		payload = *result.UpdatedToolResponse
 	}
-	return payload, meta
+	if result.UpdatedToolDocuments != nil {
+		documents = result.UpdatedToolDocuments
+	}
+	return payload, meta, documents
 }
 
 // translateError converts a tool-handler error into a [tools.ToolCallResult]
@@ -1274,7 +1454,7 @@ func (c *call) translateError(ctx context.Context, span trace.Span, err error) *
 
 // recordToolResponse builds the chat message for a successful (or
 // error-translated) tool result and adds it to the session.
-func (c *call) recordToolResponse(res *tools.ToolCallResult) {
+func (c *call) recordToolResponse(ctx context.Context, res *tools.ToolCallResult) {
 	// Tool response content must not be empty for API compatibility.
 	content := res.Output
 	if strings.TrimSpace(content) == "" {
@@ -1294,7 +1474,7 @@ func (c *call) recordToolResponse(res *tools.ToolCallResult) {
 		msg.MultiContent = chat.BuildToolResultMultiContent(content, res.Images, res.Documents)
 	}
 
-	c.addMessage(&msg)
+	c.addMessage(ctx, &msg, res)
 }
 
 // postHook fires the post-tool-use hook. SystemMessage emission is the
@@ -1343,20 +1523,62 @@ func (c *call) errorResponse(ctx context.Context, errorMsg string) {
 	if c.outOfBand {
 		return
 	}
-	c.addMessage(&chat.Message{
+	c.addMessage(ctx, &chat.Message{
 		Role:       chat.MessageRoleTool,
 		Content:    errorMsg,
 		ToolCallID: c.tc.ID,
 		IsError:    true,
 		CreatedAt:  time.Now().Format(time.RFC3339),
-	})
+	}, nil)
 }
 
 // addMessage records msg in the session and emits MessageAdded.
-func (c *call) addMessage(msg *chat.Message) {
+// addMessage puts the call's result in the session. res is what the tool
+// returned, for the hook that follows; it is nil for a result the dispatcher
+// made up itself.
+func (c *call) addMessage(ctx context.Context, msg *chat.Message, res *tools.ToolCallResult) {
 	agentMsg := session.NewAgentMessage(c.a.Name(), msg)
-	c.sess.AddMessage(agentMsg)
-	c.em.EmitMessageAdded(c.sess.ID, agentMsg, c.a.Name())
+	record := func() {
+		c.sess.AddMessage(agentMsg)
+		c.em.EmitMessageAdded(c.sess.ID, agentMsg, c.a.Name())
+	}
+	switch {
+	case c.d.Journal == nil:
+		record()
+	case c.hookFollows && res != nil:
+		// The hook is given the output, not the media that came with it.
+		forHook := &tools.ToolCallResult{Output: res.Output, IsError: res.IsError, Meta: res.Meta}
+		c.note(c.d.Journal.CallRecorded(ctx, c.tc.ID, forHook, record))
+	default:
+		// Nothing follows this result but the call's outcome: both are
+		// noted in one step, once the outcome is known.
+		earlier := c.record
+		c.record = func() {
+			if earlier != nil {
+				earlier()
+			}
+			record()
+		}
+	}
+}
+
+// journalStart runs the call's tool once the journal knows it is about to.
+// A tool the journal could not take note of does not run.
+func (c *call) journalStart(ctx context.Context, exec func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error)) (*tools.ToolCallResult, time.Duration, error) {
+	if c.d.Journal == nil {
+		return exec(ctx)
+	}
+	// A run that was cancelled since the call was approved notes nothing
+	// more. Its tool must not run unnoted: it would run a second time when
+	// the run is taken up.
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	if err := c.d.Journal.CallStarted(ctx, c.tc.ID, c.tc); err != nil {
+		c.note(err)
+		return nil, 0, fmt.Errorf("the tool was not run: %w", err)
+	}
+	return exec(ctx)
 }
 
 // startSpan wraps Tracer.Start; a nil tracer is a no-op so callers don't

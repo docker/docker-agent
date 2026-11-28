@@ -1041,6 +1041,115 @@ sess := session.New(
 )
 ```
 
+## Durable Runs
+
+`runtime.NewDurableRuntime` builds a runtime that runs agents like
+`NewLocalRuntime` does and keeps every run on record in the session store
+while it is in flight. A run that was cut off, by a crash or by your
+application shutting down, is taken up again at the step it was cut off in,
+without sending a new message.
+
+```go
+store, _ := sqlitestore.New(ctx, "sessions.db")
+rt, err := runtime.NewDurableRuntime(ctx, agentTeam, runtime.WithSessionStore(store))
+
+// At startup: every run still on record was cut off.
+runs, _ := store.(session.RunStore).ListRuns(ctx)
+for _, run := range runs {
+    sess, events, err := rt.ContinueStream(ctx, run.SessionID)
+    if err != nil {
+        continue // the run was given up; err says why
+    }
+    for event := range events {
+        // Handle events as for RunStream.
+    }
+    _ = sess // the conversation as the run left it
+}
+```
+
+The store must be a `session.RunStore`; the SQLite store is one.
+`ContinueStream` loads the session itself and returns it. Not everything your
+application sets on a session before running it is stored
+(`WithNonInteractive`, for one, is not): pass such options to
+`ContinueStream` and they are applied to the loaded session. Options do not
+change where the run stands: the agent the conversation is with and the
+run's iteration limit come from its record.
+
+A run you do not want to continue is given up with `rt.DiscardRun(ctx,
+sessionID)`. It leaves the session at the run's last finished step, without
+the half answer or the tool output the unfinished step had stored.
+
+To stop a run without ending it, for example when your application shuts
+down, cancel its context with `runtime.ErrSuspended` as the cause. Any other
+cancellation ends the run and removes its record.
+
+```go
+ctx, stop := context.WithCancelCause(parent)
+events := rt.RunStream(ctx, sess)
+// ...
+stop(runtime.ErrSuspended)
+```
+
+A durable runtime differs from a local one in what it asks of the store:
+
+- A run is recorded before it starts any toolset, along with what it starts
+  from: its prompt, and the whole conversation of a session the store has
+  never seen. After each step (a model answer, a tool result, what follows
+  an answer) the runtime waits until the store holds what the step produced,
+  then saves where the run stands. Its record goes only once the store
+  holds the run's last words.
+- A run that cannot be recorded stops with an error, and its record stays
+  where it last stood. That goes for its end too: a run whose last words
+  did not reach the store reports an error, and can be continued. A local
+  runtime logs a store error and carries on.
+- An agent that runs in an external harness is refused, when the run starts
+  or when the conversation is handed to it: its work is not in the
+  conversation, so there is no step to take it up at.
+
+A run is taken up from its last finished step. What the step it was cut off
+in had stored (half an answer, the output of a tool that never returned) is
+removed, and the step is done again:
+
+- A model call is made again.
+- A tool call that never started is run. One that had started and left no
+  result is run again only when its tool is annotated idempotent, does not
+  hand work to another agent, and is given the arguments it was given the
+  first time (hooks can rewrite them); otherwise the model is told the call
+  was interrupted and decides. One whose result was in gets its
+  `post_tool_use` hook, for the call and the result as they were. A call
+  that had finished is left alone, and still stops the run if it had.
+- What follows an answer (structured-output enforcement, stop hooks, a forced
+  handoff or completion route, queued input) is done for the answer on
+  record, without asking the model again.
+
+The run comes back with what it carried: the agent the conversation was
+with, its routing, its iteration count, what its user had let it do when
+asked to confirm a tool call (a safety mode, tools allowed from then on),
+and the context its `session_start` and `user_prompt_submit` hooks had
+added, so those hooks do not fire again.
+Hooks of a step that is done again do. A turn taken up past its model call
+fires `turn_start` again, so every `turn_end` of a stream follows a
+`turn_start` of that stream.
+
+A run that dies five times in a row at the same step is given up:
+`ContinueStream` returns an error and removes its record.
+
+> [!NOTE]
+> Only root runs are recorded. A sub-agent that was working when its run was
+> cut off is a tool call of that run: the model is told it was interrupted.
+> Budgets, and what toolsets and agents keep in memory (a model an agent
+> switched to with the model picker, tools a deferred toolset activated,
+> the tasks of background agents), start afresh. Messages queued with `Steer` or `FollowUp` are kept in memory
+> until the run takes them up: from the next step it finishes, they are part
+> of the conversation on record.
+> The store cannot tell a run that was cut off from one that is still
+> running, in another process or in yours: continue or discard the runs it
+> lists only when your application is the store's single writer, and never
+> while a stream of the same session is open.
+> A runtime has one current agent, which sessions that are not pinned follow.
+> To run several sessions at once on one runtime, pin each with
+> `session.WithAgentName`.
+
 ## Error Handling
 
 ```go

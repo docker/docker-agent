@@ -70,6 +70,9 @@ func TestHookIdentityIncludesEveryField(t *testing.T) {
 		"SystemPrompt":    func(h *Hook) { h.SystemPrompt = "other" },
 		"Schema":          func(h *Hook) { h.Schema = "other" },
 		"StrictOutput":    func(h *Hook) { h.StrictOutput = true },
+		// Internal marker for runtime-synthesized hooks; no YAML entry can
+		// reproduce it, so it must be part of the dedup identity.
+		"AutoInjected": func(h *Hook) { h.AutoInjected = true },
 	}
 	// Adding a config field must also extend identity and its coverage.
 	for field := range reflect.TypeFor[Hook]().Fields() {

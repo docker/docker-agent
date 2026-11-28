@@ -265,8 +265,11 @@ type chatPage struct {
 	showStartupBanner           bool
 	// hideBanner mirrors the user's show_banner setting; the zero value
 	// keeps the banner so page literals stay banner-enabled.
-	hideBanner       bool
-	bannerTransition animation.Transition
+	hideBanner        bool
+	bannerTransition  animation.Transition
+	bannerInteractive bool
+	bannerFlock       tuibanner.Flock
+	bannerMotion      animation.Subscription
 
 	// Message queue for enqueuing messages while agent is working
 	messageQueue    []queuedMessage
@@ -430,6 +433,7 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 		sessionState:      sessionState,
 		showStartupBanner: true,
 		bannerTransition:  ar.Transition(),
+		bannerMotion:      ar.Subscribe(),
 		sidebarGrip:       resizegrip.NewReveal(ar),
 	}
 
@@ -477,6 +481,11 @@ func WithHideSidebar() PageOption {
 		p.hideSidebar = true
 		p.keyMap.ToggleSidebar.SetEnabled(false)
 	}
+}
+
+// WithBannerInteraction enables pointer-driven motion on the startup wordmark.
+func WithBannerInteraction(enabled bool) PageOption {
+	return func(p *chatPage) { p.bannerInteractive = enabled }
 }
 
 // WithShowBanner controls whether the ASCII-art startup banner is drawn on
@@ -574,7 +583,7 @@ func Cleanup(page Page) {
 	if p, ok := page.(*chatPage); ok {
 		p.ClearScrollbarPointer()
 		ResetSidebarGrip(p)
-		p.bannerTransition.Cancel()
+		p.cancelBanner()
 		if p.inputScope != nil {
 			p.inputScope.close()
 		}
@@ -598,8 +607,8 @@ func (p *chatPage) UpdateEffects(msg tea.Msg) (Page, Effects) {
 	p.effects = &effects
 	defer func() { p.effects = nil }()
 	model, cmd := p.update(msg)
-	if p.bannerTransition.Running() && !p.bannerVisible(p.computeSidebarLayout()) {
-		p.bannerTransition.Cancel()
+	if (p.bannerTransition.Running() || p.bannerFlock.Displaced()) && !p.bannerVisible(p.computeSidebarLayout()) {
+		p.cancelBanner()
 	}
 	// State changes (async sidebar updates, streaming indicators) can move
 	// child components without any resize. Child positions are only applied
@@ -634,6 +643,16 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case animation.TickMsg:
+		if p.bannerMotion.IsActive() {
+			before, after := msg.ElapsedBounds()
+			active, changed := p.bannerFlock.Step(after-before, p.bannerProgress(), p.computeSidebarLayout().chatWidth)
+			if !active && !p.bannerTransition.Running() {
+				p.bannerMotion.Stop()
+			}
+			if changed {
+				msg.MarkDirty()
+			}
+		}
 		p.sidebarGrip.Tick(msg)
 		if p.bannerTransition.Running() {
 			p.bannerTransition.Tick()
@@ -648,8 +667,9 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return p, cmd
 
 	case tea.BlurMsg:
+		cmd := p.leaveBanner()
 		ResetSidebarGrip(p)
-		return p, nil
+		return p, cmd
 
 	case tea.KeyPressMsg:
 		return p.handleKeyPress(msg)
@@ -883,7 +903,9 @@ func (p *chatPage) messagesView(sl sidebarLayout) string {
 	}
 
 	lines := tuibanner.Render()
-	if p.bannerTransition.Running() {
+	if p.bannerFlock.Displaced() {
+		return ""
+	} else if p.bannerTransition.Running() {
 		lines = tuibanner.RenderFrame(p.bannerTransition.Progress(), sl.chatWidth)
 	}
 	banner := strings.Join(lines, "\n")
@@ -1001,6 +1023,9 @@ func (p *chatPage) setSize(width, height int, fromSidebarDrag bool) tea.Cmd {
 	// Compute layout once and use it for all sizing
 	sl := p.computeSidebarLayout()
 	old := p.appliedLayout
+	if sl != old {
+		ResetBanner(p)
+	}
 	if !fromSidebarDrag && sl != old && (sl.mode != sidebarVertical || sl.chatHeight != old.chatHeight ||
 		p.isDraggingSidebar || (sl.sidebarOnLeft == old.sidebarOnLeft && sl.handleX != old.handleX)) {
 		p.isDraggingSidebar = false
@@ -1035,8 +1060,8 @@ func (p *chatPage) setSize(width, height int, fromSidebarDrag bool) tea.Cmd {
 	if !p.isDraggingSidebar {
 		cmds = append(cmds, p.messages.SetSize(sl.chatWidth, sl.chatHeight))
 	}
-	if p.bannerTransition.Running() && !p.bannerVisible(sl) {
-		p.bannerTransition.Cancel()
+	if (p.bannerTransition.Running() || p.bannerFlock.Displaced()) && !p.bannerVisible(sl) {
+		p.cancelBanner()
 	}
 
 	return tea.Batch(cmds...)
@@ -1684,7 +1709,7 @@ func (p *chatPage) SetInterruptMode(mode msgtypes.InterruptMode) {
 func (p *chatPage) SetShowBanner(show bool) {
 	p.hideBanner = !show
 	if !show {
-		p.bannerTransition.Cancel()
+		p.cancelBanner()
 	}
 }
 
@@ -1703,7 +1728,7 @@ func StartStartupBanner(page Page) tea.Cmd {
 // CancelStartupBanner stops the animation without affecting the static banner.
 func CancelStartupBanner(page Page) {
 	if p, ok := page.(*chatPage); ok {
-		p.bannerTransition.Cancel()
+		p.cancelBanner()
 	}
 }
 

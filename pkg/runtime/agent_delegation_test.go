@@ -804,10 +804,9 @@ func TestRunTurn_BudgetAdmissionErrorStopsLoop(t *testing.T) {
 	sink := &collectSink{}
 
 	_, span := noop.NewTracerProvider().Tracer("test").Start(t.Context(), "test")
-	control := rt.runTurn(
-		t.Context(), sess, root, nil, primary, primary.ID(), 0, span,
-		nil, ls, sink,
-	)
+	control := rt.runTurn(t.Context(), &turn{
+		sess: sess, a: root, model: primary, modelID: primary.ID(), sessionSpan: span, ls: ls, events: sink,
+	}, phaseModel, nil)
 
 	assert.Equal(t, turnExit, control)
 	assert.Equal(t, turnEndReasonBudgetExceeded, ls.exitReason)

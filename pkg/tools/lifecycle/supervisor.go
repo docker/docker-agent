@@ -491,8 +491,9 @@ func (s *Supervisor) reapPendingConnect(ctx context.Context, p *pendingConnect) 
 	}
 }
 
-// Stop tears the supervisor down. Idempotent. Blocks until the underlying
-// session is closed. Cancellation by any concurrent caller interrupts teardown.
+// Stop tears the supervisor down. Idempotent. It waits for teardown or the
+// caller's context; Start cannot reconnect until teardown actually finishes.
+// Cancellation by any concurrent caller interrupts teardown.
 func (s *Supervisor) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	if s.stopping {
@@ -504,8 +505,9 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 		}
 		return err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	callerCtx := ctx
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopOnCancel := context.AfterFunc(callerCtx, cancel)
 	s.stopCancel = cancel
 	s.stopping = true
 	stopDone := make(chan struct{})
@@ -551,21 +553,27 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 		}
 		return waitErr
 	}
-	var err error
-	if shutdown := s.policy.Shutdown; shutdown != nil {
-		err = shutdown(ctx, teardown)
-	} else {
-		err = teardown()
-	}
-	if waitForWatcher(ctx, watchDone) == nil {
+	result := make(chan error, 1)
+	go func() {
+		defer cancel()
+		defer stopOnCancel()
+		var err error
+		if shutdown := s.policy.Shutdown; shutdown != nil {
+			err = shutdown(ctx, teardown)
+		} else {
+			err = teardown()
+		}
+		_ = waitForWatcher(context.WithoutCancel(ctx), watchDone)
 		close(stopDone)
-	} else {
-		go func() {
-			_ = waitForWatcher(context.WithoutCancel(ctx), watchDone)
-			close(stopDone)
-		}()
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-callerCtx.Done():
+		cancel()
+		return callerCtx.Err()
 	}
-	return err
 }
 
 func (s *Supervisor) initTimeoutError() error {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // RedactSecrets is the registered name of the builtin that scrubs
@@ -25,10 +26,11 @@ import (
 //     explicit legacy YAML entries.
 //   - [hooks.EventBeforeLLMCall]         — scrub outgoing CHAT CONTENT
 //     before each model call (returns UpdatedMessages).
-//   - [hooks.EventToolResponseTransform] — scrub tool OUTPUT before it
-//     reaches event consumers, the persisted session, the
-//     post_tool_use hook, or the next LLM call (returns
-//     UpdatedToolResponse).
+//   - [hooks.EventToolResponseTransform] — scrub tool OUTPUT, result
+//     metadata, and inline document attachments before they reach event
+//     consumers, the persisted session, the post_tool_use hook, or the
+//     next LLM call (returns UpdatedToolResponse / UpdatedToolResultMeta
+//     / UpdatedToolDocuments).
 //
 // The agent-level redact_secrets flag is shorthand for wiring the
 // builtin into all three events at once via [ApplyAgentDefaults]; the
@@ -123,15 +125,22 @@ func redactOutgoingMessages(in *hooks.Input) *hooks.Output {
 	}
 }
 
-// redactToolOutput scrubs the tool's textual response. The payload is
-// carried as `any` in the wire protocol because some MCP tools may
-// produce structured shapes; the dispatcher's record path only feeds
-// strings to the LLM today, so anything else is out of scope.
+// redactToolOutput scrubs the tool's textual response, its display
+// metadata, and its inline document attachments. The payload is carried
+// as `any` in the wire protocol because some MCP tools may produce
+// structured shapes; the dispatcher's record path only feeds strings to
+// the LLM today, so anything else is out of scope.
 //
 // Returning a pointer-typed [HookSpecificOutput.UpdatedToolResponse]
 // preserves the empty-string-vs-no-rewrite distinction (see the field
 // docs); a redaction that wipes the entire output to "" is still
 // honoured by the runtime.
+//
+// Attachments are scrubbed because MCP servers return text resources as
+// [tools.DocumentContent] with Text set. The dispatcher emits and
+// persists those documents verbatim, so without this leg the secret
+// stays in the session file and the event stream even though the next
+// LLM call re-scrubs it.
 func redactToolOutput(in *hooks.Input) *hooks.Output {
 	out := &hooks.HookSpecificOutput{HookEventName: hooks.EventToolResponseTransform}
 	if original, ok := in.ToolResponse.(string); ok {
@@ -142,10 +151,48 @@ func redactToolOutput(in *hooks.Input) *hooks.Output {
 	if meta, changed := redactResultMeta(in.ToolResultMeta); changed {
 		out.UpdatedToolResultMeta = meta
 	}
-	if out.UpdatedToolResponse == nil && out.UpdatedToolResultMeta == nil {
+	if documents, changed := redactToolDocuments(in.ToolDocuments); changed {
+		out.UpdatedToolDocuments = documents
+	}
+	if out.UpdatedToolResponse == nil && out.UpdatedToolResultMeta == nil && out.UpdatedToolDocuments == nil {
 		return nil
 	}
 	return &hooks.Output{HookSpecificOutput: out}
+}
+
+// redactToolDocuments scrubs every string field of the tool result's
+// inline document attachments. MCP text resources arrive as
+// [tools.DocumentContent] with Text set and are emitted and persisted as
+// [chat.Document] parts, so the tool_response_transform leg has to cover
+// Name/URI/MimeType/Text as well — matching what the before_llm_call leg
+// already does for document parts in chat messages. Binary Data is
+// base64 and left alone.
+//
+// Returns a clone with only the rewritten entries differing from the
+// input, and changed=false (nil documents) when nothing matched so the
+// runtime takes the no-rewrite fast path.
+func redactToolDocuments(documents []tools.DocumentContent) ([]tools.DocumentContent, bool) {
+	if len(documents) == 0 {
+		return nil, false
+	}
+	out := make([]tools.DocumentContent, len(documents))
+	changed := false
+	for i, doc := range documents {
+		out[i] = tools.DocumentContent{
+			Name:     portcullis.Redact(doc.Name),
+			URI:      portcullis.Redact(doc.URI),
+			MimeType: portcullis.Redact(doc.MimeType),
+			Data:     doc.Data,
+			Text:     portcullis.Redact(doc.Text),
+		}
+		if out[i] != doc {
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	return out, true
 }
 
 func redactResultMeta(meta any) (json.RawMessage, bool) {

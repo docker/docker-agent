@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestPipelineToolInputPatchesCompose(t *testing.T) {
@@ -113,6 +114,39 @@ func TestPipelineToolResponseComposesAndPreservesEmptyRewrite(t *testing.T) {
 	}
 }
 
+// TestPipelineToolDocumentsCompose pins that attachment rewrites ride the
+// same sequential pipeline as the response string: the hook that runs
+// second sees the first hook's list, the runtime receives the last
+// non-nil list, and the caller's input is left untouched.
+func TestPipelineToolDocumentsCompose(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry()
+	require.NoError(t, registry.RegisterBuiltin("rewrite", func(_ context.Context, in *Input, _ []string) (*Output, error) {
+		require.Len(t, in.ToolDocuments, 1)
+		assert.Equal(t, "notes.md", in.ToolDocuments[0].Name)
+		return &Output{HookSpecificOutput: &HookSpecificOutput{UpdatedToolDocuments: []tools.DocumentContent{
+			{Name: "redacted.md", MimeType: "text/markdown", Text: "[REDACTED]"},
+		}}}, nil
+	}))
+	require.NoError(t, registry.RegisterBuiltin("observe", func(_ context.Context, in *Input, _ []string) (*Output, error) {
+		require.Len(t, in.ToolDocuments, 1)
+		assert.Equal(t, "redacted.md", in.ToolDocuments[0].Name)
+		return nil, nil
+	}))
+	exec := NewExecutorWithRegistry(&Config{ToolResponseTransform: []MatcherConfig{{Hooks: []Hook{
+		{Type: HookTypeBuiltin, Command: "rewrite"},
+		{Type: HookTypeBuiltin, Command: "observe"},
+	}}}}, t.TempDir(), nil, registry)
+	in := &Input{ToolName: "mcp_fetch", ToolDocuments: []tools.DocumentContent{{Name: "notes.md", Text: "secret"}}}
+
+	result, err := exec.Dispatch(t.Context(), EventToolResponseTransform, in)
+	require.NoError(t, err)
+	require.Len(t, result.UpdatedToolDocuments, 1)
+	assert.Equal(t, "redacted.md", result.UpdatedToolDocuments[0].Name)
+	assert.Equal(t, "notes.md", in.ToolDocuments[0].Name, "caller input must not be mutated")
+}
+
 func TestPipelineToolInputEmptyPatch(t *testing.T) {
 	t.Parallel()
 
@@ -142,6 +176,7 @@ func TestPipelineNoRewrite(t *testing.T) {
 			assert.Nil(t, result.ModifiedInput)
 			assert.Nil(t, result.UpdatedMessages)
 			assert.Nil(t, result.UpdatedToolResponse)
+			assert.Nil(t, result.UpdatedToolDocuments)
 		})
 	}
 }

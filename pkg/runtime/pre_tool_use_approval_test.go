@@ -140,7 +140,7 @@ func runJudgedToolCall(t *testing.T, rt *LocalRuntime, sess *session.Session, ag
 		Function: tools.FunctionCall{Name: "the_tool", Arguments: "{}"},
 	}}
 	events := make(chan Event, 16)
-	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events), nil)
 	close(events)
 	return collectClosedEvents(events)
 }
@@ -200,7 +200,7 @@ func TestPreToolUseHook_AskEscalatesToUser(t *testing.T) {
 	events := make(chan Event, 16)
 	done := make(chan struct{})
 	go func() {
-		rt.processToolCalls(ctx, sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events))
+		rt.processToolCalls(ctx, sess, rt.resolveSessionAgent(sess), calls, agentTools, NewChannelSink(events), nil)
 		close(done)
 	}()
 
@@ -332,7 +332,7 @@ func TestPreToolUseHookPipelinePreservesUnchangedArguments(t *testing.T) {
 		Name: "the_tool", Arguments: `{"cmd":"original","cwd":"work"}`,
 	}}}
 	events := make(chan Event, 32)
-	rt.processToolCalls(t.Context(), session.New(session.WithUserMessage("test")), rt.CurrentAgent(), calls, agentTools, NewChannelSink(events))
+	rt.processToolCalls(t.Context(), session.New(session.WithUserMessage("test")), rt.CurrentAgent(), calls, agentTools, NewChannelSink(events), nil)
 	close(events)
 	assert.Equal(t, map[string]any{"cmd": "rewritten and approved", "cwd": "work"}, received)
 	assert.False(t, hasEventOfType[*ToolCallConfirmationEvent](collectClosedEvents(events)))

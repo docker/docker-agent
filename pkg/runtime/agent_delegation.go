@@ -421,7 +421,7 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	if req.directNativeTransfer {
 		idleRetryPolicy = idleStreamRetryPolicy{enabled: true, parentSessionID: parent.ID}
 	}
-	childEvents := r.runStream(ctx, s, idleRetryPolicy)
+	childEvents := r.runStream(ctx, s, idleRetryPolicy, nil)
 	var subSessionErr error
 	for event := range childEvents {
 		evts.Emit(event)
@@ -841,7 +841,7 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 	defer span.End()
 
 	r.executeOnAgentSwitchHooks(ctx, currentAgent, sess.ID, ca, next.Name(), agentSwitchKindHandoff)
-	r.switchSessionAgent(sess, next.Name())
+	r.switchSessionAgent(ctx, sess, next.Name())
 	handoffMessage := "The agent " + ca + " handed off the conversation to you. " +
 		"Your available handoff agents and tools are specified in the system messages that follow. " +
 		"Only use those capabilities - do not attempt to use tools or hand off to agents that you see " +

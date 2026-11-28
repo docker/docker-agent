@@ -34,6 +34,24 @@ func NewLoopDetector(threshold int, exemptTools ...string) *LoopDetector {
 	return &LoopDetector{threshold: threshold, exemptTools: exempt}
 }
 
+// LoopState is what a [LoopDetector] has counted so far, in a form its owner
+// can keep and hand back to a detector later.
+type LoopState struct {
+	Signature   string `json:"signature,omitempty"`
+	Consecutive int    `json:"consecutive,omitempty"`
+}
+
+// State returns what the detector has counted so far.
+func (d *LoopDetector) State() LoopState {
+	return LoopState{Signature: d.lastSignature, Consecutive: d.consecutive}
+}
+
+// Restore puts the detector back where state left it.
+func (d *LoopDetector) Restore(state LoopState) {
+	d.lastSignature = state.Signature
+	d.consecutive = state.Consecutive
+}
+
 // Consecutive returns the number of consecutive identical batches recorded
 // since the last reset (or since a non-matching batch was seen).
 func (d *LoopDetector) Consecutive() int {

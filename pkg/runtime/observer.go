@@ -73,36 +73,58 @@ func WithEventObserverFactory(factory func() EventObserver) Opt {
 
 type observerBarrier struct {
 	done chan struct{}
+	// lost is why an observer that stores the transcript no longer holds
+	// all of it, if one says so. Set before done is closed.
+	lost error
 }
 
 func (*observerBarrier) GetAgentName() string { return "" }
 
 type observerFlushKey struct{}
 
+// observerFlush waits until the observers have seen every event emitted so
+// far, and returns the barrier they passed.
+type observerFlush func(ctx context.Context) (*observerBarrier, error)
+
 // flushObservers orders direct store writes after previously emitted events.
 func flushObservers(ctx context.Context) error {
-	flush, _ := ctx.Value(observerFlushKey{}).(func(context.Context) error)
+	flush, _ := ctx.Value(observerFlushKey{}).(observerFlush)
 	if flush == nil {
 		return nil
 	}
-	return flush(ctx)
+	_, err := flush(ctx)
+	return err
 }
 
-func withObserverFlush(ctx context.Context, events chan<- Event) context.Context {
-	return context.WithValue(ctx, observerFlushKey{}, func(ctx context.Context) error {
+// transcriptStored waits like flushObservers, and also reports the error
+// that kept part of what was emitted out of the store, if one did.
+func (flush observerFlush) transcriptStored(ctx context.Context) error {
+	barrier, err := flush(ctx)
+	if err != nil {
+		return err
+	}
+	return barrier.lost
+}
+
+func newObserverFlush(events chan<- Event) observerFlush {
+	return func(ctx context.Context) (*observerBarrier, error) {
 		barrier := &observerBarrier{done: make(chan struct{})}
 		select {
 		case events <- barrier:
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 		select {
 		case <-barrier.done:
-			return nil
+			return barrier, nil
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
-	})
+	}
+}
+
+func withObserverFlush(ctx context.Context, events chan<- Event) context.Context {
+	return context.WithValue(ctx, observerFlushKey{}, newObserverFlush(events))
 }
 
 // observe wraps inner with the runtime's observer chain: each
@@ -126,6 +148,11 @@ func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner
 		defer close(out)
 		for event := range inner {
 			if barrier, ok := event.(*observerBarrier); ok {
+				for _, obs := range observers {
+					if keeper, ok := obs.(interface{ Err() error }); ok && barrier.lost == nil {
+						barrier.lost = keeper.Err()
+					}
+				}
 				close(barrier.done)
 				continue
 			}

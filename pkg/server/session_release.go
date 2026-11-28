@@ -42,7 +42,7 @@ func awaitStreamIdle(rs *activeRuntimes, timeout time.Duration) bool {
 	}
 }
 
-// releaseRuntime closes a deleted session's server-owned runtime and stops its
+// releaseRuntime closes a deleted session's server-owned runtime and disposes its
 // team's toolsets. Nothing else does: LocalRuntime.Close does not stop the
 // team's toolsets, so without this every deleted session leaves its MCP
 // clients, supervisors and connections running until the process exits.
@@ -60,8 +60,8 @@ func releaseRuntimeResources(ctx context.Context, sessionID string, rt runtime.R
 	releaseRuntimeResourcesWithin(ctx, sessionID, rt, t, releaseCloseTimeout)
 }
 
-// releaseRuntimeResourcesWithin closes rt, then stops t's toolsets. A Close
-// that fails, panics or outlives closeTimeout never skips the toolset stop,
+// releaseRuntimeResourcesWithin closes rt, then disposes t's toolsets. A Close
+// that fails, panics or outlives closeTimeout never skips toolset disposal,
 // since that is what frees the MCP clients. t is nil when the caller owns the team.
 func releaseRuntimeResourcesWithin(ctx context.Context, sessionID string, rt runtime.Runtime, t *team.Team, closeTimeout time.Duration) {
 	closed := make(chan error, 1)
@@ -81,14 +81,14 @@ func releaseRuntimeResourcesWithin(ctx context.Context, sessionID string, rt run
 			slog.ErrorContext(ctx, "Failed to close runtime", "session_id", sessionID, "error", err)
 		}
 	case <-timeout.C:
-		slog.ErrorContext(ctx, "Timed out closing runtime; stopping its toolsets anyway", "session_id", sessionID, "timeout", closeTimeout)
+		slog.ErrorContext(ctx, "Timed out closing runtime; disposing its toolsets anyway", "session_id", sessionID, "timeout", closeTimeout)
 	}
 	if t == nil {
 		return
 	}
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseStopTimeout)
 	defer cancel()
-	if err := t.StopToolSets(stopCtx); err != nil {
-		slog.ErrorContext(ctx, "Failed to stop toolsets", "session_id", sessionID, "error", err)
+	if err := t.Dispose(stopCtx); err != nil {
+		slog.ErrorContext(ctx, "Failed to dispose toolsets", "session_id", sessionID, "error", err)
 	}
 }

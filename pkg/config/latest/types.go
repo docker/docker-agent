@@ -3124,6 +3124,15 @@ type HookDefinition struct {
 	// the right Output shape (e.g. "pre_tool_use_decision" produces a
 	// permission_decision verdict).
 	Schema string `json:"schema,omitempty" yaml:"schema,omitempty"`
+
+	// AutoInjected marks a hook definition synthesized by the runtime rather
+	// than read from configuration (currently the redaction passes that
+	// bracket configured tool_response_transform hooks). It is deliberately
+	// not representable in YAML or JSON, so a user-authored hook cannot
+	// duplicate an auto-injected hook's identity; the hook executor uses it
+	// to keep those passes out of deduplication. Callers must leave it false
+	// when building hooks from configuration.
+	AutoInjected bool `json:"-" yaml:"-"`
 }
 
 // GetTimeout returns the per-hook execution timeout, defaulting to 60

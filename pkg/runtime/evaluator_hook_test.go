@@ -143,7 +143,7 @@ func TestEvaluatorHookApprovalIntegration(t *testing.T) {
 				Function: tools.FunctionCall{Name: "the_tool", Arguments: `{"cmd":"git status"}`},
 			}}
 			eventCh := make(chan Event, 32)
-			rt.processToolCalls(t.Context(), sess, root, calls, agentTools, NewChannelSink(eventCh))
+			rt.processToolCalls(t.Context(), sess, root, calls, agentTools, NewChannelSink(eventCh), nil)
 			close(eventCh)
 			events := collectClosedEvents(eventCh)
 
@@ -266,7 +266,7 @@ agents:
 				sess := session.New(session.WithAgentName(a.Name()), session.WithSafetyPolicy(session.SafetyPolicyAutonomous), session.WithNonInteractive(true))
 				calls := []tools.ToolCall{{ID: "call_1", Type: "function", Function: tools.FunctionCall{Name: "scoped_tool", Arguments: `{}`}}}
 				events := make(chan Event, 32)
-				rt.processToolCalls(t.Context(), sess, a, calls, agentTools, NewChannelSink(events))
+				rt.processToolCalls(t.Context(), sess, a, calls, agentTools, NewChannelSink(events), nil)
 				close(events)
 				assert.Equal(t, a == root, executed, "child guard must use its own deny response")
 				collected := collectClosedEvents(events)

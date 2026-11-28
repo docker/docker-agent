@@ -347,6 +347,93 @@ func TestRedactSecretsToolOutputIgnoresNonStringResponse(t *testing.T) {
 	assert.Nil(t, out)
 }
 
+// TestRedactSecretsScrubsToolDocuments: MCP text resources come back as
+// tools.DocumentContent with Text set and are emitted and persisted
+// verbatim. The tool_response_transform leg must scrub them too, and
+// must leave binary data and clean documents byte-for-byte.
+func TestRedactSecretsScrubsToolDocuments(t *testing.T) {
+	t.Parallel()
+
+	secret := fakeGitHubPAT()
+	in := &hooks.Input{
+		HookEventName: hooks.EventToolResponseTransform,
+		ToolName:      "mcp_fetch",
+		ToolDocuments: []tools.DocumentContent{
+			{Name: "notes.md", URI: "mcp://docs/notes.md", MimeType: "text/markdown", Text: "token=" + secret},
+			{Name: "clean.md", MimeType: "text/markdown", Text: "nothing to see"},
+			{Name: "report.pdf", MimeType: "application/pdf", Data: "cGRm"},
+		},
+	}
+
+	out, err := redactSecrets(t.Context(), in, nil)
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	require.NotNil(t, out.HookSpecificOutput)
+	docs := out.HookSpecificOutput.UpdatedToolDocuments
+	require.Len(t, docs, 3)
+	assert.NotContains(t, docs[0].Text, secret)
+	assert.Contains(t, docs[0].Text, portcullis.Marker)
+	assert.Equal(t, "nothing to see", docs[1].Text, "clean attachment must survive unchanged")
+	assert.Equal(t, "cGRm", docs[2].Data, "binary attachment must survive unchanged")
+	assert.Contains(t, in.ToolDocuments[0].Text, secret, "the caller's slice must not be mutated")
+}
+
+// TestRedactSecretsScrubsToolDocumentStringFields pins the non-text
+// fields of an attachment: name and MIME type are persisted as the
+// document's display metadata and URI is emitted with the tool result,
+// so a secret hiding there leaks through the same path.
+func TestRedactSecretsScrubsToolDocumentStringFields(t *testing.T) {
+	t.Parallel()
+
+	secret := fakeGitHubPAT()
+	for _, field := range []string{"name", "uri", "mime"} {
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+
+			doc := tools.DocumentContent{Name: "notes.md", URI: "mcp://docs/notes.md", MimeType: "text/markdown", Text: "clean"}
+			switch field {
+			case "name":
+				doc.Name = secret + ".md"
+			case "uri":
+				doc.URI = "mcp://docs/?token=" + secret
+			case "mime":
+				doc.MimeType = "text/plain; token=" + secret
+			}
+
+			out, err := redactSecrets(t.Context(), &hooks.Input{
+				HookEventName: hooks.EventToolResponseTransform,
+				ToolDocuments: []tools.DocumentContent{doc},
+			}, nil)
+			require.NoError(t, err)
+			require.NotNil(t, out, "a hit in any string field must produce a rewrite")
+			require.Len(t, out.HookSpecificOutput.UpdatedToolDocuments, 1)
+			updated := out.HookSpecificOutput.UpdatedToolDocuments[0]
+			assert.NotContains(t, updated.Name, secret)
+			assert.NotContains(t, updated.URI, secret)
+			assert.NotContains(t, updated.MimeType, secret)
+			assert.NotContains(t, updated.Text, secret)
+			assert.Contains(t, updated.Name+updated.URI+updated.MimeType, portcullis.Marker)
+		})
+	}
+}
+
+// TestRedactSecretsToolDocumentsNoOpOnCleanAttachments: no secret in
+// the attachments (and no textual output) ⇒ nil Output so the runtime
+// keeps the no-rewrite fast path.
+func TestRedactSecretsToolDocumentsNoOpOnCleanAttachments(t *testing.T) {
+	t.Parallel()
+
+	out, err := redactSecrets(t.Context(), &hooks.Input{
+		HookEventName: hooks.EventToolResponseTransform,
+		ToolDocuments: []tools.DocumentContent{
+			{Name: "clean.md", MimeType: "text/markdown", Text: "nothing to see"},
+			{Name: "report.pdf", MimeType: "application/pdf", Data: "cGRm"},
+		},
+	}, nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+}
+
 // TestRedactSecretsLenientOnUnsupportedEvent: configuring the builtin
 // under an event that doesn't know how to handle it (e.g. session_start)
 // must be a no-op rather than crash the run loop. The event-keyed
