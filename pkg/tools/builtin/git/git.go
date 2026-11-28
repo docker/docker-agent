@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
+	"slices"
 	"sort"
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/storer"
 
@@ -134,12 +137,11 @@ func (t *ToolSet) log(_ context.Context, args LogArgs) (*tools.ToolCallResult, e
 		return tools.ResultError("Error: " + err.Error()), nil
 	}
 
-	opts := &gogit.LogOptions{Order: gogit.LogOrderCommitterTime}
+	var p string
 	if args.Path != "" {
-		p := args.Path
-		opts.FileName = &p
+		p = path.Clean(args.Path)
 	}
-	iter, err := repo.Log(opts)
+	iter, err := repo.Log(&gogit.LogOptions{Order: gogit.LogOrderCommitterTime})
 	if err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			return tools.ResultSuccess("No commits yet."), nil
@@ -162,6 +164,12 @@ func (t *ToolSet) log(_ context.Context, args LogArgs) (*tools.ToolCallResult, e
 		if count >= limit {
 			return storer.ErrStop
 		}
+		if p != "" {
+			changed, err := changesPath(repo.Storer, c, p)
+			if err != nil || !changed {
+				return err
+			}
+		}
 		fmt.Fprintf(&b, "%s  %s  %s  %s\n",
 			c.Hash.String()[:8], c.Author.When.Format("2006-01-02"), c.Author.Name, firstLine(c.Message))
 		count++
@@ -174,6 +182,57 @@ func (t *ToolSet) log(_ context.Context, args LogArgs) (*tools.ToolCallResult, e
 		return tools.ResultSuccess("No commits found."), nil
 	}
 	return tools.ResultSuccess(b.String()), nil
+}
+
+// changesPath reports whether p differs between c and each parent; a root commit matches when it has p.
+func changesPath(s storer.EncodedObjectStorer, c *object.Commit, p string) (bool, error) {
+	entry, err := entryAt(s, c, p)
+	if err != nil {
+		return false, err
+	}
+	if c.NumParents() == 0 {
+		return entry != (object.TreeEntry{}), nil
+	}
+	for i := range c.NumParents() {
+		parent, err := c.Parent(i)
+		if err != nil {
+			return false, err
+		}
+		parentEntry, err := entryAt(s, parent, p)
+		if err != nil {
+			return false, err
+		}
+		if parentEntry == entry {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// entryAt returns the tree entry at p in c, or a zero entry when p is absent.
+func entryAt(s storer.EncodedObjectStorer, c *object.Commit, p string) (object.TreeEntry, error) {
+	if p == "." {
+		return object.TreeEntry{Mode: filemode.Dir, Hash: c.TreeHash}, nil
+	}
+	tree, err := c.Tree()
+	if err != nil {
+		return object.TreeEntry{}, err
+	}
+	names := strings.Split(p, "/")
+	for _, name := range names[:len(names)-1] {
+		i := slices.IndexFunc(tree.Entries, func(e object.TreeEntry) bool { return e.Name == name })
+		if i < 0 || tree.Entries[i].Mode != filemode.Dir {
+			return object.TreeEntry{}, nil
+		}
+		if tree, err = object.GetTree(s, tree.Entries[i].Hash); err != nil {
+			return object.TreeEntry{}, err
+		}
+	}
+	i := slices.IndexFunc(tree.Entries, func(e object.TreeEntry) bool { return e.Name == names[len(names)-1] })
+	if i < 0 {
+		return object.TreeEntry{}, nil
+	}
+	return tree.Entries[i], nil
 }
 
 func (t *ToolSet) branches(_ context.Context, _ BranchesArgs) (*tools.ToolCallResult, error) {
