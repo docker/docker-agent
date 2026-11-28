@@ -7,9 +7,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/cache"
@@ -21,7 +24,9 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
 
 // scriptedProvider answers every call with a fixed reply and counts calls.
@@ -771,4 +776,143 @@ func TestRouting_UserMessageEventKeepsTheUserPosition(t *testing.T) {
 	require.Len(t, prompts, 1)
 	assert.Equal(t, 0, prompts[0].SessionPosition)
 	assert.Less(t, slices.Index(events, Event(prompts[0])), slices.Index(events, Event(routes[0])))
+}
+
+func TestRouting_FollowUpStreamStartRecordsEntryAgent(t *testing.T) {
+	t.Parallel()
+
+	f := newEvaluatorRoutingFixture(t,
+		scriptedAnswer{result: choiceResult("complex", defaultProbabilities("complex", 0.9))},
+		scriptedAnswer{result: choiceResult("complex", defaultProbabilities("complex", 0.4))},
+	)
+	rec := &recordingTelemetry{}
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+	f.rt.telemetry = rec
+	f.rt.tracer = tp.Tracer("test")
+
+	sess := session.New(session.WithUserMessage("First complex request"), session.WithNonInteractive(true))
+	runRouted(t, f.rt, sess)
+	require.True(t, sess.Routed())
+	require.Equal(t, "specialist", sess.RouteAgent(), "first request should leave RouteAgent on specialist")
+
+	// Second request restarts at the entry agent (root) and stays there when
+	// the evaluator confidence is below the routing threshold.
+	sess.AddMessage(session.UserMessage("Follow-up on root"))
+	runRouted(t, f.rt, sess)
+
+	starts := rec.snapshot().sessionStarts
+	require.Len(t, starts, 2)
+	assert.Equal(t, "root", starts[0].AgentName)
+	assert.Equal(t, "root", starts[1].AgentName, "follow-up session_start must record entry agent, not previous route")
+
+	var sessionSpanAgents []string
+	// sessionSpan.End() runs in a defer after finalizeEventChannel closes the
+	// event channel, so wait briefly for both spans to flush.
+	require.Eventually(t, func() bool {
+		sessionSpanAgents = sessionSpanAgents[:0]
+		for _, sp := range exporter.GetSpans() {
+			if sp.Name != "runtime.session" {
+				continue
+			}
+			for _, attr := range sp.Attributes {
+				if string(attr.Key) == genai.AttrAgentNameRuntime {
+					sessionSpanAgents = append(sessionSpanAgents, attr.Value.AsString())
+				}
+			}
+		}
+		return len(sessionSpanAgents) == 2
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, []string{"root", "root"}, sessionSpanAgents, "both runtime.session spans must be attributed to root")
+
+	// Pinned children still keep their own session-local attribution.
+	pinned := session.New(session.WithAgentName("specialist"))
+	assert.Equal(t, "specialist", f.rt.streamStartAgentName(pinned))
+}
+
+func TestRouting_TransferReturnAtMaxIterationsPublishesRoutedAgent(t *testing.T) {
+	t.Parallel()
+
+	helperProv := &queueProvider{
+		id: "test/helper-model",
+		streams: []chat.MessageStream{
+			newStreamBuilder().AddContent("helper-done").AddStopWithUsage(10, 5).Build(),
+		},
+	}
+
+	var specialistTurns atomic.Int32
+	specialistProv := &delegationFuncProvider{
+		id: "test/specialist-model",
+		fn: func(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+			if specialistTurns.Add(1) == 1 {
+				return newStreamBuilder().
+					AddToolCallWithStop("tc_helper", transfertask.ToolNameTransferTask, `{"agent":"helper","task":"assist"}`).
+					Build(), nil
+			}
+			return newStreamBuilder().AddContent("should-not-run").AddStopWithUsage(10, 5).Build(), nil
+		},
+	}
+
+	eval := &scriptedEvaluator{
+		answers: []scriptedAnswer{{result: choiceResult("complex", defaultProbabilities("complex", 0.9))}},
+	}
+	helper := agent.New("helper", "helper agent", agent.WithModel(helperProv))
+	specialist := agent.New("specialist", "specialist agent",
+		agent.WithModel(specialistProv),
+		agent.WithSubAgents(helper),
+		agent.WithToolSets(transfertask.New()),
+	)
+	root := agent.New("root", "root router",
+		agent.WithModel(&scriptedProvider{reply: "root-reply"}),
+		agent.WithRouting(agent.Routing{AllowedAgents: []string{"specialist"}, DefaultAgent: "specialist"}),
+		agent.WithHooks(&latest.HooksConfig{
+			BeforeAgentRun: latest.HookDefinitions{{
+				Type:      hooks.HookTypeEvaluator,
+				Evaluator: "task_route",
+				RoutingPolicy: &latest.RoutingPolicy{
+					Routes:         map[string]string{"complex": "specialist"},
+					MinProbability: 0.7,
+				},
+			}},
+		}),
+	)
+
+	tm := team.New(
+		team.WithAgents(root, specialist, helper),
+		team.WithEvaluators(map[string]evaluator.Evaluator{"task_route": eval}),
+	)
+	rt, err := NewLocalRuntime(t.Context(), tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	sess := session.New(
+		session.WithUserMessage("Diagnose this deadlock"),
+		session.WithToolsApproved(true),
+		session.WithMaxIterations(1),
+		session.WithNonInteractive(true),
+	)
+	events := runRouted(t, rt, sess)
+
+	var (
+		sawMaxIterations bool
+		lastAgentInfo    string
+	)
+	for _, ev := range events {
+		switch e := ev.(type) {
+		case *MaxIterationsReachedEvent:
+			sawMaxIterations = true
+		case *AgentInfoEvent:
+			lastAgentInfo = e.AgentName
+		}
+	}
+
+	assert.Equal(t, int32(1), specialistTurns.Load(), "specialist must stop at max_iterations without running Turn 2")
+	assert.True(t, sawMaxIterations, "max iterations event should be emitted")
+	assert.Equal(t, "root", rt.CurrentAgent().Name(), "shared entry agent must stay root")
+	assert.Equal(t, "specialist", sess.RouteAgent(), "parent session must remain routed to specialist")
+	assert.Equal(t, "specialist", lastAgentInfo, "final AgentInfo after transfer return must name the routed parent agent")
 }

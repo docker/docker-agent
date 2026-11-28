@@ -151,10 +151,19 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 	return r.runStream(ctx, sess, defaultIdleStreamRetryPolicy(), nil)
 }
 
+func (r *LocalRuntime) streamStartAgentName(sess *session.Session) string {
+	// Routed root sessions restart at the shared entry agent in beginRouting;
+	// ignore any RouteAgent left over from the previous request.
+	if sess.Routed() && sess.AgentName == "" {
+		return r.currentAgentName()
+	}
+	return r.sessionAgentName(sess)
+}
+
 // runStream starts the run loop for sess. resume is the checkpoint the run is
 // taken up from; it is nil for a new run.
 func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idleRetryPolicy idleStreamRetryPolicy, resume *checkpoint) <-chan Event {
-	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.currentAgentName(), "session_id", sess.ID)
+	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.streamStartAgentName(sess), "session_id", sess.ID)
 	events := make(chan Event, defaultEventChannelCapacity)
 	rootStream := !sess.IsSubSession()
 	if rootStream {
@@ -192,8 +201,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// gateway-bound HTTP call originating from this loop can correlate
 	// back to the originating session. Plumbing happens in
 	// pkg/httpclient/userAgentTransport, gated on `X-Cagent-Forward`.
+	initialAgent := r.streamStartAgentName(sess)
 	ctx = httpclient.ContextWithSessionID(ctx, sess.ID)
-	r.telemetry.RecordSessionStart(ctx, r.currentAgentName(), sess.ID)
+	r.telemetry.RecordSessionStart(ctx, initialAgent, sess.ID)
 
 	// Seed `gen_ai.conversation.id` into baggage at the session
 	// boundary. Every span the runtime, providers, MCP client, RAG,
@@ -227,11 +237,11 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental.
 	sessionAttrs := []attribute.KeyValue{
 		attribute.String(genai.AttrConversationID, sess.ID),
-		attribute.String(genai.AttrAgentNameRuntime, r.currentAgentName()),
+		attribute.String(genai.AttrAgentNameRuntime, initialAgent),
 	}
 	if genai.EmitLegacyAttributes() {
 		sessionAttrs = append(sessionAttrs,
-			attribute.String("agent", r.currentAgentName()),
+			attribute.String("agent", initialAgent),
 			attribute.String("session.id", sess.ID),
 		)
 	}
