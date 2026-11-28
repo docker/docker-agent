@@ -89,6 +89,10 @@ func (m *appModel) restoreTabs(
 		return
 	}
 
+	if m.explicitSession {
+		return
+	}
+
 	var savedTabs []tuistate.TabEntry
 	var savedActiveID string
 	if userconfig.Get().GetRestoreTabs() {
