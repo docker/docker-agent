@@ -51,6 +51,9 @@ type sessionExitedEvent struct {
 // it via [eventLog.stream].
 type eventLog struct {
 	capacity int
+	// base is the sequence number the log starts after; events up to it
+	// belonged to a released log and cannot be replayed. Immutable.
+	base uint64
 
 	mu        sync.Mutex
 	seq       uint64
@@ -229,6 +232,9 @@ func (l *eventLog) replay(ctx context.Context, since *uint64, backlog []seqEvent
 // replay. An empty backlog with a non-zero since is not a gap on its own
 // (the client is simply already caught up).
 func (l *eventLog) gapped(since uint64, backlog []seqEvent) bool {
+	if since < l.base {
+		return true
+	}
 	if len(backlog) == 0 {
 		return false
 	}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -760,4 +761,283 @@ func TestAttachedServer_StatusWaitTimesOut(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+func TestSessionManager_DetachRuntimeReleasesAttachedSession(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	sm.RegisterFollowUpInjector(sess.ID, func(context.Context, string) {})
+	require.Len(t, sm.GetActiveSessions(), 1)
+
+	sm.DetachRuntime(sess.ID)
+
+	assert.Empty(t, sm.GetActiveSessions())
+	_, injected := sm.followUpInjectors.Load(sess.ID)
+	assert.False(t, injected, "follow-up injector must be released")
+
+	// The persisted session survives the detach.
+	_, err := store.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+
+	// Detaching an unknown or already detached session is a no-op.
+	sm.DetachRuntime(sess.ID)
+}
+
+// recallFakeRuntime records the handler set through SetRecallHandler.
+type recallFakeRuntime struct {
+	fakeRuntime
+
+	handler runtime.RecallHandler
+}
+
+func (r *recallFakeRuntime) SetRecallHandler(h runtime.RecallHandler) { r.handler = h }
+
+func TestSessionManager_DetachRuntimeClearsRecallHandler(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	rt := &recallFakeRuntime{}
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, rt, sess)
+	require.NotNil(t, rt.handler)
+
+	sm.DetachRuntime(sess.ID)
+
+	assert.Nil(t, rt.handler, "recall handler installed by AttachRuntime must be cleared")
+}
+
+func TestSessionManager_DetachRuntimeAllowsReattach(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	src := func(ctx context.Context, send func(any)) { <-ctx.Done() }
+
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	sm.RegisterEventSource(sess.ID, src)
+	require.True(t, sm.HasEventSource(sess.ID))
+
+	sm.DetachRuntime(sess.ID)
+	assert.False(t, sm.HasEventSource(sess.ID), "detach must tear down the event log")
+
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	sm.RegisterEventSource(sess.ID, src)
+	assert.True(t, sm.HasEventSource(sess.ID), "same ID must be able to register a new event source after reattach")
+}
+
+func TestSessionManager_DetachRuntimeKeepsEventSequence(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	sm.appendSessionEvent(sess.ID, "one")
+	sm.appendSessionEvent(sess.ID, "two")
+	seen, ok := sm.LastEventSeq(sess.ID)
+	require.True(t, ok)
+
+	sm.DetachRuntime(sess.ID)
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	sm.appendSessionEvent(sess.ID, "three")
+
+	next, ok := sm.LastEventSeq(sess.ID)
+	require.True(t, ok)
+	assert.Greater(t, next, seen, "event IDs must not restart after a reattach")
+
+	// A client resuming from before the detach missed session_exited, so it
+	// must be told to resync.
+	streamCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	var got []any
+	sm.StreamEvents(streamCtx, sess.ID, &seen, func(_ uint64, ev any) { got = append(got, ev) })
+	require.NotEmpty(t, got)
+	assert.Equal(t, gapEvent{Type: "gap"}, got[0])
+	assert.Equal(t, "three", got[len(got)-1])
+}
+
+// gatedUpdateStore holds UpdateSession open until release is closed.
+type gatedUpdateStore struct {
+	session.Store
+
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *gatedUpdateStore) UpdateSession(ctx context.Context, sess *session.Session) error {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.Store.UpdateSession(ctx, sess)
+}
+
+func TestSessionManager_DetachRuntimeDrainsMetadataUpdate(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := &gatedUpdateStore{
+		Store:   session.NewInMemorySessionStore(),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+
+	updated := make(chan error, 1)
+	go func() { updated <- sm.UpdateSessionTitle(ctx, sess.ID, "old") }()
+	<-store.entered
+
+	detached := make(chan struct{})
+	go func() {
+		sm.DetachRuntime(sess.ID)
+		close(detached)
+	}()
+
+	// While the write is in flight the session must not look inactive, or a
+	// later update would take the stored-session path and be overwritten.
+	assert.Never(t, func() bool {
+		_, ok := sm.runtimeSessions.Load(sess.ID)
+		return !ok
+	}, 100*time.Millisecond, 10*time.Millisecond)
+
+	// Another session can attach while this detach is waiting.
+	other := session.New()
+	attachedOther := make(chan struct{})
+	go func() {
+		sm.AttachRuntime(ctx, other.ID, &fakeRuntime{}, other)
+		close(attachedOther)
+	}()
+	select {
+	case <-attachedOther:
+	case <-time.After(5 * time.Second):
+		t.Error("attaching another session blocked on the detach")
+	}
+
+	// A reattach of the same ID waits for the detach to finish, so it is never torn down by it.
+	reattached := make(chan struct{})
+	replacement := &fakeRuntime{}
+	go func() {
+		sm.AttachRuntime(ctx, sess.ID, replacement, sess)
+		close(reattached)
+	}()
+	assert.Never(t, func() bool {
+		select {
+		case <-reattached:
+			return true
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, 10*time.Millisecond)
+
+	close(store.release)
+	require.NoError(t, <-updated)
+	<-detached
+	<-reattached
+
+	rs, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok, "replacement registration must survive the detach")
+	assert.Same(t, replacement, rs.runtime)
+}
+
+// failingDeleteStore holds DeleteSession open until release is closed, then fails.
+type failingDeleteStore struct {
+	session.Store
+
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *failingDeleteStore) DeleteSession(context.Context, string) error {
+	close(s.entered)
+	<-s.release
+	return errors.New("delete failed")
+}
+
+func TestSessionManager_FailedDeleteKeepsDetachMarker(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := &failingDeleteStore{
+		Store:   session.NewInMemorySessionStore(),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	rs, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok)
+
+	deleted := make(chan error, 1)
+	go func() { deleted <- sm.DeleteSession(ctx, sess.ID) }()
+	<-store.entered
+
+	detached := make(chan struct{})
+	go func() {
+		sm.DetachRuntime(sess.ID)
+		close(detached)
+	}()
+	require.Eventually(t, rs.detaching.Load, 5*time.Second, time.Millisecond)
+
+	// Holding mux keeps the detach from removing the entry while we look at it.
+	sm.mux.Lock()
+	close(store.release)
+	require.Error(t, <-deleted)
+	assert.False(t, sm.runtimeActive(sess.ID, rs), "a failed delete must not reactivate a detaching session")
+	sm.mux.Unlock()
+	<-detached
+}
+
+func TestSessionManager_DetachRuntimeRejectsLateRegistrations(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	register := func() {
+		sm.RegisterEventSource(sess.ID, func(ctx context.Context, _ func(any)) { <-ctx.Done() })
+		sm.RegisterFollowUpInjector(sess.ID, func(context.Context, string) {})
+	}
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	sm.DetachRuntime(sess.ID)
+
+	register()
+	assert.False(t, sm.HasEventSource(sess.ID))
+	_, ok := sm.followUpInjectors.Load(sess.ID)
+	assert.False(t, ok)
+
+	sm.AttachRuntime(ctx, sess.ID, &fakeRuntime{}, sess)
+	register()
+	assert.True(t, sm.HasEventSource(sess.ID))
+	_, ok = sm.followUpInjectors.Load(sess.ID)
+	assert.True(t, ok)
+	sm.DetachRuntime(sess.ID)
 }
