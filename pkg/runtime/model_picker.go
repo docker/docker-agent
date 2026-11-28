@@ -78,8 +78,12 @@ func (r *LocalRuntime) setModelAndEmitInfo(ctx context.Context, sess *session.Se
 
 // recordModelOverride stores the override on the session that gets resumed, as
 // the user's model picker does. The override applies to the whole team, so a
-// switch made in a sub-session is recorded on the root session.
+// switch made in a sub-session is recorded on the root session. An isolated
+// worktree task runs on a copy of the team, so its switches stay local.
 func (r *LocalRuntime) recordModelOverride(ctx context.Context, sess *session.Session, agentName, modelRef string) {
+	if r.isolatedWorktree {
+		return
+	}
 	sess = sess.Root()
 	if sess.IsSubSession() {
 		return

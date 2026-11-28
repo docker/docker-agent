@@ -21,12 +21,14 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
@@ -492,6 +494,56 @@ func TestBackgroundWorktreeRepeatedAgentAndBlockingDelegation(t *testing.T) {
 	}
 	assert.NoFileExists(t, filepath.Join(dir, "worker.txt"))
 	assert.Len(t, rt.LiveSessions(t.Context(), parent), 1)
+}
+
+func TestBackgroundWorktreeModelSwitchStaysLocal(t *testing.T) {
+	t.Parallel()
+	for _, call := range []struct{ name, args string }{
+		{"change_model", `{"model":"other"}`},
+		{"revert_model", `{}`},
+	} {
+		t.Run(call.name, func(t *testing.T) {
+			t.Parallel()
+			dir := worktreeRepo(t)
+			model := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+				newStreamBuilder().AddToolCallName("switch", call.name).AddToolCallArguments("switch", call.args).AddToolCallStopWithUsage(2, 1).Build(),
+				newStreamBuilder().AddContent("done").AddStopWithUsage(2, 1).Build(),
+			}}
+			rt := loadWorktreeRuntime(t, dir, map[string]provider.Provider{"root": &mockProvider{id: "test/mock-model"}, "first": model, "second": &mockProvider{id: "test/mock-model"}}, "")
+			rt.modelSwitcherCfg = &modelcatalog.Config{
+				Models: map[string]latest.ModelConfig{"other": {Provider: "openai", Model: "other"}},
+				ProviderRegistry: provider.NewRegistry(map[string]provider.Factory{
+					"openai": func(context.Context, *latest.ModelConfig, environment.Provider, ...options.Opt) (provider.Provider, error) {
+						return model, nil
+					},
+				}),
+			}
+			var factory func(context.Context, string) (*agent.Agent, error)
+			factory = func(ctx context.Context, _ string) (*agent.Agent, error) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				return agent.New("first", "", agent.WithModel(model), agent.WithToolSets(modelpicker.New([]string{"other"})), agent.WithWorkingDirFactory(factory)), nil
+			}
+			first, err := rt.team.Agent("first")
+			require.NoError(t, err)
+			agent.WithWorkingDirFactory(factory)(first)
+			parent := session.New(session.WithWorkingDir(dir), session.WithToolsApproved(true))
+			parent.SetAgentModelOverride("first", "chosen")
+			require.NoError(t, rt.sessionStore.UpdateSession(t.Context(), parent))
+
+			var wt *worktree.Worktree
+			result := rt.RunAgent(t.Context(), agenttool.RunParams{AgentName: "first", Task: "switch models", Worktree: true, ParentSession: parent, OnWorktree: func(tree *worktree.Worktree) { wt = tree }})
+			require.NotNil(t, wt)
+			t.Cleanup(func() { require.NoError(t, wt.Remove(context.WithoutCancel(t.Context()))) })
+			require.Empty(t, result.ErrMsg)
+			require.Empty(t, model.streams)
+
+			stored, err := rt.sessionStore.GetSession(t.Context(), parent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, map[string]string{"first": "chosen"}, stored.AgentModelOverrides)
+		})
+	}
 }
 
 type worktreeProviderFunc struct {
