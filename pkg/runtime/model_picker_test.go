@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"io"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
@@ -43,4 +46,46 @@ func TestModelPickerUsesSessionHandoffCaller(t *testing.T) {
 	assert.False(t, target.HasModelOverride())
 	assert.True(t, root.HasModelOverride())
 	assert.Equal(t, "root", rt.CurrentAgent().Name())
+}
+
+// A model switched by the agent must survive a resume, like one the user picked.
+func TestModelPickerRecordsOverrideOnSession(t *testing.T) {
+	t.Parallel()
+	picker := modelpicker.New([]string{"chosen"})
+	root := agent.New("root", "", agent.WithModel(&mockProvider{id: "test/root"}), agent.WithToolSets(picker))
+	store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "session.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if c, ok := store.(io.Closer); ok {
+			require.NoError(t, c.Close())
+		}
+	})
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionStore(store), WithModelStore(mockModelStore{}), WithModelSwitcherConfig(&modelcatalog.Config{
+		Models: map[string]latest.ModelConfig{"chosen": {Provider: "openai", Model: "gpt-4o-mini"}}, ProviderRegistry: testProviderRegistry(),
+	}))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+	sess := session.New(session.WithToolsApproved(true))
+	require.NoError(t, store.AddSession(t.Context(), sess))
+	ts, err := picker.Tools(t.Context())
+	require.NoError(t, err)
+	invoke := func(name, args string) {
+		rt.processToolCalls(t.Context(), sess, root, []tools.ToolCall{{ID: name, Type: "function", Function: tools.FunctionCall{Name: name, Arguments: args}}}, ts, NewChannelSink(make(chan Event, 128)), nil)
+	}
+	stored := func() map[string]string {
+		loaded, err := store.GetSession(t.Context(), sess.ID)
+		require.NoError(t, err)
+		return loaded.AgentModelOverrides
+	}
+
+	invoke("change_model", `{"model":"chosen"}`)
+	assert.Equal(t, map[string]string{"root": "chosen"}, stored())
+	invoke("revert_model", `{}`)
+	assert.Empty(t, stored())
+
+	// A sub-agent's switch is recorded on the root session, which is the one resumed.
+	child := newSubSession(sess, SubSessionConfig{ToolsApproved: true}, root)
+	grandchild := newSubSession(child, SubSessionConfig{ToolsApproved: true}, root)
+	rt.processToolCalls(t.Context(), grandchild, root, []tools.ToolCall{{ID: "sub", Type: "function", Function: tools.FunctionCall{Name: "change_model", Arguments: `{"model":"chosen"}`}}}, ts, NewChannelSink(make(chan Event, 128)), nil)
+	assert.Equal(t, map[string]string{"root": "chosen"}, stored())
 }

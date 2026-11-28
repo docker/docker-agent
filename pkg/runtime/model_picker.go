@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 )
@@ -24,7 +25,7 @@ func findModelPickerTool(a *agent.Agent) *modelpicker.ToolSet {
 }
 
 // handleChangeModel handles the change_model tool call by switching the current agent's model.
-func (r *LocalRuntime) handleChangeModel(ctx context.Context, a *agent.Agent, toolCall tools.ToolCall, events EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleChangeModel(ctx context.Context, sess *session.Session, a *agent.Agent, toolCall tools.ToolCall, events EventSink) (*tools.ToolCallResult, error) {
 	var params modelpicker.ChangeModelArgs
 	if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -47,22 +48,23 @@ func (r *LocalRuntime) handleChangeModel(ctx context.Context, a *agent.Agent, to
 		)), nil
 	}
 
-	return r.setModelAndEmitInfo(ctx, a, params.Model, events)
+	return r.setModelAndEmitInfo(ctx, sess, a, params.Model, events)
 }
 
 // handleRevertModel handles the revert_model tool call by reverting the current agent to its default model.
-func (r *LocalRuntime) handleRevertModel(ctx context.Context, a *agent.Agent, events EventSink) (*tools.ToolCallResult, error) {
-	return r.setModelAndEmitInfo(ctx, a, "", events)
+func (r *LocalRuntime) handleRevertModel(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) (*tools.ToolCallResult, error) {
+	return r.setModelAndEmitInfo(ctx, sess, a, "", events)
 }
 
 // setModelAndEmitInfo sets the model for the current agent and emits an updated
 // AgentInfo event so the UI reflects the change. An empty modelRef reverts to
 // the agent's default model.
-func (r *LocalRuntime) setModelAndEmitInfo(ctx context.Context, a *agent.Agent, modelRef string, events EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) setModelAndEmitInfo(ctx context.Context, sess *session.Session, a *agent.Agent, modelRef string, events EventSink) (*tools.ToolCallResult, error) {
 	currentName := a.Name()
 	if err := r.SetAgentModel(ctx, currentName, modelRef); err != nil {
 		return tools.ResultError(fmt.Sprintf("failed to set model: %v", err)), nil
 	}
+	r.recordModelOverride(ctx, sess, currentName, modelRef)
 
 	events.Emit(AgentInfo(a.Name(), r.getEffectiveModelID(ctx, a).String(), a.Description(), a.WelcomeMessage()))
 
@@ -72,4 +74,22 @@ func (r *LocalRuntime) setModelAndEmitInfo(ctx context.Context, a *agent.Agent, 
 	}
 	slog.InfoContext(ctx, "Model changed via model_picker tool", "agent", currentName, "model", modelRef)
 	return tools.ResultSuccess("Model changed to " + modelRef), nil
+}
+
+// recordModelOverride stores the override on the session that gets resumed, as
+// the user's model picker does. The override applies to the whole team, so a
+// switch made in a sub-session is recorded on the root session. An isolated
+// worktree task runs on a copy of the team, so its switches stay local.
+func (r *LocalRuntime) recordModelOverride(ctx context.Context, sess *session.Session, agentName, modelRef string) {
+	if r.isolatedWorktree {
+		return
+	}
+	sess = sess.Root()
+	if sess.IsSubSession() {
+		return
+	}
+	sess.SetAgentModelOverride(agentName, modelRef)
+	if err := r.sessionStore.UpdateSession(context.WithoutCancel(ctx), sess); err != nil {
+		slog.WarnContext(ctx, "Failed to persist model override", "session_id", sess.ID, "agent", agentName, "error", err)
+	}
 }
