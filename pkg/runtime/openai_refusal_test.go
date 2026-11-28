@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -94,5 +95,99 @@ func TestRunStream_OpenAIRefusal(t *testing.T) {
 			require.NotEmpty(t, msgs)
 			assert.Equal(t, refusal, msgs[len(msgs)-1].Message.Content)
 		})
+	}
+}
+
+// TestRunStream_OpenAIChoiceSelection covers n > 1 (provider_opts.extra_body
+// can forward n) on Chat Completions. The runtime reads one choice per chunk,
+// so the answer shown and the finish reason must both come from the first
+// choice, even when a sibling choice's refusal or finish arrives in a chunk
+// of its own before the first choice is done.
+func TestRunStream_OpenAIChoiceSelection(t *testing.T) {
+	t.Parallel()
+
+	chunk := func(choice string) string {
+		return `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[` + choice + `]}` + "\n\n"
+	}
+	content := func(i int, s string) string {
+		return fmt.Sprintf(`{"index":%d,"delta":{"role":"assistant","content":%q},"finish_reason":null}`, i, s)
+	}
+	refusal := func(i int, s string) string {
+		return fmt.Sprintf(`{"index":%d,"delta":{"role":"assistant","refusal":%q},"finish_reason":null}`, i, s)
+	}
+	stop := func(i int) string { return fmt.Sprintf(`{"index":%d,"delta":{},"finish_reason":"stop"}`, i) }
+	const usage = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	tests := []struct {
+		name   string
+		sse    string
+		shown  string
+		finish chat.FinishReason
+	}{
+		{
+			"sibling refuses and finishes first",
+			chunk(content(0, "Fine")) + chunk(refusal(1, "No.")) + chunk(stop(1)) + chunk(content(0, ", done.")) + chunk(stop(0)) + usage,
+			"Fine, done.", chat.FinishReasonStop,
+		},
+		{
+			"first choice refuses, sibling answers",
+			chunk(refusal(0, "I can't")) + chunk(content(1, "Sure.")) + chunk(stop(1)) + chunk(refusal(0, " help.")) + chunk(stop(0)) + usage,
+			"I can't help.", chat.FinishReasonRefusal,
+		},
+	}
+	for _, tt := range tests {
+		for _, trackUsage := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/track_usage=%t", tt.name, trackUsage), func(t *testing.T) {
+				t.Parallel()
+
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte(tt.sse))
+				}))
+				t.Cleanup(srv.Close)
+
+				cfg := latest.ModelConfig{
+					Provider: "openai",
+					Model:    "gpt-4o",
+					BaseURL:  srv.URL,
+					ProviderOpts: map[string]any{
+						"api_type":   "openai_chatcompletions",
+						"extra_body": map[string]any{"n": 2},
+					},
+					TrackUsage: &trackUsage,
+				}
+				client, err := openai.NewClient(t.Context(), &cfg,
+					environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test-key"}))
+				require.NoError(t, err)
+
+				root := agent.New("root", "test", agent.WithModel(client))
+				rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+				require.NoError(t, err)
+
+				sess := session.New(session.WithUserMessage("hi"))
+				sess.NonInteractive = true
+
+				var stopped *StreamStoppedEvent
+				var shown string
+				for ev := range rt.RunStream(t.Context(), sess) {
+					switch e := ev.(type) {
+					case *ErrorEvent:
+						t.Fatalf("unexpected error event: %s", e.Error)
+					case *StreamStoppedEvent:
+						stopped = e
+					case *AgentChoiceEvent:
+						shown += e.Content
+					}
+				}
+
+				require.NotNil(t, stopped)
+				assert.Equal(t, tt.finish, stopped.FinishReason)
+				assert.Equal(t, tt.shown, shown)
+				msgs := sess.GetAllMessages()
+				require.NotEmpty(t, msgs)
+				assert.Equal(t, tt.shown, msgs[len(msgs)-1].Message.Content)
+			})
+		}
 	}
 }

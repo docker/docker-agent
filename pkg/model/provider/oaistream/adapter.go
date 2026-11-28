@@ -17,16 +17,19 @@ import (
 
 // StreamAdapter adapts the OpenAI stream to our interface
 type StreamAdapter struct {
-	stream *ssestream.Stream[openai.ChatCompletionChunk]
-	// The finish state is tracked per choice index: provider_opts can request
-	// several completions (n > 1), and one choice's finish reason or refusal
-	// must not decide another's.
-	lastFinishReason map[int]chat.FinishReason
+	stream           *ssestream.Stream[openai.ChatCompletionChunk]
+	lastFinishReason chat.FinishReason
 	// heldFinishReason is a stop/length held back until the usage chunk
 	// arrives; emitted at EOF if no usage chunk ever comes.
-	heldFinishReason map[int]chat.FinishReason
+	heldFinishReason chat.FinishReason
 	// sawRefusal records refusal text, which turns a stop into a refusal.
-	sawRefusal  map[int]bool
+	sawRefusal bool
+	// provider_opts can request several completions (n > 1), but the runtime
+	// reads one choice per chunk. Only the first choice index seen is passed
+	// through, so the text shown and the finish reason come from the same
+	// completion for the whole stream.
+	selected    int64
+	hasSelected bool
 	toolCalls   map[int]string
 	trackUsage  bool
 	serviceTier string
@@ -34,12 +37,9 @@ type StreamAdapter struct {
 
 func NewStreamAdapter(stream *ssestream.Stream[openai.ChatCompletionChunk], trackUsage bool) *StreamAdapter {
 	return &StreamAdapter{
-		stream:           stream,
-		lastFinishReason: make(map[int]chat.FinishReason),
-		heldFinishReason: make(map[int]chat.FinishReason),
-		sawRefusal:       make(map[int]bool),
-		toolCalls:        make(map[int]string),
-		trackUsage:       trackUsage,
+		stream:     stream,
+		toolCalls:  make(map[int]string),
+		trackUsage: trackUsage,
 	}
 }
 
@@ -50,8 +50,8 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if err != nil {
 			return chat.MessageStreamResponse{}, WrapOpenAIError(err)
 		}
-		if idx, held, ok := lowestHeld(a.heldFinishReason); ok {
-			delete(a.heldFinishReason, idx)
+		if held := a.heldFinishReason; held != "" {
+			a.heldFinishReason = ""
 			return chat.MessageStreamResponse{
 				Choices: []chat.MessageStreamChoice{{FinishReason: held}},
 			}, nil
@@ -70,12 +70,18 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		Object:  string(openaiResponse.Object),
 		Created: openaiResponse.Created,
 		Model:   openaiResponse.Model,
-		Choices: make([]chat.MessageStreamChoice, len(openaiResponse.Choices)),
+		Choices: make([]chat.MessageStreamChoice, 0, len(openaiResponse.Choices)),
 	}
 
-	// Convert the choices
+	// Convert the selected choice
 	for i := range openaiResponse.Choices {
 		choice := &openaiResponse.Choices[i]
+		if !a.hasSelected {
+			a.selected, a.hasSelected = choice.Index, true
+		}
+		if choice.Index != a.selected {
+			continue
+		}
 
 		finishReason := chat.FinishReason(choice.FinishReason)
 		// content_filter (Azure OpenAI, OpenAI moderation) ends the turn
@@ -83,22 +89,21 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if finishReason == "content_filter" {
 			finishReason = chat.FinishReasonRefusal
 		}
-		idx := int(choice.Index)
 		if choice.Delta.Refusal != "" {
-			a.sawRefusal[idx] = true
+			a.sawRefusal = true
 		}
-		if finishReason == chat.FinishReasonStop && a.sawRefusal[idx] {
+		if finishReason == chat.FinishReasonStop && a.sawRefusal {
 			finishReason = chat.FinishReasonRefusal
 		}
 		if a.trackUsage && !openaiResponse.JSON.Usage.Valid() &&
 			(finishReason == chat.FinishReasonStop || finishReason == chat.FinishReasonLength || finishReason == chat.FinishReasonRefusal) {
-			a.heldFinishReason[idx] = finishReason
+			a.heldFinishReason = finishReason
 			finishReason = ""
 		}
 
 		// Track the finish reason for when we get usage info
 		if finishReason != chat.FinishReasonNull && finishReason != "" {
-			a.lastFinishReason[idx] = finishReason
+			a.lastFinishReason = finishReason
 		}
 
 		// Extract reasoning text from ExtraFields since the OpenAI SDK does
@@ -128,7 +133,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			}
 		}
 
-		response.Choices[i] = chat.MessageStreamChoice{
+		out := chat.MessageStreamChoice{
 			Index:        int(choice.Index),
 			FinishReason: finishReason,
 			Delta: chat.MessageDelta{
@@ -142,7 +147,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// Convert function call if present
 		if choice.Delta.JSON.FunctionCall.Valid() {
 			funcCall := choice.Delta.FunctionCall
-			response.Choices[i].Delta.FunctionCall = &tools.FunctionCall{
+			out.Delta.FunctionCall = &tools.FunctionCall{
 				Name:      funcCall.Name,
 				Arguments: funcCall.Arguments,
 			}
@@ -150,7 +155,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 		// Convert tool calls if present
 		if len(choice.Delta.ToolCalls) > 0 {
-			response.Choices[i].Delta.ToolCalls = make([]tools.ToolCall, len(choice.Delta.ToolCalls))
+			out.Delta.ToolCalls = make([]tools.ToolCall, len(choice.Delta.ToolCalls))
 			for j, toolCall := range choice.Delta.ToolCalls {
 				id := toolCall.ID
 				index := int(toolCall.Index)
@@ -160,7 +165,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 					a.toolCalls[index] = id
 				}
 
-				response.Choices[i].Delta.ToolCalls[j] = tools.ToolCall{
+				out.Delta.ToolCalls[j] = tools.ToolCall{
 					ID:   id,
 					Type: tools.ToolType(toolCall.Type),
 					Function: tools.FunctionCall{
@@ -170,6 +175,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 				}
 			}
 		}
+		response.Choices = append(response.Choices, out)
 	}
 
 	// Check if Usage field is present using the JSON metadata
@@ -204,17 +210,14 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// chunks must keep flowing through as content and must not be converted
 		// into a synthetic stop before the runtime sees the delta.
 		if len(openaiResponse.Choices) == 0 {
-			// The runtime reads one choice, the lowest index, so that
-			// choice's finish reason is the turn's.
-			idx := a.selectedChoice()
-			finishReason := a.lastFinishReason[idx]
-			if held, ok := a.heldFinishReason[idx]; ok {
-				finishReason = held
+			finishReason := a.lastFinishReason
+			if a.heldFinishReason != "" {
+				finishReason = a.heldFinishReason
+				a.heldFinishReason = ""
 			}
-			clear(a.heldFinishReason)
 			if finishReason == chat.FinishReasonNull || finishReason == "" {
 				finishReason = chat.FinishReasonStop
-				if a.sawRefusal[idx] {
+				if a.sawRefusal {
 					finishReason = chat.FinishReasonRefusal
 				}
 			}
@@ -230,29 +233,4 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 // Close closes the stream
 func (a *StreamAdapter) Close() {
 	_ = a.stream.Close()
-}
-
-// selectedChoice returns the index of the choice whose finish reason ends the
-// turn: the lowest one seen.
-func (a *StreamAdapter) selectedChoice() int {
-	lowest, found := 0, false
-	for _, m := range []map[int]chat.FinishReason{a.lastFinishReason, a.heldFinishReason} {
-		for idx := range m {
-			if !found || idx < lowest {
-				lowest, found = idx, true
-			}
-		}
-	}
-	return lowest
-}
-
-// lowestHeld returns the held finish reason of the lowest choice index.
-func lowestHeld(held map[int]chat.FinishReason) (int, chat.FinishReason, bool) {
-	lowest, found := 0, false
-	for idx := range held {
-		if !found || idx < lowest {
-			lowest, found = idx, true
-		}
-	}
-	return lowest, held[lowest], found
 }

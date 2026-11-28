@@ -400,29 +400,34 @@ func TestStreamAdapter_Refusal(t *testing.T) {
 	}
 }
 
-// provider_opts can ask for several completions (n > 1). A refusal in one
-// choice must not turn a different choice's normal stop into a refusal, and
-// the usage-only chunk must report the finish reason of the choice the
-// runtime reads (the lowest index).
+// provider_opts can ask for several completions (n > 1), but the runtime
+// reads one choice per chunk. Only the first choice is passed through, so a
+// sibling's refusal, text or finish, even in a chunk of its own, can neither
+// be shown nor end the turn.
 func TestStreamAdapter_RefusalPerChoice(t *testing.T) {
 	t.Parallel()
 
 	chunk := func(choices string) string {
 		return `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test","choices":[` + choices + `]}` + "\n\n"
 	}
-	text := `{"index":0,"delta":{"role":"assistant","content":"Fine."},"finish_reason":null}`
-	refusal := `{"index":1,"delta":{"role":"assistant","refusal":"No."},"finish_reason":null}`
+	text := func(i int, s string) string {
+		return fmt.Sprintf(`{"index":%d,"delta":{"role":"assistant","content":%q},"finish_reason":null}`, i, s)
+	}
+	refusal := func(i int, s string) string {
+		return fmt.Sprintf(`{"index":%d,"delta":{"role":"assistant","refusal":%q},"finish_reason":null}`, i, s)
+	}
 	stop := func(i int) string { return fmt.Sprintf(`{"index":%d,"delta":{},"finish_reason":"stop"}`, i) }
 
 	tests := []struct {
-		name string
-		sse  string
-		want string
+		name    string
+		sse     string
+		content string
+		want    string
 	}{
-		{"refusal in the other choice", chunk(text+","+refusal) + chunk(stop(0)+","+stop(1)) + chunkUsageOnly + chunkDone, "stop"},
-		{"refusal in the read choice", chunk(strings.Replace(refusal, `"index":1`, `"index":0`, 1)+","+strings.Replace(text, `"index":0`, `"index":1`, 1)) +
-			chunk(stop(0)+","+stop(1)) + chunkUsageOnly + chunkDone, "refusal"},
-		{"other choice finishes last", chunk(text+","+refusal) + chunk(stop(0)) + chunk(stop(1)) + chunkUsageOnly + chunkDone, "stop"},
+		{"refusal in the other choice", chunk(text(0, "Fine.")+","+refusal(1, "No.")) + chunk(stop(0)+","+stop(1)) + chunkUsageOnly + chunkDone, "Fine.", "stop"},
+		{"refusal in the read choice", chunk(refusal(0, "No.")+","+text(1, "Fine.")) + chunk(stop(0)+","+stop(1)) + chunkUsageOnly + chunkDone, "No.", "refusal"},
+		{"other choice finishes last", chunk(text(0, "Fine.")+","+refusal(1, "No.")) + chunk(stop(0)) + chunk(stop(1)) + chunkUsageOnly + chunkDone, "Fine.", "stop"},
+		{"other choice refuses and finishes first, in its own chunks", chunk(text(0, "Fine")) + chunk(refusal(1, "No.")) + chunk(stop(1)) + chunk(text(0, ".")) + chunk(stop(0)) + chunkUsageOnly + chunkDone, "Fine.", "stop"},
 	}
 	for _, tt := range tests {
 		for _, trackUsage := range []bool{true, false} {
@@ -431,10 +436,25 @@ func TestStreamAdapter_RefusalPerChoice(t *testing.T) {
 				adapter := NewStreamAdapter(newTestStream(t, tt.sse), trackUsage)
 				defer adapter.Close()
 
-				reasons, _, err := collectFinish(t, adapter)
-				require.ErrorIs(t, err, io.EOF)
+				var content strings.Builder
+				var reasons []string
+				for {
+					resp, err := adapter.Recv()
+					if err != nil {
+						require.ErrorIs(t, err, io.EOF)
+						break
+					}
+					for _, c := range resp.Choices {
+						assert.Zero(t, c.Index, "only the first choice is passed through")
+						content.WriteString(c.Delta.Content)
+						if c.FinishReason != "" {
+							reasons = append(reasons, string(c.FinishReason))
+						}
+					}
+				}
+				assert.Equal(t, tt.content, content.String())
 				require.NotEmpty(t, reasons)
-				assert.Equal(t, tt.want, reasons[len(reasons)-1])
+				assert.Equal(t, tt.want, reasons[0], "the first finish reason ends the turn")
 			})
 		}
 	}
