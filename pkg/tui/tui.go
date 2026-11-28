@@ -87,10 +87,14 @@ const (
 
 // Model is the top-level TUI model that wraps the chat page.
 type appModel struct {
-	toolRenderers *tool.Registry
-	ar            *animation.Runtime
-	shutdownDone  <-chan struct{}
-	cleanupOnce   sync.Once
+	toolRenderers   *tool.Registry
+	ar              *animation.Runtime
+	shutdownDone    <-chan struct{}
+	cleanupOnce     sync.Once
+	explicitSession bool
+	resumeUpdate    func(*app.App, bool)
+	resumeClear     func()
+	resumeContinued func()
 
 	// cleanupAllOnce guards the full cleanupAll shutdown sequence so repeat
 	// invocations (ExitSessionMsg followed by ExitConfirmedMsg, …) are no-ops:
@@ -336,6 +340,16 @@ type Transcriber interface {
 
 // Option configures the TUI.
 type Option func(*appModel)
+
+// WithExplicitSession gives a requested session precedence over saved tabs.
+func WithExplicitSession() Option {
+	return func(m *appModel) { m.explicitSession = true }
+}
+
+// WithProgramResume wires terminal resume to the active persisted session.
+func WithProgramResume(update func(*app.App, bool), clearReport, continued func()) Option {
+	return func(m *appModel) { m.resumeUpdate, m.resumeClear, m.resumeContinued = update, clearReport, continued }
+}
 
 // WithStartupBannerAnimation enables the one-time startup animation.
 func WithStartupBannerAnimation() Option {
@@ -839,6 +853,7 @@ func (m *appModel) contextShutdownCmd() tea.Cmd {
 
 // Init initializes the model.
 func (m *appModel) Init() tea.Cmd {
+	m.updateProgramResume()
 	return tea.Batch(m.init(), m.loadHistoryCmd(), m.waitForThemeChange(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.refreshPlanSidebarCmd(), m.initTmuxVisibilityCmd(), m.refreshProgramStatus(), m.programStatusProbeCmd())
 }
 
@@ -978,6 +993,10 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	pointerCmd := m.updateScrollbarPointer(msg)
 	stateCmd := m.applyTabEvent(m.activeTab, msg)
 	model, cmd := m.update(msg)
+	if _, ok := msg.(tea.ResumeMsg); ok && m.resumeContinued != nil {
+		m.resumeContinued()
+	}
+	m.updateProgramResume()
 	if m.ready && !m.leanMode && m.activeTab != nil && m.activeTab.editor != nil && m.editorChrome() != m.editorChromeHeight {
 		cmd = tea.Batch(cmd, m.resizeAll())
 		m.viewCacheValid = false
@@ -1314,6 +1333,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.forwardDialog(msg)
 
 	case dialog.ExitConfirmedMsg:
+		m.clearProgramResume()
 		m.cleanupAll()
 		quit := m.quitCmd()
 		return m, quit
@@ -1404,6 +1424,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.supervisor != nil && m.supervisor.Count() > 1 {
 			return m.handleCloseTab(m.supervisor.ActiveID())
 		}
+		m.clearProgramResume()
 		m.cleanupAll()
 		quit := m.quitCmd()
 		return m, quit

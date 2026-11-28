@@ -108,6 +108,16 @@ settings:
   restore_tabs: true
 ```
 
+An explicit `--session` takes precedence over `restore_tabs`: it opens the requested session rather than the saved tab layout. The saved layout is not replaced at startup.
+
+### Terminal program resume
+
+Terminals that support [OSC 7577](https://www.superlogical.com/rex/docs/build/program-resume) can restore a running standalone `docker-agent run ./agent.yaml` after the terminal application restarts. In Rex, session restore also requires an opt-in trust rule for the host executable and the reported command; see [Rex session restore](https://www.superlogical.com/rex/docs/features/session-restore) and [resume rules](https://www.superlogical.com/rex/docs/customize/resume-rules). Only trust terminal programs when you trust the host application. The terminal decides whether to restore a report.
+
+This first version reports only interactive, non-lean standalone runs with a local agent file and a persisted active session. It does not report plugin (`docker agent`), sandbox, remote, recorded or non-interactive runs, runs with other command-line options or initial messages, or environment overrides of the default model or models gateway. It captures the executable, agent file, session database, config and data directories, and active session's working directory. On resume it loads the existing session, including its saved safety policy, and fails if the session or working directory is gone or changed. The active session is restored, not the tab layout, unfinished input, live tool processes, or the original environment. Agent files, user settings, hooks and environment are read again and may have changed. Other explicitly selected flags are not replayed: those runs are not reported.
+
+An intentional exit clears the terminal's resume record; hangup or shutdown does not. When the active session cannot be safely reported, any previous record is also cleared to avoid restoring the wrong session. The token is removed from child environments, and automatic self-update is skipped for a token-bearing invocation so the restarted process cannot lose the token.
+
 ## Session Titles
 
 Docker Agent auto-generates a short title for each session from your first message, using a one-shot call to the agent's own model. Point that call at a smaller, cheaper model instead with `title_model` on a model definition:

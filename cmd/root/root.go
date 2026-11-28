@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/logging"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/programresume"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/jscommands"
 	"github.com/docker/docker-agent/pkg/selfupdate"
@@ -208,6 +209,14 @@ We collect anonymous usage data to help improve docker agent. To disable:
 }
 
 func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
+	// Remove the capability before startup can spawn any child, including the updater.
+	token := os.Getenv(programresume.TokenEnv)
+	if err := os.Unsetenv(programresume.TokenEnv); err != nil {
+		return err
+	}
+	if programresume.ValidToken(token) && plugin.RunningStandalone() {
+		ctx = context.WithValue(ctx, resumeTokenKey{}, token)
+	}
 	// Back MCP OAuth with the OS keyring for the CLI. Embedders that don't
 	// import cmd/root keep the default in-memory store.
 	keyringstore.Register()
@@ -222,7 +231,7 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 	// release and re-exec before doing any real work. Skipped for invocations
 	// where restarting would be wrong (plugin metadata handshake, shell
 	// completion) and always falls back to the current binary on any failure.
-	if selfupdate.Enabled() && !isManagementInvocation(args) {
+	if token == "" && selfupdate.Enabled() && !isManagementInvocation(args) {
 		selfupdate.Run(ctx, stdin, stderr)
 	}
 

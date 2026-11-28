@@ -76,35 +76,36 @@ type runExecFlags struct {
 	// resume handling mutate runConfig.WorkingDir; only an explicit flag
 	// makes generic new-session actions in the TUI reuse the initial
 	// session's directory instead of opening the picker.
-	workingDirChanged bool
-	attachmentPath    string
-	remoteAddress     string
-	remoteAuthToken   string
-	modelOverrides    []string
-	promptFiles       []string
-	dryRun            bool
-	runConfig         config.RuntimeConfig
-	sessionDB         string
-	sessionID         string
-	recordPath        string
-	fakeResponses     string
-	fakeStreamDelay   int
-	exitAfterResponse bool
-	cpuProfile        string
-	memProfile        string
-	forceTUI          bool
-	tour              bool
-	sandbox           bool
-	sandboxTemplate   string
-	sandboxOptions    sandbox.Options
-	sbx               bool
-	noKit             bool
-	agentPickerSpec   string
-	worktree          bool
-	worktreeName      string
-	worktreePR        string
-	worktreeBase      string
-	sessionReadOnly   bool
+	workingDirChanged      bool
+	attachmentPath         string
+	remoteAddress          string
+	remoteAuthToken        string
+	modelOverrides         []string
+	promptFiles            []string
+	dryRun                 bool
+	runConfig              config.RuntimeConfig
+	sessionDB              string
+	sessionID              string
+	recordPath             string
+	fakeResponses          string
+	fakeStreamDelay        int
+	exitAfterResponse      bool
+	cpuProfile             string
+	memProfile             string
+	forceTUI               bool
+	tour                   bool
+	sandbox                bool
+	sandboxTemplate        string
+	sandboxOptions         sandbox.Options
+	sbx                    bool
+	noKit                  bool
+	agentPickerSpec        string
+	worktree               bool
+	worktreeName           string
+	worktreePR             string
+	worktreeBase           string
+	sessionReadOnly        bool
+	requireExistingSession bool
 
 	// Exec only
 	exec          bool
@@ -192,6 +193,8 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().StringVar(&flags.remoteAuthToken, "remote-auth-token", "", "Bearer token for --remote (defaults to DOCKER_AGENT_REMOTE_AUTH_TOKEN)")
 	cmd.PersistentFlags().StringVarP(&flags.sessionDB, "session-db", "s", "", "Path to the session database (default: <data-dir>/session.db)")
 	cmd.PersistentFlags().StringVar(&flags.sessionID, "session", "", "Continue from a previous session by ID or relative offset (e.g., -1 for last session). An explicit ID that does not exist yet is created with that ID.")
+	cmd.PersistentFlags().BoolVar(&flags.requireExistingSession, "require-existing-session", false, "Require the requested session to exist")
+	_ = cmd.PersistentFlags().MarkHidden("require-existing-session")
 	cmd.PersistentFlags().StringVar(&flags.fakeResponses, "fake", "", "Replay AI responses from cassette file (for testing)")
 	cmd.PersistentFlags().IntVar(&flags.fakeStreamDelay, "fake-stream", 0, "Simulate streaming with delay in ms between chunks (default 15ms if no value given)")
 	cmd.Flag("fake-stream").NoOptDefVal = "15" // --fake-stream without value uses 15ms
@@ -415,6 +418,7 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 
 	// When an interactive run cannot find any usable model, offer the setup
 	// wizard instead of leaving the user alone with the error.
+	ctx = f.withProgramResume(ctx, cmd, args, useTUI)
 	err := f.runOrExec(ctx, out, args, useTUI)
 	return f.offerSetupOnNoModel(ctx, cmd, out, args, useTUI, err)
 }
@@ -534,7 +538,11 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	// worktree already exists). An explicit --worktree/--worktree-pr on this
 	// run takes precedence and creates a new one as usual.
 	if !f.worktree && f.worktreePR == "" {
-		if resumeDir, ok := b.ResumeWorkingDir(ctx); ok {
+		resumeDir, ok := b.ResumeWorkingDir(ctx)
+		if f.requireExistingSession && (!ok || !sameResumeDirectory(resumeDir, baseDir)) {
+			return errors.New("resume session or its working directory is unavailable or changed")
+		}
+		if ok {
 			baseDir = resumeDir
 			f.runConfig.WorkingDir = resumeDir
 		}
@@ -597,6 +605,12 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 
 	var rec *recorder.Recorder
 	tuiOptions := f.tuiOpts(args)
+	if f.sessionID != "" {
+		tuiOptions = append(tuiOptions, tui.WithExplicitSession())
+	}
+	if resume := programResumeFromContext(ctx); resume != nil && !f.lean && cassettePath == "" {
+		tuiOptions = append(tuiOptions, tui.WithProgramResume(resume.update, resume.clear, resume.resumed))
+	}
 	if dir := f.explicitDefaultWorkingDir(sess); dir != "" {
 		tuiOptions = append(tuiOptions, tui.WithDefaultWorkingDir(dir))
 	}
@@ -1042,7 +1056,7 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 			}
 
 			slog.DebugContext(ctx, "Loaded existing session", "session_id", resolvedID, "session_ref", req.ResumeSessionID, "agent", agentName)
-		case errors.Is(err, session.ErrNotFound) && !session.IsRelativeSessionRef(req.ResumeSessionID):
+		case errors.Is(err, session.ErrNotFound) && !session.IsRelativeSessionRef(req.ResumeSessionID) && !f.requireExistingSession:
 			// An explicit, caller-chosen ID that doesn't exist yet: create the
 			// session with that ID rather than failing. This lets a supervisor
 			// (e.g. a board reconnecting to a dead agent) own the ID up front and
