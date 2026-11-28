@@ -150,6 +150,69 @@ func TestGitLogPathFilterDirectory(t *testing.T) {
 	}
 }
 
+func TestGitLogPathFilterMergeHistory(t *testing.T) {
+	t.Parallel()
+	dir, repo := newRepo(t)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	commit := func(name, content, msg string, minutes int, parents ...plumbing.Hash) plumbing.Hash {
+		t.Helper()
+		full := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+		require.NoError(t, os.WriteFile(full, []byte(content), 0o644))
+		_, err := wt.Add(name)
+		require.NoError(t, err)
+		author := sig()
+		author.When = fixedTime.Add(time.Duration(minutes) * time.Minute)
+		h, err := wt.Commit(msg, &gogit.CommitOptions{Author: author, Parents: parents})
+		require.NoError(t, err)
+		return h
+	}
+
+	// By commit time, the README-only commit sits between the merge and the src commit.
+	base := commit("README.md", "1\n", "add readme", 0)
+	older := commit("src/a.txt", "1\n", "add src a", 1)
+	require.NoError(t, wt.Checkout(&gogit.CheckoutOptions{Hash: base, Force: true}))
+	newer := commit("README.md", "2\n", "edit readme", 2)
+	commit("src/a.txt", "1\n", "merge src branch", 3, newer, older)
+
+	tests := []struct {
+		path    string
+		want    []string
+		notWant []string
+	}{
+		{
+			path:    "src",
+			want:    []string{"add src a"},
+			notWant: []string{"add readme", "edit readme", "merge src branch"},
+		},
+		{
+			path:    "src/a.txt",
+			want:    []string{"add src a"},
+			notWant: []string{"add readme", "edit readme", "merge src branch"},
+		},
+		{
+			path:    "README.md",
+			want:    []string{"add readme", "edit readme"},
+			notWant: []string{"add src a", "merge src branch"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			res, err := New(dir).log(t.Context(), LogArgs{Path: tt.path})
+			require.NoError(t, err)
+			require.False(t, res.IsError, res.Output)
+			for _, msg := range tt.want {
+				require.Contains(t, res.Output, msg)
+			}
+			for _, msg := range tt.notWant {
+				require.NotContains(t, res.Output, msg)
+			}
+		})
+	}
+}
+
 func TestGitShowExplicitAndInvalidRef(t *testing.T) {
 	t.Parallel()
 	dir, repo := newRepo(t)
