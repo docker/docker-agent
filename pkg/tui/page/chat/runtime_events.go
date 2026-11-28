@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"cmp"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -318,6 +317,10 @@ func subSessionCompactionNotice(msg *runtime.SessionCompactionEvent) tea.Cmd {
 // handleTokenUsage updates sidebar and session with token usage data.
 // This handler performs side effects only and returns no command.
 func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
+	// Sessionless usage is RAG indexing, not conversation context.
+	if msg.SessionID == "" {
+		return
+	}
 	p.sidebar.SetTokenUsage(msg)
 	if msg.Usage != nil {
 		if sess := p.app.Session(); sess != nil {
@@ -326,14 +329,14 @@ func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
 			// TokenUsageEvents with a different SessionID; writing those
 			// values into the parent would overwrite the parent's own
 			// context-tracking counters.
-			if msg.SessionID == "" || msg.SessionID == sess.ID {
+			if msg.SessionID == sess.ID {
 				sess.SetUsage(msg.Usage.InputTokens, msg.Usage.OutputTokens)
 			}
 
 			// Track per-message usage for /cost dialog
 			if msg.Usage.LastMessage != nil {
 				sess.AddMessageUsageRecordForSession(
-					cmp.Or(msg.SessionID, sess.ID),
+					msg.SessionID,
 					msg.AgentName,
 					msg.Usage.LastMessage.Model,
 					msg.Usage.LastMessage.Cost,

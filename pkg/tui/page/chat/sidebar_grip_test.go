@@ -232,7 +232,7 @@ func TestSidebarDragCropsInlineImage(t *testing.T) {
 			placement := func() (x, cols int, params string) {
 				t.Helper()
 				output.Reset()
-				writer.SetContent(p.View(), SidebarDragImageMask(p))
+				writer.SetContent(p.View(), tuiimage.ForegroundLayer{Bounds: SidebarDragImageMask(p)})
 				_, err := writer.Write([]byte("frame"))
 				require.NoError(t, err)
 				match := pattern.FindStringSubmatch(output.String())

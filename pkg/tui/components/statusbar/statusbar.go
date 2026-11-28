@@ -85,7 +85,13 @@ func (s *StatusBar) SetShowNewTab(show bool) {
 
 // ClickedNewTab returns true if the given X coordinate hits the "+" button.
 func (s *StatusBar) ClickedNewTab(x int) bool {
-	return s.showNewTab && x >= s.newTabStartX && x < s.newTabEndX
+	if !s.showNewTab {
+		return false
+	}
+	if s.cacheDirty {
+		s.rebuild()
+	}
+	return x >= s.newTabStartX && x < s.newTabEndX
 }
 
 // Height returns the rendered height of the status bar (always 1).
@@ -104,27 +110,48 @@ func (s *StatusBar) rebuild() {
 	s.newTabStartX = 0
 	s.newTabEndX = 0
 
-	// Build the styled right side: optional new-tab button + title.
-	var rightW, newTabW int
-	right := styles.MutedStyle.Render(s.title)
-
-	if s.showNewTab {
-		newTab := styles.MutedStyle.Render(" \u2502 ") +
-			styles.HighlightWhiteStyle.Render("+") +
-			styles.SecondaryStyle.Render(" new tab")
-		newTabW = lipgloss.Width(newTab)
-		right = newTab + "  " + right
-		rightW = lipgloss.Width(right)
-	} else {
-		rightW = lipgloss.Width(right)
+	if s.width <= 0 {
+		s.cached = ""
+		return
 	}
 
-	const pad = 1
-	maxLeftW := s.width - rightW - 2*pad - 1
+	pad := min(1, (s.width-1)/2)
+	available := s.width - 2*pad
+	right := styles.MutedStyle.Render(s.title)
 	statusW := lipgloss.Width(s.status)
+	var newTabOffset, newTabW int
+	if s.showNewTab {
+		plus := styles.HighlightWhiteStyle.Render("+")
+		button := plus + styles.SecondaryStyle.Render(" new tab")
+		separator := styles.MutedStyle.Render(" │ ")
+		newTabW = lipgloss.Width(button)
+		full := separator + button + "  " + right
+		// Drop secondary chrome before dropping the action on narrow terminals.
+		budget := available
+		if statusW > 0 {
+			budget -= statusW + 1
+		}
+		switch {
+		case lipgloss.Width(full) <= budget:
+			right = full
+			newTabOffset = lipgloss.Width(separator)
+		case newTabW <= budget:
+			right = button
+		case budget > 0:
+			right, newTabW = plus, 1
+		default:
+			right, newTabW = "", 0
+		}
+	} else {
+		right = ansi.Truncate(right, available, "")
+	}
+
+	rightW := lipgloss.Width(right)
+	maxLeftW := available - rightW - 1
 	if statusW > 0 && statusW > maxLeftW {
 		// Give the pause notice priority over help and title on narrow terminals.
-		s.cached = " " + ansi.Truncate(s.status, max(0, s.width-2*pad), "") + " "
+		padding := strings.Repeat(" ", pad)
+		s.cached = padding + ansi.Truncate(s.status, available, "") + padding
 		return
 	}
 
@@ -158,19 +185,17 @@ func (s *StatusBar) rebuild() {
 	}
 	leftW := lipgloss.Width(left)
 
-	gap := max(1, s.width-leftW-rightW-pad)
+	gap := max(0, s.width-leftW-rightW-pad)
 
-	if s.showNewTab {
-		s.newTabStartX = leftW + gap
+	if newTabW > 0 {
+		s.newTabStartX = leftW + gap + newTabOffset
 		s.newTabEndX = s.newTabStartX + newTabW
 	}
 
-	s.cached = left + strings.Repeat(" ", gap) + right + " "
+	s.cached = left + strings.Repeat(" ", gap) + right + strings.Repeat(" ", pad)
 }
 
 // View renders the status bar.
-//
-// Layout: [ help text ...           (+ new tab)  docker agent VERSION ]
 func (s *StatusBar) View() string {
 	if s.cacheDirty {
 		s.rebuild()

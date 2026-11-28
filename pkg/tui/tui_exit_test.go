@@ -75,6 +75,7 @@ func (m *mockChatPage) SetShowBanner(show bool) {
 }
 func (m *mockChatPage) SetRoutingID(string)                             {}
 func (m *mockChatPage) UpdateEffects(tea.Msg) (chat.Page, chat.Effects) { return m, chat.Effects{} }
+func (m *mockChatPage) ActiveContextUsage() (int64, int64, bool)        { return 0, 0, false }
 func (m *mockChatPage) VisualGeneration() uint64                        { return 0 }
 func (m *mockChatPage) Bindings() []key.Binding                         { return nil }
 func (m *mockChatPage) Help() help.KeyMap                               { return nil }

@@ -75,7 +75,7 @@ func TestTranscriptScrollbarCaptureEndsOnButtonlessReleaseOutsideChat(t *testing
 	fillScrollableRoot(root)
 	x := root.width - styles.AppPadding - 1
 	y := root.contentHeight - 1
-	editorY := root.contentHeight + 1
+	editorY := root.composerDock().editorTop
 	root.View() // lay out the transcript for hit-testing
 
 	root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})

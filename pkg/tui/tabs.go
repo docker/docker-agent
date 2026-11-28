@@ -8,6 +8,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/programstatus"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
@@ -29,6 +30,7 @@ type tabModel struct {
 
 	// Non-nil until the saved conversation is loaded on first activation.
 	pendingRestore          *string
+	pendingUsage            *runtime.TokenUsageEvent
 	pendingSidebarCollapsed *bool
 	// Keys are runtime event pointers; retain every prompt's unfinished input.
 	attentionDialogs map[tea.Msg]dialog.Dialog

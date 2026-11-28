@@ -32,8 +32,27 @@ func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 
 // updateEditorCmd forwards a message to the editor and returns its cmd.
 func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
-	updated, cmd := m.activeTab.editor.Update(msg)
+	ed := m.activeTab.editor
+	before := ed.Value()
+	wasSearching := ed.IsHistorySearchActive()
+	banner := ed.BannerHeight()
+	recall, ok := ed.(editor.HistoryRecall)
+	historyArrow := ok && recall.IsHistoryRecall(msg)
+	updated, cmd := ed.Update(msg)
 	m.activeTab.editor = updated.(editor.Editor)
+	after := m.activeTab.editor.Value()
+	searching := m.activeTab.editor.IsHistorySearchActive()
+	if after != before {
+		if historyArrow {
+			m.composer.historyValue = after
+		}
+		if after == "" && !wasSearching && !searching {
+			m.composer.manualRows = 0
+		}
+	}
+	if after != before || searching != wasSearching || banner != m.activeTab.editor.BannerHeight() {
+		return tea.Batch(cmd, m.syncComposerHeight())
+	}
 	return cmd
 }
 
@@ -44,6 +63,9 @@ func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
 	}
 	updated, cmd := m.dialogMgr.Update(msg)
 	m.dialogMgr = updated.(dialog.Manager)
+	if m.tabBar != nil && m.dialogMgr.Open() && !m.dialogMgr.TopIsBackground() {
+		m.tabBar.ClearHover()
+	}
 	return cmd
 }
 

@@ -61,17 +61,6 @@ const (
 	dragRoleBystander                 // another tab is being dragged; dim this one
 )
 
-// blendColors mixes two colors by the given ratio (0 = a, 1 = b).
-func blendColors(a, b color.Color, ratio float64) color.Color {
-	ar, ag, ab := styles.ColorToRGB(a)
-	br, bg, bb := styles.ColorToRGB(b)
-	return styles.RGBToColor(
-		ar+(br-ar)*ratio,
-		ag+(bg-ag)*ratio,
-		ab+(bb-ab)*ratio,
-	)
-}
-
 // renderTab creates a Tab: ▎ title ×
 // The accent bar is bright for the focused tab and dim for inactive tabs.
 // The close button color is computed dynamically for optimal contrast against
@@ -81,7 +70,7 @@ func blendColors(a, b color.Color, ratio float64) color.Color {
 //
 // When role is dragRoleBystander, all foreground colors are faded toward the
 // background to visually de-emphasize tabs that aren't being dragged.
-func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed time.Duration) Tab {
+func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed time.Duration, closeHover float64, showClose bool) Tab {
 	title := info.Title
 	if title == "" {
 		title = defaultTabTitle
@@ -97,7 +86,9 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 		fgColor = styles.TabActiveFg
 		barColor = styles.TabBorder // bright accent for focused tab
 	} else {
-		bgColor = styles.TabBg
+		// Keep idle tabs on the shell, rather than giving them a second
+		// raised surface that competes with the active editor.
+		bgColor = styles.Background
 		fgColor = styles.TabInactiveFg
 		barColor = styles.TabInactiveFg // dim accent for inactive tab
 	}
@@ -105,8 +96,8 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 	// Lift an inactive drag source partway toward active colors so it stands
 	// out from dimmed bystanders without looking fully focused.
 	if role == dragRoleSource && !info.IsActive {
-		fgColor = blendColors(fgColor, styles.TabActiveFg, dragSourceColorBoost)
-		barColor = blendColors(barColor, styles.TabBorder, dragSourceColorBoost)
+		fgColor = styles.BlendColor(fgColor, styles.TabActiveFg, dragSourceColorBoost)
+		barColor = styles.BlendColor(barColor, styles.TabBorder, dragSourceColorBoost)
 	}
 
 	// Close button color derived from this tab's background.
@@ -114,9 +105,9 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 
 	// Fade all foreground elements when this tab is a bystander during drag.
 	if role == dragRoleBystander {
-		fgColor = blendColors(fgColor, bgColor, dragBystanderDimAmount)
-		barColor = blendColors(barColor, bgColor, dragBystanderDimAmount)
-		closeFg = blendColors(closeFg, bgColor, dragBystanderDimAmount)
+		fgColor = styles.BlendColor(fgColor, bgColor, dragBystanderDimAmount)
+		barColor = styles.BlendColor(barColor, bgColor, dragBystanderDimAmount)
+		closeFg = styles.BlendColor(closeFg, bgColor, dragBystanderDimAmount)
 	}
 
 	// Helper: every segment gets the same background.
@@ -137,15 +128,15 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 		// with a warning-colored indicator so it's obvious the tab needs action.
 		attnFg := styles.EnsureContrast(styles.Warning, bgColor)
 		if role == dragRoleBystander {
-			attnFg = blendColors(attnFg, bgColor, dragBystanderDimAmount)
+			attnFg = styles.BlendColor(attnFg, bgColor, dragBystanderDimAmount)
 		}
 		content += lipgloss.NewStyle().Foreground(attnFg).Background(bgColor).Bold(true).Render(attentionIndicator)
-	case info.IsRunning && !info.IsActive:
+	case info.IsRunning:
 		runFg := styles.EnsureContrast(styles.TabAccentFg, bgColor)
 		if role == dragRoleBystander {
-			runFg = blendColors(runFg, bgColor, dragBystanderDimAmount)
+			runFg = styles.BlendColor(runFg, bgColor, dragBystanderDimAmount)
 		}
-		frame := animation.Card.FrameAt(elapsed)
+		frame := animation.TabBusy.FrameAt(elapsed)
 		content += lipgloss.NewStyle().Foreground(runFg).Background(bgColor).Render(frame + " ")
 	default:
 		content += pad.Render(" ")
@@ -154,8 +145,12 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 
 	mainEnd := lipgloss.Width(content)
 
-	closeBtn := lipgloss.NewStyle().Foreground(closeFg).Background(bgColor).Render(closeButtonText)
-	content += closeBtn + pad.Render(" ")
+	if showClose {
+		content += buttonStyle(bgColor, closeFg, closeHover, 0).Render(closeButtonText + " ")
+	} else {
+		content += pad.Render(" ")
+		mainEnd = lipgloss.Width(content)
+	}
 
 	width := lipgloss.Width(content)
 

@@ -76,10 +76,10 @@ func TestActiveSessionTokens_FallbackToSingleSession(t *testing.T) {
 	sessionState := service.NewSessionState(sess)
 	m := New(animation.NewRuntime(), t.Context(), sessionState).(*model)
 
-	m.sessionUsage["session-1"] = &runtime.Usage{
+	m.sessionUsage["session-1"] = &sessionUsage{Usage: runtime.Usage{
 		InputTokens:  5000,
 		OutputTokens: 5000,
-	}
+	}}
 
 	tokens, found := m.activeSessionTokens()
 	assert.True(t, found)

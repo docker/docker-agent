@@ -263,6 +263,7 @@ type ThemeColors struct {
 	Selected        string `yaml:"selected,omitempty"`
 	SelectedFg      string `yaml:"selected_fg,omitempty"` // Text on selected/brand backgrounds
 	SuggestionGhost string `yaml:"suggestion_ghost,omitempty"`
+	EditorBg        string `yaml:"editor_bg,omitempty"`
 	TabBg           string `yaml:"tab_bg,omitempty"`
 	TabActiveBg     string `yaml:"tab_active_bg,omitempty"`   // Active/focused tab background
 	TabActiveFg     string `yaml:"tab_active_fg,omitempty"`   // Active/focused tab text
@@ -343,6 +344,9 @@ func DefaultTheme() *Theme {
 		}
 
 		theme.Ref = DefaultThemeRef
+		if theme.Colors.EditorBg == "" {
+			theme.Colors.EditorBg = RGBToHex(ColorToRGB(raisedEditorColor(theme.Colors)))
+		}
 		cachedDefaultTheme = &theme
 	}
 
@@ -882,6 +886,14 @@ func mergeColors(base, override ThemeColors) ThemeColors {
 	if override.SuggestionGhost != "" {
 		result.SuggestionGhost = override.SuggestionGhost
 	}
+	switch {
+	case override.EditorBg != "":
+		result.EditorBg = override.EditorBg
+	case override.Background != "":
+		result.EditorBg = RGBToHex(ColorToRGB(raisedEditorColor(override)))
+	case override.TabBg != "":
+		result.EditorBg = override.TabBg
+	}
 	if override.TabBg != "" {
 		result.TabBg = override.TabBg
 	}
@@ -1104,7 +1116,8 @@ func ApplyTheme(theme *Theme) {
 	TabBg = lipgloss.Color(c.TabBg)
 	TabPrimaryFg = lipgloss.Color(c.TextMuted)
 	TabAccentFg = lipgloss.Color(c.Highlight)
-	TabActiveBg = lipgloss.Color(c.TabActiveBg)
+	EditorBg = raisedEditorColor(c)
+	TabActiveBg = EditorBg
 	TabActiveFg = lipgloss.Color(c.TabActiveFg)
 	TabInactiveFg = lipgloss.Color(c.TabInactiveFg)
 	TabBorder = lipgloss.Color(c.TabBorder)
@@ -1320,8 +1333,8 @@ func rebuildStyles() {
 		},
 	}
 
-	EditorStyle = BaseStyle.Padding(1, AppPadding, 0, AppPadding)
-	SuggestionGhostStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost))
+	EditorStyle = BaseStyle.Margin(0, EditorHMargin).Padding(1, AppPadding).Background(EditorBg)
+	SuggestionGhostStyle = BaseStyle.Foreground(EnsureContrast(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost), EditorBg)).Background(EditorBg)
 	SuggestionCursorStyle = BaseStyle.Background(Accent).Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost))
 
 	// Attachment styles

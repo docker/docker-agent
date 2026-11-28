@@ -23,6 +23,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -53,12 +54,6 @@ type attachment struct {
 	label       string // Display label like "paste-1 (21.1 KB)"
 	sizeBytes   int
 	isTemp      bool // True for paste temp files that need cleanup
-}
-
-// AttachmentPreview describes an attachment and its contents for dialog display.
-type AttachmentPreview struct {
-	Title   string
-	Content string
 }
 
 // Editor represents an input editor component
@@ -122,12 +117,14 @@ type historySearchState struct {
 
 // editor implements [Editor]
 type editor struct {
-	textarea  input.Area
-	occupancy textOccupancyCache
-	hist      *history.History
-	width     int
-	height    int
-	working   bool
+	textarea      input.Area
+	occupancy     textOccupancyCache
+	compactFrame  bool
+	contentHeight *contentHeight
+	hist          *history.History
+	width         int
+	height        int
+	working       bool
 	// completions are the available completions
 	completions []completions.Completion
 
@@ -227,10 +224,10 @@ func New(hist *history.History, opts ...Option) Editor {
 	ta.Placeholder = defaultPlaceholder
 	ta.Prompt = ""
 	ta.CharLimit = -1
-	ta.SetWidth(50)
-	ta.SetHeight(3) // Set minimum 3 lines for multi-line input
-	ta.Focus()
 	ta.ShowLineNumbers = false
+	ta.SetWidth(50)
+	ta.SetHeight(1)
+	ta.Focus()
 
 	si := input.NewText()
 	si.Prompt = ""
@@ -246,6 +243,8 @@ func New(hist *history.History, opts ...Option) Editor {
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		banner:                        newAttachmentBanner(),
 	}
+
+	e.banner.loadPreview = e.previewBannerItem
 
 	// Apply options
 	for _, opt := range opts {
@@ -636,6 +635,7 @@ func (e *editor) resetAndSendMode(content string, followUp bool) tea.Cmd {
 	}
 
 	e.textarea.Reset()
+	e.updateAttachmentBanner()
 	e.userTyped = false
 	e.clearSuggestion()
 	return core.CmdHandler(messages.SendMsg{Content: content, Attachments: finalAttachments, FollowUp: followUp})
@@ -664,6 +664,16 @@ var (
 	historySearchApply = key.NewBinding(key.WithKeys("enter"))
 	historySearchClose = key.NewBinding(key.WithKeys("esc", "ctrl+g"))
 )
+
+// HistoryRecall distinguishes history arrows from caret movement and search.
+type HistoryRecall interface {
+	IsHistoryRecall(msg tea.Msg) bool
+}
+
+func (e *editor) IsHistoryRecall(msg tea.Msg) bool {
+	k, ok := msg.(tea.KeyPressMsg)
+	return ok && e.hist != nil && !e.userTyped && !e.historySearch.active && key.Matches(k, editorHistoryUp, editorHistoryDown)
+}
 
 // Update handles messages and updates the component state
 func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
@@ -706,10 +716,11 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case messages.ThemeChangedMsg:
 		e.textarea.SetStyles(styles.InputStyle)
 		e.searchInput.SetStyles(searchInputStyles())
+		e.banner.SetSize(e.banner.width)
 		return e, nil
 	case tea.WindowSizeMsg:
-		e.textarea.SetWidth(msg.Width - 2)
-		return e, nil
+		cmd := e.SetSize(msg.Width-styles.EditorStyle.GetHorizontalFrameSize(), e.height)
+		return e, cmd
 
 	case tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
 		var cmd tea.Cmd
@@ -903,7 +914,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, editorHistoryUp):
 			// Only navigate history if the user hasn't manually typed content
-			if !e.userTyped {
+			if e.IsHistoryRecall(msg) {
 				e.textarea.SetValue(e.hist.Previous())
 				e.textarea.MoveToEnd()
 				e.refreshSuggestion()
@@ -912,7 +923,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			// Otherwise, let the textarea handle cursor navigation
 		case key.Matches(msg, editorHistoryDown):
 			// Only navigate history if the user hasn't manually typed content
-			if !e.userTyped {
+			if e.IsHistoryRecall(msg) {
 				e.textarea.SetValue(e.hist.Next())
 				e.textarea.MoveToEnd()
 				e.refreshSuggestion()
@@ -1325,40 +1336,67 @@ func (e *editor) View() string {
 		view = e.applySuggestionOverlay(view)
 	}
 
-	bannerView := e.banner.View()
-	if bannerView != "" {
-		view = lipgloss.JoinVertical(lipgloss.Left, bannerView, view)
-	}
-
 	if e.historySearch.active {
 		view = lipgloss.JoinVertical(lipgloss.Left, view, e.searchInput.View())
 	}
 
-	return styles.RenderComposite(styles.EditorStyle.MarginBottom(1), view)
+	frame := e.frame()
+	if e.width > 0 {
+		frame = frame.Width(e.width + frame.GetHorizontalPadding() + frame.GetHorizontalBorderSize())
+	}
+	return styles.RenderComposite(frame, view)
 }
 
 // SetSize sets the dimensions of the component
 func (e *editor) SetSize(width, height int) tea.Cmd {
-	e.width = width
+	e.compactFrame = compactInput(width)
+	if e.compactFrame {
+		width += styles.EditorStyle.GetHorizontalFrameSize()
+	}
+	e.width = max(width, 1)
 	e.height = max(height, 1)
 
-	e.textarea.SetWidth(max(width, 10))
-	e.searchInput.SetWidth(max(width, 10))
-	e.updateTextareaHeight()
+	previousWidth := e.textarea.Width()
+	e.textarea.SetWidth(e.width)
+	e.searchInput.SetWidth(e.width)
+	reflowed := e.textarea.Width() != previousWidth
+	if reflowed {
+		// Bubbles updates the viewport's wrapped rows in View, not SetWidth.
+		// Refresh them before SetHeight positions the cursor against those rows.
+		_ = e.textarea.View()
+	}
+	height = e.textareaHeight()
+	if e.textarea.ScrollYOffset() > 0 && (reflowed || height > e.textarea.Height()) {
+		// Bubbles' ordinary SetHeight preserves the old scroll offset if the
+		// cursor is still visible. Its dynamic sizing path also clamps that
+		// offset to the draft, so growth can reveal earlier rows above it.
+		maxHeight := e.textarea.MaxHeight
+		e.textarea.DynamicHeight = true
+		e.textarea.MaxHeight = height
+		e.textarea.SetWidth(e.width)
+		e.textarea.MaxHeight = maxHeight
+		e.textarea.DynamicHeight = false
+	}
+	e.setTextareaHeight(height)
 
 	return nil
 }
 
-func (e *editor) updateTextareaHeight() {
-	e.textarea.SetHeight(max(e.height-e.chromeHeight(), 1))
+func (e *editor) setTextareaHeight(height int) {
+	// MaxHeight also caps logical lines; allocating more rows must not change that policy.
+	maxHeight := e.textarea.MaxHeight
+	e.textarea.MaxHeight = 0
+	e.textarea.SetHeight(height)
+	e.textarea.MaxHeight = maxHeight
 }
 
-func (e *editor) chromeHeight() int {
-	height := e.BannerHeight()
+func (e *editor) textareaHeight() int {
+	available := e.height
 	if e.historySearch.active {
-		height++
+		available--
 	}
-	return height
+
+	return max(available, 1)
 }
 
 // BannerHeight returns the current height of the attachment banner (0 if hidden)
@@ -1369,41 +1407,67 @@ func (e *editor) BannerHeight() int {
 	return e.banner.Height()
 }
 
-// GetSize returns the rendered dimensions including EditorStyle padding.
-func (e *editor) GetSize() (width, height int) {
-	return e.width + styles.EditorStyle.GetHorizontalFrameSize(),
-		max(e.height, 1+e.chromeHeight()) + styles.EditorStyle.GetVerticalFrameSize()
+// Drop decorative horizontal spacing before it leaves too few editable cells.
+func compactInput(innerWidth int) bool { return innerWidth <= 2 }
+
+func (e *editor) frame() lipgloss.Style {
+	frame := styles.EditorStyle
+	if e.compactFrame {
+		frame = frame.UnsetMargins().PaddingLeft(0).PaddingRight(0)
+	}
+	return frame
 }
 
-// AttachmentAt returns preview information for the attachment rendered at the given X position.
+// GetSize returns the rendered dimensions including editor padding.
+func (e *editor) GetSize() (width, height int) {
+	height = e.textarea.Height()
+	if e.IsHistorySearchActive() {
+		height++
+	}
+	frame := e.frame()
+	return e.width + frame.GetHorizontalFrameSize(), height + frame.GetVerticalFrameSize()
+}
+
+// AttachmentAt returns the preview for a chip on the summary row.
 func (e *editor) AttachmentAt(x int) (AttachmentPreview, bool) {
-	if e.banner == nil || e.banner.Height() == 0 {
-		return AttachmentPreview{}, false
-	}
+	return e.AttachmentAtPosition(x, e.banner.summaryY())
+}
 
-	item, ok := e.banner.HitTest(x)
-	if !ok {
-		return AttachmentPreview{}, false
-	}
-
+func (e *editor) previewBannerItem(item bannerItem) (AttachmentPreview, bool) {
 	for _, att := range e.attachments {
-		if att.placeholder != item.placeholder {
-			continue
+		if att.placeholder == item.placeholder {
+			return loadAttachmentPreview(item.label, att.path), true
 		}
-
-		data, err := os.ReadFile(att.path)
-		if err != nil {
-			slog.Warn("failed to read attachment preview", "path", att.path, "error", err)
-			return AttachmentPreview{}, false
-		}
-
-		return AttachmentPreview{
-			Title:   item.label,
-			Content: string(data),
-		}, true
 	}
-
 	return AttachmentPreview{}, false
+}
+
+func (e *editor) AttachmentAtPosition(x, y int) (AttachmentPreview, bool) {
+	return e.banner.AttachmentAtPosition(x, y)
+}
+
+// AttachmentBar is the separately laid out attachment surface of the composer.
+type AttachmentBar interface {
+	SetBounds(width, maxHeight int)
+	View() string
+	AttachmentAtPosition(x, y int) (AttachmentPreview, bool)
+	CanExpand() bool
+	ToggleAt(x, y int) bool
+	Toggle()
+	SetFocused(focused bool)
+	Hover(x, y int) tea.Cmd
+	Tick(tick animation.TickMsg)
+	ClearHover()
+}
+
+// Banner returns the attachment bar surface for composer layout and input routing.
+func (e *editor) Banner() AttachmentBar { return e.banner }
+
+// WithAnimationRuntime binds attachment hover to the owning program clock.
+func WithAnimationRuntime(ar *animation.Runtime) Option {
+	return func(e *editor) {
+		e.banner.hoverFade = animation.NewHoverFade[string](ar, animation.ShortDuration, animation.Linear)
+	}
 }
 
 // Focus gives focus to the component
@@ -1443,6 +1507,7 @@ func (e *editor) Value() string {
 func (e *editor) SetValue(content string) {
 	e.textarea.SetValue(content)
 	e.textarea.MoveToEnd()
+	e.updateAttachmentBanner()
 	e.userTyped = content != ""
 	e.refreshSuggestion()
 }
@@ -1450,6 +1515,7 @@ func (e *editor) SetValue(content string) {
 // InsertText inserts text at the current cursor position
 func (e *editor) InsertText(text string) {
 	e.textarea.InsertString(text)
+	e.updateAttachmentBanner()
 	e.userTyped = true
 	e.refreshSuggestion()
 }
@@ -1508,8 +1574,8 @@ func (e *editor) addFileAttachment(placeholder string) error {
 	if err != nil {
 		return fmt.Errorf("invalid file path %s: %w", absPath, err)
 	}
-	if info.IsDir() {
-		return fmt.Errorf("path is a directory: %s", absPath)
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", absPath)
 	}
 
 	const maxFileSize = 5 * 1024 * 1024
@@ -1580,6 +1646,9 @@ func (e *editor) collectAttachments(content string) []messages.Attachment {
 
 // Cleanup removes any temporary paste files that haven't been sent yet.
 func (e *editor) Cleanup() {
+	if e.banner != nil {
+		e.banner.ClearHover()
+	}
 	for _, att := range e.attachments {
 		if att.isTemp {
 			_ = os.Remove(att.path)
@@ -1734,7 +1803,6 @@ func (e *editor) updateAttachmentBanner() {
 	}
 
 	e.banner.SetItems(items)
-	e.updateTextareaHeight()
 }
 
 func createPasteAttachment(content string, num int) (attachment, error) {
@@ -1776,7 +1844,8 @@ func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
 	e.textarea.Placeholder = ""
 	e.textarea.Blur()
 	e.clearSuggestion()
-	e.updateTextareaHeight()
+	e.updateAttachmentBanner()
+	e.setTextareaHeight(e.textareaHeight())
 	return e, tea.Batch(
 		e.searchInput.Focus(),
 		core.CmdHandler(completion.CloseMsg{}),
@@ -1876,6 +1945,6 @@ func (e *editor) exitHistorySearch() tea.Cmd {
 	e.textarea.SetValue(e.historySearch.origTextValue)
 	e.textarea.Placeholder = e.historySearch.origTextPlaceholderValue
 	e.historySearch = historySearchState{matchIndex: -1}
-	e.updateTextareaHeight()
+	e.setTextareaHeight(e.textareaHeight())
 	return e.textarea.Focus()
 }

@@ -427,7 +427,11 @@ func (d *manager) GetLayers() []*lipgloss.Layer {
 	for _, e := range d.stack {
 		view := e.dialog.View()
 		row, col := e.dialog.Position()
-		layers = append(layers, lipgloss.NewLayer(view).X(col+e.offsetX).Y(row+e.offsetY))
+		layer := lipgloss.NewLayer(view).X(col + e.offsetX).Y(row + e.offsetY)
+		if _, ok := e.dialog.(*attachmentPreviewDialog); ok {
+			layer.ID(AttachmentPreviewLayerID)
+		}
+		layers = append(layers, layer)
 	}
 
 	return layers

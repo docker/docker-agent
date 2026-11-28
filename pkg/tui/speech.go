@@ -193,13 +193,18 @@ func (m *appModel) sendSpeechDraft(run *speechRun) tea.Cmd {
 			break
 		}
 	}
-	return func() tea.Msg {
+	routed := func() tea.Msg {
 		return messages.RoutedMsg{
 			SessionID: tabID,
 			Inner:     cmd(),
 			Valid:     func() bool { return m.tabs[tabID] == run.tab && run.tab.editor == run.editor },
 		}
 	}
+	if run.tab == m.activeTab && run.editor.Value() == "" {
+		m.composer.manualRows = 0
+		return tea.Batch(routed, m.syncComposerHeight())
+	}
+	return routed
 }
 
 func (m *appModel) cancelSpeechSend(tab *tabModel) {

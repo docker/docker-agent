@@ -67,6 +67,12 @@ func (m *appModel) helpSections() []dialog.HelpSection {
 	history := ed.IsHistorySearchActive()
 	completing := !modal && m.completions.Open()
 	var sections []dialog.HelpSection
+	tabKeys := tabbar.DefaultKeyMap()
+	tabBindings := []key.Binding{tabKeys.NewTab, tabKeys.PrevTab, tabKeys.NextTab}
+	closeTab := m.tabBar.CanCloseTabWithKey() && (m.focusedPanel != PanelEditor || m.dialogMgr.TopIsBackground())
+	if closeTab {
+		tabBindings = append(tabBindings, tabKeys.CloseTab)
+	}
 	precedence := []key.Binding{keys.Quit}
 	if m.isTranscribing() {
 		send := shortcut("Stop transcription and send", "enter")
@@ -83,7 +89,11 @@ func (m *appModel) helpSections() []dialog.HelpSection {
 	agent := shortcut("Switch directly to an agent by number", "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9")
 	help := keys.Help
 	commandPalette := describe(keys.Commands, "Open command palette")
-	beforeTour := append(slices.Clone(precedence), global...)
+	beforeTabs := slices.Clone(precedence)
+	if closeTab && !history {
+		beforeTabs = append(beforeTabs, tabKeys.CloseTab)
+	}
+	beforeTour := append(slices.Clone(beforeTabs), global...)
 	beforeTour = append(beforeTour, keys.Help)
 	chatPrecedence := beforeTour
 	if m.tour.Active() {
@@ -104,7 +114,7 @@ func (m *appModel) helpSections() []dialog.HelpSection {
 	if !ed.IsRecording() {
 		composer = append(composer, helpBindings([]key.Binding{keys.HistorySearch}, chatPrecedence...)...)
 	}
-	composer = append(composer, helpBindings([]key.Binding{describe(keys.ClearQueue, "Clear queued messages")}, precedence...)...)
+	composer = append(composer, helpBindings([]key.Binding{describe(keys.ClearQueue, "Clear queued messages")}, beforeTabs...)...)
 	transcript := page.Bindings()
 	if page.IsInlineEditing() {
 		transcript = nil
@@ -146,6 +156,11 @@ func (m *appModel) helpSections() []dialog.HelpSection {
 		context = dialog.HelpSection{Title: "Inline message editing", Bindings: helpBindings(page.Bindings(), beforePanel...)}
 	case m.focusedPanel == PanelContent:
 		context = dialog.HelpSection{Title: "Transcript", Bindings: transcript}
+	case m.focusedPanel == PanelAttachments:
+		context = dialog.HelpSection{Title: "Attachments", Bindings: helpBindings([]key.Binding{
+			describe(keys.EditorSend, "Expand or collapse attachments"),
+			shortcut("Return to the composer", "esc"),
+		}, beforePanel...)}
 	default:
 		context = dialog.HelpSection{Title: "Composer", Bindings: composer}
 	}
@@ -161,8 +176,7 @@ func (m *appModel) helpSections() []dialog.HelpSection {
 	}
 	sections = append(sections, context, dialog.HelpSection{Title: "Application", Bindings: appKeys})
 
-	tabKeys := tabbar.DefaultKeyMap()
-	tabs := dialog.HelpSection{Title: "Tabs", Bindings: []key.Binding{tabKeys.NewTab, tabKeys.PrevTab, tabKeys.NextTab}}
+	tabs := dialog.HelpSection{Title: "Tabs", Bindings: tabBindings}
 	switch {
 	case history:
 		tabs.Note = "After leaving history search."

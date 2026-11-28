@@ -134,16 +134,36 @@ func (w *Writer) SetRowOffset(rowOffset int) {
 	}
 }
 
+type ForegroundLayer struct {
+	Bounds       image.Rectangle
+	ImageContent string
+}
+
 // SetContent extracts placements from the text frame and clips them around foreground layers.
-func (w *Writer) SetContent(content string, foreground ...image.Rectangle) string {
+func (w *Writer) SetContent(content string, foreground ...ForegroundLayer) string {
 	clean, overlays := extractOverlays(content)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.enabled || !w.supported {
 		overlays = nil
-	}
-	for _, area := range foreground {
-		overlays = clipOverlays(overlays, area)
+	} else {
+		var viewport image.Rectangle
+		for _, layer := range foreground {
+			overlays = clipOverlays(overlays, layer.Bounds)
+			if strings.Contains(layer.ImageContent, markerPrefix) {
+				if viewport.Empty() {
+					viewport = frameBounds(clean)
+				}
+				images := extractMarkerOverlays(strings.Split(layer.ImageContent, "\n"))
+				for _, img := range images {
+					img.x += layer.Bounds.Min.X
+					img.y += layer.Bounds.Min.Y
+					if clipped, ok := clipOverlayToViewport(img, viewport); ok {
+						overlays = append(overlays, clipped)
+					}
+				}
+			}
+		}
 	}
 	if !sameOverlays(w.base, overlays) {
 		w.base = overlays
@@ -168,6 +188,39 @@ func (w *Writer) updateOverlays() {
 		w.overlays = overlays
 		w.dirty = true
 	}
+}
+
+func frameBounds(frame string) image.Rectangle {
+	if frame == "" {
+		return image.Rectangle{}
+	}
+	lines := strings.Split(frame, "\n")
+	width := 0
+	for _, line := range lines {
+		width = max(width, ansi.StringWidth(line))
+	}
+	return image.Rect(0, 0, width, len(lines))
+}
+
+func clipOverlayToViewport(img overlay, viewport image.Rectangle) (overlay, bool) {
+	if viewport.Empty() {
+		return overlay{}, false
+	}
+	bounds := image.Rect(img.x, img.y, img.x+img.cols, img.y+img.rows)
+	visible := bounds.Intersect(viewport)
+	if visible.Empty() {
+		return overlay{}, false
+	}
+	if visible == bounds {
+		return img, true
+	}
+	if img.sourceH == 0 && img.sourceY >= 0 && img.sourceY < img.pixelH {
+		img.sourceH = 1
+	}
+	if img.sourceW <= 0 || img.sourceH <= 0 {
+		return overlay{}, false
+	}
+	return img.crop(visible), true
 }
 
 func clipOverlays(overlays []overlay, area image.Rectangle) []overlay {

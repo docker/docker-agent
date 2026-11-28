@@ -7,6 +7,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -17,7 +18,7 @@ import (
 const (
 	// tabBarHeight is the number of terminal rows the tab bar occupies.
 	tabBarHeight = 1
-	// fallbackWidth is used when the terminal width is unknown or zero.
+	// fallbackWidth is used before a width has been assigned.
 	fallbackWidth = 200
 	// scrollArrowWidth is the visual width of a scroll indicator.
 	scrollArrowWidth = 2
@@ -90,6 +91,8 @@ type TabBar struct {
 	// maxTitleLen is the maximum display length for tab titles.
 	// Configurable via user settings; defaults to the constant in tab.go.
 	maxTitleLen int
+	hideSingle  bool
+	canSpawn    bool
 
 	// lastEnsuredIdx tracks which active tab was last scrolled-to by
 	// ensureActiveVisible. This prevents View() from overriding manual
@@ -97,7 +100,10 @@ type TabBar struct {
 	// actually changes.
 	lastEnsuredIdx int
 
-	drag dragState
+	drag          dragState
+	buttonHover   animation.HoverFade[tabButton]
+	hoveredButton tabButton
+	plusPulse     animation.Transition
 
 	visualGeneration uint64
 }
@@ -125,10 +131,7 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+p"),
 			key.WithHelp("Ctrl+p", "prev tab"),
 		),
-		CloseTab: key.NewBinding(
-			key.WithKeys("ctrl+w"),
-			key.WithHelp("Ctrl+W", "close tab"),
-		),
+		CloseTab: core.GetKeys().CloseTab,
 	}
 }
 
@@ -140,22 +143,39 @@ func New(ar *animation.Runtime, maxTitleLen int) *TabBar {
 	}
 	return &TabBar{
 		ar:             ar,
+		width:          fallbackWidth,
+		buttonHover:    animation.NewHoverFade[tabButton](ar, buttonHoverDuration, animation.EaseOutCubic),
+		plusPulse:      ar.Transition(),
 		keyMap:         DefaultKeyMap(),
 		maxTitleLen:    maxTitleLen,
+		canSpawn:       true,
 		lastEnsuredIdx: noTab,
 		drag:           dragState{dropIdx: noTab},
 	}
 }
 
-// SetCloseTabEnabled enables or disables the close-tab key binding.
-// When disabled, Ctrl+W passes through to the editor for word deletion.
-func (t *TabBar) SetCloseTabEnabled(v bool) {
-	t.keyMap.CloseTab.SetEnabled(v)
+// SetCanSpawn configures whether new tabs can be spawned (showing "+" and
+// allowing the last remaining tab to be closed and replaced).
+func (t *TabBar) SetCanSpawn(canSpawn bool) {
+	if t.canSpawn == canSpawn {
+		return
+	}
+	t.canSpawn = canSpawn
+	t.resetPointerGeometry()
+	t.visualGeneration++
 }
+
+func (t *TabBar) canCloseTab() bool { return len(t.tabs) > 1 || t.canSpawn }
+
+// CanCloseTabWithKey reports whether the close shortcut applies.
+func (t *TabBar) CanCloseTabWithKey() bool { return len(t.tabs) > 1 }
 
 // SetWidth sets the available width for the tab bar.
 func (t *TabBar) SetWidth(width int) {
-	t.width = width
+	if t.width != width {
+		t.width = max(0, width)
+		t.resetPointerGeometry()
+	}
 }
 
 // SetMaxTitleLength applies the title truncation limit immediately.
@@ -165,11 +185,16 @@ func (t *TabBar) SetMaxTitleLength(maxTitleLen int) {
 	}
 	t.maxTitleLen = maxTitleLen
 	t.lastEnsuredIdx = noTab
+	t.resetPointerGeometry()
 	t.clampScroll()
 }
 
 // SetTabs updates the list of tabs and active index.
 func (t *TabBar) SetTabs(tabs []messages.TabInfo, activeIdx int) {
+	if !sameTabOrder(t.tabs, tabs) {
+		t.resetPointerGeometry()
+	}
+
 	if activeIdx != t.activeIdx {
 		// Active tab changed — force ensureActiveVisible on next View.
 		t.lastEnsuredIdx = noTab
@@ -179,10 +204,39 @@ func (t *TabBar) SetTabs(tabs []messages.TabInfo, activeIdx int) {
 	t.clampScroll()
 }
 
-// Height returns the height of the tab bar.
-// Returns 0 when there is a single tab (no bar needed).
+func sameTabOrder(old, next []messages.TabInfo) bool {
+	if len(old) != len(next) {
+		return false
+	}
+	for i, tab := range old {
+		if tab.SessionID != next[i].SessionID {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *TabBar) resetPointerGeometry() {
+	t.ClearHover()
+	t.zones = t.zones[:0]
+	t.dragBounds = t.dragBounds[:0]
+	t.drag = dragState{dropIdx: noTab}
+}
+
+// SetHideSingle controls whether a lone session needs a tab row.
+func (t *TabBar) SetHideSingle(hide bool) {
+	if hide != t.hideSingle {
+		t.hideSingle = hide
+		t.resetPointerGeometry()
+		if t.Height() == 0 {
+			t.CancelHover()
+		}
+	}
+}
+
+// Height returns the number of visible tab rows.
 func (t *TabBar) Height() int {
-	if len(t.tabs) <= 1 {
+	if len(t.tabs) == 0 || (t.hideSingle && len(t.tabs) == 1) {
 		return 0
 	}
 	return tabBarHeight
@@ -199,10 +253,8 @@ func (t *TabBar) VisualGeneration() uint64 { return t.visualGeneration }
 // Bindings returns consolidated key bindings for the help bar.
 func (t *TabBar) Bindings() []key.Binding {
 	return []key.Binding{
-		key.NewBinding(
-			key.WithKeys("ctrl+t", "ctrl+w"),
-			key.WithHelp("Ctrl+t/w", "new/close tab"),
-		),
+		t.keyMap.NewTab,
+		core.GetKeys().CloseTab,
 		key.NewBinding(
 			key.WithKeys("ctrl+p", "ctrl+n"),
 			key.WithHelp("Ctrl+p/n", "prev/next tab"),
@@ -235,8 +287,8 @@ func (t *TabBar) Update(msg tea.Msg) tea.Cmd {
 			}
 			return core.CmdHandler(messages.SwitchTabMsg{SessionID: t.tabs[prevIdx].SessionID})
 
-		case key.Matches(msg, t.keyMap.CloseTab):
-			if len(t.tabs) <= 1 {
+		case key.Matches(msg, core.GetKeys().CloseTab):
+			if !t.CanCloseTabWithKey() {
 				return nil
 			}
 			return core.CmdHandler(messages.CloseTabMsg{SessionID: t.tabs[t.activeIdx].SessionID})
@@ -244,7 +296,12 @@ func (t *TabBar) Update(msg tea.Msg) tea.Cmd {
 
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
-			return t.handleLeftClickDown(msg.X)
+			cmd := t.UpdateHover(msg.X)
+			if t.hoveredButton.plus {
+				t.visualGeneration++
+				cmd = tea.Batch(cmd, t.plusPulse.Start(buttonPulseDuration, animation.EaseOutCubic))
+			}
+			return tea.Batch(cmd, t.handleLeftClickDown(msg.X))
 		}
 		if msg.Button == tea.MouseMiddle {
 			return t.handleMiddleClick(msg.X)
@@ -267,7 +324,8 @@ func (t *TabBar) handleLeftClickDown(x int) tea.Cmd {
 		if x < z.startX || x >= z.endX {
 			continue
 		}
-		if z.tabIdx >= 0 && z.tabIdx < len(t.tabs) && !z.isClose {
+		if len(t.tabs) > 1 && z.tabIdx >= 0 && z.tabIdx < len(t.tabs) && !z.isClose {
+			t.CancelHover()
 			t.drag = dragState{
 				active:  true,
 				dragIdx: z.tabIdx,
@@ -355,6 +413,9 @@ func (t *TabBar) dropIndexForX(x int) int {
 
 // handleMiddleClick closes the tab under the cursor on middle-click.
 func (t *TabBar) handleMiddleClick(x int) tea.Cmd {
+	if !t.canCloseTab() {
+		return nil
+	}
 	for _, z := range t.zones {
 		if x < z.startX || x >= z.endX {
 			continue
@@ -381,9 +442,9 @@ func (t *TabBar) handleClick(x int) tea.Cmd {
 		case z.isScrollRight:
 			t.scrollOffset = min(len(t.tabs)-1, t.scrollOffset+1)
 			return nil
-		case z.isPlus:
+		case z.isPlus && t.canSpawn:
 			return core.CmdHandler(messages.SpawnSessionMsg{})
-		case z.isClose && z.tabIdx >= 0 && z.tabIdx < len(t.tabs):
+		case z.isClose && t.canCloseTab() && z.tabIdx >= 0 && z.tabIdx < len(t.tabs):
 			return core.CmdHandler(messages.CloseTabMsg{SessionID: t.tabs[z.tabIdx].SessionID})
 		case z.tabIdx >= 0 && z.tabIdx < len(t.tabs) && z.tabIdx != t.activeIdx:
 			return core.CmdHandler(messages.SwitchTabMsg{SessionID: t.tabs[z.tabIdx].SessionID})
@@ -394,21 +455,24 @@ func (t *TabBar) handleClick(x int) tea.Cmd {
 }
 
 // View renders the tab bar as a single line: tab tab tab  +
-// Returns empty string when there is a single tab.
 func (t *TabBar) View() string {
-	if len(t.tabs) <= 1 {
+	// Reset zones (reuse backing array if available).
+	t.zones = t.zones[:0]
+	if t.Height() == 0 || t.width == 0 {
 		return ""
 	}
 
-	// Reset zones (reuse backing array if available).
-	if t.zones != nil {
-		t.zones = t.zones[:0]
+	availWidth := t.width
+	plusReserve := 0
+	if t.canSpawn {
+		plusReserve = plusButtonWidth
+		if availWidth < plusButtonWidth {
+			t.zones = append(t.zones, clickZone{endX: availWidth, tabIdx: noTab, isPlus: true})
+			return t.plusStyle().Render("+" + strings.Repeat(" ", availWidth-1))
+		}
 	}
 
-	availWidth := t.width
-	if availWidth <= 0 {
-		availWidth = fallbackWidth
-	}
+	showClose := t.canCloseTab()
 
 	// Pre-render all tabs.
 	allTabs := make([]Tab, len(t.tabs))
@@ -422,10 +486,10 @@ func (t *TabBar) View() string {
 				role = dragRoleBystander
 			}
 		}
-		allTabs[i] = renderTab(info, t.maxTitleLen, role, t.ar.Now())
+		allTabs[i] = renderTab(info, t.maxTitleLen, role, t.ar.Now(), t.hoverFraction(tabButton{sessionID: info.SessionID}), showClose)
 		totalWidth += allTabs[i].Width()
 	}
-	totalWidth += plusButtonWidth
+	totalWidth += plusReserve
 
 	needsScroll := totalWidth > availWidth
 
@@ -444,7 +508,6 @@ func (t *TabBar) View() string {
 
 	// Compute "+" and arrow colors dynamically from the terminal background.
 	chromeFg := styles.MutedContrastFg(styles.Background)
-	plusStyle := lipgloss.NewStyle().Foreground(chromeFg)
 	arrowStyle := lipgloss.NewStyle().Foreground(chromeFg)
 	// Attention arrow style: warning-colored and bold so off-screen attention tabs are obvious.
 	attnArrowStyle := lipgloss.NewStyle().Foreground(styles.EnsureContrast(styles.Warning, styles.Background)).Bold(true)
@@ -453,7 +516,7 @@ func (t *TabBar) View() string {
 	var cursor int
 
 	// Left scroll arrow — highlight if any off-screen tab to the left needs attention.
-	if needsScroll && t.scrollOffset > 0 {
+	if needsScroll && t.scrollOffset > 0 && availWidth >= plusReserve+scrollArrowWidth {
 		style := arrowStyle
 		if t.hasAttentionInRange(0, t.scrollOffset) {
 			style = attnArrowStyle
@@ -489,8 +552,8 @@ func (t *TabBar) View() string {
 		tabW := tab.Width()
 
 		// Reserve space for possible right arrow and "+" button.
-		rightReserve := plusButtonWidth
-		if needsScroll && i < len(allTabs)-1 {
+		rightReserve := plusReserve
+		if needsScroll && i < len(allTabs)-1 && availWidth-cursor >= plusReserve+scrollArrowWidth {
 			rightReserve += scrollArrowWidth
 		}
 
@@ -500,7 +563,8 @@ func (t *TabBar) View() string {
 			extra = dropIndicatorWidth
 		}
 
-		if cursor+tabW+extra+rightReserve > availWidth && i > t.scrollOffset {
+		budget := availWidth - cursor - extra - rightReserve
+		if budget <= 0 || (tabW > budget && i > t.scrollOffset) {
 			break
 		}
 
@@ -515,25 +579,29 @@ func (t *TabBar) View() string {
 		}
 
 		// Register click zones: main area + close area.
-		mainEnd := cursor + tab.MainZoneEnd()
-		t.zones = append(t.zones,
-			clickZone{startX: cursor, endX: mainEnd, tabIdx: i},
-			clickZone{startX: mainEnd, endX: cursor + tabW, tabIdx: i, isClose: true},
-		)
+		text := ansi.Truncate(tab.View(), budget, "")
+		end := cursor + ansi.StringWidth(text)
+		mainEnd := min(end, cursor+tab.MainZoneEnd())
+		if showClose && end-mainEnd >= lipgloss.Width(closeButtonText) {
+			t.zones = append(t.zones, clickZone{startX: mainEnd, endX: end, tabIdx: i, isClose: true})
+		} else {
+			mainEnd = end
+		}
+		t.zones = append(t.zones, clickZone{startX: cursor, endX: mainEnd, tabIdx: i})
 
-		line.WriteString(tab.View())
-		cursor += tabW
+		line.WriteString(text)
+		cursor = end
 		lastVisibleIdx = i
 	}
 
 	// Drop indicator after the last visible tab.
-	if visualDrop == lastVisibleIdx+1 {
+	if visualDrop == lastVisibleIdx+1 && cursor+dropIndicatorWidth+plusReserve <= availWidth {
 		line.WriteString(dropLine)
 		cursor += dropIndicatorWidth
 	}
 
 	// Right scroll arrow — highlight if any off-screen tab to the right needs attention.
-	if needsScroll && lastVisibleIdx < len(allTabs)-1 {
+	if needsScroll && lastVisibleIdx < len(allTabs)-1 && cursor+scrollArrowWidth+plusReserve <= availWidth {
 		style := arrowStyle
 		if t.hasAttentionInRange(lastVisibleIdx+1, len(t.tabs)) {
 			style = attnArrowStyle
@@ -548,12 +616,14 @@ func (t *TabBar) View() string {
 	}
 
 	// "+" button.
-	plus := plusStyle.Render(plusButtonText)
-	line.WriteString(plus)
-	t.zones = append(t.zones, clickZone{
-		startX: cursor, endX: cursor + plusButtonWidth,
-		tabIdx: noTab, isPlus: true,
-	})
+	if t.canSpawn {
+		plus := t.plusStyle().Render(plusButtonText)
+		line.WriteString(plus)
+		t.zones = append(t.zones, clickZone{
+			startX: cursor, endX: cursor + plusButtonWidth,
+			tabIdx: noTab, isPlus: true,
+		})
+	}
 
 	return line.String()
 }

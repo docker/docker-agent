@@ -108,7 +108,7 @@ func TestSuggestionOverlayFollowsCursorBlink(t *testing.T) {
 
 		cursorCell := func(view string) uv.Cell {
 			lines := uv.NewStyledString(view).Lines(ansi.GraphemeWidth)
-			cell := lines[1][styles.AppPadding+len("hello ")]
+			cell := lines[1][styles.EditorStyle.GetMarginLeft()+styles.EditorStyle.GetPaddingLeft()+len("hello ")]
 			require.Equal(t, "w", cell.Content)
 			return cell
 		}

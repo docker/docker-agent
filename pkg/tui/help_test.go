@@ -34,6 +34,7 @@ func openHelpWithKey(t *testing.T, m *appModel, msg tea.KeyPressMsg) dialog.Open
 
 func TestStatusBarOnlyAdvertisesHelp(t *testing.T) {
 	m := newHelpTestModel(t, WithHideSidebar(), WithVersion("test"))
+	m.tabBar.SetCanSpawn(true)
 	for _, flags := range []int{0, 1} {
 		_, _ = m.Update(tea.KeyboardEnhancementsMsg{Flags: flags})
 		bindings := m.Bindings()
@@ -41,8 +42,10 @@ func TestStatusBarOnlyAdvertisesHelp(t *testing.T) {
 		require.Equal(t, "help", bindings[0].Help().Desc)
 		frame := strings.Split(ansi.Strip(m.View().Content), "\n")
 		line := strings.TrimRight(frame[len(frame)-1], " \t")
-		require.Contains(t, line, "Ctrl+h help")
-		require.True(t, strings.HasSuffix(line, "│ + new tab  docker agent test"), "%q", line)
+		require.True(t, strings.HasPrefix(line, " Ctrl+h help"), "%q", line)
+		require.True(t, strings.HasSuffix(line, "docker agent test"), "%q", line)
+		require.NotContains(t, line, "+ new tab", "new-tab control is now in the dock")
+		require.Contains(t, frame[m.composerDock().tabsTop], "+")
 		for _, hidden := range []string{"Ctrl+c", "Ctrl+k", "Ctrl+j", "Shift+Enter", "Tab switch focus"} {
 			require.NotContains(t, line, hidden)
 		}
@@ -110,6 +113,24 @@ func TestHelpGroupsShortcutsByTask(t *testing.T) {
 			require.Equal(t, []string{group}, owners[k], k)
 		}
 	}
+}
+
+func TestComposerKeepsDeleteWordWithMultipleTabs(t *testing.T) {
+	m := newHelpTestModel(t)
+	m.tabBar.SetTabs([]messages.TabInfo{{SessionID: "first"}, {SessionID: "second"}}, 0)
+	var owners []string
+	for _, section := range m.helpSections() {
+		for _, binding := range section.Bindings {
+			if slices.Contains(binding.Keys(), "ctrl+w") {
+				owners = append(owners, section.Title)
+			}
+		}
+	}
+	require.Equal(t, []string{"Composer"}, owners)
+	m.activeTab.editor.SetValue("one two")
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'w', Mod: tea.ModCtrl})
+	require.NotContains(t, collectMsgs(cmd), messages.CloseTabMsg{SessionID: "first"})
+	require.Equal(t, "one ", m.activeTab.editor.Value())
 }
 
 func TestHelpDoesNotBreakHiddenShortcuts(t *testing.T) {
