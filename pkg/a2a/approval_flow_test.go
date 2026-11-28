@@ -573,6 +573,54 @@ func TestServer_ToolApproval_MalformedArgsAreShown(t *testing.T) {
 	assert.Equal(t, raw, meta["rawArguments"]) //nolint:testifylint // raw is deliberately invalid JSON.
 }
 
+// A later pause of the same task shows only its own arguments, not the
+// malformed ones of the call approved before it.
+func TestServer_ToolApproval_RawArgsNotCarriedToNextPause(t *testing.T) {
+	t.Parallel()
+
+	const raw = `{"path": "a.txt"`
+	var executions atomic.Int32
+	tool := approvalCanaryTool(&executions)
+	call := func(id, args string) chat.MessageStream {
+		return &mockStream{responses: []chat.MessageStreamResponse{{
+			Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ToolCalls: []tools.ToolCall{{
+				ID:       id,
+				Type:     "function",
+				Function: tools.FunctionCall{Name: tool.Name, Arguments: args},
+			}}}}},
+		}}}
+	}
+	tm, _ := approvalTeamWith(tool, call("call-1", raw), call("call-2", `{"path": "b.txt"}`), stopStream())
+	client := startToolApprovalServer(t, tm, session.NewInMemorySessionStore(), true)
+
+	approvalPart := func(task *a2a.Task) (data, meta map[string]any) {
+		for _, part := range task.Status.Message.Parts {
+			if m, ok := part.Meta()[toolApprovalExtensionURI].(map[string]any); ok {
+				data, _ = part.Data().(map[string]any)
+				meta = m
+			}
+		}
+		require.NotNil(t, meta)
+		return data, meta
+	}
+
+	task, callID := requireInputRequired(t, sendText(t, client, "", "run the tool"))
+	require.Equal(t, "call-1", callID)
+	_, meta := approvalPart(task)
+	require.Equal(t, raw, meta["rawArguments"]) //nolint:testifylint // raw is deliberately invalid JSON.
+
+	res, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: answerToolCall(task, callID, map[string]any{"decision": "approve"}),
+	})
+	require.NoError(t, err)
+	next, callID := requireInputRequired(t, res)
+	require.Equal(t, task.ID, next.ID)
+	require.Equal(t, "call-2", callID)
+	data, meta := approvalPart(next)
+	assert.NotContains(t, meta, "rawArguments", "the previous call's arguments must not be shown")
+	assert.Equal(t, map[string]any{"path": "b.txt"}, data["args"])
+}
+
 // approve-in-context survives a server restart: the grant lives in the session store.
 func TestServer_ToolApproval_ApproveToolSurvivesRestart(t *testing.T) {
 	t.Parallel()
