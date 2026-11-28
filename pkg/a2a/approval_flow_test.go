@@ -15,6 +15,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/push"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -208,8 +210,52 @@ func TestServer_ToolApproval_ShutdownFailsPausedTask(t *testing.T) {
 	assert.Zero(t, executions.Load())
 }
 
+// releasedDeps records the terminal write and webhook enqueue of a failed
+// task, and any that come after shutdown released the dependencies.
+type releasedDeps struct {
+	released atomic.Bool
+	writes   atomic.Int32
+	pushes   atomic.Int32
+	late     atomic.Int32
+}
+
+func (d *releasedDeps) record(n *atomic.Int32) {
+	n.Add(1)
+	if d.released.Load() {
+		d.late.Add(1)
+	}
+}
+
+type releasedTaskStore struct {
+	taskstore.Store
+
+	deps *releasedDeps
+}
+
+func (s releasedTaskStore) Update(ctx context.Context, req *taskstore.UpdateRequest) (taskstore.TaskVersion, error) {
+	v, err := s.Store.Update(ctx, req)
+	if err == nil && req.Task.Status.State == a2a.TaskStateFailed {
+		s.deps.record(&s.deps.writes)
+	}
+	return v, err
+}
+
+type releasedPushSender struct {
+	push.Sender
+
+	deps *releasedDeps
+}
+
+func (s releasedPushSender) SendPush(ctx context.Context, cfg *a2a.PushConfig, event a2a.Event) error {
+	if pushState(event) == a2a.TaskStateFailed {
+		s.deps.record(&s.deps.pushes)
+	}
+	return s.Sender.SendPush(ctx, cfg, event)
+}
+
 // Shutdown landing between the park and the persisted INPUT_REQUIRED still
-// fails the task and notifies its webhook once the pause is published.
+// fails the task and enqueues its webhook before close returns, which is when
+// Run closes the webhook sender and the task store.
 func TestServer_ToolApproval_ShutdownDuringPauseHandoff(t *testing.T) {
 	t.Parallel()
 
@@ -225,6 +271,9 @@ func TestServer_ToolApproval_ShutdownDuringPauseHandoff(t *testing.T) {
 
 			var executions atomic.Int32
 			deps := newTestTaskDeps(t)
+			gate := &releasedDeps{}
+			deps.tasks = releasedTaskStore{Store: deps.tasks, deps: gate}
+			deps.pushSender = releasedPushSender{Sender: deps.pushSender, deps: gate}
 			// The registry shuts down while the HTTP server keeps serving the task.
 			reg := newApprovalRegistry(t.Context(), true)
 			paused := make(chan a2a.TaskID, 1)
@@ -268,22 +317,29 @@ func TestServer_ToolApproval_ShutdownDuringPauseHandoff(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatal("shutdown did not release the parked runs")
 			}
+			select {
+			case <-closed:
+				t.Fatal("shutdown returned while the pause was still being handed off")
+			case <-time.After(50 * time.Millisecond):
+			}
 			close(release)
 			select {
 			case <-closed:
 			case <-time.After(10 * time.Second):
 				t.Fatal("shutdown did not stop the runtime")
 			}
+			gate.released.Store(true)
 
+			// No polling: Run closes the sender and the store right after close.
+			assert.Equal(t, int32(1), gate.writes.Load(), "the task must be failed before shutdown returns")
+			assert.Equal(t, int32(1), gate.pushes.Load(), "the failure webhook must be enqueued before shutdown returns")
 			ctx, _ := a2asrv.NewCallContext(t.Context(), nil)
-			require.Eventually(t, func() bool {
-				stored, err := deps.tasks.Get(ctx, taskID)
-				return err == nil && stored.Task.Status.State == a2a.TaskStateFailed
-			}, 10*time.Second, 5*time.Millisecond, "the task must not stay waiting for an approval nobody can resume")
 			stored, err := deps.tasks.Get(ctx, taskID)
 			require.NoError(t, err)
+			assert.Equal(t, a2a.TaskStateFailed, stored.Task.Status.State, "the task must not stay waiting for an approval nobody can resume")
 			assert.Equal(t, approvalShutdownReason, statusText(stored.Task))
 			waitPushState(t, received, a2a.TaskStateFailed)
+			assert.Zero(t, gate.late.Load(), "nothing may reach the task store or the webhook sender after shutdown")
 			assert.Zero(t, executions.Load())
 		})
 	}

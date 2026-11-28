@@ -102,6 +102,8 @@ type approvalRegistry struct {
 	canceled    map[a2a.TaskID]*a2a.Task // canceled by resolveCancel; reported to every in-flight CancelTask
 	closed      bool                     // shutdown released the parked runs; later parks are abandoned
 	handoffs    map[a2a.TaskID]*handoff  // parked runs whose INPUT_REQUIRED is not persisted yet
+	settling    int                      // handoffs not ended yet, deferred abandon included
+	settled     chan struct{}            // closed while settling is zero
 	onAbandon   abandonFunc
 	live        int           // runtimes whose event stream is still open
 	idle        chan struct{} // closed while live is zero
@@ -126,6 +128,8 @@ func newApprovalRegistry(baseCtx context.Context, enabled bool) *approvalRegistr
 	ctx, stop := context.WithCancel(baseCtx)
 	idle := make(chan struct{})
 	close(idle)
+	settled := make(chan struct{})
+	close(settled)
 	r := &approvalRegistry{
 		enabled:     enabled,
 		baseCtx:     ctx,
@@ -138,6 +142,7 @@ func newApprovalRegistry(baseCtx context.Context, enabled bool) *approvalRegistr
 		canceled:    make(map[a2a.TaskID]*a2a.Task),
 		handoffs:    make(map[a2a.TaskID]*handoff),
 		idle:        idle,
+		settled:     settled,
 	}
 	if enabled {
 		go r.janitor()
@@ -156,7 +161,8 @@ func (r *approvalRegistry) setAbandonHandler(fn abandonFunc) {
 }
 
 // close cancels every parked run, fails its task, and waits (bounded) for all
-// runtimes to stop so they no longer write to the stores closed after it.
+// runtimes to stop and all handoffs to end, so nothing writes to the stores or
+// enqueues a webhook once they are closed after it.
 func (r *approvalRegistry) close() {
 	if r == nil {
 		return
@@ -169,12 +175,16 @@ func (r *approvalRegistry) close() {
 	case <-timeout.C:
 		return
 	}
-	r.mu.Lock()
-	idle := r.idle
-	r.mu.Unlock()
-	select {
-	case <-idle:
-	case <-timeout.C:
+	// Runtimes first: a run parking late opens its handoff before it is drained.
+	for _, quiet := range []*chan struct{}{&r.idle, &r.settled} {
+		r.mu.Lock()
+		ch := *quiet
+		r.mu.Unlock()
+		select {
+		case <-ch:
+		case <-timeout.C:
+			return
+		}
 	}
 }
 
@@ -242,6 +252,12 @@ func bindToInvocation(invocation context.Context, cancel context.CancelFunc) (st
 // cancelled first.
 func (r *approvalRegistry) park(run *pausedRun) {
 	r.mu.Lock()
+	if _, open := r.handoffs[run.taskID]; !open {
+		if r.settling == 0 {
+			r.settled = make(chan struct{})
+		}
+		r.settling++
+	}
 	r.handoffs[run.taskID] = &handoff{run: run}
 	if r.closed {
 		r.mu.Unlock()
@@ -459,7 +475,8 @@ func (r *approvalRegistry) abandon(run *pausedRun, state a2a.TaskState, reason s
 
 // endHandoff ends the handoff of the run parked for taskID once the execution
 // that paused it is over, applying an abandon that came before INPUT_REQUIRED
-// was persisted.
+// was persisted. The handoff stays counted until the task is ended, so close
+// does not return before the write and the webhook enqueue.
 func (r *approvalRegistry) endHandoff(taskID a2a.TaskID, published bool) {
 	if r == nil {
 		return
@@ -468,7 +485,18 @@ func (r *approvalRegistry) endHandoff(taskID a2a.TaskID, published bool) {
 	h, ok := r.handoffs[taskID]
 	delete(r.handoffs, taskID)
 	r.mu.Unlock()
-	if ok && h.abandoned && published {
+	if !ok {
+		return
+	}
+	defer func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.settling--
+		if r.settling == 0 {
+			close(r.settled)
+		}
+	}()
+	if h.abandoned && published {
 		r.endTask(h.run, h.state, h.reason)
 	}
 }
