@@ -2869,6 +2869,68 @@ func TestTransferTask_DelayedReturnHookPreservesAgentInfoOrder(t *testing.T) {
 	assert.Equal(t, "root", lastAgentInfo, "final AgentInfo must stay root with no subsequent parent AgentInfo")
 }
 
+func TestTransferTask_ChildHandoffWaitsForSiblingReturnEmission(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/mock-model"}
+	root := agent.New("root", "", agent.WithModel(prov))
+	helper := agent.New("helper", "", agent.WithModel(prov))
+	triage := agent.New("triage", "", agent.WithModel(prov))
+	specialist := agent.New("specialist", "", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, helper, triage, specialist)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	parent := session.New()
+	triageSess := session.New(session.WithAgentName("triage"), session.WithAgentHandoffs())
+
+	// Park helper's return between its stack pop and its AgentInfo.
+	inReturn := make(chan struct{})
+	release := make(chan struct{})
+	var lastInfo string
+	sink := EventSinkFunc(func(ev Event) {
+		switch e := ev.(type) {
+		case *AgentSwitchingEvent:
+			if !e.Switching {
+				close(inReturn)
+				<-release
+			}
+		case *AgentInfoEvent:
+			lastInfo = e.AgentName
+		}
+	})
+
+	restoreHelper := rt.swapCurrentAgent(t.Context(), parent, "helper-session", root, helper, sink)
+	rt.swapCurrentAgent(t.Context(), parent, triageSess.ID, root, triage, sink)
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		restoreHelper()
+	}()
+	<-inReturn
+
+	handedOff := make(chan struct{})
+	go func() {
+		defer close(handedOff)
+		rt.switchSessionAgent(t.Context(), triageSess, "specialist")
+	}()
+	select {
+	case <-handedOff:
+		assert.Fail(t, "handoff advanced while a sibling return was publishing AgentInfo")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	<-returned
+	<-handedOff
+	assert.Equal(t, "triage", lastInfo, "return must publish the agent that was active when it popped")
+	assert.Equal(t, "specialist", rt.CurrentAgent().Name())
+}
+
 func TestTransferTask_ParallelChildHandoffStaysLocal(t *testing.T) {
 	t.Parallel()
 

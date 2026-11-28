@@ -315,7 +315,11 @@ func (r *LocalRuntime) switchSessionAgent(ctx context.Context, sess *session.Ses
 		sess.SetRouteAgent(name)
 		return
 	}
-	if r.agents.handoffSession(sess, name) {
+	// A sibling transfer return must finish publishing before the stack entry changes.
+	r.transferEmitMu.Lock()
+	handedOff := r.agents.handoffSession(sess, name)
+	r.transferEmitMu.Unlock()
+	if handedOff {
 		return
 	}
 	if sess.AgentName == "" {
