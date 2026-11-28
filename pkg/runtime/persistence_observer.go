@@ -186,6 +186,9 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 
 	case *TokenUsageEvent:
 		if e.Usage != nil {
+			// Every later UpdateSession writes the cost the session holds, so
+			// keep it current or a full save puts back a stale value.
+			sess.SetCost(e.Usage.Cost)
 			if err := p.store.UpdateSessionTokens(ctx, sess.ID, e.Usage.InputTokens, e.Usage.OutputTokens, e.Usage.Cost); err != nil {
 				slog.WarnContext(ctx, "Failed to persist token usage", "session_id", sess.ID, "error", err)
 			}

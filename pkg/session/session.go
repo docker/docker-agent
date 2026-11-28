@@ -979,6 +979,14 @@ func (s *Session) SetTokensAndCost(inputTokens, outputTokens int64, cost float64
 	s.Cost = cost
 }
 
+// SetCost records the session-level cost under s.mu, so that a row written
+// from this session carries the same cost the store was last told.
+func (s *Session) SetCost(cost float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Cost = cost
+}
+
 // SetTitle updates the session title under s.mu. Title writers (title
 // generation, HTTP title updates, granular store updates) run on
 // different goroutines than readers like the UpdateSession snapshot,
