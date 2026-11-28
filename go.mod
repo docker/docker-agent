@@ -13,6 +13,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.4
 	github.com/a2aproject/a2a-go v0.3.15
 	github.com/a2aproject/a2a-go/v2 v2.6.0
+	github.com/ag-ui-protocol/ag-ui/sdks/community/go v0.0.0-20261127222907-96caee88f5e4
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/alpkeskin/gotoon v0.1.1
 	github.com/anthropics/anthropic-sdk-go v1.84.0
