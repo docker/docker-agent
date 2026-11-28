@@ -47,6 +47,20 @@ type activeRuntimes struct {
 	streaming        sync.Mutex  // Held while a RunStream is in progress; serialises concurrent requests
 	modelSwitch      sync.Mutex  // Serialises model changes with manager-owned session persistence
 	deleting         atomic.Bool // Set before deletion waits for an in-flight model transaction
+	// detaching is set by DetachRuntime before it waits for that transaction.
+	// It is separate from deleting, which a failed deletion resets.
+	detaching atomic.Bool
+}
+
+func (rs *activeRuntimes) retiring() bool {
+	return rs.deleting.Load() || rs.detaching.Load()
+}
+
+// lifecycleLock is the attach/detach lock of one session ID.
+type lifecycleLock struct {
+	sync.Mutex
+
+	users int // holders and waiters; guarded by SessionManager.lifecycleMu
 }
 
 // SessionManager manages sessions for the HTTP API server and the --listen
@@ -86,10 +100,13 @@ type SessionManager struct {
 
 	mux sync.Mutex
 
-	// attachMu serialises AttachRuntime with DetachRuntime, so a reattach
-	// cannot interleave with the teardown of the previous registration. It is
-	// acquired before mux and never while holding it.
-	attachMu sync.Mutex
+	// lifecycleLocks serialises AttachRuntime with DetachRuntime per session ID,
+	// so a reattach cannot interleave with the teardown of the previous
+	// registration while other sessions stay unaffected (see lockLifecycle).
+	// A lifecycle lock is acquired before mux and never while holding it.
+	// Guarded by lifecycleMu.
+	lifecycleLocks map[string]*lifecycleLock
+	lifecycleMu    sync.Mutex
 
 	// eventLogsMu serialises event-log lifecycle transitions: on-demand
 	// creation (ensureEventLog), source attachment (RegisterEventSource) and
@@ -113,6 +130,11 @@ type SessionManager struct {
 	// releaseEventLog, so a reattached session keeps numbering its events
 	// where it left off. Guarded by eventLogsMu.
 	releasedEventSeqs map[string]uint64
+
+	// detachedSessions holds the IDs released by DetachRuntime and not
+	// attached since, so a late RegisterEventSource or RegisterFollowUpInjector
+	// cannot register state for a runtime that is gone. Guarded by eventLogsMu.
+	detachedSessions map[string]struct{}
 
 	// sessionReady is closed once the first session is attached or created,
 	// signalling that the server is ready to accept session-scoped requests.
@@ -191,6 +213,7 @@ func NewSessionManager(ctx context.Context, sources config.Sources, sessionStore
 		eventLogs:             concurrent.NewMap[string, *pumpedEventLog](),
 		deletedEventLogs:      make(map[string]struct{}),
 		releasedEventSeqs:     make(map[string]uint64),
+		detachedSessions:      make(map[string]struct{}),
 		followUpInjectors:     concurrent.NewMap[string, FollowUpInjector](),
 		followUpKeys:          concurrent.NewMap[string, *idempotencyCache](),
 		pendingSafetyDefaults: concurrent.NewMap[string, struct{}](),
@@ -263,10 +286,15 @@ type pumpedEventLog struct {
 // DeleteSession/BatchDeleteSessions can neither store a log nobody will ever
 // tear down nor start a pump for a session that is gone — src is never
 // invoked. The pump context is only created after the tombstone check, so a
-// rejected registration leaves nothing behind to clean up.
+// rejected registration leaves nothing behind to clean up. The same applies to
+// a session released by DetachRuntime, until it is attached again.
 func (sm *SessionManager) RegisterEventSource(sessionID string, src EventSource) {
 	sm.eventLogsMu.Lock()
 	if _, deleted := sm.deletedEventLogs[sessionID]; deleted {
+		sm.eventLogsMu.Unlock()
+		return
+	}
+	if _, detached := sm.detachedSessions[sessionID]; detached {
 		sm.eventLogsMu.Unlock()
 		return
 	}
@@ -357,10 +385,12 @@ func (sm *SessionManager) dropEventLog(sessionID string) {
 // tombstoning the ID: unlike dropEventLog it is for a session that merely
 // stops being attached (see DetachRuntime), so the same ID can be attached
 // again and register a fresh event source. The last sequence number is kept
-// so that source's events continue after it.
+// so that source's events continue after it. It also marks the session as
+// detached, which rejects registrations until it is attached again.
 func (sm *SessionManager) releaseEventLog(sessionID string) {
 	sm.eventLogsMu.Lock()
 	defer sm.eventLogsMu.Unlock()
+	sm.detachedSessions[sessionID] = struct{}{}
 	if pe, ok := sm.eventLogs.Load(sessionID); ok {
 		pe.cancel()
 		// A source pump closes its log asynchronously; close it now so the
@@ -431,7 +461,13 @@ func (sm *SessionManager) LastEventSeq(sessionID string) (uint64, bool) {
 // attached sessionID. When set, [SessionManager.FollowUpSession] routes
 // messages through fn (which feeds them to the TUI App so a real turn starts)
 // instead of the runtime follow-up queue. Used by the --listen control plane.
+// It is a no-op for a detached session (see [SessionManager.DetachRuntime]).
 func (sm *SessionManager) RegisterFollowUpInjector(sessionID string, fn FollowUpInjector) {
+	sm.eventLogsMu.Lock()
+	defer sm.eventLogsMu.Unlock()
+	if _, detached := sm.detachedSessions[sessionID]; detached {
+		return
+	}
 	sm.followUpInjectors.Store(sessionID, fn)
 }
 
@@ -495,12 +531,41 @@ func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, r
 		cancel:  cancel,
 		session: sess,
 	}
-	sm.attachMu.Lock()
-	defer sm.attachMu.Unlock()
+	defer sm.lockLifecycle(sessionID)()
+	sm.eventLogsMu.Lock()
+	delete(sm.detachedSessions, sessionID)
+	sm.eventLogsMu.Unlock()
 	sm.runtimeSessions.Store(sessionID, rs)
 	sm.registerRecallHandler(sessionID, rt)
 	sm.markReady()
 	return &rs.streaming
+}
+
+// lockLifecycle locks the attach/detach lock of sessionID and returns the
+// function that releases it. The lock is dropped once nobody uses it.
+func (sm *SessionManager) lockLifecycle(sessionID string) (unlock func()) {
+	sm.lifecycleMu.Lock()
+	l := sm.lifecycleLocks[sessionID]
+	if l == nil {
+		if sm.lifecycleLocks == nil {
+			sm.lifecycleLocks = make(map[string]*lifecycleLock)
+		}
+		l = &lifecycleLock{}
+		sm.lifecycleLocks[sessionID] = l
+	}
+	l.users++
+	sm.lifecycleMu.Unlock()
+
+	l.Lock()
+	return func() {
+		l.Unlock()
+		sm.lifecycleMu.Lock()
+		defer sm.lifecycleMu.Unlock()
+		l.users--
+		if l.users == 0 {
+			delete(sm.lifecycleLocks, sessionID)
+		}
+	}
 }
 
 // DetachRuntime is the inverse of [SessionManager.AttachRuntime]: it releases
@@ -512,8 +577,7 @@ func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, r
 // Unlike [SessionManager.DeleteSession], the stored session is kept and the
 // session ID is not tombstoned, so it can be attached again (e.g. a reopened tab). It is a no-op for unknown sessions.
 func (sm *SessionManager) DetachRuntime(sessionID string) {
-	sm.attachMu.Lock()
-	defer sm.attachMu.Unlock()
+	defer sm.lockLifecycle(sessionID)()
 
 	sm.mux.Lock()
 	rs, ok := sm.runtimeSessions.Load(sessionID)
@@ -521,7 +585,7 @@ func (sm *SessionManager) DetachRuntime(sessionID string) {
 		sm.mux.Unlock()
 		return
 	}
-	rs.deleting.Store(true)
+	rs.detaching.Store(true)
 	sm.mux.Unlock()
 
 	// Wait for an in-flight metadata write before the session looks inactive,
@@ -1342,7 +1406,7 @@ func sendStreamEvent(ctx context.Context, events chan<- runtime.Event, event run
 }
 
 func (sm *SessionManager) runtimeActive(sessionID string, rs *activeRuntimes) bool {
-	if rs.deleting.Load() {
+	if rs.retiring() {
 		return false
 	}
 	active, ok := sm.runtimeSessions.Load(sessionID)
@@ -2263,7 +2327,7 @@ func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID 
 
 	// Model state is protected by Session.mu; modelSwitch only serializes runtime
 	// calls and store transactions for this active runtime.
-	if rs.deleting.Load() {
+	if rs.retiring() {
 		return "", "", nil, ErrSessionNotRunning
 	}
 	rs.modelSwitch.Lock()
