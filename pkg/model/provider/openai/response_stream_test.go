@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -881,6 +882,108 @@ func TestResponseStream_CopilotUnstableItemIDsOutputTextNotDuplicated(t *testing
 			content, finishReason := drainContent(t, adapter)
 			assert.Equal(t, tt.wantContent, content)
 			assert.Equal(t, chat.FinishReasonStop, finishReason)
+		})
+	}
+}
+
+// A refusal arrives as refusal deltas or only in the output_item.done
+// snapshot. Either way it must be shown once and end the turn as a refusal.
+func TestResponseStream_Refusal(t *testing.T) {
+	t.Parallel()
+
+	const refusal = "I can't help with that."
+	deltas := []map[string]any{
+		{"type": "response.refusal.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "I can't "},
+		{"type": "response.refusal.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "help with that."},
+		{"type": "response.refusal.done", "item_id": "msg_1", "output_index": 0, "content_index": 0, "refusal": refusal},
+	}
+	snapshot := map[string]any{
+		"type": "response.output_item.done", "output_index": 0,
+		"item": map[string]any{
+			"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+			"content": []any{map[string]any{"type": "refusal", "refusal": refusal}},
+		},
+	}
+	completed := map[string]any{
+		"type":     "response.completed",
+		"response": map[string]any{"id": "r1", "output": []any{}},
+	}
+
+	for name, raw := range map[string][]map[string]any{
+		"streamed deltas":   append(slices.Clone(deltas), snapshot, completed),
+		"snapshot only":     {snapshot, completed},
+		"text stays a stop": {{"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": refusal}, completed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			adapter := newResponseStreamAdapter(&fakeEventStream{events: decodeEvents(t, raw)}, true)
+			content, finish := drainContent(t, adapter)
+			assert.Equal(t, refusal, content)
+			if name == "text stays a stop" {
+				assert.Equal(t, chat.FinishReasonStop, finish)
+				return
+			}
+			assert.Equal(t, chat.FinishReasonRefusal, finish)
+		})
+	}
+}
+
+// A message snapshot can carry several content parts. The runtime reads one
+// choice per chunk, so the parts not streamed must arrive in a single choice,
+// in order, and a streamed part must not hide an unstreamed sibling.
+func TestResponseStream_SnapshotParts(t *testing.T) {
+	t.Parallel()
+
+	snapshot := map[string]any{
+		"type": "response.output_item.done", "output_index": 0,
+		"item": map[string]any{
+			"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+			"content": []any{
+				map[string]any{"type": "output_text", "text": "Answer. "},
+				map[string]any{"type": "refusal", "refusal": "No."},
+			},
+		},
+	}
+	completed := map[string]any{
+		"type":     "response.completed",
+		"response": map[string]any{"id": "r1", "output": []any{}},
+	}
+	refusalDelta := map[string]any{"type": "response.refusal.delta", "item_id": "msg_1", "output_index": 0, "content_index": 1, "delta": "No."}
+	textDelta := map[string]any{"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "Answer. "}
+
+	tests := []struct {
+		name string
+		raw  []map[string]any
+		want string
+	}{
+		{"snapshot only", []map[string]any{snapshot, completed}, "Answer. No."},
+		{"streamed refusal, unstreamed text", []map[string]any{refusalDelta, snapshot, completed}, "No.Answer. "},
+		{"streamed text, unstreamed refusal", []map[string]any{textDelta, snapshot, completed}, "Answer. No."},
+		{"everything streamed", []map[string]any{textDelta, refusalDelta, snapshot, completed}, "Answer. No."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			adapter := newResponseStreamAdapter(&fakeEventStream{events: decodeEvents(t, tt.raw)}, true)
+
+			var content strings.Builder
+			var finish chat.FinishReason
+			for {
+				resp, err := adapter.Recv()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				require.NoError(t, err)
+				require.LessOrEqual(t, len(resp.Choices), 1, "the runtime reads only the first choice of a chunk")
+				for _, c := range resp.Choices {
+					content.WriteString(c.Delta.Content)
+					if c.FinishReason != "" {
+						finish = c.FinishReason
+					}
+				}
+			}
+			assert.Equal(t, tt.want, content.String())
+			assert.Equal(t, chat.FinishReasonRefusal, finish)
 		})
 	}
 }

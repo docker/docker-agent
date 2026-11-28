@@ -22,9 +22,17 @@ type StreamAdapter struct {
 	// heldFinishReason is a stop/length held back until the usage chunk
 	// arrives; emitted at EOF if no usage chunk ever comes.
 	heldFinishReason chat.FinishReason
-	toolCalls        map[int]string
-	trackUsage       bool
-	serviceTier      string
+	// sawRefusal records refusal text, which turns a stop into a refusal.
+	sawRefusal bool
+	// provider_opts can request several completions (n > 1), but the runtime
+	// reads one choice per chunk. Only the first choice index seen is passed
+	// through, so the text shown and the finish reason come from the same
+	// completion for the whole stream.
+	selected    int64
+	hasSelected bool
+	toolCalls   map[int]string
+	trackUsage  bool
+	serviceTier string
 }
 
 func NewStreamAdapter(stream *ssestream.Stream[openai.ChatCompletionChunk], trackUsage bool) *StreamAdapter {
@@ -62,17 +70,29 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		Object:  string(openaiResponse.Object),
 		Created: openaiResponse.Created,
 		Model:   openaiResponse.Model,
-		Choices: make([]chat.MessageStreamChoice, len(openaiResponse.Choices)),
+		Choices: make([]chat.MessageStreamChoice, 0, len(openaiResponse.Choices)),
 	}
 
-	// Convert the choices
+	// Convert the selected choice
 	for i := range openaiResponse.Choices {
 		choice := &openaiResponse.Choices[i]
+		if !a.hasSelected {
+			a.selected, a.hasSelected = choice.Index, true
+		}
+		if choice.Index != a.selected {
+			continue
+		}
 
 		finishReason := chat.FinishReason(choice.FinishReason)
 		// content_filter (Azure OpenAI, OpenAI moderation) ends the turn
 		// like a refusal, as on the Responses API path.
 		if finishReason == "content_filter" {
+			finishReason = chat.FinishReasonRefusal
+		}
+		if choice.Delta.Refusal != "" {
+			a.sawRefusal = true
+		}
+		if finishReason == chat.FinishReasonStop && a.sawRefusal {
 			finishReason = chat.FinishReasonRefusal
 		}
 		if a.trackUsage && !openaiResponse.JSON.Usage.Valid() &&
@@ -113,12 +133,13 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			}
 		}
 
-		response.Choices[i] = chat.MessageStreamChoice{
+		out := chat.MessageStreamChoice{
 			Index:        int(choice.Index),
 			FinishReason: finishReason,
 			Delta: chat.MessageDelta{
-				Role:             choice.Delta.Role,
-				Content:          choice.Delta.Content,
+				Role: choice.Delta.Role,
+				// Refusal text is the answer the user should see.
+				Content:          choice.Delta.Content + choice.Delta.Refusal,
 				ReasoningContent: reasoningContent,
 			},
 		}
@@ -126,7 +147,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// Convert function call if present
 		if choice.Delta.JSON.FunctionCall.Valid() {
 			funcCall := choice.Delta.FunctionCall
-			response.Choices[i].Delta.FunctionCall = &tools.FunctionCall{
+			out.Delta.FunctionCall = &tools.FunctionCall{
 				Name:      funcCall.Name,
 				Arguments: funcCall.Arguments,
 			}
@@ -134,7 +155,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 		// Convert tool calls if present
 		if len(choice.Delta.ToolCalls) > 0 {
-			response.Choices[i].Delta.ToolCalls = make([]tools.ToolCall, len(choice.Delta.ToolCalls))
+			out.Delta.ToolCalls = make([]tools.ToolCall, len(choice.Delta.ToolCalls))
 			for j, toolCall := range choice.Delta.ToolCalls {
 				id := toolCall.ID
 				index := int(toolCall.Index)
@@ -144,7 +165,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 					a.toolCalls[index] = id
 				}
 
-				response.Choices[i].Delta.ToolCalls[j] = tools.ToolCall{
+				out.Delta.ToolCalls[j] = tools.ToolCall{
 					ID:   id,
 					Type: tools.ToolType(toolCall.Type),
 					Function: tools.FunctionCall{
@@ -154,6 +175,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 				}
 			}
 		}
+		response.Choices = append(response.Choices, out)
 	}
 
 	// Check if Usage field is present using the JSON metadata
@@ -195,6 +217,9 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			}
 			if finishReason == chat.FinishReasonNull || finishReason == "" {
 				finishReason = chat.FinishReasonStop
+				if a.sawRefusal {
+					finishReason = chat.FinishReasonRefusal
+				}
 			}
 			response.Choices = append(response.Choices, chat.MessageStreamChoice{
 				FinishReason: finishReason,
