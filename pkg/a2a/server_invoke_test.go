@@ -196,7 +196,7 @@ func serveTeam(t *testing.T, tm *team.Team, deps taskDeps) (*echo.Echo, string) 
 	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	e, err := newServer(tm, "test.yaml", "root",
+	e, err := newServer(t.Context(), tm, "test.yaml", "root",
 		session.NewInMemorySessionStore(), deps,
 		servesafety.Resolved{Policy: session.SafetyPolicyAutonomous},
 		testWorkspaceRoot, ln.Addr().String(), RunOptions{})
@@ -507,7 +507,7 @@ func startInvokeServer(t *testing.T, tm *team.Team, store session.Store, safety 
 
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	e, err := newServer(tm, "test.yaml", "root", store, newTestTaskDeps(t), safety, testWorkspaceRoot, ln.Addr().String(), RunOptions{})
+	e, err := newServer(t.Context(), tm, "test.yaml", "root", store, newTestTaskDeps(t), safety, testWorkspaceRoot, ln.Addr().String(), RunOptions{})
 	require.NoError(t, err)
 	go func() { _ = e.Server.Serve(ln) }()
 	t.Cleanup(func() { require.NoError(t, e.Server.Close()) })

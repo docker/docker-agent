@@ -2,13 +2,14 @@ package a2a
 
 import (
 	"cmp"
-	"context"
 	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -19,6 +20,7 @@ import (
 
 	dagent "github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
+	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
@@ -30,7 +32,7 @@ import (
 // newDockerAgentAdapter creates a new ADK agent adapter from a docker agent team and agent name.
 // When agentName is empty, the team's default agent (one explicitly named "root" if it
 // exists, otherwise the first agent declared) is used.
-func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir string) (agent.Agent, error) {
+func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir string, reg *approvalRegistry) (agent.Agent, error) {
 	a, err := t.AgentOrDefault(agentName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get agent %s: %w", agentName, err)
@@ -43,13 +45,13 @@ func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Sto
 		Name:        agentName,
 		Description: desc,
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*adksession.Event, error] {
-			return runDockerAgent(ctx, t, agentName, a, sessStore, safety, workingDir)
+			return runDockerAgent(ctx, t, agentName, a, sessStore, safety, workingDir, reg)
 		},
 	})
 }
 
 // runDockerAgent executes a docker agent and returns ADK session events
-func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved, workingDir string) iter.Seq2[*adksession.Event, error] {
+func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved, workingDir string, reg *approvalRegistry) iter.Seq2[*adksession.Event, error] {
 	return func(yield func(*adksession.Event, error) bool) {
 		// Decorate the inbound `a2a.message` SERVER span (created by
 		// otelhttp.NewHandler in server.go) with the GenAI semconv
@@ -74,6 +76,14 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		// A2A invocations with that ID can resume the conversation.
 		sessionID := ctx.Session().ID()
 
+		// The executor took the run parked for this task because the message
+		// answers its pending call: resume it instead of starting a new turn.
+		if ticket, ok := resumeFrom(ctx); ok {
+			ticket.used.Store(true)
+			resumePausedRun(ctx, yield, reg, sessStore, agentName, ticket)
+			return
+		}
+
 		var sess *session.Session
 		existing, err := sessStore.GetSessionByOrigin(ctx, sessionID, "a2a")
 		switch {
@@ -87,6 +97,7 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			sess.AddMessage(session.UserMessage(message))
 			sess.SetSafetyPolicy(servesafety.ResumeCeiling(sess.GetSafetyPolicy(), safety.Policy))
 			sess.NonInteractive = true
+			sess.ToolApproval = reg.toolApproval()
 		case !errors.Is(err, session.ErrNotFound):
 			yield(nil, fmt.Errorf("look up A2A session: %w", err))
 			return
@@ -110,6 +121,7 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 					session.WithMaxToolResultTokens(a.MaxToolResultTokens()),
 					session.WithSafetyPolicy(safety.Policy),
 					session.WithNonInteractive(true),
+					session.WithToolApproval(reg.toolApproval()),
 					session.WithWorkingDir(workingDir),
 				)
 				sess.SetTitle("A2A Session " + sessionID)
@@ -135,81 +147,147 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			return
 		}
 
-		// Early iterator exits must cancel and join the runtime.
-		streamCtx, cancel := context.WithCancel(ctx)
-		eventsChan := rt.RunStream(streamCtx, sess)
-		defer func() {
-			cancel()
-			for range eventsChan {
-			}
-		}()
-
-		// Track accumulated content for chunked responses
-		var contentBuilder strings.Builder
-
-		// finalEvent builds the turn-complete ADK event from whatever content
-		// was accumulated so far. Shared by the StreamStoppedEvent case and the
-		// post-loop fallback below, so both paths build an identical event.
-		finalEvent := func() *adksession.Event {
-			return &adksession.Event{
-				Author: agentName,
-				LLMResponse: model.LLMResponse{
-					Content:      genai.NewContentFromParts([]*genai.Part{{Text: contentBuilder.String()}}, genai.RoleModel),
-					Partial:      false,
-					TurnComplete: true,
-					FinishReason: genai.FinishReasonStop,
-				},
-			}
+		// Early iterator exits must cancel and join the runtime. In tool-approval
+		// mode the stream outlives the request so a run parked on a confirmation
+		// survives it; while active it is still cancelled with the invocation.
+		streamCtx, cancel := reg.runContext(ctx)
+		stop := bindToInvocation(ctx, cancel)
+		eventsChan := reg.track(rt.RunStream(streamCtx, sess))
+		info := taskInfoFrom(ctx)
+		run := &pausedRun{
+			taskID: info.TaskID, contextID: info.ContextID, rt: rt, sess: sess, events: eventsChan, cancel: cancel,
+			spanCtx: trace.SpanContextFromContext(ctx),
 		}
+		if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
+			run.user = callCtx.User
+		}
+		if !pumpEvents(ctx, yield, reg, agentName, run, stop) {
+			stop()
+			run.cancelAndDrain()
+		}
+	}
+}
 
-		// Convert docker agent events to ADK events and yield them
+// resumePausedRun delivers the client's decision to a runtime parked on a tool
+// confirmation and continues consuming its event stream. The caller took the
+// run out of the registry, so this goroutine owns it: it must cancel and drain
+// unless the run parks again.
+func resumePausedRun(ctx agent.InvocationContext, yield func(*adksession.Event, error) bool, reg *approvalRegistry, sessStore session.Store, agentName string, ticket *resumeTicket) {
+	paused := ticket.run
+	// The run keeps the context of the request that started it, so its spans
+	// stay under that trace; link this request to it.
+	if span := trace.SpanFromContext(ctx); span.IsRecording() && paused.spanCtx.IsValid() {
+		span.AddLink(trace.Link{SpanContext: paused.spanCtx})
+	}
+	stop := bindToInvocation(ctx, paused.cancel)
+	req := resumeDecision(ticket.response, paused.grant)
+	if req.Type == runtime.ResumeTypeApproveTool {
+		// The next turn reloads the session from the store; persist the grant
+		// now, as serve api does, so it does not ask again.
+		paused.sess.AppendPermissionAllow(paused.grant)
+		if err := sessStore.UpdateSession(ctx, paused.sess); err != nil {
+			slog.WarnContext(ctx, "Failed to persist tool approval", "session_id", paused.sess.ID, "error", err)
+		}
+	}
+	paused.rt.Resume(ctx, req)
 
-		for event := range eventsChan {
-			if ctx.Ended() {
-				slog.DebugContext(ctx, "Invocation ended, stopping agent", "agent", agentName)
-				return
-			}
+	if !pumpEvents(ctx, yield, reg, agentName, paused, stop) {
+		stop()
+		paused.cancelAndDrain()
+	}
+}
 
-			switch e := event.(type) {
-			case *runtime.AgentChoiceEvent:
-				// Accumulate content chunks
-				contentBuilder.WriteString(e.Content)
+// pumpEvents converts docker-agent runtime events to ADK events and yields
+// them. It is shared by the initial run and by resume continuations. When a
+// tool call needs approval it detaches the run from the invocation (stop),
+// parks it in the registry, emits an INPUT_REQUIRED event, and returns true so
+// the caller leaves the runtime alive. It returns false on normal completion,
+// error, early stop or invocation cancellation.
+func pumpEvents(ctx agent.InvocationContext, yield func(*adksession.Event, error) bool, reg *approvalRegistry, agentName string, run *pausedRun, stop func() bool) (handedOff bool) {
+	var contentBuilder strings.Builder
+	textEvent := func(partial, turnComplete bool, text string) *adksession.Event {
+		ev := &adksession.Event{
+			Author: agentName,
+			LLMResponse: model.LLMResponse{
+				Content:      genai.NewContentFromParts([]*genai.Part{{Text: text}}, genai.RoleModel),
+				Partial:      partial,
+				TurnComplete: turnComplete,
+			},
+		}
+		if turnComplete {
+			ev.FinishReason = genai.FinishReasonStop
+		}
+		return ev
+	}
 
-				// Create a partial response event
-				adkEvent := &adksession.Event{
-					Author: agentName,
-					LLMResponse: model.LLMResponse{
-						Content:      genai.NewContentFromParts([]*genai.Part{{Text: e.Content}}, genai.RoleModel),
-						Partial:      true,
-						TurnComplete: false,
-					},
-				}
-
-				if !yield(adkEvent, nil) {
-					return
-				}
-
-			case *runtime.ErrorEvent:
-				// Yield error and stop
-
-				yield(nil, fmt.Errorf("%s", e.Error))
-				return
-
-			case *runtime.StreamStoppedEvent:
-				// Send final complete event with all accumulated content
+	for {
+		var event runtime.Event
+		select {
+		case <-ctx.Done():
+			slog.DebugContext(ctx, "Invocation canceled, stopping agent", "agent", agentName)
+			return false
+		case ev, ok := <-run.events:
+			if !ok {
+				// The channel closed without a StreamStoppedEvent: the runtime
+				// bounds how long it waits to deliver that event (#4136), but a
+				// consumer that abandoned the channel or an unexpected close
+				// should still complete the ADK turn rather than leave it hanging.
 				if contentBuilder.Len() > 0 {
-					yield(finalEvent(), nil)
-					return
+					yield(textEvent(false, true, contentBuilder.String()), nil)
 				}
+				return false
 			}
+			event = ev
+		}
+		if ctx.Ended() {
+			slog.DebugContext(ctx, "Invocation ended, stopping agent", "agent", agentName)
+			return false
 		}
 
-		// The channel closed without a StreamStoppedEvent: the runtime bounds
-		// how long it waits to deliver that event (#4136), but a consumer that
-		// abandoned the channel or an unexpected close should still complete
-		// the ADK turn rather than leave it hanging.
-		if contentBuilder.Len() > 0 {
-			yield(finalEvent(), nil)
+		switch e := event.(type) {
+		case *runtime.AgentChoiceEvent:
+			contentBuilder.WriteString(e.Content)
+			if !yield(textEvent(true, false, e.Content), nil) {
+				return false
+			}
+
+		case *runtime.ToolCallConfirmationEvent:
+			if !reg.toolApproval() || run.taskID == "" || !stop() {
+				return false
+			}
+			// Partial output is discarded when this invocation ends; emit the
+			// text so far as a final chunk so it stays in the task artifacts.
+			if contentBuilder.Len() > 0 {
+				if !yield(textEvent(false, false, contentBuilder.String()), nil) {
+					return false
+				}
+			}
+			parked := *run
+			// Computed once: the grant announced to the client is the one stored.
+			// Empty for a command call that cannot be scoped to its command.
+			parked.grant = permissions.ScopedPermissionPattern(ctx, e.ToolCall)
+			parked.callID = e.ToolCall.ID
+			// Reset: run still carries the previous pause's value.
+			parked.rawArgs = ""
+			if _, ok := decodeToolArgs(e.ToolCall.Function.Arguments); !ok {
+				parked.rawArgs = e.ToolCall.Function.Arguments
+			}
+			parked.created = time.Now()
+			reg.runHook(hookBeforePark, run.taskID)
+			reg.park(&parked)
+			reg.runHook(hookAfterPark, run.taskID)
+			yield(inputRequiredEvent(agentName, e.ToolCall), nil)
+			return true
+
+		case *runtime.ErrorEvent:
+			yield(nil, fmt.Errorf("%s", e.Error))
+			return false
+
+		case *runtime.StreamStoppedEvent:
+			if contentBuilder.Len() > 0 {
+				yield(textEvent(false, true, contentBuilder.String()), nil)
+				return false
+			}
 		}
 	}
 }

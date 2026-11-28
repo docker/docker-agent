@@ -171,12 +171,12 @@ func TestFailInterrupted(t *testing.T) {
 	for _, task := range failed {
 		ids = append(ids, task.ID)
 	}
-	assert.ElementsMatch(t, []a2a.TaskID{"submitted", "working"}, ids)
+	assert.ElementsMatch(t, []a2a.TaskID{"submitted", "working", "input"}, ids)
 
 	for id, before := range states {
 		got, err := tasks.Get(ctx, id)
 		require.NoError(t, err)
-		if id == "submitted" || id == "working" {
+		if id != "completed" {
 			assert.Equal(t, a2a.TaskStateFailed, got.Task.Status.State)
 			assert.Equal(t, taskstore.TaskVersion(2), got.Version)
 			assert.Equal(t, "alice", got.User)

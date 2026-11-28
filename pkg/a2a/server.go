@@ -64,6 +64,14 @@ type RunOptions struct {
 	// Off by default (guard on, environment proxies ignored) per A2A spec
 	// §13.2; enable only for trusted internal deployments or local testing.
 	PushAllowPrivateNetworks bool
+	// ToolApproval opts the server into out-of-band tool confirmation: a tool
+	// call that would otherwise be denied in the non-interactive A2A session
+	// instead parks the task in TASK_STATE_INPUT_REQUIRED until the client
+	// replies with an approve/reject decision. Off by default.
+	ToolApproval bool
+
+	// approvals overrides the tool-approval registry (tests).
+	approvals *approvalRegistry
 }
 
 // pushDrainTimeout bounds how long shutdown waits for queued webhooks.
@@ -152,12 +160,19 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	baseURL := &url.URL{Scheme: "http", Host: routableAddr(ln.Addr().String())}
 	slog.DebugContext(ctx, "A2A server listening", "url", baseURL.String())
 
+	if options.approvals == nil {
+		options.approvals = newApprovalRegistry(ctx, options.ToolApproval)
+	}
+	// Runs before the push drain and store closes: failing parked tasks pushes
+	// and writes, and stopped runtimes persist their final state.
+	defer options.approvals.close()
+
 	workingDir, err := session.CaptureLocalWorkingDir(runConfig.WorkingDir)
 	if err != nil {
 		return err
 	}
 
-	e, err := newServer(t, agentFilename, agentName, sessStore, taskDeps{
+	e, err := newServer(ctx, t, agentFilename, agentName, sessStore, taskDeps{
 		tasks:       a2aStore.Tasks(a2asrv.NewTaskStoreAuthenticator()),
 		pushConfigs: a2aStore,
 		pushSender:  pushSender,
@@ -207,8 +222,63 @@ func recoverInterruptedTasks(ctx context.Context, store *a2astore.Store, sender 
 	return nil
 }
 
-func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, deps taskDeps, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
-	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir)
+// failAbandonedTask moves the task of a parked run dropped without an answer
+// to state and notifies its webhooks: nothing would ever resume it.
+func failAbandonedTask(deps taskDeps) abandonFunc {
+	return func(ctx context.Context, run *pausedRun, state a2a.TaskState, reason string) *a2a.Task {
+		// The task store resolves the owner from the call context.
+		ctx, callCtx := a2asrv.NewCallContext(ctx, nil)
+		if run.user != nil {
+			callCtx.User = run.user
+		}
+		stored, err := deps.tasks.Get(ctx, run.taskID)
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to load abandoned A2A task", "task_id", run.taskID, "error", err)
+			return nil
+		}
+		if stored.Task.Status.State != a2a.TaskStateInputRequired {
+			return nil
+		}
+		task := *stored.Task
+		var msg *a2a.Message
+		if reason != "" {
+			msg = a2a.NewMessageForTask(a2a.MessageRoleAgent, &task, a2a.NewTextPart(reason))
+		}
+		event := a2a.NewStatusUpdateEvent(&task, state, msg)
+		task.Status = event.Status
+		if _, err := deps.tasks.Update(ctx, &taskstore.UpdateRequest{
+			Task: &task, Event: event, PrevTask: stored.Task, PrevVersion: stored.Version,
+		}); err != nil {
+			// A concurrent reply already moved the task on.
+			slog.WarnContext(ctx, "Failed to update abandoned A2A task", "task_id", run.taskID, "error", err)
+			return nil
+		}
+		slog.InfoContext(ctx, "Ended A2A task with an abandoned tool approval", "task_id", run.taskID, "state", state)
+		configs, err := deps.pushConfigs.List(ctx, run.taskID)
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to list push configs of abandoned task", "task_id", run.taskID, "error", err)
+			return &task
+		}
+		for _, cfg := range configs {
+			if err := deps.pushSender.SendPush(ctx, cfg, event); err != nil {
+				slog.WarnContext(ctx, "Failed to notify abandoned task", "task_id", run.taskID, "error", err)
+			}
+		}
+		return &task
+	}
+}
+
+func newServer(ctx context.Context, t *team.Team, agentFilename, agentName string, sessStore session.Store, deps taskDeps, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
+	// The registry keeps runtimes alive between the request that parks on a
+	// tool confirmation and the request that answers it. ctx is the server
+	// lifetime: cancelling it (shutdown) cancels every parked run.
+	approvals := options.approvals
+	if approvals == nil {
+		approvals = newApprovalRegistry(ctx, options.ToolApproval)
+	}
+	approvals.setAbandonHandler(failAbandonedTask(deps))
+
+	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir, approvals)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +303,9 @@ func newServer(t *team.Team, agentFilename, agentName string, sessStore session.
 		DefaultInputModes:   []string{},
 		DefaultOutputModes:  []string{},
 	}
+	if approvals.toolApproval() {
+		agentCard.Capabilities.Extensions = []a2a.AgentExtension{*toolApprovalExtension()}
+	}
 
 	executor := newExecutorWrapper(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
@@ -240,7 +313,7 @@ func newServer(t *team.Team, agentFilename, agentName string, sessStore session.
 			Agent:          adkAgent,
 			SessionService: adksession.InMemoryService(),
 		},
-	})
+	}, approvals)
 
 	// Start server
 	e := echo.New()
@@ -281,6 +354,7 @@ func newServer(t *team.Team, agentFilename, agentName string, sessStore session.
 			a2asrv.WithTaskStore(deps.tasks),
 			a2asrv.WithPushNotifications(deps.pushConfigs, deps.pushSender),
 			a2asrv.WithCapabilityChecks(&agentCard.Capabilities),
+			a2asrv.WithCallInterceptors(&approvalInterceptor{approvals: approvals}),
 		)),
 		"a2a.message",
 	)
@@ -298,7 +372,7 @@ func corsMiddlewareConfig(spec string) (middleware.CORSConfig, error) {
 	cfg := middleware.CORSConfig{
 		AllowOrigins: origins.Literals(),
 		AllowMethods: []string{http.MethodPost, http.MethodOptions},
-		AllowHeaders: []string{"Authorization", "Content-Type", "Accept"},
+		AllowHeaders: []string{"Authorization", "Content-Type", "Accept", a2a.SvcParamExtensions},
 		MaxAge:       86400,
 	}
 	if origins.HasPatterns() {

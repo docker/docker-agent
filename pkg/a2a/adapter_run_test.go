@@ -208,9 +208,16 @@ type yieldedEvent struct {
 	err   error
 }
 
+// testApprovals returns a disabled approval registry: tool approval off, so
+// the adapter behaves exactly as it did before the feature. Its context is
+// unused (no janitor is started when disabled).
+func testApprovals(ctx context.Context) *approvalRegistry {
+	return newApprovalRegistry(ctx, false)
+}
+
 func collectRunEvents(ctx agent.InvocationContext, tm *team.Team, a *dagent.Agent, store session.Store, policy session.SafetyPolicy) []yieldedEvent {
 	var out []yieldedEvent
-	for ev, err := range runDockerAgent(ctx, tm, a.Name(), a, store, servesafety.Resolved{Policy: policy}, testWorkspaceRoot) {
+	for ev, err := range runDockerAgent(ctx, tm, a.Name(), a, store, servesafety.Resolved{Policy: policy}, testWorkspaceRoot, testApprovals(ctx)) {
 		out = append(out, yieldedEvent{event: ev, err: err})
 	}
 	return out
@@ -374,7 +381,7 @@ func TestRunDockerAgent_ConsumerStopsEarly(t *testing.T) {
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-early-stop", "Hi")
 
 	var events []*adksession.Event
-	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot) {
+	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot, testApprovals(ctx)) {
 		require.NoError(t, err)
 		events = append(events, ev)
 		break
@@ -393,7 +400,7 @@ func TestRunDockerAgent_EndedInvocationStopsIteration(t *testing.T) {
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-ended", "Hi")
 
 	var events []*adksession.Event
-	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot) {
+	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot, testApprovals(ctx)) {
 		require.NoError(t, err)
 		events = append(events, ev)
 		// Ending the invocation after the first chunk must stop the

@@ -325,8 +325,9 @@ func decodePageToken(token string) (int64, string, error) {
 	return updatedAt, taskID, nil
 }
 
-// FailInterrupted marks tasks a previous process left submitted or working as
-// failed: their execution died with it, so clients would otherwise wait
+// FailInterrupted marks tasks a previous process left submitted, working or
+// waiting for input as failed: their execution (or the paused run an input
+// would resume, held in memory) died with it, so clients would otherwise wait
 // forever. It returns the updated tasks.
 func (s *Store) FailInterrupted(ctx context.Context, reason string) (_ []*a2a.Task, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -367,8 +368,8 @@ WHERE task_id = ?;`, row.state, row.statusTS, row.data, now.UnixNano(), string(t
 }
 
 func interruptedTasks(ctx context.Context, tx *sql.Tx) ([]*a2a.Task, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT data FROM a2a_tasks WHERE state IN (?, ?);`,
-		string(a2a.TaskStateSubmitted), string(a2a.TaskStateWorking))
+	rows, err := tx.QueryContext(ctx, `SELECT data FROM a2a_tasks WHERE state IN (?, ?, ?);`,
+		string(a2a.TaskStateSubmitted), string(a2a.TaskStateWorking), string(a2a.TaskStateInputRequired))
 	if err != nil {
 		return nil, fmt.Errorf("failed to list interrupted tasks: %w", err)
 	}

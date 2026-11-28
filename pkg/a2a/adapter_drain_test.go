@@ -96,7 +96,7 @@ func TestRunDockerAgent_EarlyStopCancelsAndDrainsRuntime(t *testing.T) {
 			ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-drain-"+tc.name, "Hi")
 
 			var yielded int
-			for _, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot) {
+			for _, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot, testApprovals(ctx)) {
 				require.NoError(t, err)
 				yielded++
 				if tc.stop(ctx) {

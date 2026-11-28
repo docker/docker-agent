@@ -109,8 +109,9 @@ A task still submitted or working when the server stops cannot finish. On the
 next start it is marked failed, and its webhooks are sent that final status on
 the same best-effort terms as any other update. Updates lost before the stop,
 including the final one of a task that had already completed, are not
-re-sent: read the task with `GetTask`. Tasks waiting for input or
-authentication are left unchanged.
+re-sent: read the task with `GetTask`. A task waiting for tool approval
+(`TASK_STATE_INPUT_REQUIRED`) is failed too: its paused run is held in memory
+and cannot be resumed. Tasks waiting for authentication are left unchanged.
 
 ## Tool safety and migration
 
@@ -129,6 +130,132 @@ Downgrading to a binary that predates migration 027 fails because the session
 database has a newer schema (`ErrNewerDatabase`). Restore an older database, or
 use a binary that includes the migration. Revert changes without removing the
 migration catalogue entry.
+
+## Tool approval (opt-in)
+
+By default an A2A session is non-interactive: a tool call that would otherwise
+prompt for confirmation is denied, because no one is present to approve it. Pass
+`--tool-approval` to let the connected client approve or reject such calls
+out-of-band using the A2A `TASK_STATE_INPUT_REQUIRED` flow.
+
+```bash
+$ docker agent serve a2a ./agent.yaml --safety strict --tool-approval
+```
+
+When a call needs confirmation, the task pauses in `TASK_STATE_INPUT_REQUIRED`
+and its status message carries the pending call as a data part. The reply
+contract follows the `tool-approval/v1` extension, declared in the agent card
+(`capabilities.extensions`, `required: false`) only when the flag is set:
+
+```text
+https://docker.github.io/docker-agent/features/a2a-extensions/tool-approval/v1
+```
+
+The URI resolves to the [extension specification](../a2a-extensions/tool-approval/v1/index.md).
+
+The function-call part carries the extension's metadata: a human-readable
+`prompt`, the permission pattern `approve-in-context` would store (`grant`)
+with its display label (`grantLabel`), and a JSON Schema `responseSchema` for
+the reply, readable by a UI or a model. A shell call that cannot be scoped to
+one command (empty command, or a glob, `:` or `\` in its first word) has no `grant` and no
+`approve-in-context` in the enum. When the call's arguments are not a JSON
+object, `data.args` is absent and `rawArguments` holds them verbatim, since
+some tools repair and run such arguments.
+
+```json
+{
+  "data": {
+    "id": "call_123",
+    "name": "shell",
+    "args": {
+      "cmd": "ls"
+    }
+  },
+  "metadata": {
+    "adk_type": "function_call",
+    "adk_is_long_running": true,
+    "https://docker.github.io/docker-agent/features/a2a-extensions/tool-approval/v1": {
+      "prompt": "Tool \"shell\" requires approval",
+      "grant": "shell:cmd=ls*",
+      "grantLabel": "allow ls* in this context",
+      "responseSchema": {
+        "type": "object",
+        "required": ["decision"],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": ["approve", "approve-in-context", "reject"]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The client answers with `SendMessage` on the same task (`taskId` is required,
+plus `contextId`) and a matching function-response data part. Listing the
+extension URI in the message `extensions` (or the `A2A-Extensions` header)
+activates it for the call:
+
+```json
+{
+  "taskId": "…",
+  "contextId": "…",
+  "extensions": ["https://docker.github.io/docker-agent/features/a2a-extensions/tool-approval/v1"],
+  "parts": [
+    {
+      "data": {
+        "id": "call_123",
+        "name": "shell",
+        "response": {
+          "decision": "approve"
+        }
+      },
+      "metadata": {
+        "adk_type": "function_response"
+      }
+    }
+  ]
+}
+```
+
+`decision` is one of:
+
+- `approve`: run this call only; the next matching call asks again.
+- `approve-in-context`: run it and allow later calls matching `grant` in
+  this `contextId` (persisted with the session, so it survives a restart). As in
+  the TUI, a shell command grants its first word (`ls` → `shell:cmd=ls*`), not
+  every shell command; other tools grant the tool name. Only offered when
+  `grant` is present.
+- `reject`: skip it, with an optional `reason` passed to the model.
+
+A reply that does not answer the pending call (free text, another call `id`,
+a decision outside the enum, a non-string `reason`, or a `null` part) is rejected with JSON-RPC `-32602` and a
+`reason` in the error data, e.g.
+`decision 'x' not allowed; expected [approve, approve-in-context, reject]`. The task
+stays in `TASK_STATE_INPUT_REQUIRED`, nothing is added to its history, and no
+push notification is sent, so the client can retry.
+
+Notes and limits:
+
+- The switch is narrow: only top-level A2A sessions honour it. Background agents
+  and `transfer_task` sub-sessions keep denying.
+- A paused task holds its conversation: a new task in the same `contextId` is
+  rejected with `-32602` until the paused task is answered or canceled.
+- Pending approvals are held in memory. After one hour, or at server shutdown,
+  the task moves to `TASK_STATE_FAILED` and registered webhooks are notified;
+  on A2A `CancelTask` it is canceled, even when the cancel lands while the
+  task is pausing. A server restart fails tasks left in
+  `TASK_STATE_INPUT_REQUIRED`. None of these start a new model turn.
+- After approval, the run continues under the trace of the request that
+  started it; the reply request's span links to it.
+- Canceling a task also cancels a tool it is running after approval.
+- Without the flag the behaviour is unchanged: non-interactive sessions deny,
+  and the agent card declares no extension.
 
 ## Resuming conversations
 
@@ -156,7 +283,7 @@ policy is preserved or tightened to the server's safety ceiling, never relaxed.
 
 ## Current Limitations
 
-- Tool calls are handled internally, not exposed as separate A2A events
+- Tool calls are handled internally; only calls awaiting approval are exposed, via the opt-in [tool approval](#tool-approval-opt-in) flow
 - A2A artifact support not yet integrated
 - A2A memory features not yet integrated
 - Multi-agent (sub-agent) scenarios need further work

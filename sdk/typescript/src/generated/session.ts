@@ -183,6 +183,7 @@ export interface Session {
   safety_policy?: SafetyPolicy;
   prior_safety_policy?: SafetyPolicy;
   non_interactive?: boolean;
+  tool_approval?: boolean;
   hide_tool_results: boolean;
   working_dir?: string;
   SendUserMessage: boolean;

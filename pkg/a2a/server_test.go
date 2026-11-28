@@ -109,7 +109,7 @@ func TestServerSecurity(t *testing.T) {
 
 	tm := team.New(team.WithAgents(agent.New("root", "test")))
 	store := session.NewInMemorySessionStore()
-	server, err := newServer(tm, "test.yaml", "root", store, newTestTaskDeps(t), servesafety.Resolved{}, testWorkspaceRoot, "127.0.0.1:0", RunOptions{AuthToken: "secret", CORSOrigin: "https://app.example.com"})
+	server, err := newServer(t.Context(), tm, "test.yaml", "root", store, newTestTaskDeps(t), servesafety.Resolved{}, testWorkspaceRoot, "127.0.0.1:0", RunOptions{AuthToken: "secret", CORSOrigin: "https://app.example.com"})
 	require.NoError(t, err)
 
 	request := func(method, path string, headers map[string]string) *httptest.ResponseRecorder {
@@ -132,11 +132,12 @@ func TestServerSecurity(t *testing.T) {
 
 	response = request(http.MethodOptions, "/invoke", map[string]string{
 		"Origin": "https://app.example.com", "Access-Control-Request-Method": http.MethodPost,
-		"Access-Control-Request-Headers": "authorization,content-type",
+		"Access-Control-Request-Headers": "authorization,content-type,a2a-extensions",
 	})
 	require.Equal(t, http.StatusNoContent, response.Code)
 	require.Equal(t, "https://app.example.com", response.Header().Get("Access-Control-Allow-Origin"))
 	require.Contains(t, response.Header().Get("Access-Control-Allow-Headers"), "Authorization")
+	require.Contains(t, response.Header().Get("Access-Control-Allow-Headers"), "A2A-Extensions")
 }
 
 func TestCorsMiddlewareConfigRejectsInvalidOrigin(t *testing.T) {

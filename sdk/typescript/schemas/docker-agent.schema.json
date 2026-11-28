@@ -6110,6 +6110,9 @@
         "non_interactive": {
           "type": "boolean"
         },
+        "tool_approval": {
+          "type": "boolean"
+        },
         "hide_tool_results": {
           "type": "boolean"
         },
